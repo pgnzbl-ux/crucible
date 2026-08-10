@@ -110,24 +110,45 @@ async def _append_events(session: AsyncSession, run: TaskRun, events: list[dict]
 
 
 async def _persist_single_event(session: AsyncSession, run: TaskRun, event: dict) -> None:
-    """实时落单条事件（流式回调使用）"""
+    """实时落单条事件（流式回调使用），并发布到 Redis Pub/Sub 以驱动 SSE 推送"""
     # 取本 run 当前最大 sequence
     result = await session.execute(
         select(AgentEvent.sequence).where(AgentEvent.run_id == run.id).order_by(AgentEvent.sequence.desc()).limit(1)
     )
     latest = result.scalar_one_or_none()
     next_seq = (latest or 0) + 1
+    event_type = event.get("type", "phase.updated")
+    payload_json = json.dumps(event, ensure_ascii=False, default=str)
     session.add(
         AgentEvent(
             run_id=run.id,
             task_id=run.task_id,
             sequence=next_seq,
-            event_type=event.get("type", "phase.updated"),
-            payload=json.dumps(event, ensure_ascii=False, default=str),
+            event_type=event_type,
+            payload=payload_json,
             source="claude-agent-sdk",
         )
     )
     await session.flush()
+
+    # 发布到 Redis Pub/Sub — SSE 端点订阅本 task 频道后实时转发
+    # 失败仅日志，不阻塞 Agent 流（与「事件总线失败不影响主流程」原则一致）
+    try:
+        await event_bus.publish(
+            f"task.{run.task_id}.events",
+            Event(
+                event_type=event_type,
+                aggregate_id=str(run.task_id),
+                aggregate_type="task",
+                payload={
+                    "sequence": next_seq,
+                    "run_id": str(run.id),
+                    "event": event,
+                },
+            ),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Redis Pub/Sub 发布失败（不影响主流程）: {e}")
 
 
 async def _update_run(session: AsyncSession, run: TaskRun, status: str, error: str | None = None) -> None:

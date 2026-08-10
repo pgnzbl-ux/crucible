@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import {
   Alert,
   App,
+  Badge,
   Button,
   Descriptions,
   Drawer,
@@ -28,6 +29,7 @@ import dayjs from 'dayjs'
 
 import { api, type TaskDetail, type TaskSummary, type AgentEvent, type ReportDetail } from '../shared/lib/api'
 import { getStatusMeta, getPriorityMeta, getConclusionMeta, EVENT_PHASE_LABELS } from '../shared/lib/meta'
+import { useTaskEvents, type SSEEvent } from '../shared/hooks/useTaskEvents'
 import { AppLayout } from '../app/layout'
 
 const { Title, Paragraph, Text } = Typography
@@ -59,19 +61,42 @@ function TaskDetailDrawer({
   onClose: () => void
 }) {
   const { message } = App.useApp()
+  const qc = useQueryClient()
+
   const { data: task } = useQuery({
     queryKey: ['task', taskId],
     queryFn: () => api.getTask(taskId!),
     enabled: !!taskId,
-    refetchInterval: 3000,
   })
 
-  const { data: events } = useQuery({
-    queryKey: ['task-events', taskId],
-    queryFn: () => api.getTaskEvents(taskId!),
-    enabled: !!taskId,
-    refetchInterval: 3000,
-  })
+  // SSE 实时事件流（drawer 打开 + task 处于活跃状态时启用）
+  const running = task ? ['queued', 'running'].includes(task.status) : true
+  const sseEnabled = open && !!taskId && running
+  const { events: sseEvents, status: sseStatus, error: sseError } = useTaskEvents(taskId, { enabled: sseEnabled })
+
+  // 收到 agent.completed / agent.failed → 立即刷新 task 与 report（不再 3s 轮询）
+  useEffect(() => {
+    const last = sseEvents[sseEvents.length - 1]
+    if (!last) return
+    if (last.type === 'agent.completed' || last.type === 'agent.failed') {
+      qc.invalidateQueries({ queryKey: ['task', taskId] })
+      qc.invalidateQueries({ queryKey: ['task-report', taskId] })
+      qc.invalidateQueries({ queryKey: ['tasks'] })
+    }
+  }, [sseEvents, qc, taskId])
+
+  // 把 SSE 累积事件投影成 AgentEvent[]（与原 Timeline 数据形状兼容）
+  const events: AgentEvent[] | undefined = sseEvents.length
+    ? sseEvents.map((ev) => ({
+        id: `${ev.sequence ?? 'x'}`,
+        run_id: ev.run_id ?? '',
+        sequence: ev.sequence ?? 0,
+        event_type: ev.type,
+        payload: (ev.event ?? {}) as Record<string, unknown>,
+        source: 'sse',
+        created_at: new Date().toISOString(),
+      }))
+    : undefined
 
   const { data: report } = useQuery({
     queryKey: ['task-report', taskId],
@@ -89,7 +114,6 @@ function TaskDetailDrawer({
   if (!task) return <Drawer open={open} onClose={onClose} width={680} title="任务详情" />
 
   const st = getStatusMeta(task.status)
-  const running = ['queued', 'running'].includes(task.status)
   const timelineItems =
     events?.map((ev) => {
       const p = ev.payload as Record<string, unknown>
@@ -142,9 +166,38 @@ function TaskDetailDrawer({
 
         {/* Agent 进度流 */}
         <div>
-          <Title level={5} style={{ marginBottom: 12 }}>
-            Agent 执行进度
-          </Title>
+          <Space style={{ marginBottom: 12, width: '100%', justifyContent: 'space-between' }}>
+            <Title level={5} style={{ margin: 0 }}>
+              Agent 执行进度
+            </Title>
+            {sseEnabled && (
+              <Badge
+                status={
+                  sseStatus === 'open'
+                    ? 'success'
+                    : sseStatus === 'reconnecting'
+                      ? 'warning'
+                      : sseStatus === 'connecting'
+                        ? 'processing'
+                        : 'default'
+                }
+                text={
+                  sseStatus === 'open'
+                    ? '实时'
+                    : sseStatus === 'reconnecting'
+                      ? '重连中...'
+                      : sseStatus === 'connecting'
+                        ? '连接中'
+                        : sseStatus === 'closed'
+                          ? '已断开'
+                          : '离线'
+                }
+              />
+            )}
+          </Space>
+          {sseError && sseStatus === 'reconnecting' && (
+            <Alert type="warning" showIcon message={sseError} style={{ marginBottom: 12 }} />
+          )}
           {events && events.length > 0 ? (
             <Timeline items={timelineItems} />
           ) : (

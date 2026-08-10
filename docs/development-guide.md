@@ -79,7 +79,8 @@ backend/app/
 │       └── seed.py            #   环境变量 → DB 种子迁移（幂等）
 └── shared/
     ├── base.py                # BaseModel（UUID + 时间戳）
-    └── events.py              # Event + EventBus（Redis Pub/Sub 标准事件结构）
+    ├── events.py              # Event + EventBus（Redis Pub/Sub 标准事件结构）
+    └── sse.py                 # ★ SSE 事件流（StreamingResponse + 历史回放 + 15s 心跳 + 断开清理）
 ```
 
 ### 2.2 前端结构
@@ -90,6 +91,7 @@ frontend/src/
 ├── pages/                     # DashboardPage / TasksPage / ReportsPage / SettingsPage / LoginPage
 ├── features/                  # ★ 空壳：task/ agent/ auth/ report/（提案要求，尚未填充）
 ├── shared/lib/                # api.ts（类型化 API 客户端）+ meta.ts（状态/优先级/结论映射）
+├── shared/hooks/              # ★ useTaskEvents.ts（SSE 实时事件流 hook）
 └── styles/
 ```
 
@@ -136,16 +138,18 @@ llm_providers（独立，后台管理）
 | Agent Runner 编排 | ✅ | core/agent_runner.py（容器编排 + 流式消费 + 行缓冲 + 凭据零落盘） |
 | Event Bus（Redis Pub/Sub） | ✅ | shared/events.py（统一事件结构） |
 | 事件持久化 + 查询 | ✅ | agent_events 表 + GET /tasks/{id}/events |
+| **SSE 实时事件推送（P0-1）** | ✅ | shared/sse.py（StreamingResponse + 历史回放 + 15s 心跳 + 断开清理）+ GET /tasks/{id}/events/stream + 前端 useTaskEvents hook |
 | 报告生成 + MinIO 归档 | ✅ | report/service.py + storage.py |
 | LLM 后台配置（新增） | ✅ | settings context（Fernet 加密 + 测试连接 + 种子迁移） |
 | DeepSeek 对接（新增） | ✅ | ClaudeCodeAdapter.build_env（8 变量注入，零落盘） |
 | 前端 pages/ shared/ 分层 | ✅ | AppLayout + 4 页面 |
-| 事件流展示（Timeline） | ✅ | TasksPage 详情 Drawer |
+| 事件流展示（Timeline） | ✅ | TasksPage 详情 Drawer（SSE 实时 + 连接状态指示） |
 | Prometheus 指标 | ✅ | main.py Instrumentator |
 
 ### 3.2 已通过的验证
 
 - 全链路（Mock 模式）：POST /tasks → Celery → 沙箱 clone → Agent → 事件持久化 → 报告生成 → MinIO 归档 ✅
+- SSE 实时推送：agent/tasks.py 落库后 → Redis Pub/Sub → shared/sse.py 转发 → 前端 useTaskEvents hook（历史回放 + 15s 心跳 + 断开清理）✅
 - 沙箱安全：OOM 限制、网络隔离、非 root、只读 rootfs、凭据零落盘（grep 0 命中）✅
 - LLM 后台：CRUD / 掩码 / Fernet 密文落库 / 激活唯一性 / 测试连接真实打 DeepSeek 端点 ✅
 - 种子迁移幂等性 ✅
@@ -164,12 +168,12 @@ llm_providers（独立，后台管理）
 | # | 任务 | 现状 | 目标 | 涉及 |
 |---|------|------|------|------|
 | 0 | **Agent 阶段化编排**（Stage Orchestrator） | 单次 claude 调用跑全流程（黑盒） | S0-S10 逐阶段编排 + 结构化契约 + 分支跳转（非web结束/误报Quick-Stop/回退环） | 新增 agent/stages.py + preflight.py + prompts.py，重构 executor.py / tasks.py |
-| 1 | **SSE 实时事件推送** | 前端 3-8s 轮询 `GET /tasks/{id}/events` | `GET /api/v1/tasks/{id}/events/stream` SSE 端点 + 前端 `useSSE` hook，任务进度实时刷新 | agent/tasks.py 发布 Redis → task/api.py 订阅转发；frontend shared/hooks/useSSE.ts |
+| 1 | **SSE 实时事件推送** ✅ | `GET /api/v1/tasks/{id}/events/stream` 已就绪，前端 `useTaskEvents` 替换 3s 轮询 | （已完成） | shared/sse.py + task/api.py + frontend shared/hooks/useTaskEvents.ts |
 | 2 | **取消任务真正生效** | cancel 仅改 DB 状态 | `celery_app.control.revoke(task_id)` + 沙箱销毁 + run 标记 cancelled | task/service.py + agent/tasks.py |
 | 3 | **JWT 登录闭环** | api.ts 有 token 逻辑，LoginPage 未联调 | 登录后存 token，路由守卫，owner_id 从 token 解析（当前硬编码 "system"） | frontend pages/LoginPage + api.ts；task/report api.py 的 owner 注入 |
 | 4 | **Evidence 上传链路** | storage.py 有 upload_evidence 但 service 未接 | 报告生成时证据（日志/截图）上传 MinIO + evidences 表落库 + 前端展示 | report/service.py + api.py |
 
-> **P0 顺序**：0（阶段化编排骨架）→ 1（SSE）→ 2（cancel revoke）→ 3（登录）→ 4（证据）。
+> **P0 顺序**：0（阶段化编排骨架）→ ~~1（SSE）~~ ✅ → 2（cancel revoke）→ 3（登录）→ 4（证据）。
 > 阶段化编排是前提 —— SSE 推送的正是阶段事件。
 
 ### P1 — 提案明确要求
@@ -198,7 +202,7 @@ llm_providers（独立，后台管理）
 ### 4.1 建议实施顺序
 
 ```
-第一轮（P0，功能闭环）:  1 → 2 → 3 → 4
+第一轮（P0，功能闭环）:  0（阶段化编排骨架）→ 1（SSE ✅）→ 2（cancel）→ 3（登录）→ 4（证据）
 第二轮（P1，提案对齐）:  5 → 6 → 7 → 8 → 9 → 10 → 11
 第三轮（P2，生产就绪）:  12 → 13 → 14 → 15 → 16 → 17
 ```
@@ -246,6 +250,10 @@ llm_providers（独立，后台管理）
 | 宿主机端口冲突（5432/6379 已被占用） | Crucible 用 5433/6380 |
 | Windows 下 Celery 用 solo pool | `run_worker.py` 已固定 `--pool=solo` |
 | **chromium headless 在 read_only rootfs 下崩溃** | 需额外挂 `/tmp` + `/dev/shm` tmpfs + 容器 env `HOME=/workspace`（crashpad / ProcessSingleton 依赖可写 HOME），且 `/workspace` 不能挂 `noexec`（chromium + 搭靶场二进制都需可执行） |
+| **nginx/反代默认缓冲 SSE** | 响应头加 `X-Accel-Buffering: no` + `Cache-Control: no-cache, no-transform`（sse.py 端点已加） |
+| **Redis Pub/Sub 离线即丢消息** | SSE 连接先回放 DB 历史（`_replay_history`）再订阅 Pub/Sub，保证"刚发生的事件"不丢 |
+| **EventSource 无法注入 Authorization header** | token 走 query 参数 `?token=xxx`（前端 useTaskEvents 已实现；后端鉴权待 P0-3 接入） |
+| **SSE 客户端断开不清理 → Redis 连接泄漏** | `stream_task_events` finally 块强制 `unsubscribe + pubsub.close + r.close`；并发规范见 concurrency.md §5 |
 
 ---
 
@@ -266,6 +274,7 @@ cd frontend && npm run dev                                      # 前端 5173
 ```bash
 cd backend
 python tests/smoke_agent_runner.py    # agent-runner 冒烟（基础/OOM/取消/行缓冲/清理）
+python tests/smoke_sse.py              # SSE 实时推送冒烟（帧格式/历史回放/断开检测/心跳）
 pytest                           # 单元测试（待补，见 backlog P1）
 ```
 
@@ -280,4 +289,4 @@ pytest                           # 单元测试（待补，见 backlog P1）
 
 ---
 
-> **下一步**：按 §4.1 顺序从 P0-1（SSE 实时推送）开始。每完成一项更新本文件的「已完成清单」并跑全链路冒烟。
+> **下一步**：P0-1（SSE）已完成。按 §4.1 顺序继续 **P0-0（Agent 阶段化编排 S0-S10 骨架）** 或 **P0-2（取消任务真正生效）**。每完成一项更新本文件的「已完成清单」并跑全链路冒烟。

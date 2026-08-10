@@ -39,12 +39,13 @@ frontend/src/
 - token 从 `localStorage` 读取，401 自动跳登录页（路由守卫）
 - `owner_id` 从 token 解析，不硬编码 `"system"`
 
-## 4. SSE 实时事件（P0-1 待补）
+## 4. SSE 实时事件（P0-1 已实现）
 
-- 新建 `shared/hooks/useSSE.ts`，封装 EventSource 自动重连 + 清理
-- 频道：`GET /api/v1/tasks/{id}/events/stream`，订阅后端 Redis Pub/Sub 转发
-- 组件用 `useTaskEvents(taskId)` 拿事件流，不再 3-8s 轮询
-- 不要在组件里直接 `new EventSource()`，全部走 hook
+- `shared/hooks/useTaskEvents.ts` 已封装 EventSource + 指数退避重连 + 卸载清理
+- 频道：`GET /api/v1/tasks/{id}/events/stream`，订阅后端 Redis Pub/Sub 转发；启动先回放历史
+- 组件用 `useTaskEvents(taskId)` 拿事件流，**不要**在组件里 `new EventSource()`
+- token 走 query `?token=<jwt>`（EventSource 不支持自定义 header），P0-3 接入鉴权后统一收口
+- TasksPage 详情 Drawer 已切换：SSE 实时事件流 + 连接状态指示 + agent.completed/failed 触发 task/report 刷新
 
 ## 5. 表单与受控组件
 

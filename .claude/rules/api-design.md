@@ -41,13 +41,15 @@ paths: ["backend/app/**/*.py"]
 | 429 | `RATE_LIMITED` |
 | 503 | `SERVICE_UNAVAILABLE` |
 
-## 5. SSE 端点（P0-1 待补）
+## 5. SSE 端点（P0-1 已实现）
 
 - 路径：`GET /api/v1/tasks/{id}/events/stream`
 - Content-Type：`text/event-stream`
-- 事件名 = `Event.event_type`（`task.created` / `agent.started` / `agent.message` 等）
+- 响应头：`X-Accel-Buffering: no` + `Cache-Control: no-cache, no-transform`（防反代缓冲）
+- 事件名 = `Event.event_type`（`phase.updated` / `agent.message` / `tool.call.*` / `agent.completed` / `agent.failed` / `ready` / `error`）
 - 心跳：每 15s 一条 `: heartbeat\n\n`，防代理超时
-- 客户端断开立即关闭 Redis 订阅，避免泄漏
+- 启动先回放 DB 历史（帧含 `replayed: true`），再订阅 Redis `task.{id}.events`
+- 客户端断开立即关闭 Redis 订阅（finally 块 unsubscribe + close），避免泄漏
 
 ## 6. 鉴权
 
