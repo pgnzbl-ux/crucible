@@ -1,0 +1,184 @@
+"""
+LLM Provider 管理服务。
+
+职责：
+- CRUD（API key 加密落库，列表掩码回显）
+- 默认 Provider 激活（全局唯一 is_default）
+- 测试连接（真实调用 Anthropic 兼容 /v1/messages）
+- 运行时配置解析（Agent 任务从 DB 取默认 Provider → 环境变量注入沙箱）
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from typing import Any
+
+import httpx
+
+from app.core.crypto import decrypt_secret, encrypt_secret, mask_secret
+from .models import LlmProvider
+from .repository import SettingsRepository
+from .schemas import (
+    LlmProviderCreateRequest,
+    LlmProviderResponse,
+    LlmProviderTestResult,
+    LlmProviderUpdateRequest,
+)
+
+
+def to_response(provider: LlmProvider, plain_key: str = "") -> LlmProviderResponse:
+    """ORM → 响应模型（api_key 掩码）"""
+    if not plain_key:
+        plain_key = decrypt_secret(provider.api_key_encrypted)
+    return LlmProviderResponse(
+        id=provider.id,
+        name=provider.name,
+        provider_type=provider.provider_type,
+        base_url=provider.base_url,
+        api_key_masked=mask_secret(plain_key),
+        has_api_key=bool(plain_key),
+        model=provider.model,
+        timeout_ms=provider.timeout_ms,
+        enabled=provider.enabled,
+        is_default=provider.is_default,
+        created_at=provider.created_at,
+        updated_at=provider.updated_at,
+    )
+
+
+class SettingsService:
+    def __init__(self, repo: SettingsRepository):
+        self.repo = repo
+
+    # ── CRUD ──
+
+    async def list_providers(self) -> tuple[list[LlmProviderResponse], int]:
+        providers = await self.repo.list_providers()
+        return [to_response(p) for p in providers], len(providers)
+
+    async def create_provider(self, request: LlmProviderCreateRequest) -> LlmProviderResponse:
+        provider = LlmProvider(
+            name=request.name,
+            provider_type=request.provider_type,
+            base_url=request.base_url,
+            api_key_encrypted=encrypt_secret(request.api_key),
+            model=request.model,
+            timeout_ms=request.timeout_ms,
+            enabled=request.enabled,
+            is_default=request.is_default,
+            extra=json.dumps(request.extra, ensure_ascii=False),
+        )
+        if request.is_default:
+            await self.repo.clear_default()
+        provider = await self.repo.create(provider)
+        return to_response(provider, request.api_key)
+
+    async def update_provider(
+        self, provider_id: str, request: LlmProviderUpdateRequest
+    ) -> LlmProviderResponse | None:
+        provider = await self.repo.get_by_id(provider_id)
+        if not provider:
+            return None
+        updates = request.model_dump(exclude_unset=True, exclude={"api_key"})
+        for field, value in updates.items():
+            if field == "extra" and value is not None:
+                value = json.dumps(value, ensure_ascii=False)
+            setattr(provider, field, value)
+        if request.api_key:
+            provider.api_key_encrypted = encrypt_secret(request.api_key)
+        await self.repo.session.flush()
+        return to_response(provider, request.api_key or "")
+
+    async def delete_provider(self, provider_id: str) -> bool:
+        provider = await self.repo.get_by_id(provider_id)
+        if not provider:
+            return False
+        await self.repo.delete(provider)
+        return True
+
+    async def activate_provider(self, provider_id: str) -> LlmProviderResponse | None:
+        """设为默认（清除其它默认标记）"""
+        provider = await self.repo.get_by_id(provider_id)
+        if not provider:
+            return None
+        if not provider.enabled:
+            raise ValueError("已禁用的 Provider 不能设为默认")
+        await self.repo.clear_default()
+        provider.is_default = True
+        await self.repo.session.flush()
+        return to_response(provider)
+
+    async def get_default_provider(self) -> LlmProvider | None:
+        return await self.repo.get_default()
+
+    # ── 测试连接 ──
+
+    async def test_connection(
+        self,
+        *,
+        provider_id: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+    ) -> LlmProviderTestResult:
+        """真实调用 Anthropic 兼容 /v1/messages 验证凭据与模型可用性"""
+        resolved_url = base_url
+        resolved_key = api_key
+        resolved_model = model
+
+        if provider_id:
+            provider = await self.repo.get_by_id(provider_id)
+            if provider:
+                resolved_url = resolved_url or provider.base_url
+                resolved_key = resolved_key or decrypt_secret(provider.api_key_encrypted)
+                resolved_model = resolved_model or provider.model
+
+        if not resolved_url or not resolved_key or not resolved_model:
+            return LlmProviderTestResult(ok=False, message="缺少 base_url / api_key / model 参数")
+
+        endpoint = f"{resolved_url}/v1/messages"
+        started = time.time()
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    endpoint,
+                    headers={
+                        "x-api-key": resolved_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": resolved_model,
+                        "max_tokens": 8,
+                        "messages": [{"role": "user", "content": "ping"}],
+                    },
+                )
+            latency = int((time.time() - started) * 1000)
+            if resp.status_code == 200:
+                return LlmProviderTestResult(
+                    ok=True, message=f"连接成功（{latency}ms）", latency_ms=latency, model=resolved_model
+                )
+            body = resp.text[:200]
+            return LlmProviderTestResult(
+                ok=False, message=f"HTTP {resp.status_code}: {body}", latency_ms=latency
+            )
+        except httpx.HTTPError as e:
+            return LlmProviderTestResult(ok=False, message=f"网络错误: {e}")
+        except Exception as e:  # noqa: BLE001
+            return LlmProviderTestResult(ok=False, message=f"异常: {e}")
+
+    # ── 运行时配置（Agent 调用） ──
+
+    def build_env_from_provider(self, provider: LlmProvider) -> dict[str, str]:
+        """Provider → 沙箱环境变量（凭据零落盘）"""
+        return {
+            "ANTHROPIC_BASE_URL": provider.base_url,
+            "ANTHROPIC_AUTH_TOKEN": decrypt_secret(provider.api_key_encrypted),
+            "ANTHROPIC_API_KEY": decrypt_secret(provider.api_key_encrypted),
+            "ANTHROPIC_MODEL": provider.model,
+            "ANTHROPIC_SMALL_FAST_MODEL": provider.model,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": provider.model,
+            "API_TIMEOUT_MS": str(provider.timeout_ms),
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        }

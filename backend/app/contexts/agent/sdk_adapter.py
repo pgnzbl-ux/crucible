@@ -1,0 +1,142 @@
+"""
+Claude Agent SDK 适配器（worker 侧）。
+
+职责：
+1. 构造注入 agent-runner 容器的 LLM 环境变量（凭据零落盘）
+2. 拼接最终 prompt（含 system guidance + 任务详情）
+3. 容器内权限/黑白名单实现在 runner/run_one.py（独立进程内本地回调，避免 worker 镜像承担 SDK 类型）
+
+与 ClaudeCodeAdapter 区别：
+- 旧适配器构造 `claude -p "..." --output-format json` CLI 命令
+- 新适配器只构造 env（注入容器）+ 写 .prompt.json（容器内读取）
+- SDK 调用 + canUseTool + Message 翻译全部下沉到 agent-runner 镜像内
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from app.contexts.settings.service import SettingsService
+from app.contexts.settings.repository import SettingsRepository
+from app.core.config import get_settings
+from sqlalchemy.ext.asyncio import AsyncSession
+
+settings = get_settings()
+
+
+# 与 runner/run_one.py::SYSTEM_PROMPT 保持一致（容器内 SDK system_prompt 选项覆盖）
+SYSTEM_PROMPT = """你是 Crucible 漏洞验证平台的资深安全研究员 Agent。
+任务：对给定项目源码进行漏洞分析，判定目标漏洞是否真实存在。
+
+必须遵守：
+1. 白盒优先：先读全源码、走通调用链，再下结论
+2. 输出必须包含：结论（存在/不存在/无法确认）、证据链（文件+行号+代码片段）、利用条件、修复建议
+3. 诚实：无法确认时明确说明，禁止编造证据
+4. 所有分析只读项目源码，不执行任何破坏性命令
+"""
+
+
+class ClaudeSdkAdapter:
+    """Claude Agent SDK 适配器（worker 侧）。
+
+    对外提供两件事：
+    - build_runner_env() → docker run --env 的 8 个 ANTHROPIC_* 变量 + PYTHONUNBUFFERED
+    - build_prompt_payload(ctx) → 写入 /workspace/.prompt.json 的 JSON 内容
+
+    canUseTool 黑白名单实现在容器内（runner/run_one.py），不污染 worker 镜像。
+    """
+
+    def __init__(self) -> None:
+        self.model = settings.llm_model
+        self.max_turns = settings.claude_sdk_max_turns
+
+    def build_runner_env(self, provider_env: dict[str, str] | None = None) -> dict[str, str]:
+        """构造注入 agent-runner 容器的环境变量（凭据零落盘）。
+
+        优先级：provider_env（DB 默认 Provider 解密后） > settings.llm_*
+        provider_env 由 tasks.py 在拉起前传入；不传则直接用 settings。
+        """
+        env: dict[str, str] = {
+            # 强制项：保证容器内 Python 不缓冲输出
+            "PYTHONUNBUFFERED": "1",
+            # HOME 强制指向 /workspace（tmpfs 可写）：rootfs 只读时 SDK/CLI cache 可写
+            "HOME": "/workspace",
+        }
+        src = provider_env or {}
+
+        base_url = src.get("ANTHROPIC_BASE_URL") or settings.llm_base_url
+        api_key = src.get("ANTHROPIC_AUTH_TOKEN") or src.get("ANTHROPIC_API_KEY") or settings.llm_api_key
+        model = src.get("ANTHROPIC_MODEL") or settings.llm_model
+        timeout = src.get("API_TIMEOUT_MS") or str(settings.llm_timeout_ms)
+
+        if base_url:
+            env["ANTHROPIC_BASE_URL"] = base_url
+        if api_key:
+            # DeepSeek 官方文档使用 ANTHROPIC_AUTH_TOKEN；同时设置 API_KEY 兼容其他端点
+            env["ANTHROPIC_AUTH_TOKEN"] = api_key
+            env["ANTHROPIC_API_KEY"] = api_key
+        if model:
+            env["ANTHROPIC_MODEL"] = model
+            env["ANTHROPIC_SMALL_FAST_MODEL"] = model
+            env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
+        if timeout:
+            env["API_TIMEOUT_MS"] = timeout
+        if settings.llm_disable_nonessential_traffic:
+            env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+
+        # max_turns 也走 env（容器内 run_one.py 读取）
+        env["CLAUDE_SDK_MAX_TURNS"] = str(self.max_turns)
+
+        return env
+
+    def build_prompt_payload(self, task_ctx: dict[str, Any]) -> str:
+        """构造容器内 /workspace/.prompt.json 的内容。
+
+        容器内 run_one.py 读取后自行拼 system_prompt + 任务详情 → 调 query()。
+        """
+        import json
+
+        return json.dumps(
+            {
+                "task_id": task_ctx.get("task_id", ""),
+                "run_id": task_ctx.get("run_id", ""),
+                "project_address": task_ctx.get("project_address", ""),
+                "project_ref": task_ctx.get("project_ref") or "",
+                "vulnerability_description": task_ctx.get("vulnerability_description", ""),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+
+
+async def resolve_runner_env(session: AsyncSession) -> dict[str, str]:
+    """tasks.py 调用的辅助：从 settings context 取默认 Provider 的解密 env，fallback 到 settings.llm_*。
+
+    返回值直接传给 docker run --env。
+    """
+    adapter = ClaudeSdkAdapter()
+    try:
+        svc = SettingsService(SettingsRepository(session))
+        provider = await svc.get_default_provider()
+        if provider is not None:
+            provider_env = svc.build_env_from_provider(provider)
+            if provider_env:
+                return adapter.build_runner_env(provider_env)
+    except Exception:  # noqa: BLE001 — DB 失败 fallback
+        pass
+    return adapter.build_runner_env()
+
+
+def redact_env_for_log(env: dict[str, str]) -> dict[str, str]:
+    """debug 日志前 redact 凭据（security.md §1 凭据零落盘）"""
+    redacted = {}
+    sensitive_patterns = ("KEY", "TOKEN", "SECRET", "PASSWORD")
+    for k, v in env.items():
+        if any(p in k.upper() for p in sensitive_patterns):
+            if len(v) > 4:
+                redacted[k] = f"***{v[-4:]}"
+            else:
+                redacted[k] = "***"
+        else:
+            redacted[k] = v
+    return redacted

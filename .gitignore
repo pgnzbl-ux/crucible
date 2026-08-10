@@ -1,0 +1,33 @@
+# 依赖
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.venv/
+
+# 环境
+.env
+
+# 数据库
+*.db
+*.db-journal
+
+# Node
+node_modules/
+frontend/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 项目记忆 / 临时工作区
+.workbuddy/
+
+# 构建产物
+*.tsbuildinfo
+
+# OS
+.DS_Store
+Thumbs.db

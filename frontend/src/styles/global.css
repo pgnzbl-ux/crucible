@@ -1,0 +1,22 @@
+@import './design-tokens.css';
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  font-family: var(--crucible-font);
+  background: var(--crucible-bg);
+  color: #e8e8e8;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 滚动条 */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--crucible-bg); }
+::-webkit-scrollbar-thumb { background: var(--crucible-border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #555; }

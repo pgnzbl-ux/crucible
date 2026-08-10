@@ -1,0 +1,402 @@
+"""
+agent-runner 容器内 entrypoint。
+
+职责：读取 /workspace/.prompt.json → 构造 ClaudeAgentOptions → 调用 query() →
+       逐条翻译 SDK Message 为统一事件结构 → 写到 stdout（JSONL 一行一条）。
+
+环境变量由 worker 在 docker run 时通过 --env 注入：
+  ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY / ANTHROPIC_MODEL
+  ANTHROPIC_SMALL_FAST_MODEL / ANTHROPIC_DEFAULT_HAIKU_MODEL
+  API_TIMEOUT_MS / CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC / PYTHONUNBUFFERED=1
+
+退出码：
+  0  = 正常完成（含 conclusion=unconfirmed 等业务软失败）
+  1  = 业务失败（LLM error / 无产出）
+  2  = 基础设施错误（OOM / 网络断开 / 凭据缺失）
+  137 = SIGKILL（被 worker revoke）
+
+设计要点：
+- SDK 在容器内解析 Message → 翻译为 dict → json.dumps 到 stdout；
+  worker 侧只 json.loads 每行，不感知 SDK 类型。
+- canUseTool 回调实现白/黑名单（白盒审计：只读 + curl + git-read + python PoC），
+  拒绝时输出 tool.call.denied 事件，便于事后审计。
+- stderr 走 SDK 自身 logging（便于 docker logs 调试），不污染 JSONL 流。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import re
+import sys
+import time
+import traceback
+from pathlib import Path
+from typing import Any, AsyncIterator
+
+try:
+    from claude_agent_sdk import (
+        query,
+        ClaudeAgentOptions,
+        AssistantMessage,
+        UserMessage,
+        SystemMessage,
+        ResultMessage,
+        TextBlock,
+        ToolUseBlock,
+        ToolResultBlock,
+    )
+except ImportError as e:  # 镜像构建失败时给出明确报错
+    print(json.dumps({
+        "type": "agent.failed",
+        "error": f"claude_agent_sdk 导入失败: {e}",
+        "exception": type(e).__name__,
+        "sequence": 0,
+        "timestamp": time.time(),
+    }), file=sys.stdout, flush=True)
+    sys.exit(2)
+
+
+# ── canUseTool 黑白名单（核心安全规则） ──
+
+# 白名单：永远 allow
+BASH_ALLOWLIST = [
+    re.compile(r"^git\s+(clone|fetch|log|show|diff|status|rev-parse|branch|tree)\b"),
+    re.compile(r"^curl\s+"),
+    re.compile(r"^python[0-9.]?\s+(-[c]\b|/workspace/.*\.py\b)"),
+]
+
+# 黑名单：永远 deny（含 | bash / /proc / /sys / etc ）
+BLACKLIST_RES = [
+    (re.compile(r"\|\s*bash\b"), "| bash"),
+    (re.compile(r"\|\s*sh\b"), "| sh"),
+    (re.compile(r">\s*/etc/"), "> /etc/"),
+    (re.compile(r">\s*~/\.bashrc"), "> ~/.bashrc"),
+    (re.compile(r"^rm\s"), "rm"),
+    (re.compile(r"^mv\s"), "mv"),
+    (re.compile(r"^cp\s"), "cp"),
+    (re.compile(r"^chmod\b"), "chmod"),
+    (re.compile(r"^chown\b"), "chown"),
+    (re.compile(r"^dd\s"), "dd"),
+    (re.compile(r"^mkfs\b"), "mkfs"),
+    (re.compile(r"/proc/"), "/proc/"),
+    (re.compile(r"/sys/"), "/sys/"),
+]
+
+
+def _classify_bash(cmd: str) -> tuple[str, str | None]:
+    """返回 (decision, reason)：('allow', None) / ('deny', reason)"""
+    for pat, name in BLACKLIST_RES:
+        if pat.search(cmd):
+            return ("deny", f"blocked by policy: {name}")
+    for pat in BASH_ALLOWLIST:
+        if pat.match(cmd):
+            return ("allow", None)
+    return ("deny", f"not in allowlist: {cmd[:100]}")
+
+
+async def _permission_gate(tool_name: str, tool_input: dict[str, Any], _ctx: Any) -> dict:
+    """canUseTool 回调：白盒审计风格黑白名单。
+
+    返回 PermissionResultAllow / PermissionResultDeny 字典（SDK 0.2.x 接受 dict 形式）。
+    """
+    if tool_name == "Read" or tool_name == "Grep" or tool_name == "Glob":
+        return {"behavior": "allow", "updatedInput": tool_input}
+
+    if tool_name == "Bash":
+        cmd = tool_input.get("command", "") if isinstance(tool_input, dict) else str(tool_input)
+        decision, reason = _classify_bash(cmd)
+        if decision == "allow":
+            return {"behavior": "allow", "updatedInput": tool_input}
+        # deny 时同步输出一条审计事件（worker 侧会落 AgentEvent）
+        print(json.dumps({
+            "type": "tool.call.denied",
+            "tool": tool_name,
+            "reason": reason,
+            "input": cmd[:200],
+            "timestamp": time.time(),
+        }, ensure_ascii=False), flush=True)
+        return {"behavior": "deny", "message": reason or "denied by policy"}
+
+    # Write / Edit / NotebookEdit / 其他：deny
+    print(json.dumps({
+        "type": "tool.call.denied",
+        "tool": tool_name,
+        "reason": "tool not in allowlist",
+        "input": json.dumps(tool_input, ensure_ascii=False)[:200],
+        "timestamp": time.time(),
+    }, ensure_ascii=False), flush=True)
+    return {"behavior": "deny", "message": f"tool {tool_name} not in allowlist"}
+
+
+# ── SDK Message → 统一事件结构翻译 ──
+
+def _safe_get(obj: Any, *path: str, default: Any = None) -> Any:
+    """嵌套字段安全访问（兼容 SDK 不同版本的属性差异）"""
+    cur = obj
+    for key in path:
+        try:
+            cur = getattr(cur, key, None) or (cur.get(key) if isinstance(cur, dict) else None)
+        except (AttributeError, KeyError):
+            return default
+        if cur is None:
+            return default
+    return cur
+
+
+def _truncate(text: Any, limit: int) -> str:
+    if not isinstance(text, str):
+        text = str(text)
+    return text[:limit]
+
+
+def _classify_conclusion(text: str) -> str:
+    """文本匹配：exists / not_exists / unconfirmed（与 executor.py 同语义）"""
+    if not text:
+        return "unconfirmed"
+    lowered = text.lower()
+    if any(k in lowered for k in ("漏洞存在", "确认存在", "reproduced", "confirmed", "vulnerable",
+                                    "is exploitable", "结论：存在", "存在漏洞")):
+        return "exists"
+    if any(k in lowered for k in ("不存在", "无法确认", "not vulnerable", "not exploitable",
+                                    "unconfirmed", "结论：不存在", "误报")):
+        return "not_exists"
+    return "unconfirmed"
+
+
+async def _stream_messages(options: ClaudeAgentOptions, prompt: str) -> AsyncIterator[dict]:
+    """包裹 SDK async generator，把每条 Message 翻译为 dict。"""
+    seq = 0
+    session_id_seen: str | None = None
+
+    try:
+        async for message in query(prompt=prompt, options=options):
+            seq += 1
+            ts = time.time()
+            sid = getattr(message, "session_id", None) or session_id_seen
+            message_type = type(message).__name__
+
+            # SystemMessage（init）
+            if isinstance(message, SystemMessage):
+                if sid and sid != session_id_seen:
+                    session_id_seen = sid
+                yield {
+                    "type": "phase.updated",
+                    "phase": "start",
+                    "message": getattr(message, "subtype", "init") or "init",
+                    "session_id": sid,
+                    "sequence": seq,
+                    "timestamp": ts,
+                }
+                continue
+
+            # AssistantMessage（含 TextBlock / ToolUseBlock / 错误）
+            if isinstance(message, AssistantMessage):
+                # 错误分支
+                err = getattr(message, "error", None)
+                if err:
+                    err_msg = getattr(err, "message", str(err))
+                    yield {
+                        "type": "agent.failed",
+                        "error": _truncate(err_msg, 500),
+                        "model": getattr(message, "model", None),
+                        "session_id": sid,
+                        "sequence": seq,
+                        "timestamp": ts,
+                    }
+                    continue
+
+                content = getattr(message, "content", None) or []
+                if not isinstance(content, list):
+                    content = [content]
+
+                for block in content:
+                    if isinstance(block, TextBlock):
+                        yield {
+                            "type": "agent.message",
+                            "text": getattr(block, "text", "") or "",
+                            "model": getattr(message, "model", None),
+                            "session_id": sid,
+                            "sequence": seq,
+                            "timestamp": ts,
+                        }
+                    elif isinstance(block, ToolUseBlock):
+                        yield {
+                            "type": "tool.call.started",
+                            "tool": getattr(block, "name", "unknown"),
+                            "input": getattr(block, "input", {}) or {},
+                            "tool_use_id": getattr(block, "id", None),
+                            "session_id": sid,
+                            "sequence": seq,
+                            "timestamp": ts,
+                        }
+                continue
+
+            # UserMessage（含 ToolResultBlock）
+            if isinstance(message, UserMessage):
+                content = getattr(message, "content", None) or []
+                if not isinstance(content, list):
+                    content = [content]
+                for block in content:
+                    if isinstance(block, ToolResultBlock):
+                        # content 可能是 str 或 list（list of text/image blocks）
+                        raw_content = getattr(block, "content", "") or ""
+                        if isinstance(raw_content, list):
+                            raw_content = " ".join(
+                                getattr(b, "text", "") for b in raw_content if hasattr(b, "text")
+                            )
+                        yield {
+                            "type": "tool.call.completed",
+                            "tool_use_id": getattr(block, "tool_use_id", None),
+                            "output": _truncate(raw_content, 2000),
+                            "is_error": bool(getattr(block, "is_error", False)),
+                            "session_id": sid,
+                            "sequence": seq,
+                            "timestamp": ts,
+                        }
+                continue
+
+            # ResultMessage（终态）
+            if isinstance(message, ResultMessage):
+                result_text = getattr(message, "result", "") or ""
+                yield {
+                    "type": "agent.completed",
+                    "conclusion": _classify_conclusion(result_text),
+                    "reasoning": result_text,
+                    "session_id": sid,
+                    "duration_ms": getattr(message, "duration_ms", None),
+                    "total_cost_usd": getattr(message, "total_cost_usd", None),
+                    "num_turns": getattr(message, "num_turns", None),
+                    "is_error": bool(getattr(message, "is_error", False)),
+                    "sequence": seq,
+                    "timestamp": ts,
+                }
+                continue
+
+            # 未知 Message 类型：原样序列化（兜底，page-ui 可能忽略）
+            yield {
+                "type": "raw.message",
+                "message_type": message_type,
+                "session_id": sid,
+                "raw": _truncate(str(message), 500),
+                "sequence": seq,
+                "timestamp": ts,
+            }
+
+    except Exception as e:
+        seq += 1
+        yield {
+            "type": "agent.failed",
+            "error": _truncate(str(e), 500),
+            "exception": type(e).__name__,
+            "traceback": _truncate(traceback.format_exc(), 1000),
+            "sequence": seq,
+            "timestamp": time.time(),
+        }
+        raise
+
+
+# ── Prompt 构造 ──
+
+SYSTEM_PROMPT = """你是 Crucible 漏洞验证平台的资深安全研究员 Agent。
+任务：对给定项目源码进行漏洞分析，判定目标漏洞是否真实存在。
+
+必须遵守：
+1. 白盒优先：先读全源码、走通调用链，再下结论
+2. 输出必须包含：结论（存在/不存在/无法确认）、证据链（文件+行号+代码片段）、利用条件、修复建议
+3. 诚实：无法确认时明确说明，禁止编造证据
+4. 所有分析只读项目源码
+"""
+
+
+def _build_prompt(task: dict[str, Any]) -> str:
+    return (
+        f"{SYSTEM_PROMPT}\n\n---\n\n"
+        f"任务详情：\n"
+        f"项目地址: {task.get('project_address', '')}\n"
+        f"项目引用: {task.get('project_ref') or 'default branch'}\n\n"
+        f"待验证漏洞描述:\n{task.get('vulnerability_description', '')}\n\n"
+        f"请分析 /workspace/project 下的项目源码，判定漏洞是否真实存在。"
+    )
+
+
+# ── Main ──
+
+async def _main() -> int:
+    prompt_path = Path("/workspace/.prompt.json")
+    if not prompt_path.exists():
+        print(json.dumps({
+            "type": "agent.failed",
+            "error": ".prompt.json not found at /workspace",
+            "sequence": 0,
+            "timestamp": time.time(),
+        }), ensure_ascii=False, flush=True)
+        return 2
+
+    try:
+        task = json.loads(prompt_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        print(json.dumps({
+            "type": "agent.failed",
+            "error": f".prompt.json 解析失败: {e}",
+            "sequence": 0,
+            "timestamp": time.time(),
+        }), ensure_ascii=False, flush=True)
+        return 2
+
+    model = os.environ.get("ANTHROPIC_MODEL", "deepseek-v4-flash")
+    try:
+        max_turns = int(os.environ.get("CLAUDE_SDK_MAX_TURNS", "180"))
+    except ValueError:
+        max_turns = 180
+
+    options = ClaudeAgentOptions(
+        system_prompt=SYSTEM_PROMPT,
+        model=model,
+        max_turns=max_turns,
+        cwd="/workspace/project",
+        permission_mode="bypassPermissions",
+        allowed_tools=["Read", "Grep", "Glob", "Bash"],
+        can_use_tool=_permission_gate,
+    )
+
+    prompt = _build_prompt(task)
+
+    # 流式输出
+    exit_code = 0
+    saw_completion = False
+    saw_failure = False
+    async for event in _stream_messages(options, prompt):
+        print(json.dumps(event, ensure_ascii=False, default=str), flush=True)
+        if event.get("type") == "agent.completed":
+            saw_completion = True
+            if event.get("is_error"):
+                saw_failure = True
+        elif event.get("type") == "agent.failed":
+            saw_failure = True
+
+    if saw_failure and not saw_completion:
+        return 1
+    if not saw_completion:
+        # 容器被外力 kill 或 SDK 提前退出
+        return 2
+    return exit_code
+
+
+if __name__ == "__main__":
+    try:
+        code = asyncio.run(_main())
+        sys.exit(code)
+    except SystemExit:
+        raise
+    except BaseException as e:
+        # 兜底：任何未被 _stream_messages 捕获的异常都输出失败事件
+        print(json.dumps({
+            "type": "agent.failed",
+            "error": str(e)[:500],
+            "exception": type(e).__name__,
+            "sequence": 0,
+            "timestamp": time.time(),
+        }), ensure_ascii=False, flush=True)
+        sys.exit(1)
