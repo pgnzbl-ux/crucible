@@ -79,6 +79,8 @@ Crucible/
 
 **架构决策与后续路线见 `docs/development-guide.md`**（架构原则/决策溯源 + P0/P1/P2 开发路线）。
 
+**本项目 commit message 用简体中文**。覆盖全局 CLAUDE.md「commit message 英文」默认。Conventional Commits 类型前缀（`feat:` / `fix:` / `refactor:` / `chore:` / `docs:` 等）与 `Co-Authored-By:` trailer 仍保持英文（工具链解析要求）；描述主体、bullet、footer 一律中文。
+
 ## 对接第三方 LLM（DeepSeek）
 
 Celery worker 通过 `docker run --env` 把 Anthropic 兼容端点凭据注入 `crucible-agent-runner` 容器（容器销毁 env 消失，零落盘）：
