@@ -47,10 +47,11 @@ class TaskService:
         run = await self.repo.create_run(run)
 
         # 触发 Celery 任务（agent context）— 不阻塞创建响应
+        # 用 run.id 作为 celery task_id，cancel 时可精确 revoke（terminate → SIGTERM → 容器销毁）
         from app.core.celery_app import celery_app
 
         try:
-            celery_app.send_task("agent.run_analysis", args=[task.id, run.id])
+            celery_app.send_task("agent.run_analysis", args=[task.id, run.id], task_id=run.id)
         except Exception:
             # broker 不可用时任务停留在 queued，前端可见
             await self.repo.update_status(task, "queued")
@@ -74,13 +75,33 @@ class TaskService:
         )
 
     async def cancel_task(self, task_id: str) -> TaskDetail | None:
-        task = await self.repo.get_by_id(task_id)
+        """取消任务：状态机校验 → revoke 所有活跃 celery 任务 → 标记 cancelled。
+
+        revoke(terminate=True, signal=SIGTERM) 触发 agent/tasks.py::_on_sigterm 钩子，
+        自动销毁 agent-runner 容器（双重保险的另一端是 cleanup_stale 巡检）。
+        """
+        task = await self.repo.get_by_id_with_runs(task_id)
         if not task:
             return None
         if task.status not in ("pending", "queued", "running"):
             raise ValueError(f"状态为 {task.status} 的任务不能取消")
+
+        # 1. 标记所有活跃 run 为 cancelled（并取出列表用于 revoke）
+        cancelled_runs = await self.repo.cancel_active_runs(task_id)
+
+        # 2. revoke 对应 celery 任务（task_id = run.id，见 create_task）
+        from app.core.celery_app import celery_app
+
+        for run in cancelled_runs:
+            try:
+                celery_app.control.revoke(run.id, terminate=True, signal="SIGTERM")
+            except Exception:
+                # broker 不可用不能阻断 DB 状态更新（任务已标 cancelled，worker 侧 SIGTERM 钩子兜底）
+                pass
+
+        # 3. 任务整体状态 → cancelled
         await self.repo.update_status(task, "cancelled")
-        return self._to_detail(task)
+        return self._to_detail(task, task.runs)
 
     async def get_task_events(self, task_id: str, limit: int = 200) -> list[dict[str, Any]]:
         """任务 Agent 事件流（前端进度展示用）"""

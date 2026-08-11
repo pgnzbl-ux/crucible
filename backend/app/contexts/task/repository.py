@@ -61,6 +61,22 @@ class TaskRepository:
         await self.session.flush()
         return task
 
+    async def cancel_active_runs(self, task_id: str) -> list[TaskRun]:
+        """把任务下所有活跃 run 标记 cancelled（pending/preflight/running）。
+
+        返回被取消的 run 列表（供 service 层进一步 revoke celery 任务）。
+        已是终态（completed/failed/cancelled）的 run 不动。
+        """
+        runs = await self.get_runs_for_task(task_id)
+        cancelled: list[TaskRun] = []
+        for run in runs:
+            if run.status in ("pending", "preflight", "running"):
+                run.status = "cancelled"
+                cancelled.append(run)
+        if cancelled:
+            await self.session.flush()
+        return cancelled
+
     async def create_run(self, run: TaskRun) -> TaskRun:
         self.session.add(run)
         await self.session.flush()
