@@ -58,21 +58,21 @@ except ImportError as e:  # 镜像构建失败时给出明确报错
     sys.exit(2)
 
 
-# ── canUseTool 黑白名单（核心安全规则） ──
+# ── Bash 黑名单（核心安全规则，PreToolUse hook 消费） ──
+#
+# 策略（v0.2）：黑名单 deny + 工具白名单（allowed_tools）双层模型。
+# - Bash：黑名单拦截破坏性命令（rm/mv/chmod/dd/mkfs/|bash/>/etc//proc//sys），
+#   其余放开（插件工作流需要 docker compose / git / curl / python）
+# - 工具类型白名单：allowed_tools 限定（Write/Edit/WebFetch 等显式列出）
+# - can_use_tool 不再用：bypassPermissions 会 shadow 它（SDK CanUseToolShadowedWarning）；
+#   PreToolUse hook 在所有 permission_mode 下都执行（CLI 原生消费 permissionDecision）
 
-# 白名单：永远 allow
-BASH_ALLOWLIST = [
-    re.compile(r"^git\s+(clone|fetch|log|show|diff|status|rev-parse|branch|tree)\b"),
-    re.compile(r"^curl\s+"),
-    re.compile(r"^python[0-9.]?\s+(-[c]\b|/workspace/.*\.py\b)"),
-]
-
-# 黑名单：永远 deny（含 | bash / /proc / /sys / etc ）
 BLACKLIST_RES = [
     (re.compile(r"\|\s*bash\b"), "| bash"),
     (re.compile(r"\|\s*sh\b"), "| sh"),
     (re.compile(r">\s*/etc/"), "> /etc/"),
     (re.compile(r">\s*~/\.bashrc"), "> ~/.bashrc"),
+    (re.compile(r"^rm\s+-rf?\s"), "rm -rf"),
     (re.compile(r"^rm\s"), "rm"),
     (re.compile(r"^mv\s"), "mv"),
     (re.compile(r"^cp\s"), "cp"),
@@ -86,30 +86,32 @@ BLACKLIST_RES = [
 
 
 def _classify_bash(cmd: str) -> tuple[str, str | None]:
-    """返回 (decision, reason)：('allow', None) / ('deny', reason)"""
+    """返回 (decision, reason)：黑名单 deny，其余 allow（放开 Bash 给插件工作流）。"""
     for pat, name in BLACKLIST_RES:
         if pat.search(cmd):
             return ("deny", f"blocked by policy: {name}")
-    for pat in BASH_ALLOWLIST:
-        if pat.match(cmd):
-            return ("allow", None)
-    return ("deny", f"not in allowlist: {cmd[:100]}")
+    return ("allow", None)
 
 
-async def _permission_gate(tool_name: str, tool_input: dict[str, Any], _ctx: Any) -> dict:
-    """canUseTool 回调：白盒审计风格黑白名单。
+async def _pre_tool_use_hook(hook_input: Any, _tool_use_id: str | None, _ctx: Any) -> dict | None:
+    """PreToolUse hook：Bash 黑名单拦截，其余放行。
 
-    返回 PermissionResultAllow / PermissionResultDeny 字典（SDK 0.2.x 接受 dict 形式）。
+    SDK 0.2.x 的 hooks 字段直接接受 async 回调（非 shell command），返回
+    SyncHookJSONOutput。permissionDecision 由 _bundled/claude CLI 原生消费，
+    在所有 permission_mode（含 bypassPermissions）下都生效。
+
+    matcher 限定 Bash，故本回调只处理 Bash；Write/Edit/WebFetch 等不触发。
     """
-    if tool_name == "Read" or tool_name == "Grep" or tool_name == "Glob":
-        return {"behavior": "allow", "updatedInput": tool_input}
+    # hook_input 是 PreToolUseHookInput（TypedDict），按字段取
+    tool_name = (hook_input.get("tool_name") if isinstance(hook_input, dict) else getattr(hook_input, "tool_name", "")) or ""
+    tool_input = hook_input.get("tool_input") if isinstance(hook_input, dict) else getattr(hook_input, "tool_input", {})
+    if tool_name != "Bash":
+        return None  # 非 Bash 不处理（matcher 已限定，兜底）
 
-    if tool_name == "Bash":
-        cmd = tool_input.get("command", "") if isinstance(tool_input, dict) else str(tool_input)
-        decision, reason = _classify_bash(cmd)
-        if decision == "allow":
-            return {"behavior": "allow", "updatedInput": tool_input}
-        # deny 时同步输出一条审计事件（worker 侧会落 AgentEvent）
+    cmd = tool_input.get("command", "") if isinstance(tool_input, dict) else str(tool_input)
+    decision, reason = _classify_bash(cmd)
+    if decision == "deny":
+        # 审计事件（worker 侧落 AgentEvent，前端可见）
         print(json.dumps({
             "type": "tool.call.denied",
             "tool": tool_name,
@@ -117,17 +119,15 @@ async def _permission_gate(tool_name: str, tool_input: dict[str, Any], _ctx: Any
             "input": cmd[:200],
             "timestamp": time.time(),
         }, ensure_ascii=False), flush=True)
-        return {"behavior": "deny", "message": reason or "denied by policy"}
-
-    # Write / Edit / NotebookEdit / 其他：deny
-    print(json.dumps({
-        "type": "tool.call.denied",
-        "tool": tool_name,
-        "reason": "tool not in allowlist",
-        "input": json.dumps(tool_input, ensure_ascii=False)[:200],
-        "timestamp": time.time(),
-    }, ensure_ascii=False), flush=True)
-    return {"behavior": "deny", "message": f"tool {tool_name} not in allowlist"}
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason or "denied by policy",
+            }
+        }
+    # allow：返回 None 走默认流程（bypassPermissions 自动批准）
+    return None
 
 
 # ── SDK Message → 统一事件结构翻译 ──
@@ -338,17 +338,24 @@ def _build_options(model: str, max_turns: int) -> ClaudeAgentOptions:
         "model": model,
         "max_turns": max_turns,
         "cwd": "/workspace/project",
-        # 已知限制：permission_mode=bypassPermissions 下 can_use_tool 不会被调用
-        # （SDK 有 CanUseToolShadowedWarning）。插件工作流需要 Write/Edit 等工具，
-        # 权限策略待后续切 PreToolUse hook 重构（见 docs/agent-workflow.md §权限策略）。
-        # can_use_tool 保留：切 dontAsk/hook 后立即生效，黑白名单规则已就绪。
+        # bypassPermissions：非 Bash 工具自动批准（减少摩擦）。
+        # Bash 的安全护栏由 PreToolUse hook 负责（黑名单 deny），hook 在所有
+        # permission_mode 下都执行，不被 bypassPermissions shadow（区别于 can_use_tool）。
+        # 详见 docs/agent-workflow.md §权限策略。
         "permission_mode": "bypassPermissions",
         "allowed_tools": [
             "Read", "Grep", "Glob", "Bash",         # 白盒审计 + PoC
             "Write", "Edit",                         # 写 report.md / .vuln-env.json
             "WebFetch", "WebSearch",                 # 查 CVE / 利用资料
         ],
-        "can_use_tool": _permission_gate,
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",               # 只对 Bash 触发（其余工具不需拦截）
+                    "hooks": [_pre_tool_use_hook],
+                },
+            ],
+        },
         "extra_args": ["--agent", agent_flag],
     }
 

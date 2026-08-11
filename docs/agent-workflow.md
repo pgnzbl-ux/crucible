@@ -1,6 +1,6 @@
 # Crucible Agent 阶段化编排设计
 
-> 文档版本: v0.1 · 2026-08-11
+> 文档版本: v0.2 · 2026-08-11
 > 定位: 把 development-guide.md「P0-0 Agent 阶段化编排」落地为**插件化**架构 ——
 > 阶段工作流不在 Python 侧写 Stage 类，而是由 Claude Code 插件 `vuln-verify-expert`
 > 承载，agent-runner 容器加载插件后由 SDK 调用其 agent。
@@ -176,48 +176,65 @@ ClaudeAgentOptions(
 
 ## 7. 权限策略
 
-### 现状（v0.1）
+### 现状（v0.2）
 
 ```python
-permission_mode="bypassPermissions"  # 自动批准所有工具调用
+permission_mode="bypassPermissions"  # 非 Bash 工具自动批准（减少摩擦）
 allowed_tools=["Read","Grep","Glob","Bash","Write","Edit","WebFetch","WebSearch"]
-can_use_tool=_permission_gate        # 黑白名单回调（白盒审计风格）
+hooks={"PreToolUse": [{"matcher": "Bash", "hooks": [_pre_tool_use_hook]}]}  # Bash 黑名单
 ```
 
-**已知限制**：`permission_mode=bypassPermissions` 下 `can_use_tool` **不会被调用**
-（SDK 有 `CanUseToolShadowedWarning`）—— 即 `_permission_gate` 的 Bash 黑白名单
-（禁 `rm`/`mv`/`| bash`/`/proc`/`/sys` 等）当前**不生效**。
+**双层模型**（v0.2 重构后，`can_use_tool` 已废弃）：
 
-安全护栏当前依赖：
+1. **工具类型白名单**（`allowed_tools`）—— 限定可用工具集合，不在表里的一律不可用
+2. **Bash 命令黑名单**（`PreToolUse` hook）—— `matcher: "Bash"`，拦截破坏性命令
+   （`rm`/`mv`/`cp`/`chmod`/`chown`/`dd`/`mkfs`/`|bash`/`>/etc/`/`/proc/`/`/sys/`），其余放开
+   （插件工作流需要 `docker compose`/`git`/`curl`/`python`）
+
+**为什么用 hook 而非 `can_use_tool`**：SDK 的 `permission_mode=bypassPermissions` 会
+shadow `can_use_tool`（`CanUseToolShadowedWarning`，自动批准发生在回调之前）；而
+`PreToolUse` hook 在**所有** permission_mode 下都执行，`permissionDecision: "deny"` 由
+`_bundled/claude` CLI 原生消费，bypassPermissions 之前拦截。v0.1 用 `can_use_tool` 是
+无效的（黑白名单不生效），v0.2 切 hook 后真正生效。
+
+**hook 形态**：SDK 0.2.x 的 `hooks` 字段直接接受 **async Python 回调**（`HookCallback`），
+非 shell command —— 复用纯 Python 的黑白名单逻辑，无需外部脚本。deny 时同步输出
+`tool.call.denied` 审计事件（worker 落 `AgentEvent`，前端可见）。
+
+安全护栏全栈：
 1. 容器层：非 root + 只读 rootfs + cap_drop ALL + tmpfs + 资源限制（`AgentRunnerSpec` 默认）
 2. host_workdir 任务级隔离 + 任务结束 rmtree
-3. `allowed_tools` 白名单（不在表里的工具一律不可用）
-
-### 路线（P1）
-
-切到 `PreToolUse` hook 实现黑白名单 —— hook 在所有 permission_mode 下都会跑：
-
-```python
-hooks={
-    "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "..."}]}]
-}
-```
-
-或 SDK 若暴露 `permission_mode="dontAsk"`（待 0.2.x 确认），让 `can_use_tool` 生效。
-重构后 `_permission_gate` 的规则直接复用，无需重写。
+3. `allowed_tools` 工具类型白名单
+4. `PreToolUse` hook Bash 命令黑名单（v0.2 生效）
 
 ---
 
 ## 8. 不在本版本范围（gap 汇总 → 后续 PR）
 
-| gap | 影响 | 路线 |
+| gap | 影响 | 状态 / 路线 |
 |---|---|---|
-| browser MCP 未接入 | XSS/DOM 类证据须降级 HTTP | P1 |
-| 容器内无法 docker compose 搭靶场 | 阶段 B 自建环境受限 | P1（DinD / docker.sock） |
+| 权限 hook 重构 | ~~Bash 黑白名单不生效~~ | ✅ v0.2 完成（PreToolUse hook） |
+| 插件产物自动归档 | ~~报告/截图须手动上传~~ | ✅ v0.2 完成（worker 扫 host_workdir/project → MinIO + Evidence） |
+| browser MCP 未接入 | XSS/DOM 类证据须降级 HTTP | P1（独立子项目，见下） |
+| 容器内无法 docker compose 搭靶场 | 阶段 B 自建环境受限 | P1（DinD / docker.sock 架构决策） |
 | credential_store 未接入 | 需登录的漏洞进 `needs_credentials` | P1-6 |
-| 插件产物自动归档 | 报告/截图须手动上传 | P1（worker 扫 host_workdir） |
-| 权限 hook 重构 | Bash 黑白名单当前不生效 | P1 |
 | 阶段名 ↔ 前端标签映射 | 部分阶段显示英文 phase key | P1 |
 
-> v0.1 已打通的核心链路：**任务创建 → 容器加载插件 → agent 跑白盒审计 + HTTP 验证
-> → phase.updated 实时推送 → 结论分流 → 报告生成 → 证据手动上传**。
+### browser MCP 子项目（独立立项，非阻塞）
+
+插件 agent.md 已设计「浏览器非必需时降级 HTTP/API/OOB」，故 browser MCP 是**增强**而非
+阻塞项。接入是个独立子项目，涉及：
+
+- **镜像**：agent-runner 装 chromium（~500MB）或外挂 MCP server 容器
+- **权限**：headless chrome 需 `--no-sandbox` 或额外 cap（与只读 rootfs + cap_drop ALL 冲突，需单独容器）
+- **MCP 配置**：`ClaudeAgentOptions` 的 MCP server 注入（`setting_sources` 或 `mcp_servers`）
+- **网络**：agent-runner 容器 ↔ 浏览器 MCP server ↔ 靶场网络打通
+- **方案候选**：① 单独跑 `playwright-mcp` / `chrome-devtools-mcp` 容器，agent-runner 通过 MCP 连接；② agent-runner 镜像装 chromium + playwright，容器内跑（需放开 sandbox 限制）
+
+建议单独立项评估，本次不实现。
+
+### v0.2 已打通的核心链路
+
+任务创建 → 容器加载插件 → agent 跑白盒审计 + HTTP 验证（Bash 黑名单实时拦截）→
+phase.updated 实时推送 → 结论分流 → 报告生成 + **插件产物自动归档**（report.md /
+.docx / 截图 / .vuln-env.json）→ 证据手动补充。

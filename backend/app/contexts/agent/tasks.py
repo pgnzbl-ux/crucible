@@ -351,11 +351,11 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
                     run.agent_session_id = result.session_id
             await session.commit()
 
-            # 7. 生成报告（agent 产出 → report context）
+            # 7. 生成报告（agent 产出 → report context）+ 自动归档插件产物
             if result is not None and task.status in ("completed", "needs_review"):
                 try:
                     report_svc = ReportService(ReportRepository(session))
-                    await report_svc.generate_from_agent(
+                    report = await report_svc.generate_from_agent(
                         task_id=task_id,
                         run_id=run_id,
                         owner_id=task.owner_id,
@@ -363,6 +363,15 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
                         reasoning=result.reasoning or "",
                         events=result.events,
                     )
+                    # 7.5 扫描 host_workdir/project 的 VULN-*/ 与 .vuln-env/ 产物 → MinIO + Evidence
+                    #    插件 agent 按约定把 report.md/.docx/img/.vuln-env.json 写到 project 目录，
+                    #    cleanup（step 9）前归档，让报告闭环（P0-4 手动上传的自动补充）
+                    try:
+                        archived = await _archive_artifacts(session, report, host_workdir)
+                        if archived:
+                            summary["artifacts_archived"] = archived
+                    except Exception as e:  # noqa: BLE001 — 归档失败不影响主流程
+                        logger.warning(f"插件产物归档失败: {e}")
                     await session.commit()
                     summary["report_generated"] = True
                 except Exception as e:  # noqa: BLE001 — 报告生成失败不影响主流程
@@ -439,3 +448,118 @@ def _cleanup_hostdir(path: str) -> None:
             shutil.rmtree(path, ignore_errors=True)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"清理 host_workdir 失败 {path}: {e}")
+
+
+# ── 插件产物自动归档（P1：补 P0-4 手动上传的自动补充） ──
+
+# 单文件归档上限（20MB；超大文件跳过，避免 worker 阻塞）
+_ARTIFACT_MAX_BYTES = 20 * 1024 * 1024
+
+
+def _classify_artifact(fname: str) -> str:
+    """文件名 → evidence kind（artifact | screenshot | log | poc）"""
+    fl = fname.lower()
+    if fl.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
+        return "screenshot"
+    if fl.endswith((".py", ".sh")):
+        return "poc"
+    if fl.endswith((".json", ".log", ".txt")):
+        return "log"
+    return "artifact"  # report.md / .docx / .pdf / Dockerfile / compose
+
+
+def _content_type(fname: str) -> str:
+    import mimetypes
+    ct, _ = mimetypes.guess_type(fname)
+    return ct or "application/octet-stream"
+
+
+def _scan_and_upload(project_dir: str, task_id: str) -> list[dict]:
+    """同步扫描 project_dir 的插件产物 → 上传 MinIO，返回 evidence 元数据列表。
+
+    扫描约定（与插件 agent.md / run-project-env SKILL.md 一致）：
+      <project_root>/VULN-<NNN>-<title>/          报告目录
+        ├─ report.md / *.docx / *.pdf              报告正文
+        └─ img/*.png                               截图
+      <project_root>/.vuln-env.json                环境状态
+      <project_root>/.vuln-env/                    靶场配置（Dockerfile/compose/RUN_ENV.md）
+    """
+    from app.contexts.report import storage
+    import uuid
+
+    uploaded: list[dict] = []
+    if not os.path.isdir(project_dir):
+        return uploaded
+    def _upload_one(fpath: str, fname: str) -> None:
+        try:
+            size = os.path.getsize(fpath)
+            if size > _ARTIFACT_MAX_BYTES:
+                logger.info(f"跳过超大产物 {fname} ({size}B > {_ARTIFACT_MAX_BYTES}B)")
+                return
+            with open(fpath, "rb") as f:
+                data = f.read()
+        except OSError as e:
+            logger.warning(f"读取产物失败 {fpath}: {e}")
+            return
+        key = f"{task_id}/{uuid.uuid4().hex}/{fname}"
+        try:
+            storage.upload_evidence(key, data, _content_type(fname), task_id=task_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"上传产物失败 {fname}: {e}")
+            return
+        uploaded.append({
+            "object_key": key,
+            "file_name": fname[:255],
+            "content_type": _content_type(fname)[:128],
+            "size_bytes": len(data),
+            "kind": _classify_artifact(fname),
+        })
+
+    # 1. VULN-*/ 报告目录
+    for entry in sorted(os.listdir(project_dir)):
+        vuln_dir = os.path.join(project_dir, entry)
+        if not (entry.startswith("VULN-") and os.path.isdir(vuln_dir)):
+            continue
+        for fname in sorted(os.listdir(vuln_dir)):
+            fpath = os.path.join(vuln_dir, fname)
+            if os.path.isfile(fpath):
+                _upload_one(fpath, fname)
+        # img/ 子目录（截图，扁平化命名前缀防冲突）
+        img_dir = os.path.join(vuln_dir, "img")
+        if os.path.isdir(img_dir):
+            for fname in sorted(os.listdir(img_dir)):
+                fpath = os.path.join(img_dir, fname)
+                if os.path.isfile(fpath):
+                    _upload_one(fpath, f"img/{fname}")
+
+    # 2. .vuln-env.json（环境状态）
+    env_json = os.path.join(project_dir, ".vuln-env.json")
+    if os.path.isfile(env_json):
+        _upload_one(env_json, ".vuln-env.json")
+
+    # 3. .vuln-env/（靶场配置：Dockerfile/compose/RUN_ENV.md）
+    env_dir = os.path.join(project_dir, ".vuln-env")
+    if os.path.isdir(env_dir):
+        for fname in sorted(os.listdir(env_dir)):
+            fpath = os.path.join(env_dir, fname)
+            if os.path.isfile(fpath):
+                _upload_one(fpath, f".vuln-env/{fname}")
+
+    return uploaded
+
+
+async def _archive_artifacts(session: AsyncSession, report: Report, host_workdir: str) -> int:
+    """扫描 host_workdir/project 的插件产物，上传 MinIO + 落 Evidence（关联 report）。
+
+    同步扫描 + 上传走 asyncio.to_thread（storage 是同步客户端）；
+    返回归档文件数。失败仅日志（不阻塞主流程）。
+    """
+    from app.contexts.report.models import Evidence
+
+    project_dir = os.path.join(host_workdir, "project")
+    metas = await asyncio.to_thread(_scan_and_upload, project_dir, report.task_id)
+    for meta in metas:
+        session.add(Evidence(report_id=report.id, task_id=report.task_id, **meta))
+    if metas:
+        await session.flush()
+    return len(metas)
