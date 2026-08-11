@@ -206,7 +206,7 @@ export const api = {
   // Tasks
   listTasks: (params?: Record<string, string>) => {
     const qs = params ? '?' + new URLSearchParams(params).toString() : ''
-    return request<TaskListResponse>(`/tasks${qs}`)
+    return request<TaskListResponse>(`/tasks/${qs}`)
   },
 
   createTask: (data: {
