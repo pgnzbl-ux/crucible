@@ -42,10 +42,34 @@ async def get_db_session() -> AsyncSession:
 
 
 async def init_db() -> None:
-    """创建所有表（开发环境用，生产用 Alembic）"""
+    """创建所有表（开发环境用，生产用 Alembic）。
+
+    create_all 只建不存在的表，不会给已存在的表加新列。开发环境 SQLite 叠加
+    _ensure_dev_columns 做幂等迁移（如 tasks.credential_refs）；生产用 Alembic。
+    """
     async with engine.begin() as conn:
         from app.shared.base import Base
+
         await conn.run_sync(Base.metadata.create_all)
+        if "sqlite" in settings.database_url:
+            await _ensure_dev_columns(conn)
+
+
+async def _ensure_dev_columns(conn) -> None:
+    """SQLite 开发环境：给已存在的表补缺失列（create_all 补丁）。
+
+    每次新增列在此登记一条 ALTER（IF NOT EXISTS 语义用 PRAGMA table_info 判断）。
+    生产环境用 Alembic，不走这里。
+    """
+    from sqlalchemy import text
+
+    # tasks.credential_refs（P1-6 Credential Proxy）
+    cols = (await conn.execute(text("PRAGMA table_info(tasks)"))).fetchall()
+    col_names = {c[1] for c in cols}
+    if cols and "credential_refs" not in col_names:
+        await conn.execute(
+            text("ALTER TABLE tasks ADD COLUMN credential_refs TEXT NOT NULL DEFAULT '[]'")
+        )
 
 
 async def close_db() -> None:
