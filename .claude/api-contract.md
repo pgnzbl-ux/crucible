@@ -116,9 +116,13 @@
 
 ### GET `/api/v1/reports/{id}/evidences`
 
-证据列表（日志 / 截图 MinIO 路径）。
+证据列表（日志 / 截图 / PoC），每条含 MinIO 预签名 `download_url`。
 
-**待补（P0-4）** 上传链路。
+### POST `/api/v1/reports/{id}/evidences`
+
+上传证据（multipart/form-data）。字段：`file`（文件，≤50MB）+ `kind`（`artifact|log|screenshot|poc`）。
+上传 → MinIO `crucible-evidence` bucket → 落 `evidences` 表 → 返回带预签名 URL 的 `EvidenceResponse`。
+owner 校验：生产严格（`report.owner_id` 必须匹配 token），开发宽松。
 
 ---
 
@@ -168,10 +172,12 @@
 
 ## 待补（P0/P1/P2 路线）
 
-- ~~P0-1: `GET /tasks/{id}/events/stream` SSE 端点~~ ✅ 已完成
-- P0-2: `POST /tasks/{id}/actions/cancel` 真正生效
-- P0-3: `users/me` JWT 解析 + 路由守卫（含 SSE 端点的 `?token=` 鉴权）
-- P0-4: `POST /reports/{id}/evidences` 上传
+- ~~P0-0: Agent 阶段化编排~~ ✅ 插件化（见 docs/agent-workflow.md）
+- ~~P0-1: `GET /tasks/{id}/events/stream` SSE 端点~~ ✅
+- ~~P0-2: `POST /tasks/{id}/actions/cancel` 真正生效~~ ✅（revoke + 容器销毁）
+- ~~P0-3: JWT 闭环 + SSE `?token=` 鉴权~~ ✅
+- ~~P0-4: `POST /reports/{id}/evidences` 上传~~ ✅
+- P1-6: Credential Proxy（补齐插件 `credential_store` 能力）
 - P1-7: `Authorization: ApiKey xxx` 鉴权依赖
 - P1-8: OIDC 回调 `/auth/oauth/{provider}/callback`
 - P1-9: RBAC 权限矩阵

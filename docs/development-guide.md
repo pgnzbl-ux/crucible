@@ -101,9 +101,12 @@ frontend/src/
 infrastructure/
 ├── docker-compose.yml         # postgres(5433) + redis(6380) + minio(9000/9001) + createbuckets
 └── agent-runner/              # Agent Runner 镜像（专用，Claude Agent SDK 隔离执行环境）
-    ├── Dockerfile             # python:3.11-slim + claude-agent-sdk + git + curl + tini
+    ├── Dockerfile             # build context=项目根；COPY plugins/ 进镜像 + python:3.11-slim + claude-agent-sdk + git + curl + tini
     ├── requirements.txt       # claude-agent-sdk==0.2.134
-    └── runner/run_one.py      # 容器内 entrypoint（JSONL 流输出）
+    └── runner/run_one.py      # 容器内 entrypoint（加载插件 + 指定 agent + JSONL 流输出）
+
+plugins/                       # ★ Claude Code 插件（阶段化编排的载体，见 docs/agent-workflow.md）
+└── vuln-verify-expert/        #   白盒验证 agent + 2 skills（搭靶场 / 验证出报告）
 ```
 
 ### 2.4 数据模型
@@ -136,6 +139,7 @@ llm_providers（独立，后台管理）
 | Repository 现代化 | ✅ | 每 Context repository.py（类型化 + select） |
 | Agent Adapter 抽象 | ✅ | executor.py（Protocol + 双实现 + 工厂） |
 | Agent Runner 编排 | ✅ | core/agent_runner.py（容器编排 + 流式消费 + 行缓冲 + 凭据零落盘） |
+| **Agent 阶段化编排（P0-0，插件化）** | ✅ | vuln-verify-expert 插件 COPY 进镜像 + run_one.py 加载插件指定 agent（见 docs/agent-workflow.md） |
 | Event Bus（Redis Pub/Sub） | ✅ | shared/events.py（统一事件结构） |
 | 事件持久化 + 查询 | ✅ | agent_events 表 + GET /tasks/{id}/events |
 | **SSE 实时事件推送（P0-1）** | ✅ | shared/sse.py（StreamingResponse + 历史回放 + 15s 心跳 + 断开清理）+ GET /tasks/{id}/events/stream + 前端 useTaskEvents hook |
@@ -167,14 +171,14 @@ llm_providers（独立，后台管理）
 
 | # | 任务 | 现状 | 目标 | 涉及 |
 |---|------|------|------|------|
-| 0 | **Agent 阶段化编排**（Stage Orchestrator） | 单次 claude 调用跑全流程（黑盒） | S0-S10 逐阶段编排 + 结构化契约 + 分支跳转（非web结束/误报Quick-Stop/回退环） | 新增 agent/stages.py + preflight.py + prompts.py，重构 executor.py / tasks.py |
+| 0 | **Agent 阶段化编排** ✅ | 已落地为**插件化**架构：vuln-verify-expert 插件（阶段 0/A/B/C/D）COPY 进 agent-runner 镜像，run_one.py 加载插件 + 指定 agent | （已完成 v0.1，平台能力 gap 见 agent-workflow.md §8） | Dockerfile + run_one.py + docs/agent-workflow.md |
 | 1 | **SSE 实时事件推送** ✅ | `GET /api/v1/tasks/{id}/events/stream` 已就绪，前端 `useTaskEvents` 替换 3s 轮询 | （已完成） | shared/sse.py + task/api.py + frontend shared/hooks/useTaskEvents.ts |
-| 2 | **取消任务真正生效** | cancel 仅改 DB 状态 | `celery_app.control.revoke(task_id)` + 沙箱销毁 + run 标记 cancelled | task/service.py + agent/tasks.py |
-| 3 | **JWT 登录闭环** | api.ts 有 token 逻辑，LoginPage 未联调 | 登录后存 token，路由守卫，owner_id 从 token 解析（当前硬编码 "system"） | frontend pages/LoginPage + api.ts；task/report api.py 的 owner 注入 |
-| 4 | **Evidence 上传链路** | storage.py 有 upload_evidence 但 service 未接 | 报告生成时证据（日志/截图）上传 MinIO + evidences 表落库 + 前端展示 | report/service.py + api.py |
+| 2 | **取消任务真正生效** ✅ | `send_task(task_id=run.id)` + cancel 时 `celery_app.control.revoke(run.id, terminate=True)` → SIGTERM 钩子销毁容器 | （已完成） | task/service.py + task/repository.py |
+| 3 | **JWT 登录闭环** ✅ | `shared/deps.py::CurrentUserId` 注入 owner_id（去硬编码 "system"）；前端路由守卫 + 401 跳登录 + SSE `?token=` 鉴权 | （已完成） | shared/deps.py + task/report api.py + App.tsx + LoginPage + layout.tsx |
+| 4 | **Evidence 上传链路** ✅ | `POST/GET /reports/{id}/evidences`（MinIO + 预签名 URL）+ 前端 EvidenceList 上传/下载 | （已完成） | report/service.py + report/api.py + frontend EvidenceList |
 
-> **P0 顺序**：0（阶段化编排骨架）→ ~~1（SSE）~~ ✅ → 2（cancel revoke）→ 3（登录）→ 4（证据）。
-> 阶段化编排是前提 —— SSE 推送的正是阶段事件。
+> **P0 顺序**：~~0（阶段化编排骨架）~~ ✅ → ~~1（SSE）~~ ✅ → ~~2（cancel）~~ ✅ → ~~3（登录）~~ ✅ → ~~4（证据）~~ ✅。
+> **P0 全部完成**。阶段化编排是插件化实现（非 Python Stage 类），完整设计见 `docs/agent-workflow.md`。
 
 ### P1 — 提案明确要求
 
@@ -202,12 +206,12 @@ llm_providers（独立，后台管理）
 ### 4.1 建议实施顺序
 
 ```
-第一轮（P0，功能闭环）:  0（阶段化编排骨架）→ 1（SSE ✅）→ 2（cancel）→ 3（登录）→ 4（证据）
+第一轮（P0，功能闭环）:  0（插件化编排 ✅）→ 1（SSE ✅）→ 2（cancel ✅）→ 3（登录 ✅）→ 4（证据 ✅）
 第二轮（P1，提案对齐）:  5 → 6 → 7 → 8 → 9 → 10 → 11
 第三轮（P2，生产就绪）:  12 → 13 → 14 → 15 → 16 → 17
 ```
 
-每个 P0 完成后跑一遍全链路冒烟（任务创建 → 事件流 → 报告）作为回归门禁。
+P0 全部完成。每个 P1 完成后跑一遍全链路冒烟（任务创建 → 事件流 → 报告）作为回归门禁。
 
 ---
 
@@ -263,7 +267,8 @@ llm_providers（独立，后台管理）
 
 ```bash
 cd infrastructure && docker compose up -d          # 基础设施
-docker build -f agent-runner/Dockerfile -t crucible-agent-runner:base .   # 首次构建 agent-runner 镜像
+# agent-runner 镜像：build context 必须是项目根（Dockerfile 要 COPY plugins/）
+docker build -f infrastructure/agent-runner/Dockerfile -t crucible-agent-runner:base .
 cd backend && python -m uvicorn app.main:app --port 8010        # API
 cd backend && python run_worker.py                              # Celery worker
 cd frontend && npm run dev                                      # 前端 5173
@@ -289,4 +294,4 @@ pytest                           # 单元测试（待补，见 backlog P1）
 
 ---
 
-> **下一步**：P0-1（SSE）已完成。按 §4.1 顺序继续 **P0-0（Agent 阶段化编排 S0-S10 骨架）** 或 **P0-2（取消任务真正生效）**。每完成一项更新本文件的「已完成清单」并跑全链路冒烟。
+> **下一步**：P0 全部完成（0-4）。按 §4.1 顺序进入 **P1** —— 建议 P1-5（frontend features 填充）或 P1-6（Credential Proxy，补齐插件 `credential_store` 能力，见 agent-workflow.md §4）。每完成一项更新本文件的「已完成清单」并跑全链路冒烟。
