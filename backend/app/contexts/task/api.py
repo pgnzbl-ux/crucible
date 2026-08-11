@@ -5,7 +5,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
-from app.core.security import decode_access_token
+from app.shared.deps import CurrentUserId
 from app.shared.sse import stream_task_events
 from .repository import TaskRepository
 from .schemas import TaskCreateRequest, TaskDetail, TaskListResponse
@@ -30,24 +30,23 @@ async def get_task_service(repo: Annotated[TaskRepository, Depends(get_task_repo
 async def create_task(
     request: TaskCreateRequest,
     svc: Annotated[TaskService, Depends(get_task_service)],
+    user_id: CurrentUserId,
 ) -> TaskDetail:
     """创建漏洞验证任务"""
-    # TODO: 从 JWT token 解析 owner_id
-    owner_id = "system"  # 临时占位
-    return await svc.create_task(request, owner_id)
+    return await svc.create_task(request, user_id)
 
 
 @router.get("/", response_model=TaskListResponse)
 async def list_tasks(
     svc: Annotated[TaskService, Depends(get_task_service)],
+    user_id: CurrentUserId,
     status: str | None = Query(None),
     priority: str | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> TaskListResponse:
     """获取任务列表"""
-    owner_id = "system"  # 临时占位
-    return await svc.list_tasks(owner_id, status, priority, limit, offset)
+    return await svc.list_tasks(user_id, status, priority, limit, offset)
 
 
 @router.get("/{task_id}", response_model=TaskDetail)
@@ -74,9 +73,14 @@ async def get_task_events(
 
 
 @router.get("/{task_id}/events/stream")
-async def stream_task_events_endpoint(task_id: str, request: Request) -> StreamingResponse:
+async def stream_task_events_endpoint(
+    task_id: str,
+    request: Request,
+    _user_id: CurrentUserId,
+) -> StreamingResponse:
     """SSE 实时事件推送（P0-1）
 
+    - 鉴权：?token=<jwt>（EventSource 不能注入 header，见 shared/deps.py）
     - 启动时回放历史（DB）
     - 订阅 Redis 频道 task.{id}.events 转发
     - 15s 心跳防代理超时

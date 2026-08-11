@@ -1,5 +1,14 @@
 const API_BASE = '/api/v1'
 
+// 401 处理：清 token + 跳登录（避免循环：登录页本身不触发）
+function handleUnauthorized() {
+  localStorage.removeItem('crucible_token')
+  localStorage.removeItem('crucible_user')
+  if (!window.location.pathname.startsWith('/login')) {
+    window.location.href = '/login'
+  }
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const token = localStorage.getItem('crucible_token')
   const headers: Record<string, string> = {
@@ -10,14 +19,37 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     headers['Authorization'] = `Bearer ${token}`
   }
   const res = await fetch(`${API_BASE}${path}`, { ...options, headers })
+  if (res.status === 401) {
+    handleUnauthorized()
+    throw new Error('登录已过期，请重新登录')
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: '请求失败' }))
     throw new Error(err.detail || `HTTP ${res.status}`)
+  }
+  if (res.status === 204) {
+    return undefined as T
   }
   return res.json()
 }
 
 // ── 类型 ──
+
+// Auth
+export interface CurrentUser {
+  id: string
+  email: string
+  display_name: string
+  is_active: boolean
+  is_admin: boolean
+  role: string
+}
+
+export interface TokenResponse {
+  access_token: string
+  token_type: string
+  user: CurrentUser
+}
 
 export interface TaskSummary {
   id: string
@@ -78,7 +110,19 @@ export interface ReportDetail {
   published_at: string | null
   created_at: string
   updated_at: string
-  evidence: unknown[]
+  evidence: Evidence[]
+}
+
+export interface Evidence {
+  id: string
+  object_key: string
+  bucket: string
+  file_name: string
+  content_type: string
+  size_bytes: number
+  kind: string
+  created_at: string
+  download_url: string | null
 }
 
 // ── LLM Provider ──
@@ -124,12 +168,12 @@ export interface LlmProviderTestResult {
 export const api = {
   // Auth
   login: (data: { email: string; password: string }) =>
-    request('/auth/login', { method: 'POST', body: JSON.stringify(data) }),
+    request<TokenResponse>('/auth/login', { method: 'POST', body: JSON.stringify(data) }),
 
   register: (data: { email: string; password: string; display_name: string }) =>
-    request('/auth/register', { method: 'POST', body: JSON.stringify(data) }),
+    request<CurrentUser>('/auth/register', { method: 'POST', body: JSON.stringify(data) }),
 
-  me: () => request('/auth/me'),
+  me: () => request<CurrentUser>('/auth/me'),
 
   // Tasks
   listTasks: (params?: Record<string, string>) => {
@@ -156,6 +200,36 @@ export const api = {
 
   publishReport: (reportId: string) =>
     request<ReportDetail>(`/reports/${reportId}/publish`, { method: 'POST' }),
+
+  // Evidence（P0-4）—— FormData 走单独 fetch，不经 request（不要 JSON Content-Type）
+  uploadEvidence: (reportId: string, file: File, kind: 'artifact' | 'log' | 'screenshot' | 'poc' = 'artifact') => {
+    const form = new FormData()
+    form.append('file', file)
+    form.append('kind', kind)
+    const token = localStorage.getItem('crucible_token')
+    return fetch(`${API_BASE}/reports/${reportId}/evidences`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      // 注意：不设 Content-Type，浏览器自动加 multipart boundary
+      body: form,
+    }).then(async (res): Promise<Evidence> => {
+      if (res.status === 401) {
+        handleUnauthorized()
+        throw new Error('登录已过期，请重新登录')
+      }
+      if (res.status === 413) {
+        throw new Error('文件超过 50MB 限制')
+      }
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({ detail: '上传失败' }))
+        throw new Error(e.detail || `HTTP ${res.status}`)
+      }
+      return res.json() as Promise<Evidence>
+    })
+  },
+
+  listEvidences: (reportId: string) =>
+    request<Evidence[]>(`/reports/${reportId}/evidences`),
 
   // Settings — LLM Providers
   listLlmProviders: () => request<LlmProviderListResponse>('/settings/llm/providers'),

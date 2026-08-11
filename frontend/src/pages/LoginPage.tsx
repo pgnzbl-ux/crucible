@@ -1,33 +1,34 @@
 import { Button, Card, Form, Input, Typography, App as AntApp } from 'antd'
 import { UserOutlined, LockOutlined } from '@ant-design/icons'
 import { useState } from 'react'
-import { useLocation } from 'wouter'
+import { useLocation, Redirect } from 'wouter'
+import { api } from '../shared/lib/api'
 
 const { Title } = Typography
 
 export function LoginPage() {
-  const [, setLocation] = useLocation()
+  const [location, setLocation] = useLocation()
   const [loading, setLoading] = useState(false)
   const { message } = AntApp.useApp()
+
+  // 已登录直接进首页
+  const existingToken = localStorage.getItem('crucible_token')
+  if (existingToken && location === '/login') {
+    return <Redirect to="/" />
+  }
 
   const onFinish = async (values: { email: string; password: string }) => {
     setLoading(true)
     try {
-      const res = await fetch('/api/v1/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(values),
-      })
-      if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.detail || '登录失败')
-      }
-      const data = await res.json()
-      localStorage.setItem('crucible_token', data.access_token)
-      message.success('登录成功')
+      const res = await api.login(values)
+      localStorage.setItem('crucible_token', res.access_token)
+      localStorage.setItem('crucible_user', JSON.stringify(res.user))
+      message.success(`欢迎，${res.user.display_name}`)
       setLocation('/')
-    } catch (e: any) {
-      message.error(e.message)
+      // 强制刷新以触发 RequireAuth 重新判定 + 各页面重新拉数据
+      setTimeout(() => window.location.reload(), 50)
+    } catch (e) {
+      message.error((e as Error).message)
     } finally {
       setLoading(false)
     }
@@ -40,7 +41,11 @@ export function LoginPage() {
           <Title level={2} style={{ margin: 0 }}>Crucible</Title>
           <Typography.Text type="secondary">坩埚 — AI 漏洞验证平台</Typography.Text>
         </div>
-        <Form onFinish={onFinish} size="large">
+        <Form
+          onFinish={onFinish}
+          size="large"
+          initialValues={{ email: 'admin@crucible.local', password: 'crucible123' }}
+        >
           <Form.Item name="email" rules={[{ required: true, message: '请输入邮箱' }]}>
             <Input prefix={<UserOutlined />} placeholder="邮箱" autoComplete="email" />
           </Form.Item>

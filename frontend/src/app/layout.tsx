@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
-import { Layout, Menu, Typography } from 'antd'
+import { Layout, Menu, Typography, Space, Button, App } from 'antd'
+import { LogoutOutlined } from '@ant-design/icons'
 import {
   DashboardOutlined,
   BugOutlined,
@@ -18,8 +19,32 @@ const NAV_ITEMS = [
   { key: '/settings', icon: <SettingOutlined />, label: <Link to="/settings">设置</Link> },
 ]
 
+interface CurrentUser {
+  display_name?: string
+  email?: string
+  role?: string
+}
+
+function getCurrentUser(): CurrentUser | null {
+  try {
+    const raw = localStorage.getItem('crucible_user')
+    return raw ? (JSON.parse(raw) as CurrentUser) : null
+  } catch {
+    return null
+  }
+}
+
 export function AppLayout({ children }: { children: ReactNode }) {
   const [location] = useLocation()
+  const { message } = App.useApp()
+  const user = getCurrentUser()
+
+  const handleLogout = () => {
+    localStorage.removeItem('crucible_token')
+    localStorage.removeItem('crucible_user')
+    message.success('已退出登录')
+    window.location.href = '/login'
+  }
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
@@ -59,7 +84,23 @@ export function AppLayout({ children }: { children: ReactNode }) {
           <Typography.Text type="secondary" style={{ fontSize: 13 }}>
             AI 漏洞自动验证平台
           </Typography.Text>
-          <Typography.Text style={{ fontSize: 13 }}>Mock 模式 · 开发环境</Typography.Text>
+          <Space>
+            {user && (
+              <Typography.Text style={{ fontSize: 13 }}>
+                {user.display_name ?? user.email}
+                {user.role && user.role !== 'viewer' ? ` · ${user.role}` : ''}
+              </Typography.Text>
+            )}
+            <Button
+              size="small"
+              type="text"
+              icon={<LogoutOutlined />}
+              onClick={handleLogout}
+              style={{ color: 'rgba(255,255,255,0.65)' }}
+            >
+              退出
+            </Button>
+          </Space>
         </Header>
         <Content style={{ padding: 24 }}>{children}</Content>
       </Layout>
