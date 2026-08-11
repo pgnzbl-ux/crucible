@@ -20,6 +20,7 @@ Crucible 是一个 AI 驱动的漏洞自动验证平台。安全研究员提交�
 - **模块化单体** — Bounded Context 组织代码（task / agent / report / identity），不盲目微服务
 - **事件驱动** — Context 间通过 Redis Pub/Sub 异步通信
 - **Agent GateWay** — Agent 执行抽象为平台能力而非胶水代码
+- **Agent 两阶段解耦** — 靶场环境搭建（`run-project-env`）与漏洞验证（`vuln-verify`）拆分为两个独立 skill / 模块，两个步骤解耦、可独立管理与演进（2026-08-11 决策）
 - **Security by Default** — 沙箱真隔离、凭据不落盘、Agent 零信任
 
 ## 快速启动
@@ -32,11 +33,11 @@ cd infrastructure && docker compose up -d
 #    build context 必须是项目根，Dockerfile 要 COPY plugins/ 进镜像
 docker build -f infrastructure/agent-runner/Dockerfile -t crucible-agent-runner:base .
 
-# 3. 后端
+# 3. 后端（端口统一 8010，与前端 Vite 代理对齐；`main.py` 直接运行入口默认 8000，请用 uvicorn 显式指定 8010）
 cd backend
 cp ../.env.example .env
 pip install -e ".[dev]"
-python -m app.main
+uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload
 
 # 4. 前端
 cd frontend && npm install && npm run dev
@@ -67,7 +68,9 @@ Crucible/
 │       ├── features/            # 领域功能模块
 │       └── shared/              # api / hooks（useTaskEvents）/ lib
 ├── plugins/                     # ★ Claude Code 插件（阶段化编排的载体）
-│   └── vuln-verify-expert/      #   白盒验证 agent + skills（搭靶场 / 验证 / 出报告）
+│   └── vuln-verify-expert/      #   白盒验证 agent + skills（两阶段解耦）
+│       ├── skills/run-project-env/   #   模块一：靶场环境搭建（独立管理）
+│       └── skills/vuln-verify/       #   模块二：漏洞验证（独立管理）
 └── infrastructure/              # Docker Compose
     ├── docker-compose.yml
     └── agent-runner/            # Agent Runner 专用镜像
@@ -79,6 +82,8 @@ Crucible/
 ## 开发规范
 
 **架构决策与后续路线见 `docs/development-guide.md`**（架构原则/决策溯源 + P0/P1/P2 开发路线）。
+
+**工程治理规范见 `docs/governance/`**：`constitution.md`（开发宪法）+ `AGENTS.md`（协作标准），源自 `ai-coding-best-practice` Harness 资产包，裁决顺序 `constitution.md > AGENTS.md > 既有代码`。
 
 **本项目 commit message 用简体中文**。覆盖全局 CLAUDE.md「commit message 英文」默认。Conventional Commits 类型前缀（`feat:` / `fix:` / `refactor:` / `chore:` / `docs:` 等）与 `Co-Authored-By:` trailer 仍保持英文（工具链解析要求）；描述主体、bullet、footer 一律中文。
 
