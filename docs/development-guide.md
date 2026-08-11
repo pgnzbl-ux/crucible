@@ -287,9 +287,9 @@ pytest                           # 单元测试（待补，见 backlog P1）
 
 | 变量 | 说明 |
 |------|------|
-| `SANDBOX_RUNTIME` | `host`（开发）\| `dind`（生产嵌套，未实现） |
-| `CLAUDE_CODE_ENABLED` | true 启用真实 Agent（否则 Mock） |
-| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | DeepSeek 等第三方 LLM |
+| `CLAUDE_AGENT_SDK_ENABLED` | `true` 启用真实 Agent（否则 Mock），见 README「对接第三方 LLM」 |
+| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | DeepSeek 等第三方 LLM（Anthropic 兼容端点） |
+| `AGENT_RUNNER_IMAGE` / `AGENT_RUNNER_TIMEOUT_SECONDS` | Agent Runner 镜像与超时 |
 | `SETTINGS_ENCRYPT_KEY` | Fernet 密钥（生产必配，开发从 AUTH_SECRET 派生） |
 
 ---
