@@ -29,7 +29,8 @@ Crucible 是一个 AI 驱动的漏洞自动验证平台。安全研究员提交�
 cd infrastructure && docker compose up -d
 
 # 2. Agent Runner 镜像（首次构建一次即可）
-docker build -f infrastructure/agent-runner/Dockerfile -t crucible-agent-runner:base infrastructure/
+#    build context 必须是项目根，Dockerfile 要 COPY plugins/ 进镜像
+docker build -f infrastructure/agent-runner/Dockerfile -t crucible-agent-runner:base .
 
 # 3. 后端
 cd backend
@@ -58,21 +59,21 @@ Crucible/
 │   │   │   │   └── tasks.py            # Celery 工作流（host clone + 容器编排 + 实时落库）
 │   │   │   ├── identity/        # 认证与用户管理
 │   │   │   └── report/          # 报告与证据
-│   │   └── shared/              # 共享基类、事件总线
-│   ├── alembic/                 # 数据库迁移
-│   └── tests/                   # 测试
+│   │   └── shared/              # 共享基类、事件总线、SSE、鉴权依赖
 ├── frontend/
 │   └── src/
-│       ├── app/                 # providers、router
+│       ├── app/                 # providers、layout、路由守卫
 │       ├── pages/               # 页面组件
 │       ├── features/            # 领域功能模块
-│       └── shared/              # 共享组件/工具
+│       └── shared/              # api / hooks（useTaskEvents）/ lib
+├── plugins/                     # ★ Claude Code 插件（阶段化编排的载体）
+│   └── vuln-verify-expert/      #   白盒验证 agent + skills（搭靶场 / 验证 / 出报告）
 └── infrastructure/              # Docker Compose
     ├── docker-compose.yml
     └── agent-runner/            # Agent Runner 专用镜像
-        ├── Dockerfile
+        ├── Dockerfile           # build context=项目根，COPY plugins/ 进镜像
         ├── requirements.txt
-        └── runner/run_one.py    # 容器内 entrypoint（JSONL 流）
+        └── runner/run_one.py    # 容器内 entrypoint（加载插件 + 指定 agent + JSONL 流）
 ```
 
 ## 开发规范

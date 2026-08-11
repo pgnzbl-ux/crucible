@@ -1,0 +1,8 @@
+{
+  "name": "vuln-verify-expert",
+  "version": "1.0.0",
+  "description": "White-box-first vulnerability verification engineer for web security flaws. Uses run-project-env and vuln-verify skills to create an isolated range, verify one concrete harm, collect evidence, and produce a Chinese report.",
+  "author": {
+    "name": "AutoVerify"
+  }
+}

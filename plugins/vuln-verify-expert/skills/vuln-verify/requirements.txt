@@ -1,0 +1,7 @@
+# vuln-verify skill dependencies
+python-docx>=0.8.11
+
+# Optional: for development
+# pytest>=7.0.0
+# black>=22.0.0
+# mypy>=0.990

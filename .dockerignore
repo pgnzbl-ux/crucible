@@ -1,0 +1,45 @@
+# Build context = 项目根（Dockerfile 在 infrastructure/agent-runner/）
+# agent-runner 镜像只需 plugins/ + infrastructure/agent-runner/，其余全排除
+
+# Python / Node 依赖与产物
+.venv/
+**/__pycache__/
+*.py[cod]
+backend/**/*.egg-info/
+frontend/node_modules/
+frontend/dist/
+**/*.tsbuildinfo
+
+# Git / IDE / OS
+.git/
+.gitignore
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 本地数据库 / 临时
+*.db
+*.db-journal
+backend/*.db
+backend/crucible.db
+
+# 截图 / 文档图片（不进镜像）
+*.png
+
+# 敏感：环境变量绝不进镜像（凭据零落盘）
+.env
+.env.*
+!.env.example
+
+# 工作区临时
+.workbuddy/
+memory/
+docs/
+*.md
+!plugins/vuln-verify-expert/**/*.md
+!infrastructure/agent-runner/runner/**
+
+# 只保留：
+#   infrastructure/agent-runner/{Dockerfile,requirements.txt,runner/}
+#   plugins/vuln-verify-expert/

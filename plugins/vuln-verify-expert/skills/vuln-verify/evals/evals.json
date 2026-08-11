@@ -1,0 +1,70 @@
+{
+  "skill_name": "vuln-verify",
+  "description": "Web 漏洞验证与复现技能 - 从审计报告或 PoC 出发，通过 HTTP 请求复现漏洞并生成报告",
+  "evals": [
+    {
+      "id": 1,
+      "name": "SQL 注入漏洞复现",
+      "prompt": "复现 SQL 注入漏洞，目标: http://example.com/admin?id=1'",
+      "expected_output": "执行完整的漏洞复现流程：解析漏洞描述 → 分析攻击面 → 构造 payload → 通过 HTTP 请求验证 → 判定报送级别 → 生成 report.md 和 .docx 报告",
+      "precondition": "提供可访问的目标 URL 和漏洞描述",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "XSS 漏洞验证",
+      "prompt": "验证 XSS 漏洞，target: http://test.com/search?q=<script>alert(1)</script>",
+      "expected_output": "使用 Playwright 浏览器自动化验证 XSS 触发，捕获截图证据，生成带图片的漏洞报告",
+      "precondition": "提供可访问的目标 URL 和 payload",
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "命令注入复现",
+      "prompt": "vuln-verify: 复现命令注入漏洞，ping 命令回显",
+      "expected_output": "从攻击者角度通过 HTTP 请求验证命令执行，分析响应确认漏洞，输出完整报告和 Word 文档",
+      "precondition": "提供漏洞详细信息和可测试目标",
+      "files": []
+    },
+    {
+      "id": 4,
+      "name": "SSRF 漏洞报送判定",
+      "prompt": "验证 SSRF 漏洞，目标内网地址 192.168.1.1，判断是否需要监管报送",
+      "expected_output": "复现漏洞后，依据 vulnerability_reporting_criteria.md 进行报送判定，生成包含判定理由的报告",
+      "precondition": "提供 SSRF 漏洞描述和目标",
+      "files": []
+    },
+    {
+      "id": 5,
+      "name": "IDOR 漏洞环境还原",
+      "prompt": "验证 IDOR 漏洞，用户A可访问用户B数据，完成后环境还原",
+      "expected_output": "验证漏洞 → 生成报告 → 通过 HTTP 请求还原测试数据（删除测试账号、恢复原状态）",
+      "precondition": "提供两个测试账号和漏洞路径",
+      "files": []
+    },
+    {
+      "id": 6,
+      "name": "扫描器 PoC 不完整但核心路径可疑",
+      "prompt": "扫描器报告了一个高危漏洞，但给出的 URL、编码和请求体可能不准确。请根据源码判断并验证是否真实存在。",
+      "expected_output": "将报告视为假设，提取核心安全主张；不因原 PoC 技术错误直接证伪；在无确定性阻断时构造合理变体并进入真实环境验证，同时记录所有偏差和前提。",
+      "precondition": "提供扫描器报告、源码和可测试环境",
+      "files": []
+    },
+    {
+      "id": 7,
+      "name": "代码存在确定性阻断",
+      "prompt": "扫描器声称输入可到达危险操作，但源码显示引用的是不同实体且中间存在不可绕过的绑定失败。判断漏洞是否存在。",
+      "expected_output": "追踪完整调用链并识别确定性断点；考虑保持核心主张的合理变体；确认均不可达后 Quick-Stop，不启动主动 HTTP 或浏览器复现。",
+      "precondition": "提供完整相关源码和扫描器链路",
+      "files": []
+    },
+    {
+      "id": 8,
+      "name": "诊断条件成立但完整影响未证实",
+      "prompt": "使用测试账号和手工请求可以触发底层危险操作，但扫描器声称的端到端攻击步骤尚未复现。请给出结论。",
+      "expected_output": "明确诊断证据只证明哪一层；继续验证剩余前提；若最终只确认支撑条件或更窄影响，则输出部分确认或纵深防御，而不是强行判定完全成立或完全误报。",
+      "precondition": "提供诊断请求结果、源码和可测试环境",
+      "files": []
+    }
+  ]
+}

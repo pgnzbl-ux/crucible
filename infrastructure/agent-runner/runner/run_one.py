@@ -298,27 +298,70 @@ async def _stream_messages(options: ClaudeAgentOptions, prompt: str) -> AsyncIte
 
 
 # ── Prompt 构造 ──
-
-SYSTEM_PROMPT = """你是 Crucible 漏洞验证平台的资深安全研究员 Agent。
-任务：对给定项目源码进行漏洞分析，判定目标漏洞是否真实存在。
-
-必须遵守：
-1. 白盒优先：先读全源码、走通调用链，再下结论
-2. 输出必须包含：结论（存在/不存在/无法确认）、证据链（文件+行号+代码片段）、利用条件、修复建议
-3. 诚实：无法确认时明确说明，禁止编造证据
-4. 所有分析只读项目源码
-"""
+#
+# 插件 agent（vuln-verify-expert）自带 system prompt（agents/vuln-verify-expert.md 的
+# frontmatter + 正文），这里不再拼 SYSTEM_PROMPT —— 传给 query() 的只是任务本身的
+# user message。agent 的阶段化工作流（阶段 0 平台预检 / A 接单建仓 / B 搭靶场 /
+# C 漏洞验证 / D 交付收尾）与 skills（run-project-env / vuln-verify）由插件自动加载。
 
 
 def _build_prompt(task: dict[str, Any]) -> str:
+    """构造发给插件 agent 的 user message（只含任务信息，不含 system prompt）。"""
     return (
-        f"{SYSTEM_PROMPT}\n\n---\n\n"
-        f"任务详情：\n"
         f"项目地址: {task.get('project_address', '')}\n"
-        f"项目引用: {task.get('project_ref') or 'default branch'}\n\n"
+        f"项目引用: {task.get('project_ref') or 'default branch'}（已 clone 到 /workspace/project）\n\n"
         f"待验证漏洞描述:\n{task.get('vulnerability_description', '')}\n\n"
-        f"请分析 /workspace/project 下的项目源码，判定漏洞是否真实存在。"
+        f"请按你的工作流（阶段 A→B→C→D）验证上述漏洞是否真实存在，并用 phase.updated "
+        f"事件记录每个阶段进度，最终产出中文报告。"
     )
+
+
+# ── 插件 agent 加载 ──
+
+# 容器内插件路径（Dockerfile ENV 注入，可被 docker run --env 覆盖）
+PLUGIN_DIR = os.environ.get("PLUGIN_DIR", "/app/plugins/vuln-verify-expert")
+PLUGIN_NAME = os.environ.get("PLUGIN_NAME", "vuln-verify-expert")
+AGENT_NAME = os.environ.get("AGENT_NAME", "vuln-verify-expert")
+
+
+def _build_options(model: str, max_turns: int) -> ClaudeAgentOptions:
+    """构造 SDK options：加载 vuln-verify-expert 插件 + 指定其 agent。
+
+    - 插件 agent 的 system_prompt / skills 由 agents/*.md 自动提供，这里**不**传 system_prompt
+    - extra_args 透传 --agent（SDK 无 typed `agent` 字段，CLI flag 是唯一方式，格式 plugin:agent）
+    - 插件加载优先 typed `plugins=`，降级 `extra_args --plugin-dir`（跨 SDK 版本兼容）
+    - 凭据零落盘：插件只含静态 .md，密钥通过 worker 注入的 ANTHROPIC_* env 提供
+    """
+    agent_flag = f"{PLUGIN_NAME}:{AGENT_NAME}"
+
+    common: dict[str, Any] = {
+        "model": model,
+        "max_turns": max_turns,
+        "cwd": "/workspace/project",
+        # 已知限制：permission_mode=bypassPermissions 下 can_use_tool 不会被调用
+        # （SDK 有 CanUseToolShadowedWarning）。插件工作流需要 Write/Edit 等工具，
+        # 权限策略待后续切 PreToolUse hook 重构（见 docs/agent-workflow.md §权限策略）。
+        # can_use_tool 保留：切 dontAsk/hook 后立即生效，黑白名单规则已就绪。
+        "permission_mode": "bypassPermissions",
+        "allowed_tools": [
+            "Read", "Grep", "Glob", "Bash",         # 白盒审计 + PoC
+            "Write", "Edit",                         # 写 report.md / .vuln-env.json
+            "WebFetch", "WebSearch",                 # 查 CVE / 利用资料
+        ],
+        "can_use_tool": _permission_gate,
+        "extra_args": ["--agent", agent_flag],
+    }
+
+    # 插件加载：typed plugins= 优先（SDK 0.2.x，SdkPluginConfig TypedDict）
+    try:
+        return ClaudeAgentOptions(
+            plugins=[{"type": "local", "path": PLUGIN_DIR}],
+            **common,
+        )
+    except (TypeError, ValueError):
+        # 降级：extra_args 透传 --plugin-dir（CLI flag 逃生舱，所有版本支持）
+        common["extra_args"] = ["--plugin-dir", PLUGIN_DIR, "--agent", agent_flag]
+        return ClaudeAgentOptions(**common)
 
 
 # ── Main ──
@@ -351,15 +394,7 @@ async def _main() -> int:
     except ValueError:
         max_turns = 180
 
-    options = ClaudeAgentOptions(
-        system_prompt=SYSTEM_PROMPT,
-        model=model,
-        max_turns=max_turns,
-        cwd="/workspace/project",
-        permission_mode="bypassPermissions",
-        allowed_tools=["Read", "Grep", "Glob", "Bash"],
-        can_use_tool=_permission_gate,
-    )
+    options = _build_options(model, max_turns)
 
     prompt = _build_prompt(task)
 
