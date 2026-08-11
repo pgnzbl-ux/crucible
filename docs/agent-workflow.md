@@ -99,7 +99,7 @@ development-guide.md P0-0 原描述「新增 agent/stages.py + preflight.py + pr
 |---|---|---|---|
 | `browser` | 真实页面截图（XSS/DOM 类证据） | ❌ 未接入 | P1：Playwright MCP 或 Chrome DevTools MCP 挂进 agent-runner 容器；插件阶段 0 预检探测，缺失时降级 HTTP/API 证据 |
 | `sandbox` | 受控 docker compose 搭靶场、收集产物、销毁 | ⚠️ 部分（容器隔离已就绪，但插件无法在容器内再起 docker） | P1：DinD 或挂宿主 docker.sock（受控）；当前插件搭靶场能力受限，白盒审计 + curl 验证仍可跑 |
-| `credential_store` | `credential_ref` 引用注入短命凭据 | ❌ 未接入 | P1-6 Credential Proxy：任务级凭据引用 → env / 临时文件 600 注入 → 任务结束销毁 |
+| `credential_store` | `credential_ref` 引用注入短命凭据 | ✅ v0.2（P1-6） | env_var 注 runner env / file 写 `.secrets/<target>`（600），任务结束随 host_workdir 销毁 |
 | `artifact_store` | 归档报告、截图、日志、原始响应 | ⚠️ 部分（MinIO 已就绪，但插件产物自动归档未接） | P0-4 已支持**手动**证据上传；P1：worker 扫描 host_workdir 的 `VULN-*/` + `.vuln-env/` 自动归档 report.md / .docx / img/* |
 
 > v0.1 的实际能力边界：**白盒审计 + curl/HTTP 验证 + 报告产出**可端到端跑通；
@@ -217,7 +217,7 @@ shadow `can_use_tool`（`CanUseToolShadowedWarning`，自动批准发生在回�
 | 插件产物自动归档 | ~~报告/截图须手动上传~~ | ✅ v0.2 完成（worker 扫 host_workdir/project → MinIO + Evidence） |
 | browser MCP 未接入 | XSS/DOM 类证据须降级 HTTP | P1（独立子项目，见下） |
 | 容器内无法 docker compose 搭靶场 | 阶段 B 自建环境受限 | P1（DinD / docker.sock 架构决策） |
-| credential_store 未接入 | 需登录的漏洞进 `needs_credentials` | P1-6 |
+| credential_store 未接入 | ~~需登录的漏洞进 `needs_credentials`~~ | ✅ v0.2 完成（P1-6 Credential Proxy：env_var/file 注入） |
 | 阶段名 ↔ 前端标签映射 | 部分阶段显示英文 phase key | P1 |
 
 ### browser MCP 子项目（独立立项，非阻塞）

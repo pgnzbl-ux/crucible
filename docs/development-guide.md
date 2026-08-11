@@ -185,7 +185,7 @@ llm_providers（独立，后台管理）
 | # | 任务 | 说明 | 涉及 |
 |---|------|------|------|
 | 5 | **frontend features/ 填充** | task/agent/auth/report 四个领域模块：store.ts + hooks.ts（useSSE、useTaskEvents） | frontend/features/* |
-| 6 | **Credential Proxy** | 任务级凭据引用（credential_refs）→ Secret 注入沙箱（环境变量/临时文件 600）→ 任务结束销毁 | agent/executor.py + 新 core/credential_proxy.py |
+| 6 | **Credential Proxy** ✅ | 任务级凭据（credentials 表，Fernet 加密）→ 任务引用 credential_refs → 注入 agent-runner（env_var → 容器 env / file → `.secrets/` 600）→ 任务结束销毁 | settings context + core/credential_proxy.py + task/agent 接入 |
 | 7 | **API Key + Service Account** | 平台级 API 认证（用于 CI/脚本调用） | identity context |
 | 8 | **OIDC SSO（增量叠加）** | 保持 JWT，新增 OIDC 认证方式（Keycloak） | identity context |
 | 9 | **RBAC 迁移** | 上一代有 4 角色 8 权限表，Crucible 尚未引入 | identity context + 路由守卫 |

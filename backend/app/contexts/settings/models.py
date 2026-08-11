@@ -32,3 +32,32 @@ class LlmProvider(BaseModel):
 
     def __repr__(self) -> str:
         return f"<LlmProvider {self.name} [{self.model}]>"
+
+
+class Credential(BaseModel):
+    """任务级凭据 — Fernet 加密存储，任务运行时注入 agent-runner 容器（零落盘）。
+
+    kind=env_var：注入为容器环境变量（target=变量名[大写下划线]，secret=值）
+    kind=file：   写为容器内 /workspace/.secrets/<target>（权限 600），
+                  任务结束随 host_workdir rmtree 销毁
+
+    通过 task.credential_refs（JSON id 数组）关联到任务。
+    """
+    __tablename__ = "credentials"
+
+    owner_id: Mapped[str] = mapped_column(String(36), index=True, comment="所有者 user_id")
+    name: Mapped[str] = mapped_column(String(100), nullable=False, comment="显示名")
+    kind: Mapped[str] = mapped_column(String(20), default="env_var", comment="env_var | file")
+    target: Mapped[str] = mapped_column(
+        String(255), nullable=False,
+        comment="env_var→环境变量名(大写下划线) / file→容器内文件名(.secrets/<target>)",
+    )
+    secret_encrypted: Mapped[str] = mapped_column(Text, default="", comment="Fernet 加密的凭据值")
+    description: Mapped[str | None] = mapped_column(String(500))
+
+    __table_args__ = (
+        Index("idx_credentials_owner", "owner_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Credential {self.name} [{self.kind}:{self.target}]>"

@@ -1,9 +1,21 @@
 from datetime import datetime, timezone
 from typing import Any
+import json
 
 from .models import Task, TaskRun, AgentEvent
 from .repository import TaskRepository
 from .schemas import TaskCreateRequest, TaskDetail, TaskListResponse, TaskSummary, RunSummary
+
+
+def _parse_refs(refs_raw: str | None) -> list[str]:
+    """credential_refs JSON 字符串 → list（容错）"""
+    if not refs_raw:
+        return []
+    try:
+        v = json.loads(refs_raw)
+        return v if isinstance(v, list) else []
+    except (ValueError, TypeError):
+        return []
 
 
 class TaskService:
@@ -24,6 +36,7 @@ class TaskService:
             status=task.status,
             priority=task.priority,
             owner_id=task.owner_id,
+            credential_refs=_parse_refs(getattr(task, "credential_refs", None)),
             created_at=task.created_at,
             updated_at=task.updated_at,
             runs=[RunSummary.model_validate(r) for r in (runs or [])],
@@ -39,6 +52,7 @@ class TaskService:
             priority=request.priority,
             status="queued",
             owner_id=owner_id,
+            credential_refs=json.dumps(request.credential_refs or [], ensure_ascii=False),
         )
         task = await self.repo.create(task)
 

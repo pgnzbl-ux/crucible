@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ── 请求 ──
@@ -69,3 +69,56 @@ class LlmProviderTestResult(BaseModel):
     message: str
     latency_ms: int | None = None
     model: str | None = None
+
+
+# ── Credential（任务级凭据，P1-6） ──
+
+import re
+
+_ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,62}$")
+_SAFE_FILE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+
+
+class CredentialCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    kind: str = Field("env_var", pattern=r"^(env_var|file)$")
+    target: str = Field(..., min_length=1, max_length=255, description="env_var→环境变量名(大写下划线) / file→文件名")
+    secret: str = Field(..., min_length=1, max_length=8192, description="明文凭据，服务端加密存储")
+    description: str | None = Field(None, max_length=500)
+
+    @field_validator("target")
+    @classmethod
+    def _validate_target(cls, v: str) -> str:
+        # 校验在 kind 之后，但 Pydantic 不保证字段顺序，这里宽松校验 + service 侧严格校验
+        return v.strip()
+
+    @model_validator(mode="after")
+    def _validate_kind_target(self) -> "CredentialCreateRequest":
+        if self.kind == "env_var" and not _ENV_NAME_RE.match(self.target):
+            raise ValueError("env_var 类型的 target 必须是大写下划线环境变量名（如 DB_PASSWORD）")
+        if self.kind == "file" and not _SAFE_FILE_RE.match(self.target):
+            raise ValueError("file 类型的 target 必须是安全文件名（字母数字._-，禁止路径分隔符）")
+        return self
+
+
+class CredentialUpdateRequest(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=100)
+    secret: str | None = Field(None, min_length=1, max_length=8192, description="留空表示不修改")
+    description: str | None = Field(None, max_length=500)
+
+
+class CredentialResponse(BaseModel):
+    id: str
+    name: str
+    kind: str
+    target: str
+    secret_masked: str = ""
+    has_secret: bool = False
+    description: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CredentialListResponse(BaseModel):
+    items: list[CredentialResponse]
+    total: int

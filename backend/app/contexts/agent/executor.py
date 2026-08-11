@@ -44,6 +44,7 @@ class AgentRunContext:
     host_workdir: str = ""                            # host 临时目录（worker bind mount 源）
     workdir_container: str = "/workspace/project"     # 容器内 workdir
     runner_env: dict[str, str] = field(default_factory=dict)  # 已构造好的容器 env
+    secret_files: list[dict] = field(default_factory=list)    # 注入的凭据描述（告知 agent 可用 env/文件，P1-6）
 
 
 @dataclass
@@ -98,28 +99,20 @@ class ClaudeSdkExecutor:
             result.events.append(self._phase_event("failed", result.error_message))
             return result
 
-        # 1. 构造 spec（env 已由 tasks.py 在外层解析好）
-        spec = prepare_runner_spec(
-            ctx={
-                "task_id": ctx.task_id,
-                "run_id": ctx.run_id,
-                "project_address": ctx.project_address,
-                "project_ref": ctx.project_ref,
-                "vulnerability_description": ctx.vulnerability_description,
-            },
-            host_workdir=ctx.host_workdir,
-            runner_env=ctx.runner_env,
-        )
+        # 1. 构造 spec（env 已由 tasks.py 在外层解析好，含 env_var 凭据）
+        ctx_dict = {
+            "task_id": ctx.task_id,
+            "run_id": ctx.run_id,
+            "project_address": ctx.project_address,
+            "project_ref": ctx.project_ref,
+            "vulnerability_description": ctx.vulnerability_description,
+            "secret_files": ctx.secret_files,
+        }
+        spec = prepare_runner_spec(ctx=ctx_dict, host_workdir=ctx.host_workdir, runner_env=ctx.runner_env)
 
-        # 2. 写 .prompt.json（容器内 read）
+        # 2. 写 .prompt.json（容器内 read，含 secret_files 告知 agent 可用凭据）
         try:
-            write_prompt_json(ctx.host_workdir, ctx={
-                "task_id": ctx.task_id,
-                "run_id": ctx.run_id,
-                "project_address": ctx.project_address,
-                "project_ref": ctx.project_ref,
-                "vulnerability_description": ctx.vulnerability_description,
-            })
+            write_prompt_json(ctx.host_workdir, ctx=ctx_dict)
         except OSError as e:
             result.exit_code = -1
             result.error_message = f"写 prompt 失败: {e}"

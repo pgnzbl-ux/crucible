@@ -13,6 +13,7 @@ class TaskCreateRequest(BaseModel):
     vulnerability_description: str = Field(..., min_length=10, description="漏洞描述")
     vulnerability_reasoning: str | None = Field(None, description="漏洞推理过程")
     priority: str = Field("medium", pattern=r"^(low|medium|high|critical)$")
+    credential_refs: list[str] = Field(default_factory=list, description="关联凭据 id 列表（P1-6）")
 
 
 class TaskUpdateRequest(BaseModel):
@@ -70,6 +71,7 @@ class TaskDetail(TaskSummary):
     project_ref: str | None = None
     vulnerability_description: str = ""
     vulnerability_reasoning: str | None = None
+    credential_refs: list[str] = []
     runs: list[RunSummary] = []
 
 

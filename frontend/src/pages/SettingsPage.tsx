@@ -20,6 +20,7 @@ import {
   CheckCircleOutlined,
   DeleteOutlined,
   EditOutlined,
+  KeyOutlined,
   PlusOutlined,
   ReloadOutlined,
   StarFilled,
@@ -29,7 +30,7 @@ import type { ColumnsType } from 'antd/es/table'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 
-import { api, type LlmProvider, type LlmProviderInput } from '../shared/lib/api'
+import { api, type Credential, type CredentialInput, type LlmProvider, type LlmProviderInput } from '../shared/lib/api'
 import { AppLayout } from '../app/layout'
 
 const { Title, Text } = Typography
@@ -201,6 +202,153 @@ function ProviderFormDrawer({
   )
 }
 
+// ── 任务凭据管理（P1-6 Credential Proxy） ──
+
+function CredentialsPanel() {
+  const { message } = App.useApp()
+  const qc = useQueryClient()
+  const [open, setOpen] = useState(false)
+  const [editing, setEditing] = useState<Credential | null>(null)
+  const [form] = Form.useForm()
+  const kind = Form.useWatch('kind', form)
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['credentials'],
+    queryFn: () => api.listCredentials(),
+  })
+
+  const saveMutation = useMutation({
+    mutationFn: (values: CredentialInput & { id?: string }) =>
+      values.id
+        ? api.updateCredential(values.id, values)
+        : api.createCredential(values),
+    onSuccess: () => {
+      message.success(editing ? '凭据已更新' : '凭据已创建')
+      form.resetFields()
+      setOpen(false)
+      setEditing(null)
+      qc.invalidateQueries({ queryKey: ['credentials'] })
+    },
+    onError: (e: Error) => message.error(e.message),
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => api.deleteCredential(id),
+    onSuccess: () => {
+      message.success('已删除')
+      qc.invalidateQueries({ queryKey: ['credentials'] })
+    },
+    onError: (e: Error) => message.error(e.message),
+  })
+
+  const columns: ColumnsType<Credential> = [
+    { title: '名称', dataIndex: 'name', render: (v: string) => <Space><KeyOutlined />{v}</Space> },
+    {
+      title: '注入方式', dataIndex: 'kind', width: 110,
+      render: (v: string) => <Tag color={v === 'env_var' ? 'blue' : 'purple'}>{v === 'env_var' ? '环境变量' : '文件'}</Tag>,
+    },
+    {
+      title: '目标', dataIndex: 'target', width: 180,
+      render: (v: string, row) => (
+        <Text code style={{ fontSize: 12 }}>{v}</Text>
+      ),
+    },
+    {
+      title: '值', dataIndex: 'secret_masked', width: 130,
+      render: (v: string, row) => (row.has_secret ? <Text code>{v}</Text> : <Text type="secondary">未配置</Text>),
+    },
+    { title: '描述', dataIndex: 'description', ellipsis: true, render: (v: string | null) => v ?? '-' },
+    {
+      title: '操作', key: 'actions', width: 110,
+      render: (_, row) => (
+        <Space size={4}>
+          <Button size="small" icon={<EditOutlined />} onClick={() => { setEditing(row); setOpen(true); form.setFieldsValue({ name: row.name, description: row.description }) }} />
+          <Popconfirm title="删除该凭据？关联任务将失去此凭据。" onConfirm={() => deleteMutation.mutate(row.id)}>
+            <Button size="small" danger icon={<DeleteOutlined />} />
+          </Popconfirm>
+        </Space>
+      ),
+    },
+  ]
+
+  return (
+    <Card
+      style={{ marginTop: 16 }}
+      title={<Space><KeyOutlined />任务凭据</Space>}
+      extra={
+        <Button size="small" icon={<PlusOutlined />} onClick={() => { setEditing(null); form.resetFields(); setOpen(true) }}>
+          新增凭据
+        </Button>
+      }
+    >
+      <Text type="secondary" style={{ display: 'block', marginBottom: 12, fontSize: 12 }}>
+        任务级凭据，Fernet 加密存储。任务运行时注入 agent 容器：env_var → 环境变量 / file → /workspace/.secrets/&lt;target&gt;（权限 600，任务结束销毁）。在「新建任务」时勾选关联。
+      </Text>
+      <Table
+        rowKey="id"
+        size="small"
+        loading={isLoading}
+        columns={columns}
+        dataSource={data?.items ?? []}
+        pagination={false}
+        locale={{ emptyText: '暂无凭据，点击右上角新增' }}
+      />
+
+      <Drawer
+        open={open}
+        onClose={() => { setOpen(false); setEditing(null); form.resetFields() }}
+        width={480}
+        title={editing ? `编辑凭据 · ${editing.name}` : '新增任务凭据'}
+      >
+        <Form
+          form={form}
+          layout="vertical"
+          initialValues={editing ? { kind: editing.kind } : { kind: 'env_var' }}
+          onFinish={(v) => saveMutation.mutate({ ...v, id: editing?.id })}
+        >
+          <Form.Item name="name" label="显示名" rules={[{ required: true, message: '请输入显示名' }]}>
+            <Input placeholder="如 目标站管理员账号" />
+          </Form.Item>
+          {!editing && (
+            <>
+              <Form.Item name="kind" label="注入方式" rules={[{ required: true }]}>
+                <Select
+                  options={[
+                    { value: 'env_var', label: '环境变量（env_var）— 注入为容器环境变量' },
+                    { value: 'file', label: '密钥文件（file）— 写入 /workspace/.secrets/' },
+                  ]}
+                />
+              </Form.Item>
+              <Form.Item
+                name="target"
+                label="目标"
+                rules={[{ required: true, message: '请输入目标' }]}
+                extra={kind === 'env_var' ? '环境变量名（大写下划线，如 DB_PASSWORD）' : '文件名（字母数字._-，禁止路径分隔符，如 tls.key）'}
+              >
+                <Input placeholder={kind === 'env_var' ? 'DB_PASSWORD' : 'tls.key'} />
+              </Form.Item>
+            </>
+          )}
+          <Form.Item
+            name="secret"
+            label={editing ? '凭据值（留空保持不变）' : '凭据值'}
+            rules={editing ? [] : [{ required: true, message: '请输入凭据值' }]}
+            extra="服务端加密存储，列表仅显示掩码"
+          >
+            <Input.Password placeholder={editing ? '***（已配置，留空不变）' : '输入凭据值'} autoComplete="new-password" />
+          </Form.Item>
+          <Form.Item name="description" label="描述">
+            <Input.TextArea rows={2} placeholder="如 目标站 admin 账号密码，用于登录后验证 IDOR" />
+          </Form.Item>
+          <Button type="primary" htmlType="submit" loading={saveMutation.isPending}>
+            保存
+          </Button>
+        </Form>
+      </Drawer>
+    </Card>
+  )
+}
+
 export function SettingsPage() {
   const { message } = App.useApp()
   const qc = useQueryClient()
@@ -340,6 +488,8 @@ export function SettingsPage() {
         editing={editing}
         onClose={() => { setCreateOpen(false); setEditing(null) }}
       />
+
+      <CredentialsPanel />
     </AppLayout>
   )
 }

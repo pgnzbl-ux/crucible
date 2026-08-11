@@ -4,8 +4,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
+from app.shared.deps import CurrentUserId
 from .repository import SettingsRepository
 from .schemas import (
+    CredentialCreateRequest,
+    CredentialListResponse,
+    CredentialResponse,
+    CredentialUpdateRequest,
     LlmProviderCreateRequest,
     LlmProviderListResponse,
     LlmProviderResponse,
@@ -99,3 +104,47 @@ async def test_connection(
         api_key=request.api_key,
         model=request.model,
     )
+
+
+# ── Credential（任务级凭据，P1-6 Credential Proxy） ──
+
+@router.get("/credentials", response_model=CredentialListResponse)
+async def list_credentials(
+    svc: Annotated[SettingsService, Depends(get_settings_service)],
+    user_id: CurrentUserId,
+) -> CredentialListResponse:
+    items, total = await svc.list_credentials(user_id)
+    return CredentialListResponse(items=items, total=total)
+
+
+@router.post("/credentials", response_model=CredentialResponse, status_code=201)
+async def create_credential(
+    request: CredentialCreateRequest,
+    svc: Annotated[SettingsService, Depends(get_settings_service)],
+    user_id: CurrentUserId,
+) -> CredentialResponse:
+    return await svc.create_credential(user_id, request)
+
+
+@router.put("/credentials/{credential_id}", response_model=CredentialResponse)
+async def update_credential(
+    credential_id: str,
+    request: CredentialUpdateRequest,
+    svc: Annotated[SettingsService, Depends(get_settings_service)],
+    user_id: CurrentUserId,
+) -> CredentialResponse:
+    cred = await svc.update_credential(user_id, credential_id, request)
+    if not cred:
+        raise HTTPException(404, "凭据不存在")
+    return cred
+
+
+@router.delete("/credentials/{credential_id}", status_code=204)
+async def delete_credential(
+    credential_id: str,
+    svc: Annotated[SettingsService, Depends(get_settings_service)],
+    user_id: CurrentUserId,
+) -> None:
+    deleted = await svc.delete_credential(user_id, credential_id)
+    if not deleted:
+        raise HTTPException(404, "凭据不存在")

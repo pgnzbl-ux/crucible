@@ -103,6 +103,7 @@ class ClaudeSdkAdapter:
                 "project_address": task_ctx.get("project_address", ""),
                 "project_ref": task_ctx.get("project_ref") or "",
                 "vulnerability_description": task_ctx.get("vulnerability_description", ""),
+                "secret_files": task_ctx.get("secret_files", []),
             },
             ensure_ascii=False,
             indent=2,

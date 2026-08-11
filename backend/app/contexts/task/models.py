@@ -21,6 +21,9 @@ class Task(BaseModel):
     )
     priority: Mapped[str] = mapped_column(String(10), default="medium", comment="low | medium | high | critical")
     owner_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), index=True)
+    credential_refs: Mapped[str] = mapped_column(
+        Text, default="[]", comment="关联凭据 id 的 JSON 数组（P1-6 Credential Proxy）"
+    )
 
     # 关系 — 仅 TaskRun（同 Context 内），不用跨 Context ORM 关系
     runs: Mapped[list["TaskRun"]] = relationship(back_populates="task", order_by="TaskRun.created_at.desc()")

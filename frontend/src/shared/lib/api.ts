@@ -76,6 +76,7 @@ export interface TaskDetail extends TaskSummary {
   project_ref: string | null
   vulnerability_description: string
   vulnerability_reasoning: string | null
+  credential_refs: string[]
   runs: RunSummary[]
 }
 
@@ -165,6 +166,33 @@ export interface LlmProviderTestResult {
   model: string | null
 }
 
+// ── Credential（任务级凭据，P1-6） ──
+
+export interface Credential {
+  id: string
+  name: string
+  kind: 'env_var' | 'file'
+  target: string
+  secret_masked: string
+  has_secret: boolean
+  description: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface CredentialListResponse {
+  items: Credential[]
+  total: number
+}
+
+export interface CredentialInput {
+  name: string
+  kind: 'env_var' | 'file'
+  target: string
+  secret: string
+  description?: string
+}
+
 export const api = {
   // Auth
   login: (data: { email: string; password: string }) =>
@@ -187,6 +215,7 @@ export const api = {
     priority?: string
     project_ref?: string
     vulnerability_reasoning?: string
+    credential_refs?: string[]
   }) => request<TaskDetail>('/tasks/', { method: 'POST', body: JSON.stringify(data) }),
 
   getTask: (id: string) => request<TaskDetail>(`/tasks/${id}`),
@@ -248,4 +277,16 @@ export const api = {
 
   testLlmProvider: (id: string) =>
     request<LlmProviderTestResult>(`/settings/llm/providers/${id}/test`, { method: 'POST' }),
+
+  // Credentials（P1-6）
+  listCredentials: () => request<CredentialListResponse>('/settings/credentials'),
+
+  createCredential: (data: CredentialInput) =>
+    request<Credential>('/settings/credentials', { method: 'POST', body: JSON.stringify(data) }),
+
+  updateCredential: (id: string, data: Partial<Pick<CredentialInput, 'name' | 'secret' | 'description'>>) =>
+    request<Credential>(`/settings/credentials/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+
+  deleteCredential: (id: string) =>
+    request<void>(`/settings/credentials/${id}`, { method: 'DELETE' }),
 }

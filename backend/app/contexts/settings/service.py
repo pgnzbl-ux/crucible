@@ -17,9 +17,12 @@ from typing import Any
 import httpx
 
 from app.core.crypto import decrypt_secret, encrypt_secret, mask_secret
-from .models import LlmProvider
-from .repository import SettingsRepository
+from .models import Credential, LlmProvider
+from .repository import CredentialRepository, SettingsRepository
 from .schemas import (
+    CredentialCreateRequest,
+    CredentialResponse,
+    CredentialUpdateRequest,
     LlmProviderCreateRequest,
     LlmProviderResponse,
     LlmProviderTestResult,
@@ -182,3 +185,71 @@ class SettingsService:
             "API_TIMEOUT_MS": str(provider.timeout_ms),
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         }
+
+    # ── Credential CRUD（P1-6 Credential Proxy） ──
+
+    async def list_credentials(self, owner_id: str) -> tuple[list[CredentialResponse], int]:
+        repo = CredentialRepository(self.repo.session)
+        creds = await repo.list_by_owner(owner_id)
+        return [_credential_to_response(c) for c in creds], len(creds)
+
+    async def create_credential(
+        self, owner_id: str, request: CredentialCreateRequest
+    ) -> CredentialResponse:
+        repo = CredentialRepository(self.repo.session)
+        cred = Credential(
+            owner_id=owner_id,
+            name=request.name,
+            kind=request.kind,
+            target=request.target,
+            secret_encrypted=encrypt_secret(request.secret),
+            description=request.description,
+        )
+        cred = await repo.create(cred)
+        return _credential_to_response(cred)
+
+    async def update_credential(
+        self, owner_id: str, credential_id: str, request: CredentialUpdateRequest
+    ) -> CredentialResponse | None:
+        repo = CredentialRepository(self.repo.session)
+        cred = await repo.get_by_id(credential_id)
+        if not cred or cred.owner_id != owner_id:
+            return None
+        if request.name is not None:
+            cred.name = request.name
+        if request.description is not None:
+            cred.description = request.description
+        if request.secret:
+            cred.secret_encrypted = encrypt_secret(request.secret)
+        await self.repo.session.flush()
+        return _credential_to_response(cred)
+
+    async def delete_credential(self, owner_id: str, credential_id: str) -> bool:
+        repo = CredentialRepository(self.repo.session)
+        cred = await repo.get_by_id(credential_id)
+        if not cred or cred.owner_id != owner_id:
+            return False
+        await repo.delete(cred)
+        return True
+
+    async def resolve_for_task(
+        self, owner_id: str, refs: list[str]
+    ) -> list[Credential]:
+        """任务注入用：按 id 批量解密凭据（校验 owner）"""
+        repo = CredentialRepository(self.repo.session)
+        return await repo.get_by_ids_for_owner(refs, owner_id)
+
+
+def _credential_to_response(cred: Credential) -> CredentialResponse:
+    plain = decrypt_secret(cred.secret_encrypted)
+    return CredentialResponse(
+        id=cred.id,
+        name=cred.name,
+        kind=cred.kind,
+        target=cred.target,
+        secret_masked=mask_secret(plain),
+        has_secret=bool(plain),
+        description=cred.description,
+        created_at=cred.created_at,
+        updated_at=cred.updated_at,
+    )

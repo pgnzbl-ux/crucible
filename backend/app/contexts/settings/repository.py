@@ -1,7 +1,7 @@
 from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import LlmProvider
+from .models import Credential, LlmProvider
 
 
 class SettingsRepository:
@@ -43,4 +43,44 @@ class SettingsRepository:
 
     async def delete(self, provider: LlmProvider) -> None:
         await self.session.delete(provider)
+        await self.session.flush()
+
+
+class CredentialRepository:
+    """任务级凭据数据访问层（P1-6 Credential Proxy）"""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def list_by_owner(self, owner_id: str) -> list[Credential]:
+        result = await self.session.execute(
+            select(Credential)
+            .where(Credential.owner_id == owner_id)
+            .order_by(Credential.created_at.asc())
+        )
+        return list(result.scalars().all())
+
+    async def get_by_id(self, credential_id: str) -> Credential | None:
+        result = await self.session.execute(
+            select(Credential).where(Credential.id == credential_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_ids_for_owner(self, ids: list[str], owner_id: str) -> list[Credential]:
+        """按 id 列表批量取凭据（校验 owner，任务注入时用）"""
+        if not ids:
+            return []
+        result = await self.session.execute(
+            select(Credential).where(Credential.id.in_(ids), Credential.owner_id == owner_id)
+        )
+        return list(result.scalars().all())
+
+    async def create(self, credential: Credential) -> Credential:
+        self.session.add(credential)
+        await self.session.flush()
+        await self.session.refresh(credential)
+        return credential
+
+    async def delete(self, credential: Credential) -> None:
+        await self.session.delete(credential)
         await self.session.flush()

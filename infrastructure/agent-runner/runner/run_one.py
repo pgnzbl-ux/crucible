@@ -307,13 +307,32 @@ async def _stream_messages(options: ClaudeAgentOptions, prompt: str) -> AsyncIte
 
 def _build_prompt(task: dict[str, Any]) -> str:
     """构造发给插件 agent 的 user message（只含任务信息，不含 system prompt）。"""
-    return (
-        f"项目地址: {task.get('project_address', '')}\n"
-        f"项目引用: {task.get('project_ref') or 'default branch'}（已 clone 到 /workspace/project）\n\n"
-        f"待验证漏洞描述:\n{task.get('vulnerability_description', '')}\n\n"
-        f"请按你的工作流（阶段 A→B→C→D）验证上述漏洞是否真实存在，并用 phase.updated "
-        f"事件记录每个阶段进度，最终产出中文报告。"
-    )
+    parts = [
+        f"项目地址: {task.get('project_address', '')}",
+        f"项目引用: {task.get('project_ref') or 'default branch'}（已 clone 到 /workspace/project）",
+        "",
+        f"待验证漏洞描述:\n{task.get('vulnerability_description', '')}",
+    ]
+
+    # 平台注入的凭据（P1-6 Credential Proxy）：告知 agent 有哪些 env / 文件可用
+    secret_files = task.get("secret_files") or []
+    if secret_files:
+        envcreds = [s for s in secret_files if s.get("kind") == "env_var"]
+        filecreds = [s for s in secret_files if s.get("kind") == "file"]
+        parts.append("")
+        parts.append("平台已为本次任务注入以下凭据（按需使用，勿外泄）:")
+        if envcreds:
+            parts.append("- 环境变量: " + ", ".join(s.get("target", "?") for s in envcreds))
+        if filecreds:
+            parts.append("- 密钥文件（容器内路径，权限 600）:")
+            for s in filecreds:
+                desc = f" ({s['description']})" if s.get("description") else ""
+                parts.append(f"    {s.get('path', '?')}{desc}")
+
+    parts.append("")
+    parts.append("请按你的工作流（阶段 A→B→C→D）验证上述漏洞是否真实存在，并用 phase.updated "
+                 "事件记录每个阶段进度，最终产出中文报告。")
+    return "\n".join(parts)
 
 
 # ── 插件 agent 加载 ──

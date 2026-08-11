@@ -290,6 +290,32 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
             # 3. 构造 runner env（凭据从默认 Provider 解密或 settings.llm_* 兜底）
             runner_env = await resolve_runner_env(session)
 
+            # 3.5 注入任务级凭据（P1-6 Credential Proxy）：
+            # env_var 凭据合并进 runner_env；file 凭据写 host_workdir/.secrets/（600）
+            secret_files: list[dict] = []
+            try:
+                refs_raw = getattr(task, "credential_refs", None) or "[]"
+                refs = json.loads(refs_raw) if refs_raw else []
+                if isinstance(refs, list) and refs:
+                    from app.contexts.settings.service import SettingsService
+                    from app.contexts.settings.repository import SettingsRepository
+                    from app.core.credential_proxy import inject_credentials
+
+                    creds = await SettingsService(SettingsRepository(session)).resolve_for_task(
+                        task.owner_id, refs
+                    )
+                    secret_files = inject_credentials(creds, runner_env, host_workdir)
+                    if secret_files:
+                        await _append_events(
+                            session, run,
+                            [{"type": "phase.updated", "phase": "credentials",
+                              "message": f"已注入 {len(secret_files)} 个凭据（env/file）",
+                              "source": "crucible"}],
+                        )
+                        await session.commit()
+            except Exception as e:  # noqa: BLE001 — 凭据注入失败不阻断（任务可无凭据继续）
+                logger.warning(f"凭据注入失败（任务继续）: {e}")
+
             # 4. 流式拉起 agent-runner + 实时落库
             loop = asyncio.get_running_loop()
             captured: dict = {}
@@ -312,6 +338,7 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
                 vulnerability_description=task.vulnerability_description,
                 host_workdir=host_workdir,
                 runner_env=runner_env,
+                secret_files=secret_files,
             )
             try:
                 result = await asyncio.to_thread(executor.run, ctx, on_event)

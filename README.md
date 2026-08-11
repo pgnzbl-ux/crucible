@@ -537,7 +537,7 @@ cd frontend && npm run typecheck
 ### 🚧 P1（提案对齐）
 
 - [ ] frontend `features/` 领域模块填充
-- [ ] Credential Proxy（任务级凭据引用注入）
+- [x] **Credential Proxy**（任务级凭据引用注入，env_var/file 两种方式）✅
 - [ ] API Key + Service Account
 - [ ] OIDC SSO（增量叠加）
 - [ ] RBAC 权限矩阵
