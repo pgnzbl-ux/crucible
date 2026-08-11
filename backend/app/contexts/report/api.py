@@ -1,11 +1,12 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
+from app.shared.deps import CurrentUserId
 from .repository import ReportRepository
-from .schemas import ReportDetail, ReportListResponse, ReportUpdateRequest
+from .schemas import EvidenceResponse, ReportDetail, ReportListResponse, ReportUpdateRequest
 from .service import ReportService
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -22,12 +23,12 @@ async def get_report_service(repo: Annotated[ReportRepository, Depends(get_repor
 @router.get("/", response_model=ReportListResponse)
 async def list_reports(
     svc: Annotated[ReportService, Depends(get_report_service)],
+    user_id: CurrentUserId,
     status: str | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> ReportListResponse:
-    owner_id = "system"  # TODO: 从 JWT 解析
-    reports, total = await svc.list_reports(owner_id, status, limit, offset)
+    reports, total = await svc.list_reports(user_id, status, limit, offset)
     return ReportListResponse(items=reports, total=total, limit=limit, offset=offset)
 
 
@@ -65,3 +66,42 @@ async def publish_report(
     if not report:
         raise HTTPException(404, "报告不存在")
     return report
+
+
+# ── 证据（Evidence）上传 / 列表（P0-4） ──
+
+@router.post("/{report_id}/evidences", response_model=EvidenceResponse, status_code=201)
+async def upload_evidence(
+    report_id: str,
+    user_id: CurrentUserId,
+    svc: Annotated[ReportService, Depends(get_report_service)],
+    file: UploadFile = File(..., description="证据文件（日志/截图/PoC）"),
+    kind: Annotated[str, Form(description="artifact | log | screenshot | poc")] = "artifact",
+) -> EvidenceResponse:
+    """上传证据文件 → MinIO → 落 evidences 表。返回带预签名下载 URL 的记录。"""
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "文件为空")
+    # 大小限制 50MB（防滥用；超大证据建议走对象存储直传，P1 再做）
+    if len(data) > 50 * 1024 * 1024:
+        raise HTTPException(413, "单文件超过 50MB 限制")
+    evidence, err = await svc.attach_evidence(
+        report_id=report_id,
+        owner_id=user_id,
+        file_name=file.filename or "evidence",
+        content_type=file.content_type or "application/octet-stream",
+        data=data,
+        kind=kind,
+    )
+    if err:
+        raise HTTPException(404 if "不存在" in err else 403, err)
+    return evidence
+
+
+@router.get("/{report_id}/evidences", response_model=list[EvidenceResponse])
+async def list_evidences(
+    report_id: str,
+    svc: Annotated[ReportService, Depends(get_report_service)],
+) -> list[EvidenceResponse]:
+    """列出报告的所有证据（含预签名下载 URL）"""
+    return await svc.list_evidence(report_id)

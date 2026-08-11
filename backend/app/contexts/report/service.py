@@ -20,9 +20,9 @@ from typing import Any
 
 from app.core.config import get_settings
 from . import storage
-from .models import Report
+from .models import Evidence, Report
 from .repository import ReportRepository
-from .schemas import ReportDetail
+from .schemas import EvidenceResponse, ReportDetail
 
 settings = get_settings()
 
@@ -57,7 +57,29 @@ class ReportService:
             published_at=report.published_at,
             created_at=report.created_at,
             updated_at=report.updated_at,
-            evidence=[e for e in report.evidence],
+            evidence=[ReportService._to_evidence_detail(e, with_url=True) for e in report.evidence],
+        )
+
+    @staticmethod
+    def _to_evidence_detail(ev: Evidence, *, with_url: bool = False) -> EvidenceResponse:
+        """Evidence ORM → EvidenceResponse，可选附预签名下载 URL"""
+        download_url: str | None = None
+        if with_url:
+            try:
+                download_url = storage.presigned_url(ev.bucket, ev.object_key)
+            except Exception:
+                # 预签名失败不阻塞（MinIO 不可用时仍返回元数据）
+                download_url = None
+        return EvidenceResponse(
+            id=ev.id,
+            object_key=ev.object_key,
+            bucket=ev.bucket,
+            file_name=ev.file_name,
+            content_type=ev.content_type,
+            size_bytes=ev.size_bytes,
+            kind=ev.kind,
+            created_at=ev.created_at,
+            download_url=download_url,
         )
 
     # ── 生成 ──
@@ -139,3 +161,53 @@ class ReportService:
         report.published_at = datetime.now(timezone.utc)
         await self.repo.session.flush()
         return self._to_detail(report)
+
+    # ── 证据（Evidence） ──
+
+    async def attach_evidence(
+        self,
+        *,
+        report_id: str,
+        owner_id: str,
+        file_name: str,
+        content_type: str,
+        data: bytes,
+        kind: str = "artifact",
+    ) -> tuple[EvidenceResponse | None, str | None]:
+        """给报告追加一个证据文件：上传 MinIO + 落 evidences 表。
+
+        返回 (evidence, error)。report 不存在或越权返回 (None, error)。
+        """
+        report = await self.repo.get_by_id(report_id)
+        if not report:
+            return None, "报告不存在"
+        # owner 校验：开发模式宽松（owner 可能是 "system"）；生产严格
+        if get_settings().environment != "development" and report.owner_id != owner_id:
+            return None, "无权操作该报告"
+
+        # kind 白名单（防任意值落库）
+        if kind not in ("artifact", "log", "screenshot", "poc"):
+            kind = "artifact"
+
+        key = f"{report.task_id}/{uuid.uuid4().hex}/{file_name}"
+        try:
+            storage.upload_evidence(key, data, content_type, task_id=report.task_id)
+        except storage.StorageError as e:
+            return None, str(e)
+
+        evidence = Evidence(
+            report_id=report_id,
+            task_id=report.task_id,
+            object_key=key,
+            bucket=storage.EVIDENCE_BUCKET,
+            file_name=file_name[:255],
+            content_type=content_type[:128],
+            size_bytes=len(data),
+            kind=kind,
+        )
+        evidence = await self.repo.add_evidence(evidence)
+        return self._to_evidence_detail(evidence, with_url=True), None
+
+    async def list_evidence(self, report_id: str) -> list[EvidenceResponse]:
+        evidences = await self.repo.list_evidence(report_id)
+        return [self._to_evidence_detail(e, with_url=True) for e in evidences]

@@ -15,6 +15,7 @@ class EvidenceResponse(BaseModel):
     size_bytes: int
     kind: str
     created_at: datetime
+    download_url: str | None = None  # 预签名 URL（列表/详情接口生成，落库不存）
 
     model_config = {"from_attributes": True}
 
