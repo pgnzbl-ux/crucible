@@ -1,6 +1,6 @@
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -110,3 +110,44 @@ async def cancel_task(
     if not task:
         raise HTTPException(404, "任务不存在")
     return task
+
+
+@router.post("/{task_id}/retry", status_code=202)
+async def retry_task(
+    task_id: str,
+    svc: Annotated[TaskService, Depends(get_task_service)],
+) -> dict:
+    """重试任务(断点续跑:复用上一 run 已完成的节点 output_json)。"""
+    try:
+        new_run_id = await svc.retry_task(task_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"task_id": task_id, "run_id": new_run_id, "status": "retrying"}
+
+
+@router.delete("/{task_id}", status_code=204)
+async def delete_task(
+    task_id: str,
+    svc: Annotated[TaskService, Depends(get_task_service)],
+    hard: bool = Query(False, description="true=物理删除,默认软删 archived"),
+    x_confirm: Annotated[str | None, Header(alias="X-Confirm")] = None,
+) -> None:
+    """删除任务。默认软删(status=archived);hard=true 需 X-Confirm: true header。"""
+    if hard and x_confirm != "true":
+        raise HTTPException(428, "硬删需 X-Confirm: true header")
+    try:
+        deleted = await svc.delete_task(task_id, hard=hard)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not deleted:
+        raise HTTPException(404, "任务不存在")
+
+
+@router.get("/{task_id}/runs/{run_id}/nodes")
+async def get_run_nodes(
+    task_id: str,
+    run_id: str,
+    svc: Annotated[TaskService, Depends(get_task_service)],
+) -> list[dict]:
+    """获取某 run 的节点状态(前端步骤条数据源)。"""
+    return await svc.get_run_nodes(task_id, run_id)

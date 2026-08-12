@@ -1,8 +1,8 @@
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from .models import Task, TaskRun, AgentEvent
+from .models import Task, TaskRun, AgentEvent, NodeRun
 
 
 class TaskRepository:
@@ -106,3 +106,19 @@ class TaskRepository:
             .limit(limit)
         )
         return list(result.scalars().all())
+
+    async def delete_hard(self, task: Task) -> None:
+        """物理删除任务 + 级联清理 runs/nodes/events。
+
+        顺序: events → nodes → runs → task(尊重 FK)。
+        SQLite 默认不强制 FK pragma,用手动级联确保干净。
+        """
+        run_ids = [r.id for r in task.runs] if task.runs else []
+        if run_ids:
+            await self.session.execute(delete(AgentEvent).where(AgentEvent.run_id.in_(run_ids)))
+            await self.session.execute(delete(NodeRun).where(NodeRun.run_id.in_(run_ids)))
+            await self.session.execute(delete(TaskRun).where(TaskRun.id.in_(run_ids)))
+        # task 级 events(若有 task_id 直接关联但无 run 的孤儿)
+        await self.session.execute(delete(AgentEvent).where(AgentEvent.task_id == task.id))
+        await self.session.delete(task)
+        await self.session.flush()

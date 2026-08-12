@@ -140,3 +140,104 @@ class TaskService:
                 }
             )
         return result
+
+    async def retry_task(self, task_id: str) -> str:
+        """重试任务:新建 TaskRun,复用上一 run 已完成的 NodeRun.output_json(断点续跑),
+        从第一个非 completed 节点起重跑。返回新 run_id。
+
+        复用策略:遍历上一 run 的 NodeRun,把 status=completed 的节点以 completed 形态
+        拷进新 run(保留 output_json),这样编排器从失败节点起重跑,之前的不重算。
+        """
+        from app.contexts.task.models import NodeRun
+        from sqlalchemy import select as sa_select
+
+        task = await self.repo.get_by_id_with_runs(task_id)
+        if not task:
+            raise ValueError("任务不存在")
+        if task.status not in ("failed", "completed", "cancelled", "needs_review"):
+            raise ValueError(f"状态为 {task.status} 的任务不能重试")
+
+        # 最新 run(repo 按 created_at desc 排,第一个即最新)
+        last_run = task.runs[0] if task.runs else None
+        new_run = TaskRun(task_id=task_id, status="pending")
+        new_run = await self.repo.create_run(new_run)
+
+        # 复用上一 run 已完成节点的 output_json
+        if last_run:
+            result = await self.repo.session.execute(
+                sa_select(NodeRun)
+                .where(NodeRun.run_id == last_run.id, NodeRun.status == "completed")
+                .order_by(NodeRun.node_index)
+            )
+            for nr in result.scalars().all():
+                self.repo.session.add(
+                    NodeRun(
+                        run_id=new_run.id,
+                        task_id=task_id,
+                        node_index=nr.node_index,
+                        node_key=nr.node_key,
+                        status="completed",  # 直接标完成,断点续跑
+                        output_json=nr.output_json,
+                        input_json=nr.input_json,
+                        started_at=nr.started_at,
+                        finished_at=nr.finished_at,
+                    )
+                )
+            await self.repo.session.flush()
+
+        task.status = "running"
+        await self.repo.session.flush()
+
+        # 投 Celery(用新 run.id 作 celery task_id,cancel 时可精确 revoke)
+        from app.core.celery_app import celery_app
+
+        try:
+            celery_app.send_task(
+                "agent.run_analysis", args=[task_id, new_run.id], task_id=new_run.id
+            )
+        except Exception:
+            pass  # broker 不可用,run 停 pending,前端可见
+
+        return new_run.id
+
+    async def delete_task(self, task_id: str, *, hard: bool = False) -> bool:
+        """删除任务。默认软删(status=archived),hard=True 物理删除。
+
+        running 中的任务不能删(先 cancel)。
+        """
+        task = await self.repo.get_by_id_with_runs(task_id)
+        if not task:
+            return False
+        if task.status == "running":
+            raise ValueError("运行中的任务不能删除,请先取消")
+
+        if hard:
+            await self.repo.delete_hard(task)
+        else:
+            task.status = "archived"
+            await self.repo.session.flush()
+        return True
+
+    async def get_run_nodes(self, task_id: str, run_id: str) -> list[dict]:
+        """获取某 run 的 6 节点状态(前端步骤条数据源)。"""
+        from app.contexts.task.models import NodeRun
+        from sqlalchemy import select as sa_select
+
+        result = await self.repo.session.execute(
+            sa_select(NodeRun)
+            .where(NodeRun.run_id == run_id, NodeRun.task_id == task_id)
+            .order_by(NodeRun.node_index)
+        )
+        return [
+            {
+                "id": nr.id,
+                "node_index": nr.node_index,
+                "node_key": nr.node_key,
+                "status": nr.status,
+                "attempt": nr.attempt,
+                "error_message": nr.error_message,
+                "started_at": nr.started_at.isoformat() if nr.started_at else None,
+                "finished_at": nr.finished_at.isoformat() if nr.finished_at else None,
+            }
+            for nr in result.scalars().all()
+        ]
