@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 import time
@@ -363,9 +364,13 @@ class AgentRunnerManager:
             return False
 
     def host_workdir_path(self, task_id: str) -> str:
-        """根据 task_id 计算 host 临时目录路径"""
+        """根据 task_id 计算 host 临时目录路径(规范化为 OS 绝对路径)。
+
+        settings.agent_runner_workdir_base 可能是 POSIX 风格(/tmp/...),
+        Windows 下 os.path.abspath 会解析为当前盘符根(D:\\tmp\\...)。
+        """
         base = settings.agent_runner_workdir_base.rstrip("/")
-        return f"{base}-{task_id}"
+        return os.path.abspath(f"{base}-{task_id}")
 
 
 # ─ ── AgentRunner 句柄 ─ ──
@@ -429,12 +434,20 @@ def _parse_docker_time(s: str) -> float:
 def git_clone_to_workdir(workdir: str, project_address: str, project_ref: str | None) -> tuple[bool, str]:
     """在 host 上 git clone 源码到 workdir/project。
 
-    返回 (ok, error_or_empty)。
+    返回 (ok, error_or_empty)。clone 后校验 project 非空(防静默半失败)。
     """
-    project_dir = f"{workdir}/project"
-    # 清理上次残留（同一 task_id 复用）
-    if subprocess.run(["test", "-d", project_dir], shell=False).returncode == 0:
-        shutil.rmtree(project_dir, ignore_errors=True)
+    project_dir = os.path.join(workdir, "project")
+    # 清理上次残留(retry 复用 host_workdir,旧 project 必须强删;只读文件也要删)
+    if os.path.isdir(project_dir):
+
+        def _force_remove(func, path, _exc):  # noqa: ANN001
+            try:
+                os.chmod(path, 0o777)
+                func(path)
+            except Exception:
+                pass
+
+        shutil.rmtree(project_dir, onerror=_force_remove)
 
     cmd = ["git", "clone", "--depth", "1"]
     if project_ref:
@@ -449,11 +462,22 @@ def git_clone_to_workdir(workdir: str, project_address: str, project_ref: str | 
             text=True,
             timeout=300,
         )
-        if result.returncode == 0:
-            return True, ""
-        return False, (result.stderr or result.stdout)[:1000]
+        if result.returncode != 0:
+            return False, (result.stderr or result.stdout)[:1000]
+        # clone 后校验:project 目录必须非空(防 .git 建了但 checkout 失败的静默半失败)
+        if not os.path.isdir(project_dir):
+            return False, f"clone 返回 0 但 project 目录不存在: {project_dir}"
+        entries = [e for e in os.listdir(project_dir) if e != ".git"]
+        if not entries:
+            # .git 在但无工作区文件 = checkout 失败
+            git_log = subprocess.run(
+                ["git", "-C", project_dir, "log", "--oneline", "-1"],
+                capture_output=True, text=True,
+            ).stderr
+            return False, f"clone 后 project 目录为空(checkout 失败): {(git_log or '')[:300]}"
+        return True, ""
     except subprocess.TimeoutExpired:
-        return False, "git clone 超时（>300s）"
+        return False, "git clone 超时(>300s)"
     except Exception as e:
         return False, f"git clone 异常: {e}"
 

@@ -98,6 +98,18 @@ class EnvReadyNode:
         return True
 
     async def execute(self, ctx: NodeContext) -> dict[str, Any]:
+        # Mock 模式:SDK 未启用时跳过真实 AI + docker compose,直接返回模拟靶场
+        from app.core.config import get_settings
+        if not get_settings().claude_agent_sdk_enabled:
+            logger.info("[Mock] 节点 env_ready 返回模拟靶场(不执行 docker compose)")
+            return {
+                "target_url": "http://localhost:8080",
+                "compose_path": ".vuln-env/docker-compose.yml",
+                "transport_shape": {"protocol": "http", "listener": "0.0.0.0:8080", "tls_termination": "无"},
+                "initial_creds": {},
+                "started_containers": ["mock-app"],
+            }
+
         profile = ctx.previous_outputs.get("profile", {})
         port = profile.get("port")
         last_error: str | None = None

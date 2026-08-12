@@ -5,9 +5,19 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, MagicMock
 
 from app.contexts.agent.nodes.base import NodeContext
+
+
+@pytest.fixture(autouse=True)
+def _enable_sdk():
+    """测试排障循环需走真实路径,强制 SDK 启用(否则 execute 走 mock 直接返回)。"""
+    with patch("app.core.config.get_settings") as gs:
+        s = MagicMock()
+        s.claude_agent_sdk_enabled = True
+        gs.return_value = s
+        yield
 
 
 @pytest.mark.asyncio
