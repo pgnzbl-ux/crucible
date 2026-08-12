@@ -4,23 +4,56 @@ __pycache__/
 *.egg-info/
 dist/
 .venv/
+venv/
+env/
 
-# 环境
+# 环境（保留示例模板）
 .env
+.env.*
+!.env.example
 
 # 数据库
 *.db
 *.db-journal
 
+# Python 测试 / 类型 / Lint 缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.hypothesis/
+.tox/
+.nox/
+
 # Node
 node_modules/
 frontend/dist/
+frontend/.vite/
 
-# IDE
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# 日志
+*.log
+
+# IDE / 编辑器
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
+*.suo
+*.user
+*.iml
+
+# Claude Code 运行时（规则/skills 仍提交，锁文件不提交）
+.claude/scheduled_tasks.lock
+
+# CodeGraph 本地索引（每台机器独立）
+.codegraph/
 
 # 项目记忆 / 临时工作区
 .workbuddy/
@@ -31,4 +64,8 @@ frontend/dist/
 # OS
 .DS_Store
 Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# Harness / 本地工具缓存
 .wiscode/
