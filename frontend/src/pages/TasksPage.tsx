@@ -9,6 +9,7 @@ import {
   Form,
   Input,
   List,
+  Modal,
   Select,
   Space,
   Table,
@@ -18,14 +19,18 @@ import {
   Empty,
   Divider,
   Upload,
+  Card,
+  Skeleton,
 } from 'antd'
 import type { UploadProps } from 'antd'
 import {
   BugOutlined,
+  DeleteOutlined,
   DownloadOutlined,
   PaperClipOutlined,
   PauseCircleOutlined,
   PlusOutlined,
+  RedoOutlined,
   ReloadOutlined,
   UploadOutlined,
 } from '@ant-design/icons'
@@ -34,9 +39,10 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 
 import { api, type TaskDetail, type TaskSummary, type AgentEvent, type ReportDetail, type Evidence } from '../shared/lib/api'
-import { getStatusMeta, getPriorityMeta, getConclusionMeta, EVENT_PHASE_LABELS } from '../shared/lib/meta'
+import { getStatusMeta, getPriorityMeta, getConclusionMeta, getVerdictMeta, EVENT_PHASE_LABELS } from '../shared/lib/meta'
 import { useTaskEvents, type SSEEvent } from '../shared/hooks/useTaskEvents'
 import { AppLayout } from '../app/layout'
+import { PageHeader } from '../shared/components/PageHeader'
 
 const { Title, Paragraph, Text } = Typography
 
@@ -69,7 +75,7 @@ function TaskDetailDrawer({
   const { message } = App.useApp()
   const qc = useQueryClient()
 
-  const { data: task } = useQuery({
+  const { data: task, isLoading: taskLoading } = useQuery({
     queryKey: ['task', taskId],
     queryFn: () => api.getTask(taskId!),
     enabled: !!taskId,
@@ -117,7 +123,15 @@ function TaskDetailDrawer({
     onError: (e: Error) => message.error(e.message),
   })
 
-  if (!task) return <Drawer open={open} onClose={onClose} width={680} title="任务详情" />
+  if (taskLoading && !task) {
+    return (
+      <Drawer open={open} onClose={onClose} width={720} title="任务详情">
+        <Skeleton active paragraph={{ rows: 8 }} />
+      </Drawer>
+    )
+  }
+
+  if (!task) return <Drawer open={open} onClose={onClose} width={720} title="任务详情" />
 
   const st = getStatusMeta(task.status)
   const timelineItems =
@@ -145,6 +159,7 @@ function TaskDetailDrawer({
   return (
     <Drawer open={open} onClose={onClose} width={720} title={`任务详情 · ${task.id.slice(0, 8)}`}>
       <Space direction="vertical" size="large" style={{ width: '100%' }}>
+        {/* 基础信息 */}
         <Descriptions column={2} size="small" bordered>
           <Descriptions.Item label="项目地址" span={2}>
             <Text code>{task.project_address}</Text>
@@ -170,7 +185,7 @@ function TaskDetailDrawer({
           <Alert type="error" showIcon message="执行失败" description={task.runs[0].error_message} />
         )}
 
-        {/* Agent 进度流 */}
+        {/* Agent 执行进度 */}
         <div>
           <Space style={{ marginBottom: 12, width: '100%', justifyContent: 'space-between' }}>
             <Title level={5} style={{ margin: 0 }}>
@@ -222,7 +237,7 @@ function TaskDetailDrawer({
           </>
         )}
 
-        {/* 报告 */}
+        {/* 验证报告 */}
         {report && (
           <>
             <Divider style={{ margin: '8px 0' }} />
@@ -326,7 +341,7 @@ function EvidenceList({ reportId }: { reportId: string }) {
             ].filter(Boolean) as React.ReactNode[]}
           >
             <List.Item.Meta
-              avatar={<PaperClipOutlined style={{ fontSize: 18, color: '#8c8c8c' }} />}
+              avatar={<PaperClipOutlined style={{ fontSize: 18, color: 'var(--crucible-text-disabled)' }} />}
               title={
                 <Space>
                   <Text style={{ fontSize: 13 }}>{ev.file_name}</Text>
@@ -464,6 +479,24 @@ export function TasksPage() {
     onError: (e: Error) => message.error(e.message),
   })
 
+  const retryMutation = useMutation({
+    mutationFn: (id: string) => api.retryTask(id),
+    onSuccess: () => {
+      message.success('任务已重新提交(断点续跑)')
+      qc.invalidateQueries({ queryKey: ['tasks'] })
+    },
+    onError: (e: Error) => message.error(e.message),
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => api.deleteTask(id),
+    onSuccess: () => {
+      message.success('任务已删除')
+      qc.invalidateQueries({ queryKey: ['tasks'] })
+    },
+    onError: (e: Error) => message.error(e.message),
+  })
+
   const columns: ColumnsType<TaskSummary> = [
     {
       title: '项目地址',
@@ -480,6 +513,13 @@ export function TasksPage() {
       },
     },
     {
+      title: '判定',
+      dataIndex: 'verdict',
+      width: 110,
+      render: (v: string | null) =>
+        v ? <Tag color={getVerdictMeta(v).color}>{getVerdictMeta(v).label}</Tag> : <Text type="secondary">—</Text>,
+    },
+    {
       title: '优先级',
       dataIndex: 'priority',
       width: 90,
@@ -494,9 +534,9 @@ export function TasksPage() {
     {
       title: '操作',
       key: 'actions',
-      width: 140,
+      width: 200,
       render: (_, row) => (
-        <Space>
+        <Space size="small" wrap>
           <Button size="small" onClick={() => setDetailTaskId(row.id)}>
             详情
           </Button>
@@ -510,6 +550,34 @@ export function TasksPage() {
               取消
             </Button>
           )}
+          {['failed', 'cancelled', 'completed', 'needs_review'].includes(row.status) && (
+            <Button
+              size="small"
+              icon={<RedoOutlined />}
+              onClick={() => retryMutation.mutate(row.id)}
+              loading={retryMutation.isPending}
+            >
+              重试
+            </Button>
+          )}
+          {!['running', 'pending', 'queued'].includes(row.status) && (
+            <Button
+              size="small"
+              danger
+              icon={<DeleteOutlined />}
+              onClick={() => {
+                Modal.confirm({
+                  title: '删除任务',
+                  content: '任务及其运行记录将被归档(软删)。确定继续?',
+                  okText: '删除',
+                  okType: 'danger',
+                  cancelText: '取消',
+                  onOk: () => deleteMutation.mutate(row.id),
+                })
+              }}
+              loading={deleteMutation.isPending}
+            />
+          )}
         </Space>
       ),
     },
@@ -517,40 +585,40 @@ export function TasksPage() {
 
   return (
     <AppLayout>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <div>
-          <Title level={4} style={{ marginBottom: 4 }}>
-            任务管理
-          </Title>
-          <Text type="secondary">提交漏洞验证任务，Agent 将在隔离沙箱中自动分析</Text>
-        </div>
-        <Space>
-          <Button icon={<ReloadOutlined />} onClick={() => refetch()}>
-            刷新
-          </Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
-            新建任务
-          </Button>
-        </Space>
-      </div>
+      <PageHeader
+        title="任务管理"
+        subtitle="提交漏洞验证任务，Agent 将在隔离沙箱中自动分析"
+        extra={
+          <Space>
+            <Button icon={<ReloadOutlined />} onClick={() => refetch()}>
+              刷新
+            </Button>
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
+              新建任务
+            </Button>
+          </Space>
+        }
+      />
 
-      <Space style={{ marginBottom: 16 }}>
-        <Select
-          allowClear
-          placeholder="按状态筛选"
-          style={{ width: 160 }}
-          value={statusFilter}
-          onChange={setStatusFilter}
-          options={[
-            { value: 'queued', label: '排队中' },
-            { value: 'running', label: '分析中' },
-            { value: 'needs_review', label: '待复核' },
-            { value: 'completed', label: '已完成' },
-            { value: 'failed', label: '失败' },
-            { value: 'cancelled', label: '已取消' },
-          ]}
-        />
-      </Space>
+      <Card style={{ marginBottom: 16 }}>
+        <Space>
+          <Select
+            allowClear
+            placeholder="按状态筛选"
+            style={{ width: 180 }}
+            value={statusFilter}
+            onChange={setStatusFilter}
+            options={[
+              { value: 'queued', label: '排队中' },
+              { value: 'running', label: '分析中' },
+              { value: 'needs_review', label: '待复核' },
+              { value: 'completed', label: '已完成' },
+              { value: 'failed', label: '失败' },
+              { value: 'cancelled', label: '已取消' },
+            ]}
+          />
+        </Space>
+      </Card>
 
       <Table
         rowKey="id"

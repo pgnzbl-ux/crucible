@@ -54,7 +54,9 @@ export interface TokenResponse {
 export interface TaskSummary {
   id: string
   project_address: string
+  project_id: string | null
   status: string
+  verdict: string | null
   priority: string
   source_type: string
   owner_id: string
@@ -79,6 +81,21 @@ export interface TaskDetail extends TaskSummary {
   credential_refs: string[]
   runs: RunSummary[]
 }
+
+// 节点状态(6 节点步骤条数据源)
+export interface NodeRun {
+  id: string
+  node_index: number
+  node_key: 'source' | 'profile' | 'env_ready' | 'audit' | 'reproduce' | 'report'
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
+  attempt: number
+  error_message: string | null
+  started_at: string | null
+  finished_at: string | null
+}
+
+// 6 档判定(对齐后端 verdict)
+export type Verdict = 'confirmed' | 'partial' | 'code_reachable' | 'code_smell' | 'false_positive' | 'not_reproduced'
 
 export interface TaskListResponse {
   items: TaskSummary[]
@@ -108,6 +125,14 @@ export interface ReportDetail {
   reasoning: string | null
   evidence_summary: string | null
   artifact_key: string | null
+  // 结构化字段(阶段 1 新增)
+  verdict: string | null
+  cvss_score: number | null
+  severity: string | null
+  vulnerable_file: string | null
+  report_data: Record<string, unknown> | null
+  md_artifact_key: string | null
+  docx_artifact_key: string | null
   published_at: string | null
   created_at: string
   updated_at: string
@@ -127,6 +152,22 @@ export interface Evidence {
 }
 
 // ── LLM Provider ──
+
+// Project(阶段 1 新增)
+export interface Project {
+  id: string
+  name: string
+  git_url: string
+  default_ref: string | null
+  description: string | null
+  owner_id: string
+  detected_language: string | null
+  detected_framework: string | null
+  is_web: boolean | null
+  last_cloned_at: string | null
+  created_at: string
+  updated_at: string
+}
 
 export interface LlmProvider {
   id: string
@@ -289,4 +330,33 @@ export const api = {
 
   deleteCredential: (id: string) =>
     request<void>(`/settings/credentials/${id}`, { method: 'DELETE' }),
+
+  // Tasks — 阶段 1 新增(retry / delete / nodes)
+  retryTask: (id: string) =>
+    request<{ task_id: string; run_id: string; status: string }>(`/tasks/${id}/retry`, { method: 'POST' }),
+
+  deleteTask: (id: string, hard = false) =>
+    request<void>(`/tasks/${id}${hard ? '?hard=true' : ''}`, {
+      method: 'DELETE',
+      headers: hard ? { 'X-Confirm': 'true' } : undefined,
+    }),
+
+  getRunNodes: (taskId: string, runId: string) =>
+    request<NodeRun[]>(`/tasks/${taskId}/runs/${runId}/nodes`),
+
+  // Reports — 导出
+  exportReportUrl: (reportId: string, format: 'json' | 'md' = 'json') =>
+    `${API_BASE}/reports/${reportId}/export?format=${format}`,
+
+  // Projects — 阶段 1 新增
+  listProjects: (params?: Record<string, string>) => {
+    const qs = params ? '?' + new URLSearchParams(params).toString() : ''
+    return request<{ items: Project[]; total: number }>(`/projects/${qs}`)
+  },
+  createProject: (data: { name: string; git_url: string; default_ref?: string; description?: string }) =>
+    request<Project>('/projects/', { method: 'POST', body: JSON.stringify(data) }),
+  getProject: (id: string) => request<Project>(`/projects/${id}`),
+  updateProject: (id: string, data: Partial<{ name: string; default_ref: string; description: string }>) =>
+    request<Project>(`/projects/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteProject: (id: string) => request<void>(`/projects/${id}`, { method: 'DELETE' }),
 }

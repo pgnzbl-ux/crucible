@@ -33,7 +33,9 @@ class TaskListRequest(BaseModel):
 class TaskSummary(BaseModel):
     id: str
     project_address: str
+    project_id: str | None = None
     status: str
+    verdict: str | None = None
     priority: str
     source_type: str
     owner_id: str

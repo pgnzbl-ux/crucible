@@ -29,11 +29,13 @@ class TaskService:
         return TaskDetail(
             id=task.id,
             project_address=task.project_address,
+            project_id=getattr(task, "project_id", None),
             project_ref=task.project_ref,
             source_type=task.source_type,
             vulnerability_description=task.vulnerability_description,
             vulnerability_reasoning=task.vulnerability_reasoning,
             status=task.status,
+            verdict=getattr(task, "verdict", None),
             priority=task.priority,
             owner_id=task.owner_id,
             credential_refs=_parse_refs(getattr(task, "credential_refs", None)),
@@ -43,8 +45,25 @@ class TaskService:
         )
 
     async def create_task(self, request: TaskCreateRequest, owner_id: str) -> TaskDetail:
+        # 自动按 git_url 建/复用 Project(用户建任务时无需先建 project)
+        project_id: str | None = None
+        try:
+            from app.contexts.project.repository import ProjectRepository
+            from app.contexts.project.service import ProjectService
+
+            proj_svc = ProjectService(ProjectRepository(self.repo.session))
+            project = await proj_svc.upsert_by_git_url(
+                git_url=request.project_address,
+                owner_id=owner_id,
+                default_ref=request.project_ref,
+            )
+            project_id = project.id
+        except Exception:  # noqa: BLE001 — project 建失败不阻断建任务(回退 project_address)
+            pass
+
         task = Task(
             project_address=request.project_address,
+            project_id=project_id,
             project_ref=request.project_ref,
             source_type=request.source_type,
             vulnerability_description=request.vulnerability_description,
