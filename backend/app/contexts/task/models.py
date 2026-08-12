@@ -12,12 +12,20 @@ class Task(BaseModel):
 
     project_address: Mapped[str] = mapped_column(String(1024), nullable=False, comment="项目地址 (Git URL)")
     project_ref: Mapped[str | None] = mapped_column(String(255), comment="分支/commit/tag")
+    project_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("projects.id"), index=True,
+        comment="关联 Project(P1 新增,project_address 保留兼容)",
+    )
     source_type: Mapped[str] = mapped_column(String(20), default="git", comment="git | local_upload")
     vulnerability_description: Mapped[str] = mapped_column(Text, nullable=False, comment="漏洞描述")
     vulnerability_reasoning: Mapped[str | None] = mapped_column(Text, comment="漏洞推理过程")
     status: Mapped[str] = mapped_column(
         String(20), default="pending", index=True,
-        comment="pending | queued | running | needs_review | completed | failed | cancelled"
+        comment="pending | queued | running | needs_review | completed | failed | cancelled | archived"
+    )
+    verdict: Mapped[str | None] = mapped_column(
+        String(30), index=True,
+        comment="6 档判定: confirmed|partial|code_reachable|code_smell|false_positive|not_reproduced",
     )
     priority: Mapped[str] = mapped_column(String(10), default="medium", comment="low | medium | high | critical")
     owner_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), index=True)
@@ -67,6 +75,10 @@ class AgentEvent(BaseModel):
     run_id: Mapped[str] = mapped_column(String(36), ForeignKey("task_runs.id"), index=True)
     sequence: Mapped[int] = mapped_column(default=0, comment="事件序列号，全局递增")
     task_id: Mapped[str] = mapped_column(String(36), index=True)
+    node_run_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("node_runs.id"), index=True,
+        comment="所属 NodeRun(节点化后,事件归属节点)",
+    )
     event_type: Mapped[str] = mapped_column(
         String(50), index=True,
         comment="phase.updated | tool.call.* | evidence.created | agent.completed | agent.failed"
@@ -80,3 +92,39 @@ class AgentEvent(BaseModel):
     __table_args__ = (
         Index("idx_agent_events_run_seq", "run_id", "sequence"),
     )
+
+
+class NodeRun(BaseModel):
+    """节点级执行记录 — 6 节点编排的核心。
+
+    一个 TaskRun 下挂 6 个 NodeRun(node_index 0-5),各自记录
+    input/output JSON、状态、排障 attempt。断点续跑时复用已完成的 output_json。
+    """
+    __tablename__ = "node_runs"
+
+    run_id: Mapped[str] = mapped_column(String(36), ForeignKey("task_runs.id"), index=True)
+    task_id: Mapped[str] = mapped_column(String(36), ForeignKey("tasks.id"), index=True)
+    node_index: Mapped[int] = mapped_column(comment="0-5")
+    node_key: Mapped[str] = mapped_column(
+        String(20),
+        comment="source|profile|env_ready|audit|reproduce|report",
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), default="pending",
+        comment="pending|running|completed|failed|skipped",
+    )
+    input_json: Mapped[str] = mapped_column(Text, default="{}", comment="节点输入(前序 output 组装)")
+    output_json: Mapped[str] = mapped_column(Text, default="{}", comment="节点结构化产出(交接契约)")
+    attempt: Mapped[int] = mapped_column(default=1, comment="排障重试计数(节点 2 用,max 5)")
+    agent_session_id: Mapped[str | None] = mapped_column(String(128), comment="AI 节点 SDK session_id")
+    error_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column()
+    finished_at: Mapped[datetime | None] = mapped_column()
+
+    __table_args__ = (
+        Index("idx_node_runs_run_idx", "run_id", "node_index", unique=True),
+        Index("idx_node_runs_task_key", "task_id", "node_key"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<NodeRun [{self.node_index}:{self.node_key}] {self.status}>"
