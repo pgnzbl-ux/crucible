@@ -81,11 +81,13 @@ def create_app() -> FastAPI:
     from app.contexts.task.api import router as task_router
     from app.contexts.report.api import router as report_router
     from app.contexts.settings.api import router as settings_router
+    from app.contexts.project.api import router as project_router
 
     app.include_router(auth_router, prefix="/api/v1")
     app.include_router(task_router, prefix="/api/v1")
     app.include_router(report_router, prefix="/api/v1")
     app.include_router(settings_router, prefix="/api/v1")
+    app.include_router(project_router, prefix="/api/v1")
 
     # ── 健康检查 ──
     @app.get("/health")
