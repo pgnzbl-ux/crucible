@@ -105,3 +105,42 @@ async def list_evidences(
 ) -> list[EvidenceResponse]:
     """列出报告的所有证据（含预签名下载 URL）"""
     return await svc.list_evidence(report_id)
+
+
+@router.get("/{report_id}/export")
+async def export_report(
+    report_id: str,
+    svc: Annotated[ReportService, Depends(get_report_service)],
+    format: str = Query("json", pattern="^(json|md)$"),
+):
+    """导出报告。format=json 返回结构化 report_data;format=md 返回渲染后的 markdown。"""
+    from fastapi.responses import PlainTextResponse, JSONResponse
+
+    report = await svc.get_report(report_id)
+    if not report:
+        raise HTTPException(404, "报告不存在")
+
+    if format == "md":
+        from app.contexts.report.renderer import render_report_md
+        if not report.report_data:
+            raise HTTPException(400, "报告尚无结构化数据,无法导出 markdown")
+        md = render_report_md(report.report_data)
+        return PlainTextResponse(
+            md,
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="report-{report_id[:8]}.md"'},
+        )
+    # json
+    return JSONResponse(
+        content={
+            "report_id": report_id,
+            "task_id": report.task_id,
+            "verdict": report.verdict,
+            "cvss_score": report.cvss_score,
+            "severity": report.severity,
+            "vulnerable_file": report.vulnerable_file,
+            "report_data": report.report_data,
+            "created_at": report.created_at.isoformat(),
+        },
+        headers={"Content-Disposition": f'attachment; filename="report-{report_id[:8]}.json"'},
+    )

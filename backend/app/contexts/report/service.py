@@ -42,6 +42,13 @@ class ReportService:
 
     @staticmethod
     def _to_detail(report: Report) -> ReportDetail:
+        # report_data 存为 Text(JSON 字符串),解析成 dict 供前端
+        report_data_dict: dict[str, Any] | None = None
+        if report.report_data:
+            try:
+                report_data_dict = json.loads(report.report_data) if isinstance(report.report_data, str) else report.report_data
+            except (json.JSONDecodeError, TypeError):
+                report_data_dict = None
         return ReportDetail(
             id=report.id,
             task_id=report.task_id,
@@ -54,6 +61,13 @@ class ReportService:
             reasoning=report.reasoning,
             evidence_summary=report.evidence_summary,
             artifact_key=report.artifact_key,
+            verdict=report.verdict,
+            cvss_score=report.cvss_score,
+            severity=report.severity,
+            vulnerable_file=report.vulnerable_file,
+            report_data=report_data_dict,
+            md_artifact_key=report.md_artifact_key,
+            docx_artifact_key=report.docx_artifact_key,
             published_at=report.published_at,
             created_at=report.created_at,
             updated_at=report.updated_at,

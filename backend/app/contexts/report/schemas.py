@@ -32,6 +32,14 @@ class ReportDetail(BaseModel):
     reasoning: str | None
     evidence_summary: str | None
     artifact_key: str | None
+    # 结构化字段(阶段 1 新增)
+    verdict: str | None = None
+    cvss_score: float | None = None
+    severity: str | None = None
+    vulnerable_file: str | None = None
+    report_data: dict[str, Any] | None = None
+    md_artifact_key: str | None = None
+    docx_artifact_key: str | None = None
     published_at: datetime | None
     created_at: datetime
     updated_at: datetime
