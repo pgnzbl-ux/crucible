@@ -43,6 +43,7 @@ import { getStatusMeta, getPriorityMeta, getConclusionMeta, getVerdictMeta, EVEN
 import { useTaskEvents, type SSEEvent } from '../shared/hooks/useTaskEvents'
 import { AppLayout } from '../app/layout'
 import { PageHeader } from '../shared/components/PageHeader'
+import { NodeSteps } from '../shared/components/NodeSteps'
 
 const { Title, Paragraph, Text } = Typography
 
@@ -86,11 +87,11 @@ function TaskDetailDrawer({
   const sseEnabled = open && !!taskId && running
   const { events: sseEvents, status: sseStatus, error: sseError } = useTaskEvents(taskId, { enabled: sseEnabled })
 
-  // 收到 agent.completed / agent.failed → 立即刷新 task 与 report（不再 3s 轮询）
+  // 收到 agent.completed / agent.failed / node.updated → 刷新 task 与 report
   useEffect(() => {
     const last = sseEvents[sseEvents.length - 1]
     if (!last) return
-    if (last.type === 'agent.completed' || last.type === 'agent.failed') {
+    if (last.type === 'agent.completed' || last.type === 'agent.failed' || last.type === 'node.updated') {
       qc.invalidateQueries({ queryKey: ['task', taskId] })
       qc.invalidateQueries({ queryKey: ['task-report', taskId] })
       qc.invalidateQueries({ queryKey: ['tasks'] })
@@ -184,6 +185,16 @@ function TaskDetailDrawer({
         {task.status === 'failed' && task.runs[0]?.error_message && (
           <Alert type="error" showIcon message="执行失败" description={task.runs[0].error_message} />
         )}
+
+        {/* 6 节点编排进度 */}
+        <div>
+          <Title level={5} style={{ margin: '0 0 8px' }}>编排进度</Title>
+          <NodeSteps
+            taskId={task.id}
+            runId={task.runs[0]?.id}
+            sseEvents={sseEvents as unknown as SSEEvent[]}
+          />
+        </div>
 
         {/* Agent 执行进度 */}
         <div>
