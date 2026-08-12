@@ -342,75 +342,178 @@ PLUGIN_DIR = os.environ.get("PLUGIN_DIR", "/app/plugins/vuln-verify-expert")
 PLUGIN_NAME = os.environ.get("PLUGIN_NAME", "vuln-verify-expert")
 AGENT_NAME = os.environ.get("AGENT_NAME", "vuln-verify-expert")
 
+# 节点 → 插件 agent 映射(阶段 2 多 agent 拆分)
+# NODE_KEY 由 worker 通过 docker run --env 注入;为空时走旧的 vuln-verify-expert 总 agent(兼容)
+NODE_AGENT_MAP: dict[str, str] = {
+    "env_ready": "env-builder",
+    "audit": "auditor",
+    "reproduce": "reproducer",
+    "report": "reporter",
+}
 
-def _build_options(model: str, max_turns: int) -> ClaudeAgentOptions:
-    """构造 SDK options：加载 vuln-verify-expert 插件 + 指定其 agent。
+# 各 AI 节点的 submit_result 工具 input schema(与 worker 侧 ai_runner.NODE_INPUT_SCHEMAS 对齐)
+NODE_INPUT_SCHEMAS: dict[str, dict] = {
+    "env_ready": {
+        "type": "object",
+        "properties": {
+            "target_url": {"type": "string"},
+            "compose_path": {"type": "string"},
+            "transport_shape": {"type": "object"},
+            "initial_creds": {"type": "object"},
+            "started_containers": {"type": "array"},
+        },
+        "required": ["target_url", "compose_path"],
+    },
+    "audit": {
+        "type": "object",
+        "properties": {
+            "kill_chain": {"type": "string"},
+            "defense_layers": {"type": "array"},
+            "payloads": {"type": "array"},
+            "gate_verdict": {"type": "string", "enum": ["pass", "fail"]},
+            "gate_reason": {"type": "string"},
+        },
+        "required": ["gate_verdict"],
+    },
+    "reproduce": {
+        "type": "object",
+        "properties": {
+            "reproduced": {"type": "boolean"},
+            "evidence": {"type": "array"},
+            "screenshots": {"type": "array"},
+            "verdict": {"type": "string", "enum": ["confirmed", "partial", "code_reachable", "code_smell", "false_positive", "not_reproduced"]},
+        },
+        "required": ["verdict"],
+    },
+    "report": {
+        "type": "object",
+        "properties": {
+            "report_data": {"type": "object"},
+            "final_verdict": {"type": "string", "enum": ["confirmed", "partial", "code_reachable", "code_smell", "false_positive", "not_reproduced"]},
+            "cvss": {"type": "object"},
+        },
+        "required": ["report_data", "final_verdict"],
+    },
+}
 
-    - 插件 agent 的 system_prompt / skills 由 agents/*.md 自动提供，这里**不**传 system_prompt
-    - extra_args 透传 --agent（SDK 无 typed `agent` 字段，CLI flag 是唯一方式，格式 plugin:agent）
-    - 插件加载优先 typed `plugins=`，降级 `extra_args --plugin-dir`（跨 SDK 版本兼容）
-    - 凭据零落盘：插件只含静态 .md，密钥通过 worker 注入的 ANTHROPIC_* env 提供
+
+def _make_submit_result_tool(schema: dict):
+    """构造 submit_result MCP 工具:agent 调用时把 input 写到 /workspace/.node_output.json。
+
+    SDK 0.2.134 PoC 确认:create_sdk_mcp_server + @tool 原生支持自定义工具注入。
     """
-    agent_flag = f"{PLUGIN_NAME}:{AGENT_NAME}"
+    from claude_agent_sdk import tool
+
+    @tool(name="submit_result", description="提交本节点的结构化结果。完成后必须调用此工具。", input_schema=schema)
+    async def submit_result(input: dict) -> dict:
+        # input 已按 schema 校验;写文件供 worker 读取
+        out_path = Path("/workspace/.node_output.json")
+        out_path.write_text(json.dumps(input, ensure_ascii=False, default=str), encoding="utf-8")
+        return {"status": "submitted", "fields": list(input.keys())}
+
+    return submit_result
+
+
+def _build_options(model: str, max_turns: int, node_key: str | None = None) -> ClaudeAgentOptions:
+    """构造 SDK options。
+
+    节点化(node_key 非空):按 node_key 选插件子 agent + 注入 submit_result MCP 工具。
+    兼容模式(node_key 空):走旧的 vuln-verify-expert 总 agent(单次大调用)。
+    """
+    # 选 agent
+    if node_key and node_key in NODE_AGENT_MAP:
+        agent_name = NODE_AGENT_MAP[node_key]
+    else:
+        agent_name = AGENT_NAME
+    agent_flag = f"{PLUGIN_NAME}:{agent_name}"
 
     common: dict[str, Any] = {
         "model": model,
         "max_turns": max_turns,
         "cwd": "/workspace/project",
-        # bypassPermissions：非 Bash 工具自动批准（减少摩擦）。
-        # Bash 的安全护栏由 PreToolUse hook 负责（黑名单 deny），hook 在所有
-        # permission_mode 下都执行，不被 bypassPermissions shadow（区别于 can_use_tool）。
-        # 详见 docs/agent-workflow.md §权限策略。
         "permission_mode": "bypassPermissions",
         "allowed_tools": [
             "Read", "Grep", "Glob", "Bash",         # 白盒审计 + PoC
-            "Write", "Edit",                         # 写 report.md / .vuln-env.json
+            "Write", "Edit",                         # 写配置 / report
             "WebFetch", "WebSearch",                 # 查 CVE / 利用资料
         ],
         "hooks": {
             "PreToolUse": [
-                {
-                    "matcher": "Bash",               # 只对 Bash 触发（其余工具不需拦截）
-                    "hooks": [_pre_tool_use_hook],
-                },
+                {"matcher": "Bash", "hooks": [_pre_tool_use_hook]},
             ],
         },
         "extra_args": ["--agent", agent_flag],
     }
 
-    # 插件加载：typed plugins= 优先（SDK 0.2.x，SdkPluginConfig TypedDict）
+    # 节点化:注入 submit_result MCP 工具 + 限定工具集含它
+    if node_key and node_key in NODE_INPUT_SCHEMAS:
+        try:
+            from claude_agent_sdk import create_sdk_mcp_server
+
+            schema = NODE_INPUT_SCHEMAS[node_key]
+            submit_tool = _make_submit_result_tool(schema)
+            server = create_sdk_mcp_server(name="crucible", tools=[submit_tool])
+            common["mcp_servers"] = {"crucible": server}
+            common["allowed_tools"] = common["allowed_tools"] + ["submit_result"]
+        except (ImportError, TypeError, Exception) as e:  # noqa: BLE001
+            # MCP 注入失败:降级(prompt 要求 ```json 块,可靠性降级但不阻塞)
+            print(json.dumps({
+                "type": "agent.warning",
+                "message": f"submit_result MCP 注入失败,降级文本模式: {type(e).__name__}: {e}",
+                "timestamp": time.time(),
+            }, ensure_ascii=False), flush=True)
+
+    # 插件加载
     try:
         return ClaudeAgentOptions(
             plugins=[{"type": "local", "path": PLUGIN_DIR}],
             **common,
         )
     except (TypeError, ValueError):
-        # 降级：extra_args 透传 --plugin-dir（CLI flag 逃生舱，所有版本支持）
         common["extra_args"] = ["--plugin-dir", PLUGIN_DIR, "--agent", agent_flag]
+        # mcp_servers 可能不被旧构造接受,移除后重试
+        common.pop("mcp_servers", None)
         return ClaudeAgentOptions(**common)
 
 
 # ── Main ──
 
 async def _main() -> int:
+    # 节点模式(阶段 2):优先读 .node.json;兼容模式:读 .prompt.json
+    node_path = Path("/workspace/.node.json")
     prompt_path = Path("/workspace/.prompt.json")
-    if not prompt_path.exists():
-        print(json.dumps({
-            "type": "agent.failed",
-            "error": ".prompt.json not found at /workspace",
-            "sequence": 0,
-            "timestamp": time.time(),
-        }), ensure_ascii=False, flush=True)
-        return 2
+    node_key = os.environ.get("NODE_KEY") or None
+    input_json: dict[str, Any] = {}
+    task: dict[str, Any] = {}
 
-    try:
-        task = json.loads(prompt_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
+    if node_path.exists():
+        try:
+            _payload = json.loads(node_path.read_text(encoding="utf-8"))
+            node_key = _payload.get("node_key") or node_key
+            input_json = _payload.get("input_json", {})
+            task = input_json
+        except (json.JSONDecodeError, OSError) as e:
+            print(json.dumps({
+                "type": "agent.failed",
+                "error": f".node.json 解析失败: {e}",
+                "sequence": 0, "timestamp": time.time(),
+            }), ensure_ascii=False, flush=True)
+            return 2
+    elif prompt_path.exists():
+        try:
+            task = json.loads(prompt_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            print(json.dumps({
+                "type": "agent.failed",
+                "error": f".prompt.json 解析失败: {e}",
+                "sequence": 0, "timestamp": time.time(),
+            }), ensure_ascii=False, flush=True)
+            return 2
+    else:
         print(json.dumps({
             "type": "agent.failed",
-            "error": f".prompt.json 解析失败: {e}",
-            "sequence": 0,
-            "timestamp": time.time(),
+            "error": "既无 .node.json 也无 .prompt.json",
+            "sequence": 0, "timestamp": time.time(),
         }), ensure_ascii=False, flush=True)
         return 2
 
@@ -420,11 +523,13 @@ async def _main() -> int:
     except ValueError:
         max_turns = 180
 
-    options = _build_options(model, max_turns)
+    options = _build_options(model, max_turns, node_key=node_key)
 
-    prompt = _build_prompt(task)
+    if node_key and node_key in NODE_AGENT_MAP:
+        prompt = _build_node_prompt(node_key, input_json)
+    else:
+        prompt = _build_prompt(task)
 
-    # 流式输出
     exit_code = 0
     saw_completion = False
     saw_failure = False
@@ -436,6 +541,16 @@ async def _main() -> int:
                 saw_failure = True
         elif event.get("type") == "agent.failed":
             saw_failure = True
+
+    # 节点模式:校验 submit_result 是否被调用(.node_output.json 存在)
+    if node_key and node_key in NODE_AGENT_MAP:
+        if not Path("/workspace/.node_output.json").exists():
+            print(json.dumps({
+                "type": "agent.failed",
+                "error": f"节点 {node_key} 未调用 submit_result(无 .node_output.json)",
+                "sequence": 999, "timestamp": time.time(),
+            }, ensure_ascii=False), flush=True)
+            return 1
 
     if saw_failure and not saw_completion:
         return 1
