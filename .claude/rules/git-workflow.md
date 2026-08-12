@@ -10,7 +10,9 @@
 - `chore/<short-name>` —— 重构 / 文档 / 杂项
 - `<short-name>` 用 kebab-case，3-5 词
 
-## 2. Commit Message（英文）
+## 2. Commit Message（简体中文，覆盖全局英文默认）
+
+> 项目根 CLAUDE.md 明确"本项目 commit message 用简体中文"。Conventional Commits 类型前缀(feat/fix 等)+ `Co-Authored-By` trailer 仍用英文(工具链解析要求);描述主体、bullet、footer 一律中文。
 
 ```
 <type>(<scope>): <subject>

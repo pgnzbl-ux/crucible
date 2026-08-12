@@ -31,7 +31,7 @@ paths: ["backend/app/**/*.py"]
 | `tasks.repo_url` | URL 形式（HTTPS 优先，HTTP 警告） |
 | `tasks.description` | 10-8000 字符 |
 | `llm_providers.base_url` | URL，必须 HTTPS（生产环境） |
-| `llm_providers.api_key` | 入库前 Fernet 加密；接口只回显掩码 |
+| `llm_providers.api_key` | 当前**明文入库**(存 `api_key_encrypted` 字段);接口只回显掩码 `***last4` |
 
 ## 4. 错误消息
 

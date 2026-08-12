@@ -4,7 +4,7 @@
 > 定位: Crucible 架构决策与开发路线 —— 从 v2.0 分层架构痛点复盘到 v3.0 六原则六决策落地
 > 阅读对象: 任何接手本项目的开发者
 >
-> **Agent 阶段化编排是核心方向，完整设计见 `docs/agent-workflow.md`**（11 节点 S0-S10 + 3 分支出口 + 回退环 + 浏览器降级策略）
+> **平台 6 节点编排是核心方向，完整设计见 `docs/agent-workflow.md`**（6 节点 source/profile/env_ready/audit/reproduce/report + 3 分支出口：非 web skip、audit gate_fail 判误报、env 5 轮失败）
 
 ---
 
@@ -64,18 +64,21 @@ backend/app/
 │   ├── security.py            # JWT + bcrypt（bcrypt 锁 4.0.1 兼容 passlib）
 │   ├── celery_app.py          # Celery + autodiscover agent 任务 + prefetch=1 + acks_late
 │   ├── agent_runner.py        # ★ Agent Runner 编排（Docker SDK + 流式消费，替代 sandbox）
-│   └── crypto.py              # Fernet 加密（LLM API Key 落库加密）
+│   └── crypto.py              # Fernet 加密工具(遗留,settings 已不调用,明文存取)
 ├── contexts/                  # Bounded Contexts
 │   ├── identity/              # 用户注册/登录/JWT
 │   ├── task/                  # 任务 CRUD + TaskRun + AgentEvent + 事件流查询
-│   ├── agent/                 # ★ Agent 执行平台（Claude Agent SDK + agent-runner 容器）
+│   ├── agent/                 # ★ Agent 执行平台（6 节点编排 + Claude Agent SDK + agent-runner 容器）
+│   │   ├── orchestrator.py   #   ★ 6 节点编排器（循环 + 分支出口 + 断点续跑）
+│   │   ├── nodes/            #   ★ 6 节点实现（source/profile/env_ready/audit/reproduce/report）
+│   │   ├── ai_runner.py      #   AI 节点容器编排 + submit_result 工具 + schema 校验
+│   │   ├── profile_detector.py #  节点 1 规则引擎（7 语言 + web 门禁,纯代码）
 │   │   ├── sdk_adapter.py     #   Claude Agent SDK 适配器（env + prompt 构造）
-│   │   ├── runner_bridge.py   #   容器编排 + 写 prompt + 流消费组合
-│   │   ├── executor.py        #   ClaudeSdkExecutor / MockExecutor + 工厂
-│   │   └── tasks.py           #   Celery 工作流（host clone → 容器 → 实时落库）
+│   │   ├── executor.py        #   ClaudeSdkExecutor / MockExecutor + 工厂（遗留兼容）
+│   │   └── tasks.py           #   Celery 工作流（host clone → 调 orchestrator → 实时落库）
 │   ├── report/                # 报告生成 + 状态机 + MinIO 归档
 │   │   └── storage.py         #   MinIO (S3) 存储封装
-│   └── settings/              # ★ LLM Provider 后台配置（多 Provider + 加密 + 测试连接）
+│   └── settings/              # ★ LLM Provider 后台配置（多 Provider + 明文存取 + 测试连接）
 │       └── seed.py            #   环境变量 → DB 种子迁移（幂等）
 └── shared/
     ├── base.py                # BaseModel（UUID + 时间戳）
@@ -89,7 +92,7 @@ backend/app/
 frontend/src/
 ├── app/                       # providers.tsx + layout.tsx（AppLayout + 侧边栏）
 ├── pages/                     # DashboardPage / TasksPage / ReportsPage / SettingsPage / LoginPage
-├── features/                  # ★ 空壳：task/ agent/ auth/ report/（提案要求，尚未填充）
+├── features/                  # task/components（TaskTable/TaskFilterBar/TaskCreateDrawer）等
 ├── shared/lib/                # api.ts（类型化 API 客户端）+ meta.ts（状态/优先级/结论映射）
 ├── shared/hooks/              # ★ useTaskEvents.ts（SSE 实时事件流 hook）
 └── styles/
@@ -112,11 +115,13 @@ plugins/                       # ★ Claude Code 插件（阶段化编排的载�
 ### 2.4 数据模型
 
 ```
-users ──1:N── tasks ──1:N── task_runs ──1:N── agent_events
-                    │
-                    └──1:1── reports ──1:N── evidences
-                    
-llm_providers（独立，后台管理）
+users ──1:N── projects ──1:N── tasks ──1:N── task_runs ──1:N── agent_events
+                                │              │
+                                │              └──1:N── node_runs(6 节点断点续跑)
+                                └──1:1── reports ──1:N── evidences
+
+llm_providers(独立,后台管理) / credentials(凭据,明文存)
+Task 加 project_id(FK→projects) + verdict(6 档);Report 加 report_data 等结构化字段
 ```
 
 ### 2.5 运行时两种模式
@@ -139,13 +144,13 @@ llm_providers（独立，后台管理）
 | Repository 现代化 | ✅ | 每 Context repository.py（类型化 + select） |
 | Agent Adapter 抽象 | ✅ | executor.py（Protocol + 双实现 + 工厂） |
 | Agent Runner 编排 | ✅ | core/agent_runner.py（容器编排 + 流式消费 + 行缓冲 + 凭据零落盘） |
-| **Agent 阶段化编排（P0-0，插件化）** | ✅ | vuln-verify-expert 插件 COPY 进镜像 + run_one.py 加载插件指定 agent（见 docs/agent-workflow.md） |
+| **平台 6 节点编排** | ✅ | agent/orchestrator.py 驱动 6 节点 + node_runs 表 + submit_result 工具回传 + 4 子 agent(见 docs/agent-workflow.md) |
 | Event Bus（Redis Pub/Sub） | ✅ | shared/events.py（统一事件结构） |
 | 事件持久化 + 查询 | ✅ | agent_events 表 + GET /tasks/{id}/events |
 | **SSE 实时事件推送（P0-1）** | ✅ | shared/sse.py（StreamingResponse + 历史回放 + 15s 心跳 + 断开清理）+ GET /tasks/{id}/events/stream + 前端 useTaskEvents hook |
 | 报告生成 + MinIO 归档 | ✅ | report/service.py + storage.py |
 | LLM 后台配置（新增） | ✅ | settings context（Fernet 加密 + 测试连接 + 种子迁移） |
-| DeepSeek 对接（新增） | ✅ | ClaudeCodeAdapter.build_env（8 变量注入，零落盘） |
+| DeepSeek 对接 | ✅ | ClaudeSdkAdapter.build_runner_env() 注入 ANTHROPIC_* env(零落盘,容器销毁消失) |
 | 前端 pages/ shared/ 分层 | ✅ | AppLayout + 4 页面 |
 | 事件流展示（Timeline） | ✅ | TasksPage 详情 Drawer（SSE 实时 + 连接状态指示） |
 | Prometheus 指标 | ✅ | main.py Instrumentator |
@@ -155,7 +160,7 @@ llm_providers（独立，后台管理）
 - 全链路（Mock 模式）：POST /tasks → Celery → 沙箱 clone → Agent → 事件持久化 → 报告生成 → MinIO 归档 ✅
 - SSE 实时推送：agent/tasks.py 落库后 → Redis Pub/Sub → shared/sse.py 转发 → 前端 useTaskEvents hook（历史回放 + 15s 心跳 + 断开清理）✅
 - 沙箱安全：OOM 限制、网络隔离、非 root、只读 rootfs、凭据零落盘（grep 0 命中）✅
-- LLM 后台：CRUD / 掩码 / Fernet 密文落库 / 激活唯一性 / 测试连接真实打 DeepSeek 端点 ✅
+- LLM 后台：CRUD / 掩码 / **明文落库(响应层 mask_secret 掩码)** / 激活唯一性 / 测试连接真实打 DeepSeek 端点 ✅(crypto.encrypt_secret 遗留未用)
 - 种子迁移幂等性 ✅
 
 ---
@@ -171,7 +176,7 @@ llm_providers（独立，后台管理）
 
 | # | 任务 | 现状 | 目标 | 涉及 |
 |---|------|------|------|------|
-| 0 | **Agent 阶段化编排** ✅ | 已落地为**插件化**架构：vuln-verify-expert 插件（阶段 0/A/B/C/D）COPY 进 agent-runner 镜像，run_one.py 加载插件 + 指定 agent | （已完成 v0.1，平台能力 gap 见 agent-workflow.md §8） | Dockerfile + run_one.py + docs/agent-workflow.md |
+| 0 | **平台 6 节点编排** ✅ | agent/orchestrator.py 驱动 6 节点(source/profile/env_ready/audit/reproduce/report) + node_runs 表 + 4 子 agent(env-builder/auditor/reproducer/reporter) + submit_result 工具回传;分支出口:非 web skip、audit gate_fail 判误报、env 5 轮失败 | orchestrator.py + nodes/ + agent/tasks.py |
 | 1 | **SSE 实时事件推送** ✅ | `GET /api/v1/tasks/{id}/events/stream` 已就绪，前端 `useTaskEvents` 替换 3s 轮询 | （已完成） | shared/sse.py + task/api.py + frontend shared/hooks/useTaskEvents.ts |
 | 2 | **取消任务真正生效** ✅ | `send_task(task_id=run.id)` + cancel 时 `celery_app.control.revoke(run.id, terminate=True)` → SIGTERM 钩子销毁容器 | （已完成） | task/service.py + task/repository.py |
 | 3 | **JWT 登录闭环** ✅ | `shared/deps.py::CurrentUserId` 注入 owner_id（去硬编码 "system"）；前端路由守卫 + 401 跳登录 + SSE `?token=` 鉴权 | （已完成） | shared/deps.py + task/report api.py + App.tsx + LoginPage + layout.tsx |
@@ -185,11 +190,11 @@ llm_providers（独立，后台管理）
 | # | 任务 | 说明 | 涉及 |
 |---|------|------|------|
 | 5 | **frontend features/ 填充** | task/agent/auth/report 四个领域模块：store.ts + hooks.ts（useSSE、useTaskEvents） | frontend/features/* |
-| 6 | **Credential Proxy** ✅ | 任务级凭据（credentials 表，Fernet 加密）→ 任务引用 credential_refs → 注入 agent-runner（env_var → 容器 env / file → `.secrets/` 600）→ 任务结束销毁 | settings context + core/credential_proxy.py + task/agent 接入 |
+| 6 | **Credential Proxy** ✅ | 任务级凭据(credentials 表,**明文存取**)→ 任务引用 credential_refs → 注入 agent-runner(env_var → 容器 env / file → `.secrets/` 600)→ 任务结束销毁 | settings context + core/credential_proxy.py + task/agent 接入 |
 | 7 | **API Key + Service Account** | 平台级 API 认证（用于 CI/脚本调用） | identity context |
 | 8 | **OIDC SSO（增量叠加）** | 保持 JWT，新增 OIDC 认证方式（Keycloak） | identity context |
 | 9 | **RBAC 迁移** | 上一代有 4 角色 8 权限表，Crucible 尚未引入 | identity context + 路由守卫 |
-| 10 | **报告版本历史 + 导出** | Report 增加版本记录；PDF/DOCX 导出（python-docx，报告模块已具备 md→docx 转换） | report context + frontend |
+| 10 | **报告导出** | report_data JSON 入库;GET /reports/{id}/export?format=json\|md 导出(md 由 renderer.py 渲染)。**不生成 docx**,原 plugin md_to_docx.py 不用 | report context + frontend |
 | 11 | **审计日志 Context** | 平台操作审计（谁在何时做了什么） | 新 contexts/audit + event bus 订阅 |
 
 ### P2 — 生产 / 体验增强
@@ -235,7 +240,7 @@ P0 全部完成。每个 P1 完成后跑一遍全链路冒烟（任务创建 →
 - **凭据零落盘**：LLM key / 证书只走环境变量或运行时卷注入，绝不写镜像层或容器文件系统
 - agent-runner 容器必须：非 root + 只读 rootfs + cap_drop ALL + 资源限制 + 超时回收（`AgentRunnerSpec` 默认值）
 - 凭据零落盘：`ANTHROPIC_*` 等 8 个变量通过 `docker run --env` 注入 agent-runner 容器，容器销毁 env 消失
-- API Key 落库必须 Fernet 加密（`core/crypto.py`），列表接口只回显掩码
+- API Key 当前**明文落库**(`settings/service.py` 存 `api_key_encrypted` 字段),列表接口走 `mask_secret` 掩码。`core/crypto.py` 的 Fernet 工具遗留未用
 - 生产环境（`ENVIRONMENT=production`）强制校验：必须 AUTH_SECRET + 禁止 SQLite（config validator）
 
 ### 5.4 踩坑记录（务必先读）
@@ -290,7 +295,7 @@ pytest                           # 单元测试（待补，见 backlog P1）
 | `CLAUDE_AGENT_SDK_ENABLED` | `true` 启用真实 Agent（否则 Mock），见 README「对接第三方 LLM」 |
 | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | DeepSeek 等第三方 LLM（Anthropic 兼容端点） |
 | `AGENT_RUNNER_IMAGE` / `AGENT_RUNNER_TIMEOUT_SECONDS` | Agent Runner 镜像与超时 |
-| `SETTINGS_ENCRYPT_KEY` | Fernet 密钥（生产必配，开发从 AUTH_SECRET 派生） |
+| `SETTINGS_ENCRYPT_KEY` | 遗留配置(当前 settings 明文存取,Fernet 未生效) |
 
 ---
 

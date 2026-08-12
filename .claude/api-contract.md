@@ -75,7 +75,19 @@
 
 ### POST `/api/v1/tasks/{id}/actions/cancel`
 
-取消任务。**待补（P0-2）**：`celery_app.control.revoke` + 沙箱销毁。
+取消任务(已实现):`celery_app.control.revoke(terminate=True)` + agent-runner 容器销毁(SIGTERM 钩子)。
+
+### POST `/api/v1/tasks/{id}/retry`  *(阶段 1 新增)*
+
+重试任务(202 返 `{task_id, run_id, status:retrying}`)。**断点续跑**:复用上一 run 已完成的 NodeRun.output_json,从第一个非 completed 节点起重跑。
+
+### DELETE `/api/v1/tasks/{id}?hard=true|false`  *(阶段 1 新增)*
+
+删除任务。默认软删(`status=archived`);`hard=true` 物理删除需 `X-Confirm: true` header(级联清理 runs/nodes/events)。
+
+### GET `/api/v1/tasks/{id}/runs/{run_id}/nodes`  *(阶段 1 新增)*
+
+返回该 run 的 6 节点 NodeRun 列表(前端步骤条数据源):`[{node_index, node_key, status, attempt, error_message, started_at, finished_at}]`。
 
 ### GET `/api/v1/tasks/{id}/events`
 
@@ -108,11 +120,11 @@
 
 ### GET `/api/v1/reports/{id}`
 
-含正文、状态、MinIO 签名 URL。
+含正文、状态、结构化字段(verdict/cvss_score/severity/vulnerable_file/report_data/md_artifact_key/docx_artifact_key)。
 
-### POST `/api/v1/reports/{id}/actions/export?format=pdf|docx`
+### GET `/api/v1/reports/{id}/export?format=json|md`
 
-**待补（P1-10）**。
+**已实现**。format=json 返回结构化 report_data;format=md 返回 renderer.py 渲染的 markdown。**不生成 docx/pdf**。
 
 ### GET `/api/v1/reports/{id}/evidences`
 
@@ -134,7 +146,7 @@ owner 校验：生产严格（`report.owner_id` 必须匹配 token），开发�
 
 ### POST `/api/v1/settings/providers`
 
-新建。`api_key` 落库前 Fernet 加密。
+新建。`api_key` **明文落库**(存 `api_key_encrypted` 字段),响应层 `mask_secret` 掩码。
 
 ### PATCH `/api/v1/settings/providers/{id}`
 
@@ -172,7 +184,7 @@ owner 校验：生产严格（`report.owner_id` 必须匹配 token），开发�
 
 ## 待补（P0/P1/P2 路线）
 
-- ~~P0-0: Agent 阶段化编排~~ ✅ 插件化（见 docs/agent-workflow.md）
+- ~~P0-0: Agent 编排~~ ✅ 平台 6 节点编排(见 docs/agent-workflow.md)
 - ~~P0-1: `GET /tasks/{id}/events/stream` SSE 端点~~ ✅
 - ~~P0-2: `POST /tasks/{id}/actions/cancel` 真正生效~~ ✅（revoke + 容器销毁）
 - ~~P0-3: JWT 闭环 + SSE `?token=` 鉴权~~ ✅
@@ -181,6 +193,6 @@ owner 校验：生产严格（`report.owner_id` 必须匹配 token），开发�
 - P1-7: `Authorization: ApiKey xxx` 鉴权依赖
 - P1-8: OIDC 回调 `/auth/oauth/{provider}/callback`
 - P1-9: RBAC 权限矩阵
-- P1-10: 报告导出 `?format=pdf|docx`
+- 报告导出已实现(GET /reports/{id}/export?format=json|md),docx 不再支持
 - P1-11: 审计日志端点 `/audit/logs`
 - P2-12: OpenAPI 自动生成前端 types
