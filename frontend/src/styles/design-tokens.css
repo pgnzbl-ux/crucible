@@ -1,32 +1,47 @@
-/* Crucible Design Tokens */
+/* Crucible 设计令牌 —— 中性安全风（石墨灰 + 钢蓝） */
+/* 与 styles/theme.ts 同源；业务组件一律引用这里的变量，不写硬编码色值 */
 :root {
-  /* 主色调 */
-  --crucible-primary: #1976d2;
-  --crucible-primary-hover: #1565c0;
-  --crucible-primary-light: #e3f2fd;
+  /* 表面层级 */
+  --crucible-bg: #0f1115;
+  --crucible-surface: #15181f;
+  --crucible-surface-raised: #1b2029;
+  --crucible-border: rgba(255, 255, 255, 0.08);
+  --crucible-border-strong: rgba(255, 255, 255, 0.14);
 
-  /* 漏洞严重程度 — 中国红涨绿跌约定 */
-  --vr-critical: #d32f2f;
-  --vr-high: #f57c00;
-  --vr-medium: #fbc02d;
-  --vr-low: #388e3c;
-  --vr-info: #1976d2;
+  /* 文本 */
+  --crucible-text: #e6e8ec;
+  --crucible-text-secondary: #9aa1ac;
+  --crucible-text-disabled: #6f7683;
+
+  /* 品牌主色（钢蓝） */
+  --crucible-primary: #5b7fd4;
+  --crucible-primary-hover: #6f90e0;
+  --crucible-primary-active: #4a68b8;
+  --crucible-primary-light: rgba(91, 127, 212, 0.16);
+
+  /* 语义色 */
+  --crucible-success: #22a06b;
+  --crucible-warning: #d97706;
+  --crucible-error: #d64545;
+  --crucible-info: #5b7fd4;
+
+  /* 漏洞严重程度 —— 中国红涨绿跌约定 */
+  --vr-critical: #d64545;
+  --vr-high: #e8930c;
+  --vr-medium: #d9b14a;
+  --vr-low: #22a06b;
+  --vr-info: #5b7fd4;
 
   /* 任务流转状态色 */
-  --vr-pending: #9e9e9e;
-  --vr-running: #1976d2;
-  --vr-verifying: #7b1fa2;
-  --vr-verified: #388e3c;
-  --vr-failed: #d32f2f;
-  --vr-submitted: #f57c00;
-
-  /* 表面色（暗色主题） */
-  --crucible-bg: #141414;
-  --crucible-surface: #1f1f1f;
-  --crucible-surface-raised: #2a2a2a;
-  --crucible-border: #333333;
+  --vr-pending: #6b7280;
+  --vr-running: #5b7fd4;
+  --vr-verifying: #8b5cf6;
+  --vr-verified: #22a06b;
+  --vr-failed: #d64545;
+  --vr-submitted: #d97706;
 
   /* 排版 */
-  --crucible-font: 'Manrope', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif;
-  --crucible-font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  --crucible-font: 'IBM Plex Sans', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC',
+    -apple-system, BlinkMacSystemFont, sans-serif;
+  --crucible-font-mono: 'JetBrains Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
 }

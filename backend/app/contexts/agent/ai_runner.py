@@ -99,6 +99,59 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
 }
 
 
+def _mock_output(node_key: str, input_json: dict[str, Any]) -> dict[str, Any]:
+    """Mock 模式:SDK 未启用时返回模拟 output(通过 schema 校验),供编排链路联调。"""
+    if node_key == "env_ready":
+        return {
+            "target_url": "http://localhost:8080",
+            "compose_path": ".vuln-env/docker-compose.yml",
+            "transport_shape": {"protocol": "http", "listener": "0.0.0.0:8080", "tls_termination": "无"},
+            "initial_creds": {},
+            "started_containers": ["mock-app"],
+        }
+    if node_key == "audit":
+        return {
+            "kill_chain": "[Mock] entry → sink(模拟调用链)",
+            "defense_layers": [{"name": "validator", "bypass": "模拟绕过"}],
+            "payloads": ["mock-payload"],
+            "gate_verdict": "pass",
+            "gate_reason": "[Mock] 三问通过",
+        }
+    if node_key == "reproduce":
+        return {
+            "reproduced": True,
+            "evidence": [{"type": "http_response", "detail": "[Mock] 200 OK, payload reflected"}],
+            "screenshots": [],
+            "verdict": "confirmed",
+        }
+    if node_key == "report":
+        return {
+            "report_data": {
+                "product_intro": "[Mock] 产品介绍",
+                "vulnerability": {
+                    "type": "CWE-89: SQL 注入(Mock)",
+                    "cvss": {"vector": "AV:N/AC:L/PR:N/UI:N/C:H/I:H/A:H", "base_score": 9.8, "severity": "Critical"},
+                    "vulnerable_file": "app/mock.py",
+                    "vulnerable_lines": "1-10",
+                    "preconditions": "无",
+                    "entry_point": "POST /login",
+                    "core_harm": "[Mock] 数据泄露",
+                    "environment_constraint": "默认配置",
+                    "trigger_default": "是",
+                },
+                "impact": {"affected_versions": "all", "unaffected_versions": "—", "trigger_condition_defaults": "默认即满足"},
+                "details": {"audit_analysis": [], "poc_construction": {"exploitation_chain": "[Mock]"}},
+                "reproduction": {"transport_shape": {"protocol": "HTTP"}, "steps": [], "attack_chain_diagram": "[Mock]"},
+                "poc_commands": ["curl -X POST http://localhost:8080/login"],
+                "fix_suggestions": [{"priority": "P0", "suggestion": "[Mock] 参数化查询"}],
+                "reporting_decision": {"recommendation": "📤 建议报送", "actual_harm": "高", "fix_priority": "P0", "reason": "[Mock]", "risk_description": "[Mock]"},
+            },
+            "final_verdict": "confirmed",
+            "cvss": {"vector": "AV:N/AC:L/PR:N/UI:N/C:H/I:H/A:H", "base_score": 9.8, "severity": "Critical"},
+        }
+    return {}
+
+
 def validate_output(node_key: str, output: dict) -> tuple[bool, str | None]:
     """校验 AI 节点 output 是否满足最小 schema。"""
     schema = NODE_OUTPUT_SCHEMAS.get(node_key)
@@ -122,7 +175,17 @@ async def run_ai_node(
     """起 agent-runner 容器跑一个 AI 节点,返回 output_json。
 
     失败抛 AgentRunnerError。
+    SDK 未启用(claude_agent_sdk_enabled=False)时走 mock,返回模拟 output 供编排链路联调。
     """
+    # Mock 模式:SDK 未启用时直接返回模拟 output(不起容器)
+    from app.core.config import get_settings
+    if not get_settings().claude_agent_sdk_enabled:
+        logger.info(f"[Mock] AI 节点 {node_key} 返回模拟 output(SDK 未启用)")
+        output = _mock_output(node_key, input_json)
+        if on_event:
+            on_event({"type": "phase.updated", "phase": node_key, "message": f"[Mock] {node_key} 完成"})
+        return output
+
     # 1. 写 .node.json(容器内 run_one.py 读)
     node_input_path = Path(host_workdir) / ".node.json"
     node_input_path.write_text(

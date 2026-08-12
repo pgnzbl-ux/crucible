@@ -1,11 +1,12 @@
 import { useMemo } from 'react'
-import { Button, Card, Col, Row, Statistic, Table, Tag, Typography } from 'antd'
+import { Button, Card, Col, Empty, Row, Skeleton, Table, Tag, Typography } from 'antd'
 import {
   BugOutlined,
   CheckCircleOutlined,
   ClockCircleOutlined,
   ThunderboltOutlined,
   FileProtectOutlined,
+  PlusOutlined,
   ArrowRightOutlined,
 } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
@@ -16,8 +17,9 @@ import { useLocation } from 'wouter'
 import { api, type TaskSummary } from '../shared/lib/api'
 import { getStatusMeta, getPriorityMeta } from '../shared/lib/meta'
 import { AppLayout } from '../app/layout'
+import { PageHeader } from '../shared/components/PageHeader'
 
-const { Title, Text } = Typography
+const { Text } = Typography
 
 export function DashboardPage() {
   const [, navigate] = useLocation()
@@ -69,61 +71,42 @@ export function DashboardPage() {
     },
   ]
 
+  const statCards = [
+    { title: '排队中', value: stats.queued, icon: <ClockCircleOutlined />, tone: 'default' },
+    { title: '分析中', value: stats.running, icon: <ThunderboltOutlined />, tone: 'primary' },
+    { title: '待复核', value: stats.needsReview, icon: <BugOutlined />, tone: 'warning' },
+    { title: '已完成', value: stats.completed, icon: <CheckCircleOutlined />, tone: 'success' },
+    { title: '失败', value: stats.failed, icon: <BugOutlined />, tone: 'error' },
+    { title: '任务总数', value: stats.total, icon: <FileProtectOutlined />, tone: 'default' },
+  ]
+
   return (
     <AppLayout>
-      <Title level={4} style={{ marginBottom: 4 }}>
-        Crucible 工作台
-      </Title>
-      <Text type="secondary">AI 漏洞自动验证平台 · 任务总览</Text>
+      <PageHeader
+        title="工作台"
+        subtitle="AI 漏洞自动验证平台 · 任务总览"
+        extra={
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/tasks')}>
+            新建任务
+          </Button>
+        }
+      />
 
-      <Row gutter={[16, 16]} style={{ marginTop: 20 }}>
-        <Col xs={24} sm={12} lg={6}>
-          <Card>
-            <Statistic title="排队中" value={stats.queued} prefix={<ClockCircleOutlined />} />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <Card>
-            <Statistic title="分析中" value={stats.running} prefix={<ThunderboltOutlined />} />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <Card>
-            <Statistic
-              title="待复核"
-              value={stats.needsReview}
-              prefix={<BugOutlined />}
-              valueStyle={{ color: '#d46b08' }}
-            />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <Card>
-            <Statistic
-              title="已完成"
-              value={stats.completed}
-              prefix={<CheckCircleOutlined />}
-              valueStyle={{ color: '#3f8600' }}
-            />
-          </Card>
-        </Col>
-      </Row>
-
-      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-        <Col xs={24} sm={12} lg={6}>
-          <Card>
-            <Statistic title="失败" value={stats.failed} prefix={<BugOutlined />} valueStyle={{ color: '#cf1322' }} />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <Card>
-            <Statistic title="任务总数" value={stats.total} prefix={<FileProtectOutlined />} />
-          </Card>
-        </Col>
+      <Row gutter={[16, 16]} className="crucible-stagger">
+        {statCards.map((card) => (
+          <Col xs={24} sm={12} lg={8} key={card.title}>
+            <Card className="stat-card">
+              <div className={`stat-card-icon stat-card-icon-${card.tone}`}>{card.icon}</div>
+              <div className="stat-card-title">{card.title}</div>
+              <div className="stat-card-value">{card.value}</div>
+            </Card>
+          </Col>
+        ))}
       </Row>
 
       <Card
         style={{ marginTop: 24 }}
+        className="crucible-card-hover"
         title="最近任务"
         extra={
           <Button type="link" onClick={() => navigate('/tasks')}>
@@ -131,14 +114,23 @@ export function DashboardPage() {
           </Button>
         }
       >
-        <Table
-          rowKey="id"
-          size="small"
-          loading={isLoading}
-          columns={recentColumns}
-          dataSource={(data?.items ?? []).slice(0, 8)}
-          pagination={false}
-        />
+        {isLoading ? (
+          <Skeleton active paragraph={{ rows: 5 }} />
+        ) : (data?.items ?? []).length ? (
+          <Table
+            rowKey="id"
+            size="middle"
+            columns={recentColumns}
+            dataSource={(data?.items ?? []).slice(0, 8)}
+            pagination={false}
+            onRow={() => ({
+              onClick: () => navigate('/tasks'),
+              style: { cursor: 'pointer' },
+            })}
+          />
+        ) : (
+          <Empty description="暂无任务" />
+        )}
       </Card>
     </AppLayout>
   )

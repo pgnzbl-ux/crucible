@@ -7,6 +7,7 @@ import { DashboardPage } from './pages/DashboardPage'
 import { TasksPage } from './pages/TasksPage'
 import { ReportsPage } from './pages/ReportsPage'
 import { SettingsPage } from './pages/SettingsPage'
+import { NotFoundPage } from './pages/NotFoundPage'
 
 // 路由守卫：无 token → /login（P0-3 JWT 闭环）
 function RequireAuth({ children }: { children: ReactNode }) {
@@ -43,7 +44,7 @@ export function App() {
               <DashboardPage />
             </RequireAuth>
           </Route>
-          <Route>404 — 页面未找到</Route>
+          <Route component={NotFoundPage} />
         </Switch>
       </AntApp>
     </Providers>

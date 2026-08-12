@@ -1,4 +1,5 @@
 @import './design-tokens.css';
+@import './fonts.css';
 
 * {
   margin: 0;
@@ -6,17 +7,358 @@
   box-sizing: border-box;
 }
 
-html, body, #root {
+html,
+body,
+#root {
   height: 100%;
   font-family: var(--crucible-font);
   background: var(--crucible-bg);
-  color: #e8e8e8;
+  color: var(--crucible-text);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  font-variant-numeric: tabular-nums;
 }
 
-/* 滚动条 */
-::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-track { background: var(--crucible-bg); }
-::-webkit-scrollbar-thumb { background: var(--crucible-border); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #555; }
+/* ── 滚动条 ── */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* ── 焦点可见性（企业级可访问性） ── */
+:focus-visible {
+  outline: 2px solid var(--crucible-primary);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* ── 页面进入动效 ── */
+@keyframes crucible-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.crucible-page-enter {
+  animation: crucible-fade-in 320ms ease-out both;
+}
+
+/* 首屏 stagger 入场（Dashboard 统计卡） */
+.crucible-stagger > * {
+  animation: crucible-fade-in 360ms ease-out both;
+}
+.crucible-stagger > *:nth-child(2) {
+  animation-delay: 60ms;
+}
+.crucible-stagger > *:nth-child(3) {
+  animation-delay: 120ms;
+}
+.crucible-stagger > *:nth-child(4) {
+  animation-delay: 180ms;
+}
+.crucible-stagger > *:nth-child(5) {
+  animation-delay: 240ms;
+}
+.crucible-stagger > *:nth-child(6) {
+  animation-delay: 300ms;
+}
+
+/* ── 卡片 hover 微交互 ── */
+.crucible-card-hover {
+  transition:
+    transform 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+.crucible-card-hover:hover {
+  transform: translateY(-2px);
+  border-color: var(--crucible-primary-light);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+}
+
+/* ── 布局：品牌区 ── */
+.crucible-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 20px;
+  color: #fff;
+  overflow: hidden;
+}
+.crucible-brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--crucible-primary), #3a5fb8);
+  color: #fff;
+  font-size: 16px;
+  flex-shrink: 0;
+}
+.crucible-brand-name {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  line-height: 1.2;
+  display: block;
+  white-space: nowrap;
+}
+.crucible-brand-tagline {
+  font-size: 11px;
+  color: #8a93a3;
+  line-height: 1.2;
+  display: block;
+  white-space: nowrap;
+}
+.ant-layout-sider-collapsed .crucible-brand-text {
+  display: none;
+}
+.ant-layout-sider-collapsed .crucible-brand {
+  justify-content: center;
+  padding: 16px 0;
+}
+
+/* ── 布局：顶栏 ── */
+.crucible-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--crucible-border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.02);
+}
+.crucible-header-title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+.crucible-header-user {
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 8px;
+  transition: background-color 0.2s ease;
+}
+.crucible-header-user:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.crucible-header-username {
+  font-size: 13px;
+  color: var(--crucible-text-secondary);
+}
+
+/* ── 布局：内容容器 ── */
+.crucible-content {
+  padding: clamp(16px, 2.5vw, 32px);
+}
+.crucible-content-inner {
+  max-width: 1280px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+/* ── 统一页头 ── */
+.crucible-page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.crucible-page-header-main {
+  flex: 1;
+  min-width: 0;
+}
+.crucible-page-header-extra {
+  flex-shrink: 0;
+}
+
+/* ── 统计卡 ── */
+.stat-card {
+  border-radius: 12px;
+  min-height: 146px;
+  overflow: hidden;
+  position: relative;
+  transition:
+    transform 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+.stat-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(91, 127, 212, 0.35);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+.stat-card::after {
+  content: '';
+  position: absolute;
+  right: -24px;
+  bottom: -34px;
+  width: 108px;
+  height: 108px;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  border-radius: 50%;
+  pointer-events: none;
+}
+.stat-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  font-size: 18px;
+  margin-bottom: 12px;
+}
+.stat-card-icon-primary {
+  background: rgba(91, 127, 212, 0.16);
+  color: var(--crucible-primary);
+}
+.stat-card-icon-success {
+  background: rgba(34, 160, 107, 0.16);
+  color: var(--crucible-success);
+}
+.stat-card-icon-warning {
+  background: rgba(217, 119, 6, 0.16);
+  color: var(--crucible-warning);
+}
+.stat-card-icon-error {
+  background: rgba(214, 69, 69, 0.16);
+  color: var(--crucible-error);
+}
+.stat-card-icon-default {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--crucible-text-secondary);
+}
+.stat-card-title {
+  font-size: 13px;
+  color: var(--crucible-text-secondary);
+}
+.stat-card-value {
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.2;
+  margin-top: 2px;
+}
+
+/* ── 登录页 ── */
+.ant-card-head {
+  min-height: 56px;
+}
+
+.ant-table-wrapper {
+  overflow-x: auto;
+}
+
+.ant-table-tbody > tr {
+  transition: background-color 0.18s ease;
+}
+
+.ant-table-tbody > tr > td:first-child {
+  font-weight: 500;
+}
+
+@media (max-width: 768px) {
+  .crucible-header {
+    padding: 0 16px;
+  }
+
+  .crucible-header-username {
+    display: none;
+  }
+
+  .crucible-page-header {
+    align-items: stretch;
+    flex-direction: column;
+    margin-bottom: 16px;
+  }
+
+  .crucible-page-header-extra,
+  .crucible-page-header-extra .ant-space {
+    width: 100%;
+  }
+
+  .crucible-page-header-extra .ant-btn,
+  .crucible-page-header-extra .ant-space-item {
+    flex: 1;
+  }
+}
+
+.crucible-login {
+
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background:
+    radial-gradient(ellipse at 50% -20%, rgba(91, 127, 212, 0.14), transparent 60%),
+    var(--crucible-bg);
+  padding: 24px;
+}
+.crucible-login-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-size: 32px 32px;
+  -webkit-mask-image: radial-gradient(ellipse at center, rgba(0, 0, 0, 0.6), transparent 75%);
+  mask-image: radial-gradient(ellipse at center, rgba(0, 0, 0, 0.6), transparent 75%);
+  pointer-events: none;
+}
+.crucible-login-card {
+  width: 400px;
+  max-width: 100%;
+  border-radius: 16px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.4);
+  position: relative;
+  animation: crucible-fade-in 360ms ease-out both;
+}
+.crucible-login-brand {
+  text-align: center;
+  margin-bottom: 28px;
+}
+.crucible-login-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, var(--crucible-primary), #3a5fb8);
+  color: #fff;
+  font-size: 22px;
+  box-shadow: 0 8px 24px rgba(91, 127, 212, 0.35);
+}
+
+/* ── 动效降级 ── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
