@@ -1,22 +1,25 @@
-import { Button, Card, Table, Tag, Typography } from 'antd'
+import { Button, Card, Empty, Skeleton, Table, Tag, Typography } from 'antd'
 import { FileProtectOutlined, ReloadOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { useQuery } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 
 import { api, type ReportDetail } from '../shared/lib/api'
-import { getConclusionMeta } from '../shared/lib/meta'
+import { getVerdictMeta } from '../shared/lib/meta'
 import { AppLayout } from '../app/layout'
+import { PageHeader } from '../shared/components/PageHeader'
+import { ReportContent } from '../shared/components/ReportContent'
 
-const { Title, Text } = Typography
+const { Text } = Typography
+
+type ReportRow = ReportDetail & { project_address: string }
 
 export function ReportsPage() {
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['reports'],
     queryFn: () =>
       api.listTasks({ limit: '200' }).then(async (tasks) => {
-        // 逐个任务查报告（分页小场景直接聚合）
-        const reports: Array<ReportDetail & { project_address: string }> = []
+        const reports: ReportRow[] = []
         for (const t of tasks.items) {
           try {
             const r = await api.getReportByTask(t.id)
@@ -30,7 +33,7 @@ export function ReportsPage() {
     refetchInterval: 8000,
   })
 
-  const columns: ColumnsType<ReportDetail & { project_address: string }> = [
+  const columns: ColumnsType<ReportRow> = [
     {
       title: '任务',
       dataIndex: 'task_id',
@@ -44,18 +47,23 @@ export function ReportsPage() {
       render: (v: string) => <Text code>{v}</Text>,
     },
     {
-      title: '标题',
-      dataIndex: 'title',
-      ellipsis: true,
+      title: '判定',
+      dataIndex: 'verdict',
+      width: 120,
+      render: (v: string | null) =>
+        v ? <Tag color={getVerdictMeta(v).color}>{getVerdictMeta(v).label}</Tag> : <Text type="secondary">—</Text>,
     },
     {
-      title: '结论',
-      dataIndex: 'conclusion',
-      width: 140,
-      render: (v: string) => {
-        const m = getConclusionMeta(v)
-        return <Tag color={m.color}>{m.label}</Tag>
-      },
+      title: 'CVSS',
+      dataIndex: 'cvss_score',
+      width: 90,
+      render: (v: number | null) => (v != null ? <Text strong>{v.toFixed(1)}</Text> : <Text type="secondary">—</Text>),
+    },
+    {
+      title: '严重度',
+      dataIndex: 'severity',
+      width: 90,
+      render: (v: string | null) => (v ? <Tag>{v}</Tag> : <Text type="secondary">—</Text>),
     },
     {
       title: '状态',
@@ -73,26 +81,32 @@ export function ReportsPage() {
 
   return (
     <AppLayout>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <div>
-          <Title level={4} style={{ marginBottom: 4 }}>
-            验证报告
-          </Title>
-          <Text type="secondary">Agent 分析产出的结构化验证报告</Text>
-        </div>
-        <Button icon={<ReloadOutlined />} onClick={() => refetch()}>
-          刷新
-        </Button>
-      </div>
-      <Card>
-        <Table
-          rowKey="id"
-          loading={isLoading}
-          columns={columns}
-          dataSource={data ?? []}
-          pagination={{ pageSize: 10 }}
-          locale={{ emptyText: '暂无报告' }}
-        />
+      <PageHeader
+        title="验证报告"
+        subtitle="Agent 分析产出的结构化验证报告(点击行展开 8 节详情)"
+        extra={
+          <Button icon={<ReloadOutlined />} onClick={() => refetch()}>
+            刷新
+          </Button>
+        }
+      />
+      <Card className="crucible-card-hover">
+        {isLoading ? (
+          <Skeleton active paragraph={{ rows: 6 }} />
+        ) : (data ?? []).length ? (
+          <Table<ReportRow>
+            rowKey="id"
+            columns={columns}
+            dataSource={data ?? []}
+            pagination={{ pageSize: 10 }}
+            expandable={{
+              expandedRowRender: (row) => <ReportContent report={row} />,
+              rowExpandable: () => true,
+            }}
+          />
+        ) : (
+          <Empty description="暂无报告" image={<FileProtectOutlined style={{ fontSize: 40 }} />} />
+        )}
       </Card>
     </AppLayout>
   )
