@@ -2,7 +2,7 @@
 LLM Provider 管理服务。
 
 职责：
-- CRUD（API key 加密落库，列表掩码回显）
+- CRUD(API key 明文落库,列表掩码回显)
 - 默认 Provider 激活（全局唯一 is_default）
 - 测试连接（真实调用 Anthropic 兼容 /v1/messages）
 - 运行时配置解析（Agent 任务从 DB 取默认 Provider → 环境变量注入沙箱）
@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx
 
-from app.core.crypto import decrypt_secret, encrypt_secret, mask_secret
+from app.core.crypto import mask_secret
 from .models import Credential, LlmProvider
 from .repository import CredentialRepository, SettingsRepository
 from .schemas import (
@@ -33,7 +33,7 @@ from .schemas import (
 def to_response(provider: LlmProvider, plain_key: str = "") -> LlmProviderResponse:
     """ORM → 响应模型（api_key 掩码）"""
     if not plain_key:
-        plain_key = decrypt_secret(provider.api_key_encrypted)
+        plain_key = provider.api_key_encrypted
     return LlmProviderResponse(
         id=provider.id,
         name=provider.name,
@@ -65,7 +65,7 @@ class SettingsService:
             name=request.name,
             provider_type=request.provider_type,
             base_url=request.base_url,
-            api_key_encrypted=encrypt_secret(request.api_key),
+            api_key_encrypted=request.api_key,
             model=request.model,
             timeout_ms=request.timeout_ms,
             enabled=request.enabled,
@@ -89,7 +89,7 @@ class SettingsService:
                 value = json.dumps(value, ensure_ascii=False)
             setattr(provider, field, value)
         if request.api_key:
-            provider.api_key_encrypted = encrypt_secret(request.api_key)
+            provider.api_key_encrypted = request.api_key
         await self.repo.session.flush()
         return to_response(provider, request.api_key or "")
 
@@ -134,7 +134,7 @@ class SettingsService:
             provider = await self.repo.get_by_id(provider_id)
             if provider:
                 resolved_url = resolved_url or provider.base_url
-                resolved_key = resolved_key or decrypt_secret(provider.api_key_encrypted)
+                resolved_key = resolved_key or provider.api_key_encrypted
                 resolved_model = resolved_model or provider.model
 
         if not resolved_url or not resolved_key or not resolved_model:
@@ -177,8 +177,8 @@ class SettingsService:
         """Provider → 沙箱环境变量（凭据零落盘）"""
         return {
             "ANTHROPIC_BASE_URL": provider.base_url,
-            "ANTHROPIC_AUTH_TOKEN": decrypt_secret(provider.api_key_encrypted),
-            "ANTHROPIC_API_KEY": decrypt_secret(provider.api_key_encrypted),
+            "ANTHROPIC_AUTH_TOKEN": provider.api_key_encrypted,
+            "ANTHROPIC_API_KEY": provider.api_key_encrypted,
             "ANTHROPIC_MODEL": provider.model,
             "ANTHROPIC_SMALL_FAST_MODEL": provider.model,
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": provider.model,
@@ -202,7 +202,7 @@ class SettingsService:
             name=request.name,
             kind=request.kind,
             target=request.target,
-            secret_encrypted=encrypt_secret(request.secret),
+            secret_encrypted=request.secret,
             description=request.description,
         )
         cred = await repo.create(cred)
@@ -220,7 +220,7 @@ class SettingsService:
         if request.description is not None:
             cred.description = request.description
         if request.secret:
-            cred.secret_encrypted = encrypt_secret(request.secret)
+            cred.secret_encrypted = request.secret
         await self.repo.session.flush()
         return _credential_to_response(cred)
 
@@ -241,7 +241,7 @@ class SettingsService:
 
 
 def _credential_to_response(cred: Credential) -> CredentialResponse:
-    plain = decrypt_secret(cred.secret_encrypted)
+    plain = cred.secret_encrypted
     return CredentialResponse(
         id=cred.id,
         name=cred.name,

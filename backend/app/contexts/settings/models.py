@@ -7,7 +7,7 @@ from app.shared.base import BaseModel
 class LlmProvider(BaseModel):
     """LLM Provider 配置 — 后台可管理的模型接入点
 
-    api_key 加密存储（Fernet），列表接口仅回显掩码。
+    api_key 明文存储,列表接口仅回显掩码。
     is_default 全局唯一（通过 service 保证），Agent 任务运行时取默认 Provider。
     """
     __tablename__ = "llm_providers"
@@ -18,7 +18,7 @@ class LlmProvider(BaseModel):
         comment="deepseek | tencent | openai_compat | anthropic | custom"
     )
     base_url: Mapped[str] = mapped_column(String(512), nullable=False, comment="Anthropic 兼容端点")
-    api_key_encrypted: Mapped[str] = mapped_column(Text, default="", comment="Fernet 加密的 API Key")
+    api_key_encrypted: Mapped[str] = mapped_column(Text, default="", comment="明文 API Key(响应层掩码)")
     model: Mapped[str] = mapped_column(String(100), nullable=False, comment="模型名，如 deepseek-v4-flash")
     timeout_ms: Mapped[int] = mapped_column(Integer, default=600000, comment="API_TIMEOUT_MS")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, comment="是否启用")
@@ -35,7 +35,7 @@ class LlmProvider(BaseModel):
 
 
 class Credential(BaseModel):
-    """任务级凭据 — Fernet 加密存储，任务运行时注入 agent-runner 容器（零落盘）。
+    """任务级凭据 — 明文存储,任务运行时注入 agent-runner 容器(零落盘)。
 
     kind=env_var：注入为容器环境变量（target=变量名[大写下划线]，secret=值）
     kind=file：   写为容器内 /workspace/.secrets/<target>（权限 600），
@@ -52,7 +52,7 @@ class Credential(BaseModel):
         String(255), nullable=False,
         comment="env_var→环境变量名(大写下划线) / file→容器内文件名(.secrets/<target>)",
     )
-    secret_encrypted: Mapped[str] = mapped_column(Text, default="", comment="Fernet 加密的凭据值")
+    secret_encrypted: Mapped[str] = mapped_column(Text, default="", comment="明文凭据值(响应层掩码)")
     description: Mapped[str | None] = mapped_column(String(500))
 
     __table_args__ = (

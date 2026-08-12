@@ -19,7 +19,6 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from app.core.crypto import decrypt_secret
 from app.contexts.settings.models import Credential
 
 # host_workdir 下的密钥子目录（bind mount → 容器内 /workspace/.secrets）
@@ -48,7 +47,7 @@ def inject_credentials(
     secret_dir = os.path.join(host_workdir, SECRET_DIR_NAME)
 
     for cred in credentials:
-        plain = decrypt_secret(cred.secret_encrypted)
+        plain = cred.secret_encrypted
         if not plain:
             # 解密失败（key 变更或空值）跳过，不阻断任务
             continue
