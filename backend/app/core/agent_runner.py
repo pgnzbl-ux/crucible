@@ -284,11 +284,25 @@ class AgentRunnerManager:
             if oom_killed and exit_code == 137:
                 logger.warning(f"agent-runner 容器 OOM kill: {runner.name}")
 
+            # 失败时(非 0 且非 OOM)在删容器前抓 stderr,供 executor 诊断。
+            # 此前 executor 在 finally 后才取,那时容器已删 → 永远空。
+            stderr_tail = ""
+            if exit_code != 0 and not oom_killed:
+                try:
+                    raw = runner.container.logs(tail=50, stdout=False, stderr=True)
+                    if isinstance(raw, bytes):
+                        stderr_tail = raw.decode("utf-8", errors="replace")
+                    else:
+                        stderr_tail = str(raw)
+                except Exception:  # noqa: BLE001 — 抓 stderr 失败不阻断
+                    pass
+
             summary = {
                 "container_id": runner.id,
                 "container_name": runner.name,
                 "exit_code": exit_code,
                 "oom_killed": oom_killed,
+                "stderr_tail": stderr_tail,
             }
             return exit_code, summary
 

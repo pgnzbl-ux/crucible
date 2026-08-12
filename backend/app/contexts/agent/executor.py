@@ -148,14 +148,8 @@ class ClaudeSdkExecutor:
             result.error_message = "agent_runner_killed"
         elif exit_code != 0 and exit_code != 2:
             # 2 = 基础设施错误（OCI / 镜像）；其它非 0 = 业务失败
-            stderr_tail = ""
-            try:
-                if result.container_id:
-                    stderr_tail = agent_runner_manager._client.containers.get(
-                        result.container_id
-                    ).logs(tail=50, stdout=False, stderr=True).decode("utf-8", errors="replace")
-            except Exception:
-                pass
+            # stderr_tail 已由 run_with_streaming 在删容器前抓好（避免容器已删取不到）
+            stderr_tail = summary.get("stderr_tail", "") if summary else ""
             result.conclusion = "failed"
             result.error_message = (stderr_tail or result.error_message or "agent_runner 非 0 退出")[:500]
         else:
