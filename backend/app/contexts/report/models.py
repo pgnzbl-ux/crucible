@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Index, String, Text
+from sqlalchemy import Float, ForeignKey, Index, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.shared.base import BaseModel
@@ -25,8 +25,21 @@ class Report(BaseModel):
     title: Mapped[str] = mapped_column(String(255), default="漏洞验证报告")
     summary: Mapped[str | None] = mapped_column(Text, comment="结论摘要")
     reasoning: Mapped[str | None] = mapped_column(Text, comment="完整分析推理")
-    evidence_summary: Mapped[str | None] = mapped_column(Text, comment="证据摘要（JSON）")
-    artifact_key: Mapped[str | None] = mapped_column(String(512), comment="报告产物在 MinIO 的 key")
+    evidence_summary: Mapped[str | None] = mapped_column(Text, comment="证据摘要(JSON,deprecated)")
+    artifact_key: Mapped[str | None] = mapped_column(String(512), comment="报告产物在 MinIO 的 key(deprecated)")
+
+    # 结构化字段(阶段 1 新增)
+    verdict: Mapped[str | None] = mapped_column(
+        String(30), index=True,
+        comment="6 档: confirmed|partial|code_reachable|code_smell|false_positive|not_reproduced",
+    )
+    cvss_score: Mapped[float | None] = mapped_column(Float, index=True)
+    severity: Mapped[str | None] = mapped_column(String(20), comment="Critical/High/Medium/Low/None")
+    vulnerable_file: Mapped[str | None] = mapped_column(String(1024), comment="漏洞文件定位")
+    report_data: Mapped[str | None] = mapped_column(Text, comment="8 节结构化 JSON(对齐 report_template)")
+    md_artifact_key: Mapped[str | None] = mapped_column(String(512), comment="MinIO:原始 md key")
+    docx_artifact_key: Mapped[str | None] = mapped_column(String(512), comment="MinIO:导出 docx key")
+
     published_at: Mapped[datetime | None] = mapped_column(comment="发布时间")
 
     # 关系 — 仅同 Context 内
