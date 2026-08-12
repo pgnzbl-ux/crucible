@@ -38,11 +38,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 from app.contexts.identity.models import User  # noqa: F401 — 注册 users 表到 metadata，保证 FK 解析
+from app.contexts.project.models import Project  # noqa: F401 — 注册 projects 表(阶段 1)
 from app.contexts.report.models import Report, Evidence  # noqa: F401 — 注册 reports/evidences 表
 from app.contexts.report.repository import ReportRepository
 from app.contexts.report.service import ReportService
 from app.contexts.settings.models import LlmProvider  # noqa: F401 — 注册 llm_providers 表
-from app.contexts.task.models import AgentEvent, Task, TaskRun
+from app.contexts.task.models import AgentEvent, Task, TaskRun, NodeRun  # noqa: F401 — NodeRun 注册(阶段 1)
 from app.core.agent_runner import AgentRunnerError, agent_runner_manager, git_clone_to_workdir
 from app.core.celery_app import celery_app
 from app.core.config import get_settings

@@ -11,8 +11,10 @@ from app.core.config import get_settings
 # 导入所有模型以确保它们注册到 Base.metadata
 from app.contexts.identity.models import User
 from app.contexts.task.models import Task, TaskRun, AgentEvent
+from app.contexts.task.models import NodeRun  # 阶段 1 新增
 from app.contexts.report.models import Report, Evidence
 from app.contexts.settings.models import LlmProvider, Credential
+from app.contexts.project.models import Project  # 阶段 1 新增
 
 config = context.config
 settings = get_settings()
