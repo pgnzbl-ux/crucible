@@ -317,96 +317,82 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
             except Exception as e:  # noqa: BLE001 — 凭据注入失败不阻断（任务可无凭据继续）
                 logger.warning(f"凭据注入失败（任务继续）: {e}")
 
-            # 4. 流式拉起 agent-runner + 实时落库
-            loop = asyncio.get_running_loop()
+            # 4. 6 节点编排(替代旧的单次 executor.run)
+            from app.contexts.agent.orchestrator import run_orchestration
+            from app.contexts.task.models import NodeRun as _NodeRun
+            from sqlalchemy import select as _select
+
             captured: dict = {}
 
-            def on_event(event: dict) -> None:
-                future = asyncio.run_coroutine_threadsafe(
-                    _persist_single_event(session, run, event), loop
-                )
+            async def _on_node_event(node_key: str, status: str, output) -> None:
+                """节点状态变化 → 发 Redis Pub/Sub(SSE 推前端步骤条)。"""
                 try:
-                    future.result(timeout=5)
-                except Exception as e:  # noqa: BLE001 — 落库失败仅日志，不阻塞流
-                    logger.warning(f"实时落库失败（不影响主流程）: {e}")
+                    await event_bus.publish(
+                        f"task.{task_id}.events",
+                        Event(
+                            event_type="node.updated",
+                            aggregate_id=str(task_id),
+                            aggregate_type="task",
+                            payload={
+                                "run_id": str(run.id),
+                                "node_key": node_key,
+                                "status": status,
+                                "output": output,
+                            },
+                        ),
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"node.updated 发布失败(不影响主流程): {e}")
 
-            executor = ClaudeSdkExecutor()
-            ctx = AgentRunContext(
-                task_id=task_id,
-                run_id=run_id,
-                project_address=task.project_address,
-                project_ref=task.project_ref,
-                vulnerability_description=task.vulnerability_description,
-                host_workdir=host_workdir,
-                runner_env=runner_env,
-                secret_files=secret_files,
-            )
             try:
-                result = await asyncio.to_thread(executor.run, ctx, on_event)
-                captured["result"] = result
-                container_id = result.container_id
-                _register_container(container_id)
-            except AgentRunnerError as e:
-                captured["error"] = e
+                orch_result = await run_orchestration(
+                    task_id=task_id,
+                    run_id=run_id,
+                    session=session,
+                    host_workdir=host_workdir,
+                    source_path=host_workdir,  # source 在 host_workdir/project 下
+                    runner_env=runner_env,
+                    on_node_event=_on_node_event,
+                )
+                captured["result"] = orch_result
             except Exception as e:  # noqa: BLE001
                 captured["error"] = e
-            finally:
-                _unregister_container(container_id)
 
-            # 5. 状态分流 + 持久化
-            result = captured.get("result")
-            if result is None:
-                err = str(captured.get("error", "agent_runner 未返回结果"))
+            # 5. 状态(orchestrator 已设 task/run/verdict;这里补 summary + 报告雏形)
+            orch_result = captured.get("result")
+            if orch_result is None:
+                err = str(captured.get("error", "orchestrator 未返回结果"))
                 await _update_run(session, run, "failed", err[:500])
                 task.status = "failed"
-            elif result.conclusion == "cancelled":
-                await _update_run(session, run, "cancelled", result.error_message)
-                task.status = "cancelled"
-            elif result.exit_code != 0 and result.exit_code != 137 and result.conclusion == "failed":
-                await _update_run(session, run, "failed", result.error_message)
-                task.status = "failed"
-            elif result.conclusion == "exists":
-                await _update_run(session, run, "completed")
-                task.status = "needs_review"
             else:
-                await _update_run(session, run, "completed")
-                task.status = "completed"
+                # 节点 5 产出 report_data 时,落结构化 Report(阶段 4 补 docx 导出)
+                report_data = orch_result.get("report_data")
+                if report_data and task.status in ("completed", "needs_review"):
+                    try:
+                        from app.contexts.report.models import Report
+                        existing = await session.execute(
+                            _select(Report).where(Report.task_id == task_id, Report.run_id == run_id)
+                        )
+                        report = existing.scalar_one_or_none()
+                        if report is None:
+                            report = Report(
+                                task_id=task_id, run_id=run_id, owner_id=task.owner_id,
+                                status="generated",
+                                verdict=orch_result.get("verdict"),
+                                report_data=json.dumps(report_data, ensure_ascii=False, default=str),
+                                title=f"漏洞验证报告 — {task_id[:8]}",
+                                summary=str(report_data.get("§1") or report_data.get("product_intro") or "")[:500],
+                            )
+                            session.add(report)
+                        await session.commit()
+                        summary["report_generated"] = True
+                    except Exception as e:  # noqa: BLE001
+                        summary["report_generated"] = False
+                        summary["report_error"] = str(e)
 
-            # 6. 持久化 reasoning + session_id
-            if result is not None:
-                task.vulnerability_reasoning = (result.reasoning or "")[:20000] or None
-                if result.session_id:
-                    run.agent_session_id = result.session_id
             await session.commit()
 
-            # 7. 生成报告（agent 产出 → report context）+ 自动归档插件产物
-            if result is not None and task.status in ("completed", "needs_review"):
-                try:
-                    report_svc = ReportService(ReportRepository(session))
-                    report = await report_svc.generate_from_agent(
-                        task_id=task_id,
-                        run_id=run_id,
-                        owner_id=task.owner_id,
-                        conclusion=result.conclusion,
-                        reasoning=result.reasoning or "",
-                        events=result.events,
-                    )
-                    # 7.5 扫描 host_workdir/project 的 VULN-*/ 与 .vuln-env/ 产物 → MinIO + Evidence
-                    #    插件 agent 按约定把 report.md/.docx/img/.vuln-env.json 写到 project 目录，
-                    #    cleanup（step 9）前归档，让报告闭环（P0-4 手动上传的自动补充）
-                    try:
-                        archived = await _archive_artifacts(session, report, host_workdir)
-                        if archived:
-                            summary["artifacts_archived"] = archived
-                    except Exception as e:  # noqa: BLE001 — 归档失败不影响主流程
-                        logger.warning(f"插件产物归档失败: {e}")
-                    await session.commit()
-                    summary["report_generated"] = True
-                except Exception as e:  # noqa: BLE001 — 报告生成失败不影响主流程
-                    summary["report_generated"] = False
-                    summary["report_error"] = str(e)
-
-            # 8. 发布 domain 事件
+            # 6. 发布 domain 事件
             try:
                 await event_bus.publish_domain_event(
                     Event(
@@ -416,7 +402,7 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
                         payload={
                             "task_id": task_id,
                             "run_status": run.status,
-                            "conclusion": result.conclusion if result else None,
+                            "verdict": task.verdict,
                         },
                     )
                 )
@@ -425,7 +411,7 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
                         event_type="task.updated",
                         aggregate_id=task_id,
                         aggregate_type="task",
-                        payload={"status": task.status},
+                        payload={"status": task.status, "verdict": task.verdict},
                     )
                 )
             except Exception:  # noqa: BLE001 — 事件总线失败不影响主流程
@@ -434,9 +420,8 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
             summary.update(
                 status=task.status,
                 run_status=run.status,
-                conclusion=result.conclusion if result else None,
-                events_count=len(result.events) if result else 0,
-                container_id=container_id,
+                verdict=task.verdict,
+                non_web=orch_result.get("non_web") if orch_result else False,
             )
 
     except Exception as e:  # noqa: BLE001 — 兜底：任何异常都要落库并返回
