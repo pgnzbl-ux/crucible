@@ -105,7 +105,7 @@ Celery worker 通过 `docker run --env` 把 Anthropic 兼容端点凭据注入 `
 CLAUDE_AGENT_SDK_ENABLED=true
 LLM_BASE_URL=https://api.deepseek.com/anthropic    # DeepSeek 官方端点
 LLM_API_KEY=sk-xxx                                  # 你的 DeepSeek API Key
-LLM_MODEL=deepseek-v4-flash                         # deepseek-v4-flash(轻量) / deepseek-v4-pro(增强);两者均支持思考模式,thinking 参数切换
+LLM_MODEL=deepseek-v4-flash                         # flash/pro 协议一致;思考 thinking.type=enabled|disabled(默认 enabled),强度 output_config.effort=low|high|max(默认 high)
 ```
 
 配置说明：
