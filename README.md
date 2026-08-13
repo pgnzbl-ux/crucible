@@ -65,7 +65,7 @@ Crucible 是一个 **Web 平台 + Agent 执行引擎** 的组合：
 | 角色 | 职责 |
 |---|---|
 | **Web 平台**（FastAPI + React） | 任务管理、用户认证、实时进度推送、报告归档、证据管理 |
-| **Agent 执行引擎**（Claude Agent SDK + 专用容器） | 在隔离容器内加载 `vuln-verify-expert` 插件，按阶段化工作流执行漏洞验证 |
+| **Agent 执行引擎**（Claude Agent SDK + 专用容器） | 在隔离容器内按 6 节点编排执行漏洞验证(每 AI 节点独立容器 + `submit_result` 工具回传结构化 output) |
 
 **输入**：项目 Git 地址 + 漏洞描述（可选 PoC / 推理过程）
 **输出**：结构化中文验证报告（结论 + CVSS 评分 + 证据链 + 修复建议）+ 可复现的 PoC
@@ -77,10 +77,10 @@ Crucible 是一个 **Web 平台 + Agent 执行引擎** 的组合：
 
 ## ✨ 核心特性
 
-- 🤖 **插件化阶段编排** —— 漏洞验证方法论封装为 Claude Code 插件 `vuln-verify-expert`（阶段 0/A/B/C/D + 验证门禁 + 证据判定档位），平台只负责调度与持久化，方法论可独立演进
-- 🔄 **实时进度推送** —— Agent 执行的每个阶段（`phase.updated` / 工具调用 / 结论）通过 SSE 实时推送到前端，无需轮询
+- 🤖 **平台 6 节点编排** —— Celery worker 的 orchestrator 驱动 6 节点(source/profile/env_ready/audit/reproduce/report),AI 节点用独立 agent-runner 容器 + `submit_result` 工具回传结构化 output;分支出口:非 web skip、audit gate_fail 判误报、env 5 轮失败。方法论封装为 `vuln-verify-expert` 插件 4 子 agent
+- 🔄 **实时进度推送** —— 6 节点状态(`node.updated` 事件) + 工具调用 + 结论通过 SSE 实时推送到前端,驱动节点步骤条,无需轮询
 - 🧱 **模块化单体** —— Bounded Context 组织代码（task / agent / report / identity / settings），事件驱动通信，未来可拆
-- 🔒 **Security by Default** —— Agent 跑在独立隔离容器（非 root + 只读 rootfs + cap_drop ALL + 资源限制），凭据零落盘（环境变量注入，容器销毁即消失）
+- 🔒 **Security by Default** —— Agent 跑在独立隔离容器(非 root + 只读 rootfs + cap_drop ALL + 资源限制)。LLM 凭据通过 `docker run --env` 注入容器(容器销毁 env 消失,这部分零落盘成立);**注意:LLM API Key 当前明文存库**(响应层 `mask_secret` 掩码)
 - 🌐 **多 LLM 后端** —— 通过 Anthropic 兼容端点对接 DeepSeek / 腾讯云等第三方 LLM，后台可配置多 Provider + 测试连接
 - 📦 **证据归档** —— 报告与证据文件归档到 MinIO（S3 兼容），支持手动上传补充证据 + 预签名下载
 - 🛑 **可控取消** —— 取消任务真正生效（`celery revoke` + SIGTERM 钩子销毁容器）
@@ -99,7 +99,7 @@ Crucible 是一个 **Web 平台 + Agent 执行引擎** 的组合：
                             ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  后端 API（FastAPI · async）                                       │
-│    contexts/ {task, agent, report, identity, settings}            │
+│    contexts/ {task, agent, report, identity, project, settings}    │
 │    shared/  {events, sse, deps}                                   │
 └──────┬────────────────────┬──────────────────────┬──────────────┘
        │                    │                      │
@@ -109,21 +109,25 @@ Crucible 是一个 **Web 平台 + Agent 执行引擎** 的组合：
 │ / SQLite     │   │  agent/tasks.py    │◄──┤ broker + pubsub  │
 │              │   │   host git clone   │   └──────────────────┘
 │ tasks/runs/  │   │   docker run ──────┼──┐
-│ events/      │   │   消费 JSONL 流    │  │ 拉起隔离容器
+│ nodes/       │   │   消费 JSONL 流    │  │ 每 AI 节点独立起容器
 │ reports      │   │   落库 + 发布事件   │  ▼
 └──────────────┘   └────────────────────┘   ┌────────────────────────┐
                                             │ agent-runner 容器        │
                                             │  (crucible-agent-runner) │
                                             │                          │
                                             │  tini → run_one.py       │
-                                            │   ├─ 加载 vuln-verify-   │
-                                            │   │   expert 插件         │
-                                            │   ├─ ClaudeAgentOptions  │
-                                            │   │   (--agent ...)       │
+                                            │   ├─ 读 .node.json        │
+                                            │   ├─ 按 NODE_KEY 选 agent │
+                                            │   │   (env-builder/       │
+                                            │   │    auditor/           │
+                                            │   │    reproducer/        │
+                                            │   │    reporter)          │
+                                            │   ├─ 注入 submit_result   │
+                                            │   │   MCP 工具(schema 校验)│
                                             │   └─ query() → JSONL      │
                                             │                          │
                                             │  _bundled/claude (CLI)   │
-                                            │  + 插件 agent + 2 skills │
+                                            │  + 4 子 agent + 2 skills │
                                             └────────────────────────┘
                                                       │
                                                       ▼
@@ -147,33 +151,32 @@ Crucible 是一个 **Web 平台 + Agent 执行引擎** 的组合：
 
 ```
 1. 用户提交任务（项目地址 + 漏洞描述）
+   → API 自动按 git_url upsert Project + 创建 Task + TaskRun → 投递 Celery
         │
-2. API 创建 Task + TaskRun → 投递 Celery（task_id = run.id，便于取消）
+2. Worker 在宿主机 git clone 源码到隔离临时目录(clone 后校验非空)
         │
-3. Worker 在宿主机 git clone 源码到隔离临时目录
+3. Worker 调 orchestrator.run_orchestration 驱动 6 节点循环:
+   ┌─ 节点 0 source      ■代码:clone 结果包装
+   ├─ 节点 1 profile    ■代码:profile_detector 规则引擎(7 语言 + web 门禁)
+   │                     └─ 分支:is_web=false → skip 2-5,task completed 不下结论
+   ├─ 节点 2 env_ready  □AI+■代码:AI 产 Dockerfile/compose,worker 执行 docker compose
+   │                     │  + 健康检查,失败回喂 AI(max 5 轮)→ 取 target_url
+   │                     └─ 分支:5 轮失败 → task failed(可 retry)
+   ├─ 节点 3 audit      □AI:白盒审计 + Phase 2.5 Gate 三问
+   │                     └─ 分支:gate_fail → skip 4,判 false_positive(不发请求)
+   ├─ 节点 4 reproduce  □AI:一次 HTTP 复现 + 6 档判定(已确认/部分/代码可达/...)
+   └─ 节点 5 report     □AI:生成 8 节 report_data JSON → 落 Report 表
         │
-4. Worker docker run agent-runner 容器（bind mount 源码 + --env 注入 LLM 凭据）
+4. 每 AI 节点:写 .node.json → 起 agent-runner 容器(NODE_KEY 选 agent)
+   → 容器内调 submit_result MCP 工具回传结构化 output
+   → worker schema 校验 → 落 NodeRun.output_json(断点续跑复用)
         │
-5. 容器内 run_one.py 加载 vuln-verify-expert 插件，以插件 agent 启动会话
+5. 节点状态变化发 node.updated 事件 → Redis Pub/Sub → SSE 推前端步骤条
         │
-6. 插件 agent 按阶段化工作流执行：
-   ┌─ 阶段 0  平台预检（能力探测，缺失降级）
-   ├─ 阶段 A  接单建仓（源码固定、范围对齐）
-   ├─ 阶段 B  搭建靶场（run-project-env：识别技术栈、写 Dockerfile/compose、启动探活）
-   ├─ 阶段 C  漏洞验证（vuln-verify：白盒走链 → Gate 推演 → 一次 HTTP 确认 → 出报告）
-   │           ├─ 分支：误报 Quick-Stop（Gate 推演不通，不发请求）
-   │           └─ 分支：回退环（首测未复现 → 试变体，上限 5 次）
-   └─ 阶段 D  交付收尾（结论 + artifact 引用 + 启停说明）
+6. 节点 5 产出 report_data → Report 表(verdict/cvss/report_data)
+   → GET /reports/{id}/export?format=json|md 导出
         │
-7. 每个阶段产出 phase.updated 事件 → stdout JSONL → Worker 解析
-        │
-8. Worker 实时落 AgentEvent + 发 Redis Pub/Sub → SSE 推前端
-        │
-9. 容器结束 → 结论分流（已确认/误报/未复现/失败/取消）
-        │
-10. 生成报告（Report 表 + MinIO 归档）→ 用户审阅 → 可补充证据
-        │
-11. finally：销毁容器 + 清理临时目录
+7. finally:销毁容器 + 清理临时目录(retry 时复用已完成节点)
 ```
 
 ---
@@ -205,7 +208,7 @@ Crucible/
 │   │   │   ├── agent/               # Agent 执行（SDK 适配 + 容器编排 + Celery 工作流）
 │   │   │   ├── report/              # 报告 + 证据（MinIO 归档）
 │   │   │   ├── identity/            # 认证（JWT + bcrypt）
-│   │   │   └── settings/            # LLM Provider 后台配置（Fernet 加密）
+│   │   │   └── settings/            # LLM Provider 后台配置（明文存取 + 掩码）
 │   │   └── shared/                  # events（事件总线）/ sse / deps（鉴权）
 │   ├── run_worker.py                # Celery worker 入口（solo pool）
 │   ├── pyproject.toml
@@ -215,16 +218,21 @@ Crucible/
 │   └── src/
 │       ├── app/                     # providers / layout（路由守卫）
 │       ├── pages/                   # Dashboard / Tasks / Reports / Settings / Login
-│       ├── features/                # 领域模块（待填充）
+│       ├── features/                # 领域模块(task/components: TaskTable/FilterBar/CreateDrawer)
 │       └── shared/                  # api / hooks（useTaskEvents SSE）/ lib
 │
-├── plugins/                         # ★ Claude Code 插件（阶段化编排载体）
-│   └── vuln-verify-expert/          #   白盒验证 agent + 2 skills
+├── plugins/                         # ★ Claude Code 插件（4 子 agent,平台 6 节点编排调用）
+│   └── vuln-verify-expert/
 │       ├── .claude-plugin/plugin.json
-│       ├── agents/vuln-verify-expert.md   # 阶段 0/A/B/C/D 工作流定义
+│       ├── agents/                  # 4 子 agent(节点 env_ready/audit/reproduce/report)
+│       │   ├── env-builder.md       # 节点 env_ready（靶场）
+│       │   ├── auditor.md           # 节点 audit（Phase 2.5 Gate）
+│       │   ├── reproducer.md        # 节点 reproduce（复现）
+│       │   ├── reporter.md          # 节点 report（生成 report_data JSON）
+│       │   └── vuln-verify-expert.md # 旧单体 agent,保留兼容
 │       └── skills/
-│           ├── run-project-env/     # 搭建隔离靶场
-│           └── vuln-verify/         # 白盒审计 + 复现 + 出报告
+│           ├── run-project-env/     # 搭建隔离靶场方法论
+│           └── vuln-verify/         # 白盒审计 + 复现方法论
 │
 ├── infrastructure/                  # Docker
 │   ├── docker-compose.yml           # postgres(5433) + redis(6380) + minio(9000/9001)
@@ -333,7 +341,7 @@ curl -X POST http://localhost:8010/api/v1/auth/login \
 | `REDIS_URL` | Redis 地址（端口 6380） | `redis://localhost:6380/0` |
 | `AUTH_SECRET` | JWT 签名密钥（生产必配，≥32 字节） | `dev-secret-change-in-production` |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | 初始管理员种子账号 | `admin@crucible.local` / 空 |
-| `SETTINGS_ENCRYPT_KEY` | Fernet 密钥（加密落库的 LLM API Key） | 开发从 AUTH_SECRET 派生 |
+| `SETTINGS_ENCRYPT_KEY` | 遗留配置(当前明文存取,Fernet 未生效) | 开发从 AUTH_SECRET 派生 |
 
 ### Agent 配置
 
@@ -387,7 +395,7 @@ LLM_MODEL=deepseek-v4-flash       # v4-flash（非思考）/ v4-pro（思考）
 
 LLM 配置也可在**平台后台**管理（侧边栏「设置」→ LLM Provider）：
 - 多 Provider 管理，同一时刻仅一个激活
-- API Key **Fernet 加密落库**，列表只回显掩码 `***last4`
+- API Key **明文落库**(存 `api_key_encrypted` 字段),列表只回显掩码 `***last4`
 - 测试连接真实打端点验证
 - DB 默认 Provider 优先级高于 `.env`（`resolve_runner_env` 自动解析）
 
@@ -495,7 +503,7 @@ cd frontend && npm run typecheck
 
 - LLM API Key / Token **只**走环境变量注入（`docker run --env`），容器销毁 env 消失
 - 绝不写进 `Dockerfile` / `docker-compose.yml` / 种子脚本 / 配置文件
-- 落库的 API Key 必须 Fernet 加密（`core/crypto.py`），列表接口只回显掩码
+- 落库的 API Key 当前**明文存储**(`settings/service.py` 存 `api_key_encrypted`),列表接口走 `mask_secret` 掩码。`core/crypto.py` 的 Fernet 工具遗留未用
 - 提交前 `git grep -nE "sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{30,}"` 必须**零命中**
 
 ### 2. Agent 容器真隔离
@@ -516,11 +524,7 @@ cd frontend && npm run typecheck
 
 - Agent 输出视为**不可信**，所有事件走 schema 校验才落库
 - Agent 不能直接访问平台 DB / Redis / MinIO —— 只能通过受控事件流
-- `can_use_tool` 黑白名单（白盒审计风格：只允许 Read/Grep/Glob + 受限 Bash 子集）
-
-> **已知限制**：当前 `permission_mode=bypassPermissions` 下 `can_use_tool` 不生效
-> （SDK 有 `CanUseToolShadowedWarning`），安全护栏靠容器隔离 + `allowed_tools` 白名单兜底，
-> P1 切 PreToolUse hook 重构。详见 [`docs/agent-workflow.md`](docs/agent-workflow.md) §权限策略。
+- `PreToolUse` hook 实现黑白名单(白盒审计风格:只允许 Read/Grep/Glob + 受限 Bash 子集,拦截 rm/chmod/|bash 等破坏性命令)。hook 在所有 permission_mode 下生效,不被 bypassPermissions shadow
 
 ---
 
@@ -528,7 +532,7 @@ cd frontend && npm run typecheck
 
 ### ✅ P0（功能闭环）—— 已完成
 
-- [x] **P0-0** Agent 阶段化编排（插件化：vuln-verify-expert）
+- [x] **P0-0** Agent 编排（平台 6 节点编排：source/profile/env_ready/audit/reproduce/report）
 - [x] **P0-1** SSE 实时事件推送
 - [x] **P0-2** 取消任务真正生效
 - [x] **P0-3** JWT 登录闭环
@@ -541,7 +545,7 @@ cd frontend && npm run typecheck
 - [ ] API Key + Service Account
 - [ ] OIDC SSO（增量叠加）
 - [ ] RBAC 权限矩阵
-- [ ] 报告版本历史 + PDF/DOCX 导出
+- [x] 报告导出（report_data JSON 入库 + GET /reports/{id}/export?format=json|md，不生成 docx）
 - [ ] 审计日志 Context
 - [ ] 插件平台能力补齐（browser MCP / 容器内 docker compose / 自动归档 / 权限 hook）
 
@@ -563,7 +567,7 @@ cd frontend && npm run typecheck
 | 文档 | 内容 |
 |---|---|
 | [docs/development-guide.md](docs/development-guide.md) | 架构决策溯源 + P0/P1/P2 完整路线 + 踩坑记录 |
-| [docs/agent-workflow.md](docs/agent-workflow.md) | 插件化阶段编排设计 + 平台↔插件契约 + 权限策略 |
+| [docs/agent-workflow.md](docs/agent-workflow.md) | 平台 6 节点编排设计 + 平台↔插件契约 + 权限策略 |
 | [CLAUDE.md](CLAUDE.md) | 项目级 AI 协作约定（技术栈/启动/规范） |
 | [.claude/api-contract.md](.claude/api-contract.md) | API 端点契约（路由/请求/响应/错误码） |
 | [.claude/rules/](.claude/rules/) | 各维度硬性约定（backend/frontend/security/concurrency/...） |
