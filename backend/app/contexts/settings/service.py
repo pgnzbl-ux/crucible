@@ -235,7 +235,7 @@ class SettingsService:
     async def resolve_for_task(
         self, owner_id: str, refs: list[str]
     ) -> list[Credential]:
-        """任务注入用：按 id 批量解密凭据（校验 owner）"""
+        """任务注入用：按 id 批量取凭据(明文)（校验 owner）"""
         repo = CredentialRepository(self.repo.session)
         return await repo.get_by_ids_for_owner(refs, owner_id)
 

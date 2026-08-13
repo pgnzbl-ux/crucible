@@ -49,7 +49,7 @@ def inject_credentials(
     for cred in credentials:
         plain = cred.secret_encrypted
         if not plain:
-            # 解密失败（key 变更或空值）跳过，不阻断任务
+            # 空值跳过,不阻断任务
             continue
 
         if cred.kind == "env_var":

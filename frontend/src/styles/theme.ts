@@ -2,32 +2,28 @@ import { theme } from 'antd'
 import type { ThemeConfig } from 'antd'
 
 /**
- * Crucible 中性安全风主题
- * 石墨灰表面层级 + 克制的钢蓝主色 + 绿色成功 / 红色告警
+ * Crucible 浅色企业后台主题（Ant Design Pro 风格）
+ * 白底表面 + 标准蓝主色 + 绿色成功 / 红色告警
  * 与 styles/design-tokens.css 保持同源（实现以本文件为准）
  */
 export const crucibleTheme: ThemeConfig = {
-  algorithm: theme.darkAlgorithm,
+  algorithm: theme.defaultAlgorithm,
   token: {
-    // 品牌与语义色
-    colorPrimary: '#5b7fd4',
-    colorInfo: '#5b7fd4',
-    colorSuccess: '#22a06b',
-    colorWarning: '#d97706',
-    colorError: '#d64545',
-    colorLink: '#6f90e0',
-    // 表面层级（石墨灰）
-    colorBgBase: '#0f1115',
-    colorBgContainer: '#15181f',
-    colorBgElevated: '#1b2029',
-    colorBgLayout: '#0f1115',
-    colorBorder: 'rgba(255,255,255,0.08)',
-    colorBorderSecondary: 'rgba(255,255,255,0.06)',
-    // 文本
-    colorText: '#e6e8ec',
-    colorTextSecondary: '#9aa1ac',
-    colorTextTertiary: '#6f7683',
-    // 形状与排版
+    colorPrimary: '#1677ff',
+    colorInfo: '#1677ff',
+    colorSuccess: '#52c41a',
+    colorWarning: '#faad14',
+    colorError: '#ff4d4f',
+    colorLink: '#1677ff',
+    colorBgBase: '#f5f5f5',
+    colorBgContainer: '#ffffff',
+    colorBgElevated: '#ffffff',
+    colorBgLayout: '#f0f2f5',
+    colorBorder: '#f0f0f0',
+    colorBorderSecondary: '#f0f0f0',
+    colorText: 'rgba(0, 0, 0, 0.88)',
+    colorTextSecondary: 'rgba(0, 0, 0, 0.65)',
+    colorTextTertiary: 'rgba(0, 0, 0, 0.45)',
     borderRadius: 8,
     borderRadiusLG: 12,
     borderRadiusSM: 6,
@@ -40,34 +36,38 @@ export const crucibleTheme: ThemeConfig = {
       '"IBM Plex Sans", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", -apple-system, BlinkMacSystemFont, sans-serif',
     fontFamilyCode: '"JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace',
     controlHeight: 32,
+    boxShadow: '0 1px 2px 0 rgba(0, 0, 0, 0.03), 0 1px 6px -1px rgba(0, 0, 0, 0.02), 0 2px 4px 0 rgba(0, 0, 0, 0.02)',
+    boxShadowSecondary:
+      '0 6px 16px 0 rgba(0, 0, 0, 0.08), 0 3px 6px -4px rgba(0, 0, 0, 0.12), 0 9px 28px 8px rgba(0, 0, 0, 0.05)',
   },
   components: {
     Layout: {
-      siderBg: '#0c0e12',
-      headerBg: 'rgba(15,17,21,0.85)',
-      headerColor: '#e6e8ec',
+      siderBg: '#ffffff',
+      headerBg: '#ffffff',
+      headerColor: 'rgba(0, 0, 0, 0.88)',
       headerHeight: 56,
       headerPadding: '0 24px',
-      bodyBg: '#0f1115',
+      bodyBg: '#f0f2f5',
     },
     Menu: {
-      darkItemBg: '#0c0e12',
-      darkSubMenuItemBg: 'rgba(255,255,255,0.02)',
-      darkItemSelectedBg: 'rgba(91,127,212,0.18)',
-      darkItemSelectedColor: '#9db4e8',
-      darkItemHoverBg: 'rgba(255,255,255,0.05)',
-      darkItemColor: '#aab2c0',
+      itemBg: 'transparent',
+      itemSelectedBg: '#e6f4ff',
+      itemSelectedColor: '#1677ff',
+      itemHoverBg: 'rgba(0, 0, 0, 0.04)',
+      itemColor: 'rgba(0, 0, 0, 0.65)',
       itemBorderRadius: 8,
       itemMarginInline: 8,
+      subMenuItemBg: 'transparent',
+      activeBarBorderWidth: 0,
     },
     Table: {
-      headerBg: '#1b2029',
-      headerColor: '#9aa1ac',
+      headerBg: '#fafafa',
+      headerColor: 'rgba(0, 0, 0, 0.88)',
       headerSplitColor: 'transparent',
-      rowHoverBg: 'rgba(255,255,255,0.04)',
+      rowHoverBg: '#fafafa',
       cellPaddingBlock: 12,
       cellPaddingInline: 16,
-      borderColor: 'rgba(255,255,255,0.06)',
+      borderColor: '#f0f0f0',
     },
     Card: {
       headerBg: 'transparent',
@@ -87,11 +87,9 @@ export const crucibleTheme: ThemeConfig = {
     },
     Button: {
       fontWeight: 500,
-      defaultBg: '#1b2029',
-      defaultBorderColor: 'rgba(255,255,255,0.12)',
     },
-    Segmented: {
-      itemSelectedBg: '#1b2029',
+    Tabs: {
+      cardBg: '#fafafa',
     },
   },
 }

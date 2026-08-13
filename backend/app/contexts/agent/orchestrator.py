@@ -178,15 +178,10 @@ async def run_orchestration(
     if final_verdict != "false_positive" and report_out.get("final_verdict"):
         final_verdict = report_out["final_verdict"]
 
-    # 收尾
+    # 收尾(非 web 与正常路径统一 completed;非 web 的 verdict 已为 None)
     task.verdict = final_verdict
-    if skipped_due_to_non_web and not report_out:
-        # 非 web:completed 无 verdict
-        run.status = "completed"
-        task.status = "completed"
-    else:
-        run.status = "completed"
-        task.status = "completed"
+    run.status = "completed"
+    task.status = "completed"
     run.finished_at = datetime.now(timezone.utc)
     await session.commit()
 

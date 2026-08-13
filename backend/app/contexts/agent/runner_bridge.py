@@ -14,6 +14,9 @@ Runner Bridge — 拉起 agent-runner 容器 + 同步流式消费的薄封装。
 将 ClaudeSdkExecutor 与底层解耦，让 executor.py 只关心业务语义（结论 / 事件流）。
 """
 
+# ⚠️ DEPRECATED: 已被 6 节点编排(orchestrator + ai_runner)取代,保留仅作历史参考。
+
+
 from __future__ import annotations
 
 import logging

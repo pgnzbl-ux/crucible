@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { Button, Card, Col, Empty, Row, Skeleton, Table, Tag, Typography } from 'antd'
+import { App, Button, Card, Col, Empty, Row, Skeleton, Table, Tag, Typography } from 'antd'
 import {
   BugOutlined,
   CheckCircleOutlined,
@@ -18,6 +18,9 @@ import { api, type TaskSummary } from '../shared/lib/api'
 import { getStatusMeta, getPriorityMeta } from '../shared/lib/meta'
 import { AppLayout } from '../app/layout'
 import { PageHeader } from '../shared/components/PageHeader'
+import { PageContainer } from '../shared/components/PageContainer'
+import { StatCard } from '../features/dashboard/components/StatCard'
+import { TaskTrendChart } from '../features/dashboard/components/TaskTrendChart'
 
 const { Text } = Typography
 
@@ -29,8 +32,9 @@ export function DashboardPage() {
     refetchInterval: 5000,
   })
 
+  const tasks = data?.items ?? []
+
   const stats = useMemo(() => {
-    const tasks = data?.items ?? []
     return {
       queued: tasks.filter((t) => ['pending', 'queued'].includes(t.status)).length,
       running: tasks.filter((t) => t.status === 'running').length,
@@ -39,7 +43,7 @@ export function DashboardPage() {
       failed: tasks.filter((t) => t.status === 'failed').length,
       total: tasks.length,
     }
-  }, [data])
+  }, [tasks])
 
   const recentColumns: ColumnsType<TaskSummary> = [
     {
@@ -72,12 +76,48 @@ export function DashboardPage() {
   ]
 
   const statCards = [
-    { title: '排队中', value: stats.queued, icon: <ClockCircleOutlined />, tone: 'default' },
-    { title: '分析中', value: stats.running, icon: <ThunderboltOutlined />, tone: 'primary' },
-    { title: '待复核', value: stats.needsReview, icon: <BugOutlined />, tone: 'warning' },
-    { title: '已完成', value: stats.completed, icon: <CheckCircleOutlined />, tone: 'success' },
-    { title: '失败', value: stats.failed, icon: <BugOutlined />, tone: 'error' },
-    { title: '任务总数', value: stats.total, icon: <FileProtectOutlined />, tone: 'default' },
+    {
+      title: '排队中',
+      value: stats.queued,
+      icon: <ClockCircleOutlined />,
+      tone: 'default' as const,
+      filter: 'queued',
+    },
+    {
+      title: '分析中',
+      value: stats.running,
+      icon: <ThunderboltOutlined />,
+      tone: 'primary' as const,
+      filter: 'running',
+    },
+    {
+      title: '待复核',
+      value: stats.needsReview,
+      icon: <BugOutlined />,
+      tone: 'warning' as const,
+      filter: 'needs_review',
+    },
+    {
+      title: '已完成',
+      value: stats.completed,
+      icon: <CheckCircleOutlined />,
+      tone: 'success' as const,
+      filter: 'completed',
+    },
+    {
+      title: '失败',
+      value: stats.failed,
+      icon: <BugOutlined />,
+      tone: 'error' as const,
+      filter: 'failed',
+    },
+    {
+      title: '任务总数',
+      value: stats.total,
+      icon: <FileProtectOutlined />,
+      tone: 'default' as const,
+      filter: undefined,
+    },
   ]
 
   return (
@@ -95,43 +135,56 @@ export function DashboardPage() {
       <Row gutter={[16, 16]} className="crucible-stagger">
         {statCards.map((card) => (
           <Col xs={24} sm={12} lg={8} key={card.title}>
-            <Card className="stat-card">
-              <div className={`stat-card-icon stat-card-icon-${card.tone}`}>{card.icon}</div>
-              <div className="stat-card-title">{card.title}</div>
-              <div className="stat-card-value">{card.value}</div>
-            </Card>
+            <StatCard
+              title={card.title}
+              value={card.value}
+              icon={card.icon}
+              tone={card.tone}
+              trend="近 7 日"
+              onClick={() =>
+                card.filter ? navigate(`/tasks?status=${card.filter}`) : navigate('/tasks')
+              }
+            />
           </Col>
         ))}
       </Row>
 
-      <Card
-        style={{ marginTop: 24 }}
-        className="crucible-card-hover"
-        title="最近任务"
-        extra={
-          <Button type="link" onClick={() => navigate('/tasks')}>
-            查看全部 <ArrowRightOutlined />
-          </Button>
-        }
-      >
-        {isLoading ? (
-          <Skeleton active paragraph={{ rows: 5 }} />
-        ) : (data?.items ?? []).length ? (
-          <Table
-            rowKey="id"
-            size="middle"
-            columns={recentColumns}
-            dataSource={(data?.items ?? []).slice(0, 8)}
-            pagination={false}
-            onRow={() => ({
-              onClick: () => navigate('/tasks'),
-              style: { cursor: 'pointer' },
-            })}
-          />
-        ) : (
-          <Empty description="暂无任务" />
-        )}
-      </Card>
+      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+        <Col xs={24} lg={14}>
+          <Card className="crucible-card-hover" title="近 7 日任务趋势">
+            {isLoading ? <Skeleton active paragraph={{ rows: 4 }} /> : <TaskTrendChart tasks={tasks} />}
+          </Card>
+        </Col>
+        <Col xs={24} lg={10}>
+          <Card
+            className="crucible-card-hover"
+            title="最近任务"
+            extra={
+              <Button type="link" onClick={() => navigate('/tasks')}>
+                查看全部 <ArrowRightOutlined />
+              </Button>
+            }
+          >
+            {isLoading ? (
+              <Skeleton active paragraph={{ rows: 5 }} />
+            ) : tasks.length ? (
+              <Table
+                rowKey="id"
+                size="middle"
+                columns={recentColumns}
+                dataSource={tasks.slice(0, 8)}
+                pagination={false}
+                onRow={(row) => ({
+                  onClick: () => navigate(`/tasks/${row.id}`),
+                  style: { cursor: 'pointer' },
+                })}
+              />
+            ) : (
+              <Empty description="暂无任务" />
+            )}
+          </Card>
+        </Col>
+      </Row>
     </AppLayout>
   )
 }

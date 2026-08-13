@@ -49,7 +49,6 @@ from app.core.celery_app import celery_app
 from app.core.config import get_settings
 from app.shared.events import Event, event_bus
 
-from .executor import AgentRunContext, ClaudeSdkExecutor, get_executor
 from .sdk_adapter import resolve_runner_env
 
 logger = logging.getLogger(__name__)

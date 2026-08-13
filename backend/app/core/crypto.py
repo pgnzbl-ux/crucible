@@ -8,6 +8,10 @@ Key 来源：
 - 开发环境从 auth_secret 派生（SHA256 → urlsafe base64），保证稳定性且无需额外配置
 """
 
+# ⚠️ DEPRECATED: 明文存储改造后遗留,仅 mask_secret 仍在用;
+# encrypt_secret/decrypt_secret 已不被 settings/credential 调用。
+
+
 from __future__ import annotations
 
 import base64

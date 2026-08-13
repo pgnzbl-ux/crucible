@@ -118,6 +118,7 @@ export interface ReportDetail {
   id: string
   task_id: string
   run_id: string
+  owner_id: string
   status: string
   conclusion: string
   title: string
