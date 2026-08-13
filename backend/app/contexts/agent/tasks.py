@@ -44,6 +44,7 @@ from app.contexts.report.repository import ReportRepository
 from app.contexts.report.service import ReportService
 from app.contexts.settings.models import LlmProvider  # noqa: F401 — 注册 llm_providers 表
 from app.contexts.task.models import AgentEvent, Task, TaskRun, NodeRun  # noqa: F401 — NodeRun 注册(阶段 1)
+from app.contexts.agent.errors import format_agent_error, humanize_agent_error
 from app.core.agent_runner import AgentRunnerError, agent_runner_manager, git_clone_to_workdir
 from app.core.celery_app import celery_app
 from app.core.config import get_settings
@@ -130,6 +131,7 @@ async def _persist_single_event(session: AsyncSession, run: TaskRun, event: dict
         )
     )
     await session.flush()
+    await session.commit()
 
     # 发布到 Redis Pub/Sub — SSE 端点订阅本 task 频道后实时转发
     # 失败仅日志，不阻塞 Agent 流（与「事件总线失败不影响主流程」原则一致）
@@ -176,7 +178,11 @@ def _unregister_container(container_id: str | None) -> None:
 
 def _on_sigterm(_signum, _frame):  # noqa: ANN001
     """Celery revoke(terminate=True) 发 SIGTERM → 先强杀 agent-runner 容器，再退出"""
-    logger.warning(f"收到 SIGTERM，清理 {len(_known_container_ids)} 个 agent-runner 容器")
+    logger.warning("收到 SIGTERM，清理 agent-runner 容器")
+    try:
+        agent_runner_manager.stop_all_active()
+    except Exception:  # noqa: BLE001
+        pass
     for cid in list(_known_container_ids):
         try:
             agent_runner_manager.remove_by_id(cid)
@@ -259,10 +265,22 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
             # 1. 最小预检
             ok, preflight_err = await _platform_preflight_minimal(session)
             if not ok:
-                await _update_run(session, run, "failed", f"infra_error: {preflight_err}")
+                title, hint = humanize_agent_error(preflight_err)
+                detail = format_agent_error(preflight_err)
+                await _update_run(session, run, "failed", detail[:1000])
                 task.status = "failed"
+                await _persist_single_event(
+                    session,
+                    run,
+                    {
+                        "type": "agent.failed",
+                        "error": preflight_err,
+                        "title": title,
+                        "hint": hint,
+                    },
+                )
                 await session.commit()
-                summary.update(status="failed", error=preflight_err)
+                summary.update(status="failed", error=title)
                 return summary
 
             # 2. host 临时目录 + git clone
@@ -280,11 +298,23 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
             )
             if not clone_ok:
                 err = f"源码克隆失败: {clone_err[:500]}"
-                await _update_run(session, run, "failed", err)
+                title, hint = humanize_agent_error(err)
+                detail = format_agent_error(err)
+                await _update_run(session, run, "failed", detail[:1000])
                 task.status = "failed"
+                await _persist_single_event(
+                    session,
+                    run,
+                    {
+                        "type": "agent.failed",
+                        "error": err,
+                        "title": title,
+                        "hint": hint,
+                    },
+                )
                 await session.commit()
                 _cleanup_hostdir(host_workdir)
-                summary.update(status="failed", error=err)
+                summary.update(status="failed", error=title)
                 return summary
 
             # 3. 构造 runner env（凭据从默认 Provider 解密或 settings.llm_* 兜底）
@@ -322,26 +352,35 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
             from sqlalchemy import select as _select
 
             captured: dict = {}
+            loop = asyncio.get_running_loop()
+
+            def _on_ai_event(event: dict) -> None:
+                """AI 节点 JSONL → 落 AgentEvent + Redis(从 docker 线程跨回 loop)。"""
+                try:
+                    fut = asyncio.run_coroutine_threadsafe(
+                        _persist_single_event(session, run, event), loop
+                    )
+                    fut.result(timeout=5)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"AI 事件落库失败(不影响主流程): {e}")
 
             async def _on_node_event(node_key: str, status: str, output) -> None:
-                """节点状态变化 → 发 Redis Pub/Sub(SSE 推前端步骤条)。"""
+                """节点状态变化 → 落 AgentEvent + Redis（SSE 步骤条与事件流共用）。"""
+                event = {
+                    "type": "node.updated",
+                    "node_key": node_key,
+                    "status": status,
+                    "output": output,
+                    "timestamp": datetime.now(timezone.utc).timestamp(),
+                }
+                if isinstance(output, dict) and status == "failed":
+                    event["error"] = output.get("error") or output.get("detail")
+                    event["title"] = output.get("error")
+                    event["hint"] = output.get("hint")
                 try:
-                    await event_bus.publish(
-                        f"task.{task_id}.events",
-                        Event(
-                            event_type="node.updated",
-                            aggregate_id=str(task_id),
-                            aggregate_type="task",
-                            payload={
-                                "run_id": str(run.id),
-                                "node_key": node_key,
-                                "status": status,
-                                "output": output,
-                            },
-                        ),
-                    )
+                    await _persist_single_event(session, run, event)
                 except Exception as e:  # noqa: BLE001
-                    logger.warning(f"node.updated 发布失败(不影响主流程): {e}")
+                    logger.warning(f"node.updated 落库失败(不影响主流程): {e}")
 
             try:
                 orch_result = await run_orchestration(
@@ -352,6 +391,7 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
                     source_path=host_workdir,  # source 在 host_workdir/project 下
                     runner_env=runner_env,
                     on_node_event=_on_node_event,
+                    on_ai_event=_on_ai_event,
                 )
                 captured["result"] = orch_result
             except Exception as e:  # noqa: BLE001
@@ -361,8 +401,19 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
             orch_result = captured.get("result")
             if orch_result is None:
                 err = str(captured.get("error", "orchestrator 未返回结果"))
-                await _update_run(session, run, "failed", err[:500])
+                title, hint = humanize_agent_error(err)
+                await _update_run(session, run, "failed", format_agent_error(err)[:1000])
                 task.status = "failed"
+                await _persist_single_event(
+                    session,
+                    run,
+                    {
+                        "type": "agent.failed",
+                        "error": err,
+                        "title": title,
+                        "hint": hint,
+                    },
+                )
             else:
                 # 节点 5 产出 report_data 时,落结构化 Report(阶段 4 补 docx 导出)
                 report_data = orch_result.get("report_data")
@@ -438,7 +489,7 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
                 run = await session.get(TaskRun, run_id)
                 task = await session.get(Task, task_id)
                 if run:
-                    await _update_run(session, run, "failed", str(e))
+                    await _update_run(session, run, "failed", format_agent_error(str(e))[:1000])
                 if task:
                     task.status = "failed"
                 await session.commit()
@@ -447,6 +498,12 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
         summary.update(status="failed", error=str(e))
     finally:
         # 9. 清理容器与 host_workdir
+        if host_workdir:
+            try:
+                from app.contexts.agent.nodes.env_ready import docker_compose_down
+                await docker_compose_down(host_workdir)
+            except Exception:  # noqa: BLE001
+                logger.warning("任务结束拆靶场失败(best-effort)", exc_info=True)
         if container_id:
             try:
                 await asyncio.to_thread(agent_runner_manager.remove_by_id, container_id)

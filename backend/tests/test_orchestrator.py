@@ -206,3 +206,51 @@ async def test_breakpoint_resume_skips_completed_nodes(session_factory):
         assert call_count == {"source": 0, "profile": 0}
         assert result["status"] == "completed"
         assert result["verdict"] == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_resume_reuses_audit_gate_fail_skips_reproduce(session_factory):
+    """断点续跑:已 completed 的 audit=fail 仍须跳过 reproduce,不得重跑 HTTP。"""
+    from app.contexts.agent import orchestrator as orch
+    from app.contexts.task.models import NodeRun
+    from sqlalchemy import select
+
+    async with session_factory() as session:
+        task, run = await _seed_task_run(session)
+        session.add(NodeRun(
+            run_id=run.id, task_id=task.id, node_index=0, node_key="source",
+            status="completed", output_json='{"source_path": "/p"}',
+        ))
+        session.add(NodeRun(
+            run_id=run.id, task_id=task.id, node_index=1, node_key="profile",
+            status="completed", output_json='{"is_web": true, "language": "python"}',
+        ))
+        session.add(NodeRun(
+            run_id=run.id, task_id=task.id, node_index=2, node_key="env_ready",
+            status="completed", output_json='{"target_url": "http://localhost:5000", "compose_path": "x.yml"}',
+        ))
+        session.add(NodeRun(
+            run_id=run.id, task_id=task.id, node_index=3, node_key="audit",
+            status="completed", output_json='{"gate_verdict": "fail", "gate_reason": "链路不通"}',
+        ))
+        await session.flush()
+
+        async def fake_report(ctx):
+            return {"report_data": {"x": 1}, "final_verdict": "false_positive"}
+
+        real_nodes = orch.NODE_ORDER
+        with patch.object(real_nodes[4], "execute", AsyncMock(side_effect=AssertionError("续跑不得执行 reproduce"))), \
+             patch.object(real_nodes[5], "execute", fake_report):
+            result = await orch.run_orchestration(
+                task_id=task.id, run_id=run.id, session=session,
+                host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
+            )
+
+        assert result["status"] == "completed"
+        assert result["verdict"] == "false_positive"
+        nodes = (await session.execute(
+            select(NodeRun).where(NodeRun.run_id == run.id).order_by(NodeRun.node_index)
+        )).scalars().all()
+        statuses = {n.node_key: n.status for n in nodes}
+        assert statuses["reproduce"] == "skipped"
+        assert statuses["report"] == "completed"

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 
 @dataclass
@@ -21,6 +21,7 @@ class NodeContext:
     project_ref: str | None
     previous_outputs: dict[str, dict] = field(default_factory=dict)
     runner_env: dict[str, str] = field(default_factory=dict)
+    on_event: Callable[[dict], None] | None = None
 
 
 class NodeExecutor(Protocol):

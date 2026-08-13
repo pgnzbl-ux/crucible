@@ -30,4 +30,5 @@ class ReportNode:
             input_json=input_json,
             host_workdir=ctx.host_workdir,
             runner_env=ctx.runner_env,
+            on_event=ctx.on_event,
         )

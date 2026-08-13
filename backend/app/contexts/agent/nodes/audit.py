@@ -18,7 +18,7 @@ class AuditNode:
         from app.contexts.agent.ai_runner import run_ai_node
 
         input_json = {
-            "source_path": ctx.source_path,
+            "source_path": "/workspace/project",
             "vulnerability_description": ctx.vulnerability_description,
             "profile": ctx.previous_outputs.get("profile", {}),
         }
@@ -27,4 +27,5 @@ class AuditNode:
             input_json=input_json,
             host_workdir=ctx.host_workdir,
             runner_env=ctx.runner_env,
+            on_event=ctx.on_event,
         )

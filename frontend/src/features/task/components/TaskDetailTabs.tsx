@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Alert,
   App,
@@ -25,6 +25,49 @@ import { TaskEventTimeline } from './TaskEventTimeline'
 
 const { Title, Paragraph, Text } = Typography
 
+function unixToIso(ts: unknown): string | null {
+  if (typeof ts !== 'number' || !Number.isFinite(ts)) return null
+  const ms = ts > 1e12 ? ts : ts * 1000
+  return new Date(ms).toISOString()
+}
+
+function sseToAgentEvent(ev: SSEEvent): AgentEvent | null {
+  if (ev.type === 'ready' || ev.type === 'error') return null
+  const inner = (ev.event && typeof ev.event === 'object' ? ev.event : {}) as Record<string, unknown>
+  return {
+    id: `sse-${ev.sequence ?? 'x'}`,
+    run_id: ev.run_id ?? '',
+    sequence: ev.sequence ?? 0,
+    event_type: ev.type,
+    payload: inner,
+    source: 'sse',
+    created_at: unixToIso(inner.timestamp) ?? new Date().toISOString(),
+  }
+}
+
+function mergeTaskEvents(rest: AgentEvent[] | undefined, sse: SSEEvent[]): AgentEvent[] {
+  const map = new Map<string, AgentEvent>()
+  for (const ev of rest ?? []) {
+    map.set(`${ev.run_id}:${ev.sequence}`, ev)
+  }
+  for (const raw of sse) {
+    const mapped = sseToAgentEvent(raw)
+    if (!mapped) continue
+    const key = `${mapped.run_id}:${mapped.sequence}`
+    const existing = map.get(key)
+    if (existing) {
+      map.set(key, {
+        ...existing,
+        event_type: mapped.event_type || existing.event_type,
+        payload: Object.keys(mapped.payload).length ? mapped.payload : existing.payload,
+      })
+    } else {
+      map.set(key, mapped)
+    }
+  }
+  return [...map.values()].sort((a, b) => a.sequence - b.sequence)
+}
+
 interface TaskDetailTabsProps {
   taskId: string
 }
@@ -40,9 +83,15 @@ export function TaskDetailTabs({ taskId }: TaskDetailTabsProps) {
   })
 
   const running = task ? ['queued', 'running'].includes(task.status) : false
-  const sseEnabled = !!taskId && running
+  const sseEnabled = !!taskId
   const { events: sseEvents, status: sseStatus, error: sseError } = useTaskEvents(taskId, {
     enabled: sseEnabled,
+  })
+
+  const { data: restEvents } = useQuery({
+    queryKey: ['task-events', taskId],
+    queryFn: () => api.getTaskEvents(taskId),
+    enabled: !!taskId,
   })
 
   useEffect(() => {
@@ -51,21 +100,15 @@ export function TaskDetailTabs({ taskId }: TaskDetailTabsProps) {
     if (last.type === 'agent.completed' || last.type === 'agent.failed' || last.type === 'node.updated') {
       qc.invalidateQueries({ queryKey: ['task', taskId] })
       qc.invalidateQueries({ queryKey: ['task-report', taskId] })
+      qc.invalidateQueries({ queryKey: ['task-events', taskId] })
       qc.invalidateQueries({ queryKey: ['tasks'] })
     }
   }, [sseEvents, qc, taskId])
 
-  const events: AgentEvent[] | undefined = sseEvents.length
-    ? sseEvents.map((ev) => ({
-        id: `${ev.sequence ?? 'x'}`,
-        run_id: ev.run_id ?? '',
-        sequence: ev.sequence ?? 0,
-        event_type: ev.type,
-        payload: (ev.event ?? {}) as Record<string, unknown>,
-        source: 'sse',
-        created_at: new Date().toISOString(),
-      }))
-    : undefined
+  const events = useMemo(
+    () => mergeTaskEvents(restEvents, sseEvents as SSEEvent[]),
+    [restEvents, sseEvents],
+  )
 
   const { data: report } = useQuery({
     queryKey: ['task-report', taskId],
@@ -179,7 +222,11 @@ function OverviewTab({
           type="error"
           showIcon
           message="执行失败"
-          description={task.runs[0].error_message}
+          description={
+            <Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}>
+              {task.runs[0].error_message}
+            </Paragraph>
+          }
           style={{ marginBottom: 16 }}
         />
       )}

@@ -51,11 +51,18 @@ except ImportError as e:  # 镜像构建失败时给出明确报错
     print(json.dumps({
         "type": "agent.failed",
         "error": f"claude_agent_sdk 导入失败: {e}",
+        "title": "容器内缺少 Claude Agent SDK",
+        "hint": "agent-runner 镜像不完整，请重新构建镜像。",
         "exception": type(e).__name__,
         "sequence": 0,
         "timestamp": time.time(),
     }), file=sys.stdout, flush=True)
     sys.exit(2)
+
+try:
+    from claude_agent_sdk import ThinkingBlock  # type: ignore[attr-defined]
+except ImportError:
+    ThinkingBlock = None  # type: ignore[misc, assignment]
 
 
 # ── Bash 黑名单（核心安全规则，PreToolUse hook 消费） ──
@@ -151,6 +158,61 @@ def _truncate(text: Any, limit: int) -> str:
     return text[:limit]
 
 
+def extract_thinking_text(block: Any) -> str | None:
+    """从 SDK content block 抽出思考文本（兼容 ThinkingBlock / 鸭子类型 / dict）。"""
+    if block is None:
+        return None
+    if isinstance(ThinkingBlock, type):
+        try:
+            if isinstance(block, ThinkingBlock):
+                text = getattr(block, "thinking", None) or getattr(block, "text", None)
+                return str(text) if text else None
+        except TypeError:
+            pass
+    thinking = getattr(block, "thinking", None)
+    if isinstance(thinking, str) and thinking.strip():
+        return thinking
+    name = type(block).__name__.lower()
+    if "thinking" in name:
+        text = getattr(block, "text", None) or getattr(block, "thinking", None)
+        return str(text) if text else None
+    if isinstance(block, dict):
+        btype = str(block.get("type") or "")
+        if btype in ("thinking", "thought"):
+            raw = block.get("thinking") or block.get("text") or ""
+            return str(raw) if raw else None
+    return None
+
+
+def humanize_container_error(raw: str) -> tuple[str, str]:
+    """容器内失败 → (标题, 下一步)。与 worker 侧 errors.py 对齐。"""
+    text = (raw or "").strip() or "未知错误"
+    rules = [
+        ("未调用 submit_result", "Agent 没有提交节点结果就结束了", "模型未调用 submit_result。检查节点 prompt 或 MCP 工具注入。"),
+        ("claude_agent_sdk 导入失败", "容器内缺少 Claude Agent SDK", "重新构建 agent-runner 镜像。"),
+        ("NameError", "容器入口代码异常", "更新 run_one.py 后必须重建镜像。"),
+        ("Authentication", "LLM 鉴权失败", "检查 API Key 与 Base URL。"),
+        ("401", "LLM 接口拒绝访问（401）", "API Key 无效或未注入容器。"),
+        (".node.json 解析失败", "节点输入文件损坏", "worker 写入的 .node.json 不是合法 JSON。"),
+        ("既无 .node.json 也无 .prompt.json", "容器没拿到任务输入", "检查 host_workdir 是否正确 bind mount 到 /workspace。"),
+    ]
+    for needle, title, hint in rules:
+        if needle.lower() in text.lower():
+            return title, hint
+    return text[:240], "查看本条事件的原文与 traceback，对照失败发生在思考、工具还是收尾。"
+
+
+def _failed_event(raw: str, **extra: Any) -> dict[str, Any]:
+    title, hint = humanize_container_error(raw)
+    return {
+        "type": "agent.failed",
+        "error": _truncate(raw, 500),
+        "title": title,
+        "hint": hint,
+        **extra,
+    }
+
+
 def _classify_conclusion(text: str) -> str:
     """文本匹配：exists / not_exists / unconfirmed（与 executor.py 同语义）"""
     if not text:
@@ -197,14 +259,13 @@ async def _stream_messages(options: ClaudeAgentOptions, prompt: str) -> AsyncIte
                 err = getattr(message, "error", None)
                 if err:
                     err_msg = getattr(err, "message", str(err))
-                    yield {
-                        "type": "agent.failed",
-                        "error": _truncate(err_msg, 500),
-                        "model": getattr(message, "model", None),
-                        "session_id": sid,
-                        "sequence": seq,
-                        "timestamp": ts,
-                    }
+                    yield _failed_event(
+                        err_msg,
+                        model=getattr(message, "model", None),
+                        session_id=sid,
+                        sequence=seq,
+                        timestamp=ts,
+                    )
                     continue
 
                 content = getattr(message, "content", None) or []
@@ -212,6 +273,17 @@ async def _stream_messages(options: ClaudeAgentOptions, prompt: str) -> AsyncIte
                     content = [content]
 
                 for block in content:
+                    thinking_text = extract_thinking_text(block)
+                    if thinking_text:
+                        yield {
+                            "type": "agent.thinking",
+                            "text": thinking_text,
+                            "model": getattr(message, "model", None),
+                            "session_id": sid,
+                            "sequence": seq,
+                            "timestamp": ts,
+                        }
+                        continue
                     if isinstance(block, TextBlock):
                         yield {
                             "type": "agent.message",
@@ -231,6 +303,18 @@ async def _stream_messages(options: ClaudeAgentOptions, prompt: str) -> AsyncIte
                             "sequence": seq,
                             "timestamp": ts,
                         }
+                    elif not isinstance(block, (TextBlock, ToolUseBlock)):
+                        # 未知 block：仍尝试当思考/文本露出，避免静默丢流
+                        fallback = getattr(block, "text", None)
+                        if fallback:
+                            yield {
+                                "type": "agent.message",
+                                "text": str(fallback),
+                                "model": getattr(message, "model", None),
+                                "session_id": sid,
+                                "sequence": seq,
+                                "timestamp": ts,
+                            }
                 continue
 
             # UserMessage（含 ToolResultBlock）
@@ -260,6 +344,14 @@ async def _stream_messages(options: ClaudeAgentOptions, prompt: str) -> AsyncIte
             # ResultMessage（终态）
             if isinstance(message, ResultMessage):
                 result_text = getattr(message, "result", "") or ""
+                is_error = bool(getattr(message, "is_error", False))
+                if is_error:
+                    yield _failed_event(
+                        result_text or "SDK ResultMessage.is_error=true",
+                        session_id=sid,
+                        sequence=seq,
+                        timestamp=ts,
+                    )
                 yield {
                     "type": "agent.completed",
                     "conclusion": _classify_conclusion(result_text),
@@ -268,7 +360,7 @@ async def _stream_messages(options: ClaudeAgentOptions, prompt: str) -> AsyncIte
                     "duration_ms": getattr(message, "duration_ms", None),
                     "total_cost_usd": getattr(message, "total_cost_usd", None),
                     "num_turns": getattr(message, "num_turns", None),
-                    "is_error": bool(getattr(message, "is_error", False)),
+                    "is_error": is_error,
                     "sequence": seq,
                     "timestamp": ts,
                 }
@@ -286,14 +378,13 @@ async def _stream_messages(options: ClaudeAgentOptions, prompt: str) -> AsyncIte
 
     except Exception as e:
         seq += 1
-        yield {
-            "type": "agent.failed",
-            "error": _truncate(str(e), 500),
-            "exception": type(e).__name__,
-            "traceback": _truncate(traceback.format_exc(), 1000),
-            "sequence": seq,
-            "timestamp": time.time(),
-        }
+        yield _failed_event(
+            str(e),
+            exception=type(e).__name__,
+            traceback=_truncate(traceback.format_exc(), 1000),
+            sequence=seq,
+            timestamp=time.time(),
+        )
         raise
 
 
@@ -333,6 +424,36 @@ def _build_prompt(task: dict[str, Any]) -> str:
     parts.append("请按你的工作流（阶段 A→B→C→D）验证上述漏洞是否真实存在，并用 phase.updated "
                  "事件记录每个阶段进度，最终产出中文报告。")
     return "\n".join(parts)
+
+
+def _build_node_prompt(node_key: str, input_json: dict[str, Any]) -> str:
+    """按节点构造 user message。源码在容器内固定为 /workspace/project。"""
+    payload = json.dumps(input_json, ensure_ascii=False, indent=2, default=str)
+    headers = {
+        "env_ready": (
+            "你是靶场工程师。源码在 /workspace/project。"
+            "根据以下输入产出 Dockerfile / docker-compose.yml 到 "
+            "/workspace/project/.vuln-env/，完成后必须调用 submit_result。"
+            "不要自己执行 docker compose（由平台 worker 执行）。"
+        ),
+        "audit": (
+            "你是白盒审计员。源码在 /workspace/project。"
+            "根据以下输入完成利用链审计与 Phase 2.5 Gate，完成后必须调用 submit_result。"
+        ),
+        "reproduce": (
+            "你是漏洞复现员。根据以下输入对靶标发一次 HTTP 验证，完成后必须调用 submit_result。"
+            "target_url 中的 host.docker.internal 指向宿主机上的靶场（不要改用 localhost）。"
+        ),
+        "report": (
+            "你是报告撰写员。根据以下全部前序输出生成 8 节 report_data，"
+            "完成后必须调用 submit_result。"
+        ),
+    }
+    head = headers.get(
+        node_key,
+        "根据以下输入完成节点任务，完成后必须调用 submit_result。",
+    )
+    return f"{head}\n\n源码目录: /workspace/project\n\n输入(JSON):\n{payload}"
 
 
 # ── 插件 agent 加载 ──
@@ -493,28 +614,22 @@ async def _main() -> int:
             input_json = _payload.get("input_json", {})
             task = input_json
         except (json.JSONDecodeError, OSError) as e:
-            print(json.dumps({
-                "type": "agent.failed",
-                "error": f".node.json 解析失败: {e}",
-                "sequence": 0, "timestamp": time.time(),
-            }), ensure_ascii=False, flush=True)
+            print(json.dumps(_failed_event(
+                f".node.json 解析失败: {e}", sequence=0, timestamp=time.time(),
+            ), ensure_ascii=False), flush=True)
             return 2
     elif prompt_path.exists():
         try:
             task = json.loads(prompt_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as e:
-            print(json.dumps({
-                "type": "agent.failed",
-                "error": f".prompt.json 解析失败: {e}",
-                "sequence": 0, "timestamp": time.time(),
-            }), ensure_ascii=False, flush=True)
+            print(json.dumps(_failed_event(
+                f".prompt.json 解析失败: {e}", sequence=0, timestamp=time.time(),
+            ), ensure_ascii=False), flush=True)
             return 2
     else:
-        print(json.dumps({
-            "type": "agent.failed",
-            "error": "既无 .node.json 也无 .prompt.json",
-            "sequence": 0, "timestamp": time.time(),
-        }), ensure_ascii=False, flush=True)
+        print(json.dumps(_failed_event(
+            "既无 .node.json 也无 .prompt.json", sequence=0, timestamp=time.time(),
+        ), ensure_ascii=False), flush=True)
         return 2
 
     model = os.environ.get("ANTHROPIC_MODEL", "deepseek-v4-flash")
@@ -545,11 +660,11 @@ async def _main() -> int:
     # 节点模式:校验 submit_result 是否被调用(.node_output.json 存在)
     if node_key and node_key in NODE_AGENT_MAP:
         if not Path("/workspace/.node_output.json").exists():
-            print(json.dumps({
-                "type": "agent.failed",
-                "error": f"节点 {node_key} 未调用 submit_result(无 .node_output.json)",
-                "sequence": 999, "timestamp": time.time(),
-            }, ensure_ascii=False), flush=True)
+            print(json.dumps(_failed_event(
+                f"节点 {node_key} 未调用 submit_result(无 .node_output.json)",
+                sequence=999,
+                timestamp=time.time(),
+            ), ensure_ascii=False), flush=True)
             return 1
 
     if saw_failure and not saw_completion:
@@ -568,11 +683,10 @@ if __name__ == "__main__":
         raise
     except BaseException as e:
         # 兜底：任何未被 _stream_messages 捕获的异常都输出失败事件
-        print(json.dumps({
-            "type": "agent.failed",
-            "error": str(e)[:500],
-            "exception": type(e).__name__,
-            "sequence": 0,
-            "timestamp": time.time(),
-        }), ensure_ascii=False, flush=True)
+        print(json.dumps(_failed_event(
+            str(e)[:500],
+            exception=type(e).__name__,
+            sequence=0,
+            timestamp=time.time(),
+        ), ensure_ascii=False), flush=True)
         sys.exit(1)

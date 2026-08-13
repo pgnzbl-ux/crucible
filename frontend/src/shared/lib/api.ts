@@ -264,7 +264,7 @@ export const api = {
 
   cancelTask: (id: string) => request<TaskDetail>(`/tasks/${id}/cancel`, { method: 'POST' }),
 
-  getTaskEvents: (id: string) => request<AgentEvent[]>(`/tasks/${id}/events`),
+  getTaskEvents: (id: string) => request<AgentEvent[]>(`/tasks/${id}/events?limit=1000`),
 
   // Reports
   getReportByTask: (taskId: string) => request<ReportDetail>(`/reports/task/${taskId}`),

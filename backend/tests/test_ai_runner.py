@@ -4,7 +4,11 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.contexts.agent.ai_runner import validate_output, NODE_INPUT_SCHEMAS
+from app.contexts.agent.ai_runner import (
+    NODE_INPUT_SCHEMAS,
+    rewrite_url_for_agent_container,
+    validate_output,
+)
 
 
 def test_validate_env_ready_ok():
@@ -58,3 +62,10 @@ def test_input_schemas_defined_for_all_ai_nodes():
     for key in ["env_ready", "audit", "reproduce", "report"]:
         assert key in NODE_INPUT_SCHEMAS, f"{key} 缺 input schema"
         assert "required" in NODE_INPUT_SCHEMAS[key]
+
+
+def test_rewrite_localhost_to_host_docker_internal():
+    assert rewrite_url_for_agent_container("http://localhost:8080") == "http://host.docker.internal:8080"
+    assert rewrite_url_for_agent_container("http://127.0.0.1:5000/login") == "http://host.docker.internal:5000/login"
+    assert rewrite_url_for_agent_container("http://example.com") == "http://example.com"
+    assert rewrite_url_for_agent_container(None) is None

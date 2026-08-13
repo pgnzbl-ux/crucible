@@ -54,7 +54,7 @@ paths: ["backend/app/contexts/**/*.py", "backend/app/shared/**/*.py", "backend/a
 
 新增 Agent 实现必须注册到工厂；调用方不 `import` 具体类。
 
-事件流：`agent-runner` 容器内 `runner/run_one.py` 把 SDK Message 翻译为统一事件结构（`phase.updated` / `agent.message` / `tool.call.*` / `agent.completed` / `agent.failed`），通过 stdout JSONL 推给 worker。
+事件流：`agent-runner` 容器内 `runner/run_one.py` 把 SDK Message 翻译为统一事件结构（`phase.updated` / `agent.thinking` / `agent.message` / `tool.call.*` / `agent.completed` / `agent.failed`），通过 stdout JSONL 推给 worker。`agent.failed` 带 `title`/`hint`；编排失败文案见 `contexts/agent/errors.py`。
 
 ## 6. Settings / LLM Provider（`settings` context）
 

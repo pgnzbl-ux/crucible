@@ -123,15 +123,15 @@ class TaskRepository:
         )
         return list(result.scalars().all())
 
-    async def get_events_for_task(self, task_id: str, limit: int = 200) -> list[AgentEvent]:
-        """任务全部 Agent 事件（按 sequence 升序）"""
+    async def get_events_for_task(self, task_id: str, limit: int = 1000) -> list[AgentEvent]:
+        """任务全部 Agent 事件（最近 limit 条，按 sequence 升序）"""
         result = await self.session.execute(
             select(AgentEvent)
             .where(AgentEvent.task_id == task_id)
-            .order_by(AgentEvent.sequence.asc())
+            .order_by(AgentEvent.sequence.desc())
             .limit(limit)
         )
-        return list(result.scalars().all())
+        return list(reversed(list(result.scalars().all())))
 
     async def delete_hard(self, task: Task) -> None:
         """物理删除任务 + 级联清理 runs/nodes/events。

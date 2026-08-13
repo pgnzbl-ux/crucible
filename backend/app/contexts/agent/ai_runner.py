@@ -99,6 +99,18 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
 }
 
 
+def rewrite_url_for_agent_container(url: str | None) -> str | None:
+    """把宿主机 localhost 靶标改写成 agent-runner 容器可达的 host.docker.internal。"""
+    if not url:
+        return url
+    return (
+        url.replace("http://localhost", "http://host.docker.internal")
+        .replace("https://localhost", "https://host.docker.internal")
+        .replace("http://127.0.0.1", "http://host.docker.internal")
+        .replace("https://127.0.0.1", "https://host.docker.internal")
+    )
+
+
 def _mock_output(node_key: str, input_json: dict[str, Any]) -> dict[str, Any]:
     """Mock 模式:SDK 未启用时返回模拟 output(通过 schema 校验),供编排链路联调。"""
     if node_key == "env_ready":
@@ -216,6 +228,9 @@ async def run_ai_node(
     exit_code, summary = await asyncio.to_thread(
         agent_runner_manager.run_with_streaming, spec, _on_event
     )
+
+    if summary.get("timed_out"):
+        raise AgentRunnerError(f"AI 节点 {node_key} 超时({timeout_seconds}s)")
 
     # 3. 读 .node_output.json(submit_result 写的)
     output_path = Path(host_workdir) / ".node_output.json"

@@ -70,7 +70,7 @@ async def get_task(
 async def get_task_events(
     task_id: str,
     svc: Annotated[TaskService, Depends(get_task_service)],
-    limit: int = Query(200, ge=1, le=1000),
+    limit: int = Query(1000, ge=1, le=1000),
 ) -> list[dict[str, Any]]:
     """获取任务 Agent 事件流（历史分页，SSE 不可用时降级方案）"""
     events = await svc.get_task_events(task_id, limit)

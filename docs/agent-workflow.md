@@ -159,15 +159,15 @@ ClaudeAgentOptions(
 天然对接已有 SSE 链路：
 
 ```
-插件 agent 产出 phase.updated / agent.message / tool.call.* / agent.completed
+插件 agent 产出 phase.updated / agent.thinking / agent.message / tool.call.* / agent.completed / agent.failed
   → SDK Message → run_one.py 翻译为统一事件 dict → stdout JSONL
   → worker LineBufferedJsonParser 解析 → AgentEvent 落库
   → Redis Pub/Sub（task.{id}.events）→ SSE 端点转发 → 前端 useTaskEvents
 ```
 
 事件 schema 见 [`run_one.py`](../infrastructure/agent-runner/runner/run_one.py) `_stream_messages`。
-前端 Timeline 直接消费 `phase.updated` 的 `phase` 字段（phase 标签映射在
-`frontend/src/shared/lib/meta.ts::EVENT_PHASE_LABELS`）。
+`agent.thinking` 来自 SDK ThinkingBlock（或鸭子类型 / dict）；`agent.failed` 带 `title` + `hint` 便于排错。
+前端「事件流」Tab 渲染思考 / 回复 / 工具 / 错误（`EVENT_TYPE_LABELS` / `EVENT_PHASE_LABELS` 在 `frontend/src/shared/lib/meta.ts`）；失败节点在步骤条展示人类可读全文。
 
 > **待补**：插件 agent.md 的阶段名（start / preflight / scanning / reproducing / completed
 > 等）与前端 `EVENT_PHASE_LABELS` 的映射需对齐，见 P1 backlog。

@@ -96,18 +96,19 @@
 
 ### GET `/api/v1/tasks/{id}/events`
 
-历史事件分页（降级方案；SSE 不可用或补齐历史时用）。
+历史事件（默认最近 1000 条，`limit` 1–1000）。含 `agent.thinking` / `agent.message` / `tool.call.*` / `agent.failed`（`title`+`hint`）/ `node.updated`。
 
 ### GET `/api/v1/tasks/{id}/events/stream`
 
 **SSE** 实时事件流（P0-1 已实现）。`Content-Type: text/event-stream`。
 
 - 响应头：`X-Accel-Buffering: no` + `Cache-Control: no-cache, no-transform`（防 nginx/反代缓冲）
-- 事件名 = `Event.event_type`（`phase.updated` / `agent.message` / `tool.call.*` / `agent.completed` / `agent.failed` / `ready` / `error`）
-- 启动先回放 DB 历史（帧含 `replayed: true`），再订阅 Redis `task.{id}.events` 频道转发实时事件
+- 事件名 = `Event.event_type`（`phase.updated` / `agent.thinking` / `agent.message` / `tool.call.*` / `agent.completed` / `agent.failed` / `node.updated` / `ready` / `error`）
+- 启动先回放 DB 最近 1000 条（帧含 `replayed: true`），再订阅 Redis `task.{id}.events` 频道转发实时事件
+- `agent.failed` 的 `event` 含 `error`（原文）、`title`（人类可读）、`hint`（下一步）
 - 15s 心跳：`: heartbeat\n\n`
 - 客户端断开 → 立即 `unsubscribe` + 关闭 Redis 连接（防泄漏）
-- 鉴权（待 P0-3）：`?token=<jwt>` query 注入（EventSource 不支持自定义 header）
+- 鉴权：`?token=<jwt>` query 注入（EventSource 不支持自定义 header）
 
 ---
 

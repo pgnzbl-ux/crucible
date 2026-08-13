@@ -139,7 +139,7 @@ class TaskService:
         await self.repo.update_status(task, "cancelled")
         return self._to_detail(task, task.runs)
 
-    async def get_task_events(self, task_id: str, limit: int = 200) -> list[dict[str, Any]]:
+    async def get_task_events(self, task_id: str, limit: int = 1000) -> list[dict[str, Any]]:
         """任务 Agent 事件流（前端进度展示用）"""
         events = await self.repo.get_events_for_task(task_id, limit)
         result: list[dict[str, Any]] = []

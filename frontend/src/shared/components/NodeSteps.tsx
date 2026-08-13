@@ -1,5 +1,5 @@
 import { useEffect, useMemo } from 'react'
-import { Steps, Tag, Tooltip, Typography } from 'antd'
+import { Steps, Typography } from 'antd'
 import {
   CheckCircleOutlined,
   CloseCircleOutlined,
@@ -103,9 +103,9 @@ export function NodeSteps({ taskId, runId, sseEvents = [] }: NodeStepsProps) {
       </span>
     )
     const desc = n.error_message ? (
-      <Tooltip title={n.error_message}>
-        <Text type="danger" style={{ fontSize: 11 }}>失败(悬停查看)</Text>
-      </Tooltip>
+      <Text type="danger" style={{ fontSize: 12, whiteSpace: 'pre-wrap', display: 'block' }}>
+        {n.error_message}
+      </Text>
     ) : n.status === 'skipped' ? (
       <Text type="secondary" style={{ fontSize: 11 }}>跳过</Text>
     ) : n.status === 'completed' && n.finished_at ? (

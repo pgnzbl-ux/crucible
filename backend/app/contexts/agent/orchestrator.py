@@ -64,6 +64,28 @@ async def _get_or_create_node_run(
     return nr
 
 
+async def _skip_reproduce_if_gate_fail(
+    session: AsyncSession,
+    run_id: str,
+    task_id: str,
+    previous_outputs: dict[str, dict],
+    on_node_event,
+) -> str | None:
+    """audit gate_fail → 跳过 reproduce,返回 false_positive;否则 None。"""
+    gate = previous_outputs.get("audit", {}).get("gate_verdict")
+    if gate != "fail":
+        return None
+    repro_nr = await _get_or_create_node_run(
+        session, run_id, task_id, NODE_ORDER[4].node_index, NODE_ORDER[4].node_key
+    )
+    if repro_nr.status != "completed":
+        repro_nr.status = "skipped"
+        await session.commit()
+    if on_node_event:
+        await on_node_event("reproduce", "skipped", None)
+    return "false_positive"
+
+
 async def run_orchestration(
     *,
     task_id: str,
@@ -73,6 +95,7 @@ async def run_orchestration(
     source_path: str,
     runner_env: dict[str, str],
     on_node_event=None,
+    on_ai_event=None,
 ) -> dict[str, Any]:
     """跑 6 节点编排。返回 {status, verdict, summary}。
 
@@ -111,6 +134,12 @@ async def run_orchestration(
                 previous_outputs[node.node_key] = {}
             if on_node_event:
                 await on_node_event(node.node_key, "reused", previous_outputs[node.node_key])
+            if node.node_key == "audit":
+                verdict = await _skip_reproduce_if_gate_fail(
+                    session, run_id, task_id, previous_outputs, on_node_event
+                )
+                if verdict:
+                    final_verdict = verdict
             continue
 
         # 已被分支出口标 skipped(如 gate_fail 后的 reproduce)→ 不执行
@@ -123,7 +152,9 @@ async def run_orchestration(
         # 执行节点
         nr.status = "running"
         nr.started_at = datetime.now(timezone.utc)
-        await session.flush()
+        await session.commit()
+        if on_node_event:
+            await on_node_event(node.node_key, "running", None)
 
         ctx = NodeContext(
             task_id=task_id, run_id=run_id, host_workdir=host_workdir,
@@ -131,6 +162,7 @@ async def run_orchestration(
             vulnerability_description=task.vulnerability_description,
             project_address=task.project_address, project_ref=task.project_ref,
             previous_outputs=dict(previous_outputs), runner_env=runner_env,
+            on_event=on_ai_event,
         )
         try:
             output = await node.execute(ctx)
@@ -143,33 +175,39 @@ async def run_orchestration(
                 await on_node_event(node.node_key, "completed", output)
         except Exception as e:  # noqa: BLE001
             logger.exception(f"节点 {node.node_key} 执行失败")
+            from app.contexts.agent.errors import format_agent_error, humanize_agent_error
+
+            title, hint = humanize_agent_error(str(e))
+            detail = format_agent_error(str(e), node_key=node.node_key)
             nr.status = "failed"
-            nr.error_message = str(e)[:1000]
+            nr.error_message = detail[:1000]
             nr.finished_at = datetime.now(timezone.utc)
             run.status = "failed"
-            run.error_message = f"节点 {node.node_key} 失败: {e}"[:500]
+            run.error_message = f"节点 {node.node_key} 失败: {title}"[:500]
             run.finished_at = datetime.now(timezone.utc)
             task.status = "failed"
             await session.commit()
             if on_node_event:
-                await on_node_event(node.node_key, "failed", {"error": str(e)[:300]})
+                await on_node_event(
+                    node.node_key,
+                    "failed",
+                    {"error": title, "detail": str(e)[:300], "hint": hint},
+                )
             return {
-                "status": "failed", "error": str(e)[:500],
-                "node": node.node_key, "verdict": None,
+                "status": "failed",
+                "error": title,
+                "hint": hint,
+                "node": node.node_key,
+                "verdict": None,
             }
 
         # 分支出口 B:节点 3 audit gate_fail → 跳过节点 4,判误报
         if node.node_key == "audit":
-            gate = previous_outputs.get("audit", {}).get("gate_verdict")
-            if gate == "fail":
-                final_verdict = "false_positive"
-                # 节点 4 标 skipped
-                repro_nr = await _get_or_create_node_run(
-                    session, run_id, task_id, NODE_ORDER[4].node_index, NODE_ORDER[4].node_key
-                )
-                if repro_nr.status != "completed":
-                    repro_nr.status = "skipped"
-                    await session.commit()
+            verdict = await _skip_reproduce_if_gate_fail(
+                session, run_id, task_id, previous_outputs, on_node_event
+            )
+            if verdict:
+                final_verdict = verdict
 
     # 节点 5 报告产出 final_verdict
     # 注意:若 audit 已判 false_positive(gate_fail),report 节点仍会执行(产出误报报告),

@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from unittest.mock import MagicMock, patch
 
-from app.core.agent_runner import AgentRunnerManager, AgentRunnerSpec
+from app.core.agent_runner import AGENT_EXTRA_HOSTS, AgentRunnerManager, AgentRunnerSpec
 
 
 def test_failed_container_stderr_in_summary():
@@ -72,3 +72,67 @@ def test_success_container_empty_stderr_in_summary():
 
     assert exit_code == 0
     assert summary.get("stderr_tail", "MISSING") == ""
+
+
+def test_extra_hosts_maps_host_docker_internal():
+    assert AGENT_EXTRA_HOSTS.get("host.docker.internal") == "host-gateway"
+
+
+def test_run_with_streaming_registers_and_clears_active():
+    fake_container = MagicMock()
+    fake_container.logs.side_effect = [iter([])]
+    fake_container.wait.return_value = {"StatusCode": 0}
+    fake_container.attrs = {"State": {"OOMKilled": False}}
+    fake_container.id = "cid-active"
+    fake_container.reload = MagicMock()
+
+    fake_runner = MagicMock()
+    fake_runner.container = fake_container
+    fake_runner.id = "cid-active"
+    fake_runner.name = "active-runner"
+    fake_runner.stop_and_remove = MagicMock()
+
+    mgr = AgentRunnerManager.__new__(AgentRunnerManager)
+    mgr._client = MagicMock()
+    mgr._active_ids = {"cid-active"}
+
+    with patch.object(mgr, "create", return_value=fake_runner):
+        mgr.run_with_streaming(AgentRunnerSpec(host_workdir="/tmp/x"), lambda e: None)
+
+    assert "cid-active" not in mgr._active_ids
+
+
+def test_timeout_stops_container():
+    fake_container = MagicMock()
+    fake_container.logs.side_effect = [iter([])]
+    fake_container.wait.return_value = {"StatusCode": 137}
+    fake_container.attrs = {"State": {"OOMKilled": False}}
+    fake_container.id = "cid-to"
+    fake_container.reload = MagicMock()
+    fake_container.stop = MagicMock()
+
+    fake_runner = MagicMock()
+    fake_runner.container = fake_container
+    fake_runner.id = "cid-to"
+    fake_runner.name = "to-runner"
+    fake_runner.stop_and_remove = MagicMock()
+
+    mgr = AgentRunnerManager.__new__(AgentRunnerManager)
+    mgr._client = MagicMock()
+    mgr._active_ids = set()
+
+    class ImmediateTimer:
+        def __init__(self, interval, fn, **kwargs):
+            self.fn = fn
+        def start(self):
+            self.fn()
+        def cancel(self):
+            pass
+
+    with patch.object(mgr, "create", return_value=fake_runner), \
+         patch("app.core.agent_runner.threading.Timer", ImmediateTimer):
+        spec = AgentRunnerSpec(host_workdir="/tmp/x", timeout_seconds=1)
+        exit_code, summary = mgr.run_with_streaming(spec, lambda e: None)
+
+    fake_container.stop.assert_called()
+    assert summary.get("timed_out") is True or exit_code == 137

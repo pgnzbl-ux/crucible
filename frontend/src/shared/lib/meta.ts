@@ -59,11 +59,25 @@ export const NODE_STATUS_META: Record<string, { label: string; color: TagProps['
 export const EVENT_PHASE_LABELS: Record<string, string> = {
   start: '启动分析',
   preflight: '环境准备',
+  credentials: '凭据注入',
   running: '执行分析',
   scanning: '代码审计',
   reproducing: '尝试复现',
   completed: '完成',
   failed: '失败',
+}
+
+export const EVENT_TYPE_LABELS: Record<string, string> = {
+  'agent.thinking': '思考',
+  'agent.message': '回复',
+  'agent.completed': '完成',
+  'agent.failed': '失败',
+  'tool.call.started': '工具开始',
+  'tool.call.completed': '工具结束',
+  'tool.call.denied': '工具拒绝',
+  'node.updated': '节点',
+  'phase.updated': '阶段',
+  'raw.message': '原始消息',
 }
 
 export function getStatusMeta(status: string) {

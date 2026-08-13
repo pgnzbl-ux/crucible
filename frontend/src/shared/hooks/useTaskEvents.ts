@@ -62,6 +62,7 @@ export function useTaskEvents<T = unknown>(
     }
 
     closedByUnmountRef.current = false
+    setEvents([])
     setStatus('connecting')
 
     const token = localStorage.getItem('crucible_token')

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import subprocess
 from typing import Any
 
@@ -17,9 +18,33 @@ logger = logging.getLogger(__name__)
 MAX_ATTEMPTS = 5
 
 
+def resolve_compose_host_path(compose_path: str, host_workdir: str) -> str:
+    """把 AI 给出的 compose 路径解析为宿主机绝对路径。
+
+    约定:配方写在 host_workdir/project/.vuln-env/。
+    兼容容器内绝对路径 /workspace/project/... 以及误放在 host_workdir 根下的文件。
+    """
+    from pathlib import Path
+
+    raw = (compose_path or ".vuln-env/docker-compose.yml").replace("\\", "/")
+    host = Path(host_workdir)
+    if raw.startswith("/workspace/"):
+        rel = raw[len("/workspace/"):].lstrip("/")
+        return str(host / rel)
+    if raw.startswith("/") and os.path.exists(raw):
+        return raw
+    project_hit = host / "project" / raw
+    root_hit = host / raw
+    if project_hit.exists():
+        return str(project_hit)
+    if root_hit.exists():
+        return str(root_hit)
+    return str(project_hit)
+
+
 async def docker_compose_up(compose_path: str, host_workdir: str) -> tuple[bool, str]:
     """在 host 执行 docker compose up -d --build,返回 (ok, error)。"""
-    abs_path = compose_path if compose_path.startswith("/") else f"{host_workdir}/{compose_path}"
+    abs_path = resolve_compose_host_path(compose_path, host_workdir)
     abs_path = abs_path.replace("\\", "/")
     try:
         result = await asyncio.to_thread(
@@ -53,17 +78,46 @@ async def health_check(port: int | None, host_workdir: str) -> tuple[bool, str]:
     return False, ""
 
 
-async def collect_compose_logs(host_workdir: str) -> str:
+async def collect_compose_logs(host_workdir: str, compose_path: str | None = None) -> str:
     """收 docker compose logs 给下轮 AI 排障。"""
+    cmd = ["docker", "compose", "logs", "--tail=50"]
+    cwd = host_workdir
+    if compose_path:
+        abs_path = resolve_compose_host_path(compose_path, host_workdir)
+        cmd = ["docker", "compose", "-f", abs_path.replace("\\", "/"), "logs", "--tail=50"]
+        cwd = None
     try:
         result = await asyncio.to_thread(
             subprocess.run,
-            ["docker", "compose", "logs", "--tail=50"],
-            cwd=host_workdir, capture_output=True, text=True, timeout=30,
+            cmd,
+            cwd=cwd, capture_output=True, text=True, timeout=30,
         )
         return (result.stdout or result.stderr)[:2000]
     except Exception:  # noqa: BLE001
         return ""
+
+
+async def docker_compose_down(host_workdir: str, compose_path: str | None = None) -> None:
+    """任务结束拆掉靶场(best-effort)。"""
+    from pathlib import Path
+
+    abs_path = None
+    if compose_path:
+        abs_path = resolve_compose_host_path(compose_path, host_workdir)
+    else:
+        default = Path(host_workdir) / "project" / ".vuln-env" / "docker-compose.yml"
+        if default.exists():
+            abs_path = str(default)
+    if not abs_path or not os.path.exists(abs_path):
+        return
+    try:
+        await asyncio.to_thread(
+            subprocess.run,
+            ["docker", "compose", "-f", abs_path.replace("\\", "/"), "down", "-v", "--remove-orphans"],
+            capture_output=True, text=True, timeout=120,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("docker compose down 失败(best-effort)", exc_info=True)
 
 
 async def run_ai_turn(
@@ -76,7 +130,7 @@ async def run_ai_turn(
     from app.contexts.agent.ai_runner import run_ai_node
 
     input_json = {
-        "source_path": ctx.source_path,
+        "source_path": "/workspace/project",
         "profile": ctx.previous_outputs.get("profile", {}),
         "attempt": attempt,
         "previous_error": prev_error,
@@ -86,6 +140,7 @@ async def run_ai_turn(
         input_json=input_json,
         host_workdir=ctx.host_workdir,
         runner_env=ctx.runner_env,
+        on_event=ctx.on_event,
     )
 
 
@@ -122,7 +177,7 @@ class EnvReadyNode:
             compose_path = recipe.get("compose_path", ".vuln-env/docker-compose.yml")
             ok, err = await docker_compose_up(compose_path, ctx.host_workdir)
             if not ok:
-                logs = await collect_compose_logs(ctx.host_workdir)
+                logs = await collect_compose_logs(ctx.host_workdir, compose_path)
                 last_error = f"attempt {attempt} compose up 失败: {err}\n--- logs ---\n{logs}"
                 logger.warning(f"节点 2 attempt {attempt} 失败: {err[:200]}")
                 continue
