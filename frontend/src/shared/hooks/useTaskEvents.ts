@@ -91,6 +91,12 @@ export function useTaskEvents<T = unknown>(
       newEs.onmessage = (e: MessageEvent) => {
         try {
           const parsed = JSON.parse(e.data) as SSEEvent<T>
+          // ready 帧也走 onmessage(后端不发 event: 具名行,统一 type 字段)
+          if (parsed.type === 'ready') {
+            setStatus('open')
+            reconnectAttemptsRef.current = 0
+            return
+          }
           setEvents((prev) => {
             // 去重：sequence 一致的事件不重复（历史回放 + 实时推送短暂重叠）
             if (parsed.sequence != null) {
@@ -104,11 +110,6 @@ export function useTaskEvents<T = unknown>(
           console.warn('[useTaskEvents] 解析 SSE 帧失败:', err, e.data)
         }
       }
-
-      newEs.addEventListener('ready', () => {
-        setStatus('open')
-        reconnectAttemptsRef.current = 0
-      })
 
       newEs.onerror = () => {
         if (closedByUnmountRef.current) return

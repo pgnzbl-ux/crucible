@@ -29,20 +29,21 @@ SSE_HEARTBEAT_SECONDS = 15
 
 
 def _sse_frame(event_type: str, data: dict[str, Any] | str, event_id: str | None = None) -> str:
-    """构造一条 SSE 帧（按 WHATWG HTML5 EventSource 规范）
+    """构造一条 SSE 帧(按 WHATWG HTML5 EventSource 规范)。
 
-    - event: 自定义事件名
-    - data: JSON 序列化载荷
-    - id: 客户端 EventSource 在断线重连时通过 Last-Event-ID 回传
+    重要:不发 `event:` 具名事件行 —— 具名事件只触发 addEventListener('事件名'),
+    不触发 onmessage,会导致前端 onmessage 永远收不到。改为把 event_type 塞进
+    data 体的 `type` 字段,前端用 onmessage 通杀 + 按 parsed.type 分发。
     """
     if isinstance(data, dict):
+        # 把事件类型塞进 data 体(前端 SSEEvent.type 依赖此字段)
+        data = {**data, "type": event_type}
         data_str = json.dumps(data, ensure_ascii=False, default=str)
     else:
         data_str = data
     parts: list[str] = []
     if event_id:
         parts.append(f"id: {event_id}")
-    parts.append(f"event: {event_type}")
     parts.append(f"data: {data_str}")
     return "\n".join(parts) + "\n\n"
 
