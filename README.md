@@ -379,14 +379,14 @@ Crucible 通过 **Anthropic 兼容端点**对接第三方 LLM，凭据以环境�
 CLAUDE_AGENT_SDK_ENABLED=true
 LLM_BASE_URL=https://api.deepseek.com/anthropic
 LLM_API_KEY=sk-your-deepseek-key
-LLM_MODEL=deepseek-v4-flash       # v4-flash（非思考）/ v4-pro（思考）
+LLM_MODEL=deepseek-v4-flash       # deepseek-v4-flash(轻量,支持思考/非思考切换) / deepseek-v4-pro(增强)
 ```
 
 ### 其他兼容端点
 
 | Provider | `LLM_BASE_URL` | 模型示例 |
 |---|---|---|
-| DeepSeek 官方 | `https://api.deepseek.com/anthropic` | `deepseek-v4-flash` / `deepseek-v4-pro` |
+| DeepSeek 官方 | `https://api.deepseek.com/anthropic` | `deepseek-v4-flash`(轻量) / `deepseek-v4-pro`(增强);两者均支持思考模式,通过 `thinking` 参数切换 |
 | 腾讯云知识引擎 | `https://api.lkeap.cloud.tencent.com/anthropic` | `deepseek-v3.2` |
 
 > 旧模型名 `deepseek-chat` / `deepseek-reasoner` 已于 2026-07-24 弃用。
