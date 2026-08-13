@@ -81,7 +81,7 @@ export function DashboardPage() {
       value: stats.queued,
       icon: <ClockCircleOutlined />,
       tone: 'default' as const,
-      filter: 'queued',
+      filter: 'pending,queued',
     },
     {
       title: '分析中',

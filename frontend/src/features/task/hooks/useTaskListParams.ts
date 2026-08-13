@@ -1,6 +1,5 @@
 import { useCallback, useMemo } from 'react'
 import { useLocation } from 'wouter'
-import dayjs from 'dayjs'
 
 export interface TaskListParams {
   status?: string
@@ -60,24 +59,4 @@ export function useTaskListParams() {
   const clearParams = useCallback(() => navigate('/tasks'), [navigate])
 
   return { params, setParams, clearParams }
-}
-
-/** 客户端过滤（日期范围 + 关键词） */
-export function clientFilterTasks<
-  T extends { project_address: string; created_at: string; status: string },
->(items: T[], params: TaskListParams): T[] {
-  let result = items
-  if (params.q) {
-    const q = params.q.toLowerCase()
-    result = result.filter((t) => t.project_address.toLowerCase().includes(q))
-  }
-  if (params.dateFrom) {
-    const from = dayjs(params.dateFrom).startOf('day')
-    result = result.filter((t) => dayjs(t.created_at).isAfter(from) || dayjs(t.created_at).isSame(from))
-  }
-  if (params.dateTo) {
-    const to = dayjs(params.dateTo).endOf('day')
-    result = result.filter((t) => dayjs(t.created_at).isBefore(to) || dayjs(t.created_at).isSame(to))
-  }
-  return result
 }

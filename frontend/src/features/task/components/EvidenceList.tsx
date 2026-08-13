@@ -3,6 +3,7 @@ import type { UploadProps } from 'antd'
 import { DownloadOutlined, PaperClipOutlined, UploadOutlined } from '@ant-design/icons'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
+import type { ReactNode } from 'react'
 
 import { api, type Evidence } from '../../../shared/lib/api'
 
@@ -66,7 +67,7 @@ export function EvidenceList({ reportId }: { reportId: string }) {
                   下载
                 </Button>
               ) : null,
-            ].filter(Boolean) as React.ReactNode[]}
+            ].filter(Boolean) as ReactNode[]}
           >
             <List.Item.Meta
               avatar={<PaperClipOutlined style={{ fontSize: 18, color: 'var(--crucible-text-disabled)' }} />}

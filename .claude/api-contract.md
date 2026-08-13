@@ -69,7 +69,12 @@
 
 ### GET `/api/v1/tasks`
 
-分页查询。`?page=1&page_size=20&status=running`
+分页查询。Query：
+- `status`：单状态，或逗号分隔多状态（如 `pending,queued`）
+- `priority` / `q`（项目地址关键词）/ `date_from` / `date_to`（`YYYY-MM-DD`）
+- `limit`（默认 50，最大 200）/ `offset`
+
+响应：`{ items, total, limit, offset }`
 
 ### GET `/api/v1/tasks/{id}`
 

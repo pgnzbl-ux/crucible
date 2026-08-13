@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { App, Button, Space } from 'antd'
 import { PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -10,7 +10,7 @@ import { PageContainer } from '../shared/components/PageContainer'
 import { TaskFilterBar } from '../features/task/components/TaskFilterBar'
 import { TaskTable } from '../features/task/components/TaskTable'
 import { TaskCreateDrawer } from '../features/task/components/TaskCreateDrawer'
-import { clientFilterTasks, useTaskListParams } from '../features/task/hooks/useTaskListParams'
+import { useTaskListParams } from '../features/task/hooks/useTaskListParams'
 
 export function TasksPage() {
   const { message } = App.useApp()
@@ -21,17 +21,15 @@ export function TasksPage() {
   const apiParams: Record<string, string> = { limit: '100' }
   if (params.status) apiParams.status = params.status
   if (params.priority) apiParams.priority = params.priority
+  if (params.q) apiParams.q = params.q
+  if (params.dateFrom) apiParams.date_from = params.dateFrom
+  if (params.dateTo) apiParams.date_to = params.dateTo
 
   const { data, isLoading, refetch } = useQuery({
-    queryKey: ['tasks', params.status, params.priority],
+    queryKey: ['tasks', params],
     queryFn: () => api.listTasks(apiParams),
     refetchInterval: 5000,
   })
-
-  const filteredItems = useMemo(
-    () => clientFilterTasks(data?.items ?? [], params),
-    [data?.items, params],
-  )
 
   const cancelMutation = useMutation({
     mutationFn: (id: string) => api.cancelTask(id),
@@ -81,9 +79,9 @@ export function TasksPage() {
 
       <PageContainer>
         <TaskTable
-          data={filteredItems}
+          data={data?.items ?? []}
           loading={isLoading}
-          total={filteredItems.length}
+          total={data?.total ?? 0}
           onCancel={(id) => cancelMutation.mutate(id)}
           onRetry={(id) => retryMutation.mutate(id)}
           onDelete={(id) => deleteMutation.mutate(id)}

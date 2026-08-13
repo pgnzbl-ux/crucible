@@ -13,8 +13,9 @@ interface TaskFilterBarProps {
 }
 
 const STATUS_OPTIONS = [
-  { value: 'queued', label: '排队中' },
+  { value: 'pending,queued', label: '排队中' },
   { value: 'pending', label: '待处理' },
+  { value: 'queued', label: '已入队' },
   { value: 'running', label: '分析中' },
   { value: 'needs_review', label: '待复核' },
   { value: 'completed', label: '已完成' },
