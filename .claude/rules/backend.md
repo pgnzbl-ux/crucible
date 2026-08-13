@@ -19,10 +19,10 @@ paths: ["backend/app/contexts/**/*.py", "backend/app/shared/**/*.py", "backend/a
 | Context | 核心模型 | 关键职责 |
 |---|---|---|
 | `identity` | users | 注册、登录、JWT、bcrypt（**锁 bcrypt==4.0.1**） |
-| `task` | tasks / task_runs / agent_events | 任务 CRUD、状态机、事件查询 |
+| `task` | tasks / task_runs / node_runs / agent_events | 任务 CRUD、状态机(含 retry/delete/archived)、6 节点断点续跑、事件查询 |
 | `agent` | （无自有表，消费 settings 与 task） | Agent 执行器抽象、Celery 工作流、沙箱编排 |
 | `report` | reports / evidences | 报告生成 + 状态机 + MinIO 归档 |
-| `settings` | llm_providers | LLM Provider 后台 CRUD（**Fernet 加密 + 激活唯一性**） |
+| `settings` | llm_providers / credentials | LLM Provider + 凭据后台 CRUD（**明文存取 + 响应掩码 + 激活唯一性**） |
 
 新增 Context 时单独评审，避免膨胀为"通用业务包"。
 
@@ -58,7 +58,7 @@ paths: ["backend/app/contexts/**/*.py", "backend/app/shared/**/*.py", "backend/a
 
 ## 6. Settings / LLM Provider（`settings` context）
 
-- API Key 入库前 `Fernet.encrypt`，列表接口只回显掩码（`***last4`）
+- API Key 当前**明文入库**(`settings/service.py` 存 `api_key_encrypted`),列表接口走 `mask_secret` 掩码。`core/crypto.py::encrypt_secret` 遗留未用
 - 同一时刻**仅一个** Provider 处于 active 状态（业务唯一性约束）
 - 测试连接真实打 `LLM_BASE_URL`（不 Mock），便于配置阶段就发现端点 / 凭据错误
 

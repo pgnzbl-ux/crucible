@@ -1,47 +1,51 @@
-/* Crucible 设计令牌 —— 中性安全风（石墨灰 + 钢蓝） */
+/* Crucible 设计令牌 —— 浅色企业后台（Ant Design Pro 风格） */
 /* 与 styles/theme.ts 同源；业务组件一律引用这里的变量，不写硬编码色值 */
 :root {
   /* 表面层级 */
-  --crucible-bg: #0f1115;
-  --crucible-surface: #15181f;
-  --crucible-surface-raised: #1b2029;
-  --crucible-border: rgba(255, 255, 255, 0.08);
-  --crucible-border-strong: rgba(255, 255, 255, 0.14);
+  --crucible-bg: #f0f2f5;
+  --crucible-surface: #ffffff;
+  --crucible-surface-raised: #ffffff;
+  --crucible-border: #f0f0f0;
+  --crucible-border-strong: #d9d9d9;
 
   /* 文本 */
-  --crucible-text: #e6e8ec;
-  --crucible-text-secondary: #9aa1ac;
-  --crucible-text-disabled: #6f7683;
+  --crucible-text: rgba(0, 0, 0, 0.88);
+  --crucible-text-secondary: rgba(0, 0, 0, 0.65);
+  --crucible-text-disabled: rgba(0, 0, 0, 0.45);
 
-  /* 品牌主色（钢蓝） */
-  --crucible-primary: #5b7fd4;
-  --crucible-primary-hover: #6f90e0;
-  --crucible-primary-active: #4a68b8;
-  --crucible-primary-light: rgba(91, 127, 212, 0.16);
+  /* 品牌主色 */
+  --crucible-primary: #1677ff;
+  --crucible-primary-hover: #4096ff;
+  --crucible-primary-active: #0958d9;
+  --crucible-primary-light: #e6f4ff;
 
   /* 语义色 */
-  --crucible-success: #22a06b;
-  --crucible-warning: #d97706;
-  --crucible-error: #d64545;
-  --crucible-info: #5b7fd4;
+  --crucible-success: #52c41a;
+  --crucible-warning: #faad14;
+  --crucible-error: #ff4d4f;
+  --crucible-info: #1677ff;
 
   /* 漏洞严重程度 —— 中国红涨绿跌约定 */
-  --vr-critical: #d64545;
-  --vr-high: #e8930c;
-  --vr-medium: #d9b14a;
-  --vr-low: #22a06b;
-  --vr-info: #5b7fd4;
+  --vr-critical: #ff4d4f;
+  --vr-high: #fa8c16;
+  --vr-medium: #faad14;
+  --vr-low: #52c41a;
+  --vr-info: #1677ff;
 
   /* 任务流转状态色 */
-  --vr-pending: #6b7280;
-  --vr-running: #5b7fd4;
-  --vr-verifying: #8b5cf6;
-  --vr-verified: #22a06b;
-  --vr-failed: #d64545;
-  --vr-submitted: #d97706;
+  --vr-pending: #8c8c8c;
+  --vr-running: #1677ff;
+  --vr-verifying: #722ed1;
+  --vr-verified: #52c41a;
+  --vr-failed: #ff4d4f;
+  --vr-submitted: #faad14;
 
   /* 排版 */
   --crucible-font: 'IBM Plex Sans', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC',
     -apple-system, BlinkMacSystemFont, sans-serif;
   --crucible-font-mono: 'JetBrains Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+
+  /* 阴影 */
+  --crucible-shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.03), 0 1px 6px -1px rgba(0, 0, 0, 0.02);
+  --crucible-shadow-md: 0 6px 16px 0 rgba(0, 0, 0, 0.08), 0 3px 6px -4px rgba(0, 0, 0, 0.12);
 }

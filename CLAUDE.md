@@ -20,8 +20,8 @@ Crucible 是一个 AI 驱动的漏洞自动验证平台。安全研究员提交�
 - **模块化单体** — Bounded Context 组织代码（task / agent / report / identity），不盲目微服务
 - **事件驱动** — Context 间通过 Redis Pub/Sub 异步通信
 - **Agent GateWay** — Agent 执行抽象为平台能力而非胶水代码
-- **Agent 两阶段解耦** — 靶场环境搭建（`run-project-env`）与漏洞验证（`vuln-verify`）拆分为两个独立 skill / 模块，两个步骤解耦、可独立管理与演进（2026-08-11 决策）
-- **Security by Default** — 沙箱真隔离、凭据不落盘、Agent 零信任
+- **Agent 平台 6 节点编排** — Celery worker 的 `orchestrator.py` 驱动 6 节点(source/profile/env_ready/audit/reproduce/report),AI 节点用独立 agent-runner 容器 + `submit_result` 工具回传结构化 output;分支出口:非 web→skip 2-5、audit gate_fail→skip 4 判误报、env_ready 5 轮失败→task failed(2026-08-12 重塑,替代旧插件单次大调用)
+- **Security by Default** — 沙箱真隔离、Agent 零信任。LLM 凭据通过 `docker run --env` 注入容器(容器销毁 env 消失,这部分零落盘成立);**注意:LLM API Key 当前明文存库**(`settings/service.py` 明文存取,响应层 `mask_secret` 掩码),`core/crypto.py` 的 Fernet 工具遗留未用
 
 ## 快速启动
 
@@ -52,25 +52,34 @@ Crucible/
 │   │   ├── main.py              # FastAPI 入口 (<100行)
 │   │   ├── core/                # 配置、数据库、安全、Celery、agent-runner 编排
 │   │   ├── contexts/            # Bounded Contexts
-│   │   │   ├── task/            # 任务管理 (models/schemas/service/repo/api)
-│   │   │   ├── agent/           # Agent 执行平台（SDK 适配 + 容器编排）
+│   │   │   ├── task/            # 任务管理 (models/schemas/service/repo/api) + NodeRun/重试/删除
+│   │   │   ├── agent/           # Agent 执行平台（6 节点编排 + SDK 适配 + 容器编排）
+│   │   │   │   ├── orchestrator.py     # ★ 6 节点编排器（循环 + 分支出口 + 断点续跑）
+│   │   │   │   ├── nodes/              # ★ 6 节点实现（source/profile/env_ready/audit/reproduce/report）
+│   │   │   │   ├── ai_runner.py        # AI 节点容器编排 + submit_result 工具 + schema 校验
+│   │   │   │   ├── profile_detector.py # 节点 1 规则引擎（7 语言 + web 门禁,纯代码）
 │   │   │   │   ├── sdk_adapter.py      # Claude Agent SDK 适配器（env + prompt 构造）
-│   │   │   │   ├── runner_bridge.py    # 拉起容器 + 写 prompt + 流消费组合
-│   │   │   │   ├── executor.py         # ClaudeSdkExecutor / MockExecutor + 工厂
-│   │   │   │   └── tasks.py            # Celery 工作流（host clone + 容器编排 + 实时落库）
+│   │   │   │   ├── executor.py         # ClaudeSdkExecutor / MockExecutor + 工厂（遗留兼容）
+│   │   │   │   └── tasks.py            # Celery 工作流（host clone + 调 orchestrator + 实时落库）
 │   │   │   ├── identity/        # 认证与用户管理
-│   │   │   └── report/          # 报告与证据
+│   │   │   ├── project/         # ★ 项目源码管理（projects 表 CRUD + 画像缓存）
+│   │   │   └── report/          # 报告与证据（结构化 report_data + md 渲染导出）
 │   │   └── shared/              # 共享基类、事件总线、SSE、鉴权依赖
 ├── frontend/
 │   └── src/
 │       ├── app/                 # providers、layout、路由守卫
 │       ├── pages/               # 页面组件
-│       ├── features/            # 领域功能模块
-│       └── shared/              # api / hooks（useTaskEvents）/ lib
-├── plugins/                     # ★ Claude Code 插件（阶段化编排的载体）
-│   └── vuln-verify-expert/      #   白盒验证 agent + skills（两阶段解耦）
-│       ├── skills/run-project-env/   #   模块一：靶场环境搭建（独立管理）
-│       └── skills/vuln-verify/       #   模块二：漏洞验证（独立管理）
+│       ├── features/            # 领域功能模块（task/components 等）
+│       └── shared/              # api / hooks（useTaskEvents）/ lib / components（NodeSteps/ReportContent）
+├── plugins/                     # ★ Claude Code 插件（4 子 agent,平台 6 节点编排调用）
+│   └── vuln-verify-expert/
+│       ├── agents/env-builder.md       # 节点 env_ready（靶场）
+│       ├── agents/auditor.md           # 节点 audit（Phase 2.5 Gate）
+│       ├── agents/reproducer.md        # 节点 reproduce（复现）
+│       ├── agents/reporter.md          # 节点 report（生成 report_data JSON）
+│       ├── agents/vuln-verify-expert.md # 旧单体 agent,保留兼容
+│       ├── skills/run-project-env/      # 靶场环境搭建方法论
+│       └── skills/vuln-verify/          # 漏洞验证方法论
 └── infrastructure/              # Docker Compose
     ├── docker-compose.yml
     └── agent-runner/            # Agent Runner 专用镜像
@@ -96,7 +105,7 @@ Celery worker 通过 `docker run --env` 把 Anthropic 兼容端点凭据注入 `
 CLAUDE_AGENT_SDK_ENABLED=true
 LLM_BASE_URL=https://api.deepseek.com/anthropic    # DeepSeek 官方端点
 LLM_API_KEY=sk-xxx                                  # 你的 DeepSeek API Key
-LLM_MODEL=deepseek-v4-flash                         # v4-flash 非思考 / v4-pro 思考
+LLM_MODEL=deepseek-v4-flash                         # flash/pro 协议一致;思考 thinking.type=enabled|disabled(默认 enabled),强度 output_config.effort=low|high|max(默认 high)
 ```
 
 配置说明：

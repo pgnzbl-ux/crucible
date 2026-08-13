@@ -1,6 +1,7 @@
 import { Card, Collapse, Descriptions, Table, Tag, Typography, Button, Space, Empty } from 'antd'
 import { DownloadOutlined, FileTextOutlined } from '@ant-design/icons'
 import type { ReportDetail } from '../lib/api'
+import { api } from '../lib/api'
 import { getVerdictMeta } from '../lib/meta'
 
 const { Title, Paragraph, Text, Link } = Typography
@@ -17,10 +18,10 @@ export function ReportContent({ report }: ReportContentProps) {
   const rd = report.report_data as Record<string, unknown> | null
 
   const exportJson = () => {
-    window.open(`/api/v1/reports/${report.id}/export?format=json`, '_blank')
+    window.open(api.exportReportUrl(report.id, 'json'), '_blank')
   }
   const exportMd = () => {
-    window.open(`/api/v1/reports/${report.id}/export?format=md`, '_blank')
+    window.open(api.exportReportUrl(report.id, 'md'), '_blank')
   }
 
   // 无结构化数据 → 回退

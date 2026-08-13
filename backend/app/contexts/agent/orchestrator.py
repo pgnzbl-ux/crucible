@@ -100,7 +100,7 @@ async def run_orchestration(
             previous_outputs[node.node_key] = {}
             skipped_due_to_non_web = True
             if on_node_event:
-                on_node_event(node.node_key, "skipped", None)
+                await on_node_event(node.node_key, "skipped", None)
             continue
 
         # 断点续跑:已完成 → 复用 output_json
@@ -110,14 +110,14 @@ async def run_orchestration(
             except json.JSONDecodeError:
                 previous_outputs[node.node_key] = {}
             if on_node_event:
-                on_node_event(node.node_key, "reused", previous_outputs[node.node_key])
+                await on_node_event(node.node_key, "reused", previous_outputs[node.node_key])
             continue
 
         # 已被分支出口标 skipped(如 gate_fail 后的 reproduce)→ 不执行
         if nr.status == "skipped":
             previous_outputs[node.node_key] = {}
             if on_node_event:
-                on_node_event(node.node_key, "skipped", None)
+                await on_node_event(node.node_key, "skipped", None)
             continue
 
         # 执行节点
@@ -140,7 +140,7 @@ async def run_orchestration(
             previous_outputs[node.node_key] = output
             await session.commit()
             if on_node_event:
-                on_node_event(node.node_key, "completed", output)
+                await on_node_event(node.node_key, "completed", output)
         except Exception as e:  # noqa: BLE001
             logger.exception(f"节点 {node.node_key} 执行失败")
             nr.status = "failed"
@@ -152,7 +152,7 @@ async def run_orchestration(
             task.status = "failed"
             await session.commit()
             if on_node_event:
-                on_node_event(node.node_key, "failed", {"error": str(e)[:300]})
+                await on_node_event(node.node_key, "failed", {"error": str(e)[:300]})
             return {
                 "status": "failed", "error": str(e)[:500],
                 "node": node.node_key, "verdict": None,
@@ -171,20 +171,17 @@ async def run_orchestration(
                     repro_nr.status = "skipped"
                     await session.commit()
 
-    # 节点 5 报告产出 final_verdict(优先于 gate_fail,正常路径)
+    # 节点 5 报告产出 final_verdict
+    # 注意:若 audit 已判 false_positive(gate_fail),report 节点仍会执行(产出误报报告),
+    # 但其 final_verdict 不应覆盖 audit 的误报结论 —— audit Gate 是权威判定。
     report_out = previous_outputs.get("report", {})
-    if report_out.get("final_verdict"):
+    if final_verdict != "false_positive" and report_out.get("final_verdict"):
         final_verdict = report_out["final_verdict"]
 
-    # 收尾
+    # 收尾(非 web 与正常路径统一 completed;非 web 的 verdict 已为 None)
     task.verdict = final_verdict
-    if skipped_due_to_non_web and not report_out:
-        # 非 web:completed 无 verdict
-        run.status = "completed"
-        task.status = "completed"
-    else:
-        run.status = "completed"
-        task.status = "completed"
+    run.status = "completed"
+    task.status = "completed"
     run.finished_at = datetime.now(timezone.utc)
     await session.commit()
 

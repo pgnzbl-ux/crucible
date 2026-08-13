@@ -49,7 +49,6 @@ from app.core.celery_app import celery_app
 from app.core.config import get_settings
 from app.shared.events import Event, event_bus
 
-from .executor import AgentRunContext, ClaudeSdkExecutor, get_executor
 from .sdk_adapter import resolve_runner_env
 
 logger = logging.getLogger(__name__)
@@ -381,10 +380,18 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
                                 verdict=orch_result.get("verdict"),
                                 report_data=json.dumps(report_data, ensure_ascii=False, default=str),
                                 title=f"漏洞验证报告 — {task_id[:8]}",
-                                summary=str(report_data.get("§1") or report_data.get("product_intro") or "")[:500],
+                                summary=str(report_data.get("product_intro") or "")[:500],
                             )
                             session.add(report)
                         await session.commit()
+                        # 归档插件产物(VULN-*/img/.vuln-env 等)到 MinIO + Evidence
+                        try:
+                            archived = await _archive_artifacts(session, report, host_workdir)
+                            if archived:
+                                summary["artifacts_archived"] = archived
+                                await session.commit()
+                        except Exception as e:  # noqa: BLE001 — 归档失败不阻断主流程
+                            logger.warning(f"插件产物归档失败(不影响主流程): {e}")
                         summary["report_generated"] = True
                     except Exception as e:  # noqa: BLE001
                         summary["report_generated"] = False

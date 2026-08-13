@@ -98,7 +98,7 @@ class ReportService:
 
     # ── 生成 ──
 
-    async def generate_from_agent(
+    async def generate_from_agent(  # noqa: DEPRECATED — 6 节点编排后在 tasks.py 内联建 Report,此方法遗留无调用方
         self,
         *,
         task_id: str,

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   App,
   Button,
@@ -34,6 +34,7 @@ import dayjs from 'dayjs'
 import { api, type Credential, type CredentialInput, type LlmProvider, type LlmProviderInput } from '../shared/lib/api'
 import { AppLayout } from '../app/layout'
 import { PageHeader } from '../shared/components/PageHeader'
+import { PageContainer } from '../shared/components/PageContainer'
 
 const { Text } = Typography
 
@@ -69,6 +70,25 @@ function ProviderFormDrawer({
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null)
 
   const providerType = Form.useWatch('provider_type', form)
+
+  useEffect(() => {
+    if (!open) return
+    if (editing) {
+      form.setFieldsValue({
+        name: editing.name,
+        provider_type: editing.provider_type,
+        base_url: editing.base_url,
+        model: editing.model,
+        timeout_ms: editing.timeout_ms,
+        enabled: editing.enabled,
+        api_key: undefined,
+      })
+    } else {
+      form.resetFields()
+      form.setFieldsValue({ provider_type: 'deepseek', timeout_ms: 600000, enabled: true })
+    }
+    setTestResult(null)
+  }, [open, editing, form])
 
   const saveMutation = useMutation({
     mutationFn: (values: LlmProviderInput) =>
@@ -135,18 +155,6 @@ function ProviderFormDrawer({
         form={form}
         layout="vertical"
         onFinish={(v) => saveMutation.mutate(v)}
-        initialValues={
-          editing
-            ? {
-                name: editing.name,
-                provider_type: editing.provider_type,
-                base_url: editing.base_url,
-                model: editing.model,
-                timeout_ms: editing.timeout_ms,
-                enabled: editing.enabled,
-              }
-            : { provider_type: 'deepseek', timeout_ms: 600000, enabled: true }
-        }
       >
         <Form.Item name="provider_type" label="服务商" rules={[{ required: true }]}>
           <Select
@@ -295,7 +303,14 @@ function ProviderPanel() {
               设为默认
             </Button>
           )}
-          <Button size="small" icon={<EditOutlined />} onClick={() => setEditing(row)} />
+          <Button
+            size="small"
+            icon={<EditOutlined />}
+            onClick={() => {
+              setEditing(row)
+              setCreateOpen(true)
+            }}
+          />
           <Popconfirm
             title="删除该 Provider？"
             onConfirm={() => deleteMutation.mutate(row.id)}
@@ -338,7 +353,10 @@ function ProviderPanel() {
       <ProviderFormDrawer
         open={createOpen}
         editing={editing}
-        onClose={() => { setCreateOpen(false); setEditing(null) }}
+        onClose={() => {
+          setCreateOpen(false)
+          setEditing(null)
+        }}
       />
     </div>
   )
@@ -500,12 +518,15 @@ export function SettingsPage() {
         title="设置"
         subtitle="管理 AI 模型接入与任务级凭据"
       />
+      <PageContainer>
       <Tabs
+        type="card"
         items={[
           { key: 'providers', label: 'LLM Provider', children: <ProviderPanel /> },
           { key: 'credentials', label: '任务凭据', children: <CredentialsPanel /> },
         ]}
       />
+      </PageContainer>
     </AppLayout>
   )
 }

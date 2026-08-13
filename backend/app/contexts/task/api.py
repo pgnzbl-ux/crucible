@@ -40,13 +40,18 @@ async def create_task(
 async def list_tasks(
     svc: Annotated[TaskService, Depends(get_task_service)],
     user_id: CurrentUserId,
-    status: str | None = Query(None),
+    status: str | None = Query(None, description="单状态或逗号分隔多状态，如 pending,queued"),
     priority: str | None = Query(None),
+    q: str | None = Query(None, description="项目地址关键词"),
+    date_from: str | None = Query(None, description="创建日起 YYYY-MM-DD"),
+    date_to: str | None = Query(None, description="创建日止 YYYY-MM-DD"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> TaskListResponse:
     """获取任务列表"""
-    return await svc.list_tasks(user_id, status, priority, limit, offset)
+    return await svc.list_tasks(
+        user_id, status, priority, limit, offset, q=q, date_from=date_from, date_to=date_to,
+    )
 
 
 @router.get("/{task_id}", response_model=TaskDetail)

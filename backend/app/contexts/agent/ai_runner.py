@@ -187,7 +187,16 @@ async def run_ai_node(
         return output
 
     # 1. 写 .node.json(容器内 run_one.py 读)
+    #    先清旧的 .node_output.json:env_ready 排障循环每轮重调本函数,
+    #    若上轮 agent 没调 submit_result,容器会读到上轮遗留的旧 output(run_one
+    #    退出码 0 → 本函数读到旧数据,静默用错)。
     node_input_path = Path(host_workdir) / ".node.json"
+    node_output_path = Path(host_workdir) / ".node_output.json"
+    if node_output_path.exists():
+        try:
+            node_output_path.unlink()
+        except OSError:
+            pass
     node_input_path.write_text(
         json.dumps({"node_key": node_key, "input_json": input_json}, ensure_ascii=False),
         encoding="utf-8",

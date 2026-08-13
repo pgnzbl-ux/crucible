@@ -24,7 +24,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 settings = get_settings()
 
 
-# 与 runner/run_one.py::SYSTEM_PROMPT 保持一致（容器内 SDK system_prompt 选项覆盖）
+# DEPRECATED: 编排走 .node.json,system prompt 由插件 agent frontmatter 提供,此常量无调用方。
+# 历史说明：曾与 runner/run_one.py::SYSTEM_PROMPT 保持一致（容器内 SDK system_prompt 选项覆盖）。
 SYSTEM_PROMPT = """你是 Crucible 漏洞验证平台的资深安全研究员 Agent。
 任务：对给定项目源码进行漏洞分析，判定目标漏洞是否真实存在。
 
@@ -111,7 +112,7 @@ class ClaudeSdkAdapter:
 
 
 async def resolve_runner_env(session: AsyncSession) -> dict[str, str]:
-    """tasks.py 调用的辅助：从 settings context 取默认 Provider 的解密 env，fallback 到 settings.llm_*。
+    """tasks.py 调用的辅助：从 settings context 取默认 Provider 的明文 env，fallback 到 settings.llm_*。
 
     返回值直接传给 docker run --env。
     """

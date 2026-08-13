@@ -1,37 +1,82 @@
-import { Button, Card, Empty, Skeleton, Table, Tag, Typography } from 'antd'
-import { FileProtectOutlined, ReloadOutlined } from '@ant-design/icons'
+import { useMemo, useState } from 'react'
+import { Button, Card, Empty, Input, Select, Skeleton, Table, Tag, Typography } from 'antd'
+import { FileProtectOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { useQuery } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 
-import { api, type ReportDetail } from '../shared/lib/api'
-import { getVerdictMeta } from '../shared/lib/meta'
+import { api, type TaskSummary } from '../shared/lib/api'
+import { getVerdictMeta, VERDICT_META } from '../shared/lib/meta'
 import { AppLayout } from '../app/layout'
 import { PageHeader } from '../shared/components/PageHeader'
+import { PageContainer } from '../shared/components/PageContainer'
 import { ReportContent } from '../shared/components/ReportContent'
 
 const { Text } = Typography
 
-type ReportRow = ReportDetail & { project_address: string }
+type ReportRow = {
+  task_id: string
+  project_address: string
+  verdict: string | null
+  cvss_score: number | null
+  severity: string | null
+  status: string | null
+  created_at: string | null
+  hasReport: boolean
+}
+
+function ReportExpandedRow({ taskId }: { taskId: string }) {
+  const { data: report, isLoading } = useQuery({
+    queryKey: ['task-report', taskId],
+    queryFn: () => api.getReportByTask(taskId),
+    retry: false,
+  })
+
+  if (isLoading) return <Skeleton active paragraph={{ rows: 4 }} />
+  if (!report) return <Empty description="暂无报告详情" />
+  return <ReportContent report={report} />
+}
 
 export function ReportsPage() {
-  const { data, isLoading, refetch } = useQuery({
-    queryKey: ['reports'],
-    queryFn: () =>
-      api.listTasks({ limit: '200' }).then(async (tasks) => {
-        const reports: ReportRow[] = []
-        for (const t of tasks.items) {
-          try {
-            const r = await api.getReportByTask(t.id)
-            reports.push({ ...r, project_address: t.project_address })
-          } catch {
-            // 无报告的任务跳过
-          }
-        }
-        return reports
-      }),
+  const [verdictFilter, setVerdictFilter] = useState<string | undefined>()
+  const [keyword, setKeyword] = useState('')
+
+  const { data: tasksData, isLoading, refetch } = useQuery({
+    queryKey: ['reports-tasks'],
+    queryFn: () => api.listTasks({ limit: '200' }),
     refetchInterval: 8000,
   })
+
+  const rows: ReportRow[] = useMemo(() => {
+    return (tasksData?.items ?? [])
+      .filter((t: TaskSummary) => t.verdict != null || t.status === 'completed' || t.status === 'needs_review')
+      .map((t: TaskSummary) => ({
+        task_id: t.id,
+        project_address: t.project_address,
+        verdict: t.verdict,
+        cvss_score: null,
+        severity: null,
+        status: t.status,
+        created_at: t.created_at,
+        hasReport: true,
+      }))
+  }, [tasksData])
+
+  const filtered = useMemo(() => {
+    let result = rows
+    if (verdictFilter) {
+      result = result.filter((r) => r.verdict === verdictFilter)
+    }
+    if (keyword) {
+      const q = keyword.toLowerCase()
+      result = result.filter(
+        (r) =>
+          r.project_address.toLowerCase().includes(q) ||
+          r.task_id.toLowerCase().includes(q),
+      )
+    }
+    return result
+  }, [rows, verdictFilter, keyword])
 
   const columns: ColumnsType<ReportRow> = [
     {
@@ -54,28 +99,16 @@ export function ReportsPage() {
         v ? <Tag color={getVerdictMeta(v).color}>{getVerdictMeta(v).label}</Tag> : <Text type="secondary">—</Text>,
     },
     {
-      title: 'CVSS',
-      dataIndex: 'cvss_score',
-      width: 90,
-      render: (v: number | null) => (v != null ? <Text strong>{v.toFixed(1)}</Text> : <Text type="secondary">—</Text>),
-    },
-    {
-      title: '严重度',
-      dataIndex: 'severity',
-      width: 90,
+      title: '任务状态',
+      dataIndex: 'status',
+      width: 100,
       render: (v: string | null) => (v ? <Tag>{v}</Tag> : <Text type="secondary">—</Text>),
     },
     {
-      title: '状态',
-      dataIndex: 'status',
-      width: 100,
-      render: (v: string) => <Tag color={v === 'published' ? 'green' : 'blue'}>{v}</Tag>,
-    },
-    {
-      title: '生成时间',
+      title: '创建时间',
       dataIndex: 'created_at',
       width: 160,
-      render: (v: string) => dayjs(v).format('MM-DD HH:mm:ss'),
+      render: (v: string | null) => (v ? dayjs(v).format('MM-DD HH:mm:ss') : '—'),
     },
   ]
 
@@ -83,31 +116,51 @@ export function ReportsPage() {
     <AppLayout>
       <PageHeader
         title="验证报告"
-        subtitle="Agent 分析产出的结构化验证报告(点击行展开 8 节详情)"
+        subtitle="Agent 分析产出的结构化验证报告（点击行展开详情）"
         extra={
           <Button icon={<ReloadOutlined />} onClick={() => refetch()}>
             刷新
           </Button>
         }
       />
-      <Card className="crucible-card-hover">
+
+      <div className="crucible-filter-bar" style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+        <Select
+          allowClear
+          placeholder="判定结果"
+          style={{ width: 160 }}
+          value={verdictFilter}
+          onChange={setVerdictFilter}
+          options={Object.entries(VERDICT_META).map(([v, m]) => ({ value: v, label: m.label }))}
+        />
+        <Input
+          allowClear
+          placeholder="搜索项目地址 / 任务 ID"
+          prefix={<SearchOutlined />}
+          style={{ width: 260 }}
+          value={keyword}
+          onChange={(e) => setKeyword(e.target.value)}
+        />
+      </div>
+
+      <PageContainer>
         {isLoading ? (
           <Skeleton active paragraph={{ rows: 6 }} />
-        ) : (data ?? []).length ? (
+        ) : filtered.length ? (
           <Table<ReportRow>
-            rowKey="id"
+            rowKey="task_id"
             columns={columns}
-            dataSource={data ?? []}
-            pagination={{ pageSize: 10 }}
+            dataSource={filtered}
+            pagination={{ pageSize: 10, showTotal: (t) => `共 ${t} 条` }}
             expandable={{
-              expandedRowRender: (row) => <ReportContent report={row} />,
+              expandedRowRender: (row) => <ReportExpandedRow taskId={row.task_id} />,
               rowExpandable: () => true,
             }}
           />
         ) : (
           <Empty description="暂无报告" image={<FileProtectOutlined style={{ fontSize: 40 }} />} />
         )}
-      </Card>
+      </PageContainer>
     </AppLayout>
   )
 }

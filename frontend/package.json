@@ -10,14 +10,15 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@ant-design/charts": "^2.6.7",
+    "@ant-design/icons": "^5.5.0",
+    "@tanstack/react-query": "^5.60.0",
+    "antd": "^5.22.0",
+    "dayjs": "^1.11.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "antd": "^5.22.0",
-    "@ant-design/icons": "^5.5.0",
-    "zustand": "^5.0.0",
-    "@tanstack/react-query": "^5.60.0",
     "wouter": "^3.3.0",
-    "dayjs": "^1.11.0"
+    "zustand": "^5.0.0"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",

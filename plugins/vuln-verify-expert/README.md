@@ -68,4 +68,4 @@ python plugins\vuln-verify-expert\skills\vuln-verify\scripts\check_deps.py
 - `credential_store`：按引用注入短生命周期凭据。
 - `artifact_store`：保存报告、截图、日志、原始响应和哈希。
 
-具体字段和事件格式见仓库根目录 [Agent运行契约.md](../../Agent运行契约.md)。
+具体字段和事件格式见 [.claude/api-contract.md](../../.claude/api-contract.md)。

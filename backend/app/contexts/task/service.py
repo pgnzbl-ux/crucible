@@ -100,8 +100,11 @@ class TaskService:
     async def list_tasks(
         self, owner_id: str, status: str | None = None,
         priority: str | None = None, limit: int = 50, offset: int = 0,
+        q: str | None = None, date_from: str | None = None, date_to: str | None = None,
     ) -> TaskListResponse:
-        tasks, total = await self.repo.list_by_owner(owner_id, status, priority, limit, offset)
+        tasks, total = await self.repo.list_by_owner(
+            owner_id, status, priority, limit, offset, q=q, date_from=date_from, date_to=date_to,
+        )
         return TaskListResponse(
             items=[TaskSummary.model_validate(t) for t in tasks],
             total=total, limit=limit, offset=offset,

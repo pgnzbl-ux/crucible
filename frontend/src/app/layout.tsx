@@ -7,23 +7,26 @@ import {
   LogoutOutlined,
   SafetyCertificateOutlined,
   SettingOutlined,
-  UserOutlined,
 } from '@ant-design/icons'
 import { Link, useLocation } from 'wouter'
+
+import { BreadcrumbNav } from '../shared/components/BreadcrumbNav'
+import { getRouteMeta } from '../shared/lib/routes'
 
 const { Header, Content, Sider } = Layout
 const { Text } = Typography
 
-// 导航分组：总览 / 业务 / 系统
 const NAV_GROUPS = [
   {
     key: 'overview',
     label: '总览',
+    type: 'group' as const,
     children: [{ key: '/', icon: <DashboardOutlined />, label: <Link to="/">工作台</Link> }],
   },
   {
     key: 'operations',
     label: '业务',
+    type: 'group' as const,
     children: [
       { key: '/tasks', icon: <BugOutlined />, label: <Link to="/tasks">任务管理</Link> },
       { key: '/reports', icon: <FileProtectOutlined />, label: <Link to="/reports">验证报告</Link> },
@@ -32,16 +35,10 @@ const NAV_GROUPS = [
   {
     key: 'system',
     label: '系统',
+    type: 'group' as const,
     children: [{ key: '/settings', icon: <SettingOutlined />, label: <Link to="/settings">设置</Link> }],
   },
 ]
-
-const TITLES: Record<string, string> = {
-  '/': '工作台',
-  '/tasks': '任务管理',
-  '/reports': '验证报告',
-  '/settings': '设置',
-}
 
 interface CurrentUser {
   display_name?: string
@@ -63,8 +60,8 @@ export function AppLayout({ children }: { children: ReactNode }) {
   const { message } = App.useApp()
   const user = getCurrentUser()
 
-  const selectedKey = location === '/' ? '/' : location.split('?')[0]
-  const pageTitle = TITLES[selectedKey] ?? 'Crucible'
+  const selectedKey = location.startsWith('/tasks/') ? '/tasks' : location === '/' ? '/' : location.split('?')[0]
+  const pageMeta = getRouteMeta(location)
 
   const handleLogout = () => {
     localStorage.removeItem('crucible_token')
@@ -77,13 +74,14 @@ export function AppLayout({ children }: { children: ReactNode }) {
   const avatarText = userName.slice(0, 1).toUpperCase()
 
   return (
-    <Layout style={{ minHeight: '100vh' }}>
+    <Layout style={{ minHeight: '100vh', width: '100%' }}>
       <Sider
-        theme="dark"
+        theme="light"
         width={224}
         breakpoint="lg"
         collapsible
         collapsedWidth={64}
+        className="crucible-sider"
         style={{ position: 'sticky', top: 0, height: '100vh' }}
       >
         <div className="crucible-brand">
@@ -95,11 +93,14 @@ export function AppLayout({ children }: { children: ReactNode }) {
             <span className="crucible-brand-tagline">AI 漏洞验证平台</span>
           </span>
         </div>
-        <Menu theme="dark" mode="inline" selectedKeys={[selectedKey]} items={NAV_GROUPS} />
+        <Menu mode="inline" selectedKeys={[selectedKey]} items={NAV_GROUPS} style={{ border: 'none' }} />
       </Sider>
-      <Layout>
+      <Layout style={{ flex: 1, minWidth: 0 }}>
         <Header className="crucible-header">
-          <Text className="crucible-header-title">{pageTitle}</Text>
+          <div className="crucible-header-left">
+            <BreadcrumbNav />
+            <Text className="crucible-header-title">/ {pageMeta.title}</Text>
+          </div>
           <Dropdown
             menu={{
               items: [
@@ -131,7 +132,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
             </Space>
           </Dropdown>
         </Header>
-        <Content className="crucible-content crucible-page-enter">
+        <Content className="crucible-content crucible-page-enter" style={{ width: '100%' }}>
           <div className="crucible-content-inner">{children}</div>
         </Content>
       </Layout>

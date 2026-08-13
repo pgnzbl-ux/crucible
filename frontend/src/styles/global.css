@@ -28,14 +28,14 @@ body,
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.15);
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.2);
+  background: rgba(0, 0, 0, 0.25);
 }
 
-/* ── 焦点可见性（企业级可访问性） ── */
+/* ── 焦点可见性 ── */
 :focus-visible {
   outline: 2px solid var(--crucible-primary);
   outline-offset: 2px;
@@ -58,37 +58,23 @@ body,
   animation: crucible-fade-in 320ms ease-out both;
 }
 
-/* 首屏 stagger 入场（Dashboard 统计卡） */
 .crucible-stagger > * {
   animation: crucible-fade-in 360ms ease-out both;
 }
-.crucible-stagger > *:nth-child(2) {
-  animation-delay: 60ms;
-}
-.crucible-stagger > *:nth-child(3) {
-  animation-delay: 120ms;
-}
-.crucible-stagger > *:nth-child(4) {
-  animation-delay: 180ms;
-}
-.crucible-stagger > *:nth-child(5) {
-  animation-delay: 240ms;
-}
-.crucible-stagger > *:nth-child(6) {
-  animation-delay: 300ms;
-}
+.crucible-stagger > *:nth-child(2) { animation-delay: 60ms; }
+.crucible-stagger > *:nth-child(3) { animation-delay: 120ms; }
+.crucible-stagger > *:nth-child(4) { animation-delay: 180ms; }
+.crucible-stagger > *:nth-child(5) { animation-delay: 240ms; }
+.crucible-stagger > *:nth-child(6) { animation-delay: 300ms; }
 
-/* ── 卡片 hover 微交互 ── */
+/* ── 卡片 hover ── */
 .crucible-card-hover {
-  transition:
-    transform 0.2s ease,
-    border-color 0.2s ease,
-    box-shadow 0.2s ease;
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
 }
 .crucible-card-hover:hover {
   transform: translateY(-2px);
-  border-color: var(--crucible-primary-light);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+  border-color: var(--crucible-primary);
+  box-shadow: var(--crucible-shadow-md);
 }
 
 /* ── 布局：品牌区 ── */
@@ -97,8 +83,9 @@ body,
   align-items: center;
   gap: 10px;
   padding: 16px 20px;
-  color: #fff;
+  color: var(--crucible-text);
   overflow: hidden;
+  border-bottom: 1px solid var(--crucible-border);
 }
 .crucible-brand-mark {
   display: inline-flex;
@@ -107,7 +94,7 @@ body,
   width: 32px;
   height: 32px;
   border-radius: 8px;
-  background: linear-gradient(135deg, var(--crucible-primary), #3a5fb8);
+  background: linear-gradient(135deg, var(--crucible-primary), #0958d9);
   color: #fff;
   font-size: 16px;
   flex-shrink: 0;
@@ -119,10 +106,11 @@ body,
   line-height: 1.2;
   display: block;
   white-space: nowrap;
+  color: var(--crucible-text);
 }
 .crucible-brand-tagline {
   font-size: 11px;
-  color: #8a93a3;
+  color: var(--crucible-text-secondary);
   line-height: 1.2;
   display: block;
   white-space: nowrap;
@@ -135,23 +123,38 @@ body,
   padding: 16px 0;
 }
 
+/* ── 布局：侧边栏 ── */
+.crucible-sider {
+  border-right: 1px solid var(--crucible-border) !important;
+  box-shadow: var(--crucible-shadow-sm);
+}
+.crucible-sider .ant-menu-item-selected {
+  border-left: 3px solid var(--crucible-primary) !important;
+  border-radius: 0 8px 8px 0 !important;
+}
+
 /* ── 布局：顶栏 ── */
 .crucible-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--crucible-border);
   position: sticky;
   top: 0;
   z-index: 10;
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.02);
+  background: var(--crucible-surface) !important;
+  box-shadow: var(--crucible-shadow-sm);
+}
+.crucible-header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
 }
 .crucible-header-title {
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: 0.2px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--crucible-text-secondary);
 }
 .crucible-header-user {
   cursor: pointer;
@@ -160,7 +163,7 @@ body,
   transition: background-color 0.2s ease;
 }
 .crucible-header-user:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(0, 0, 0, 0.04);
 }
 .crucible-header-username {
   font-size: 13px;
@@ -169,12 +172,23 @@ body,
 
 /* ── 布局：内容容器 ── */
 .crucible-content {
-  padding: clamp(16px, 2.5vw, 32px);
+  padding: 16px 20px 24px;
+  background: var(--crucible-bg);
+  flex: 1;
+  min-width: 0;
 }
 .crucible-content-inner {
-  max-width: 1280px;
-  margin: 0 auto;
   width: 100%;
+  max-width: none;
+}
+
+/* ── 页面容器 ── */
+.crucible-page-container {
+  background: var(--crucible-surface);
+  border-radius: 8px;
+  padding: 16px 20px;
+  box-shadow: var(--crucible-shadow-sm);
+  border: 1px solid var(--crucible-border);
 }
 
 /* ── 统一页头 ── */
@@ -196,29 +210,17 @@ body,
 /* ── 统计卡 ── */
 .stat-card {
   border-radius: 12px;
-  min-height: 146px;
+  min-height: 120px;
   overflow: hidden;
   position: relative;
-  transition:
-    transform 0.2s ease,
-    border-color 0.2s ease,
-    box-shadow 0.2s ease;
+  cursor: pointer;
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  border: 1px solid var(--crucible-border);
 }
 .stat-card:hover {
   transform: translateY(-2px);
-  border-color: rgba(91, 127, 212, 0.35);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
-}
-.stat-card::after {
-  content: '';
-  position: absolute;
-  right: -24px;
-  bottom: -34px;
-  width: 108px;
-  height: 108px;
-  border: 1px solid rgba(255, 255, 255, 0.04);
-  border-radius: 50%;
-  pointer-events: none;
+  border-color: var(--crucible-primary);
+  box-shadow: var(--crucible-shadow-md);
 }
 .stat-card-icon {
   display: inline-flex;
@@ -231,23 +233,23 @@ body,
   margin-bottom: 12px;
 }
 .stat-card-icon-primary {
-  background: rgba(91, 127, 212, 0.16);
+  background: var(--crucible-primary-light);
   color: var(--crucible-primary);
 }
 .stat-card-icon-success {
-  background: rgba(34, 160, 107, 0.16);
+  background: #f6ffed;
   color: var(--crucible-success);
 }
 .stat-card-icon-warning {
-  background: rgba(217, 119, 6, 0.16);
+  background: #fffbe6;
   color: var(--crucible-warning);
 }
 .stat-card-icon-error {
-  background: rgba(214, 69, 69, 0.16);
+  background: #fff2f0;
   color: var(--crucible-error);
 }
 .stat-card-icon-default {
-  background: rgba(255, 255, 255, 0.06);
+  background: #fafafa;
   color: var(--crucible-text-secondary);
 }
 .stat-card-title {
@@ -259,9 +261,117 @@ body,
   font-weight: 700;
   line-height: 1.2;
   margin-top: 2px;
+  color: var(--crucible-text);
+}
+.stat-card-trend {
+  font-size: 12px;
+  color: var(--crucible-text-disabled);
+  margin-top: 4px;
 }
 
-/* ── 登录页 ── */
+/* ── 登录页（双栏布局） ── */
+.crucible-login {
+  display: flex;
+  min-height: 100vh;
+  background: var(--crucible-bg);
+}
+.crucible-login-hero {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 48px;
+  background: linear-gradient(135deg, #e6f4ff 0%, #f0f2f5 50%, #ffffff 100%);
+  position: relative;
+  overflow: hidden;
+}
+.crucible-login-hero::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(22, 119, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(22, 119, 255, 0.04) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+.crucible-login-hero-content {
+  position: relative;
+  text-align: center;
+  max-width: 400px;
+}
+.crucible-login-hero-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, var(--crucible-primary), #0958d9);
+  color: #fff;
+  font-size: 28px;
+  box-shadow: 0 8px 24px rgba(22, 119, 255, 0.25);
+  margin-bottom: 24px;
+}
+.crucible-login-hero-title {
+  font-size: 32px;
+  font-weight: 700;
+  color: var(--crucible-text);
+  margin-bottom: 12px;
+}
+.crucible-login-hero-desc {
+  font-size: 15px;
+  color: var(--crucible-text-secondary);
+  line-height: 1.6;
+}
+.crucible-login-form-panel {
+  width: 480px;
+  max-width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 40px;
+  background: var(--crucible-surface);
+  border-left: 1px solid var(--crucible-border);
+}
+.crucible-login-card {
+  width: 100%;
+  max-width: 360px;
+  border: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+}
+.crucible-login-brand {
+  margin-bottom: 32px;
+}
+.crucible-login-mark {
+  display: none;
+}
+
+/* ── 任务详情页 ── */
+.crucible-detail-sticky-bar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--crucible-surface);
+  padding: 16px 0;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--crucible-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+/* ── 筛选栏 ── */
+.crucible-filter-bar {
+  background: var(--crucible-surface);
+  border: 1px solid var(--crucible-border);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
 .ant-card-head {
   min-height: 56px;
 }
@@ -279,80 +389,43 @@ body,
 }
 
 @media (max-width: 768px) {
+  .crucible-content {
+    padding: 12px 16px 20px;
+  }
+
+  .crucible-page-container {
+    padding: 12px 16px;
+  }
+
   .crucible-header {
     padding: 0 16px;
   }
-
   .crucible-header-username {
     display: none;
   }
-
   .crucible-page-header {
     align-items: stretch;
     flex-direction: column;
     margin-bottom: 16px;
   }
-
   .crucible-page-header-extra,
   .crucible-page-header-extra .ant-space {
     width: 100%;
   }
-
-  .crucible-page-header-extra .ant-btn,
-  .crucible-page-header-extra .ant-space-item {
-    flex: 1;
+  .crucible-login {
+    flex-direction: column;
+  }
+  .crucible-login-hero {
+    padding: 32px 24px;
+    min-height: auto;
+  }
+  .crucible-login-form-panel {
+    width: 100%;
+    border-left: none;
+    border-top: 1px solid var(--crucible-border);
   }
 }
 
-.crucible-login {
-
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 100vh;
-  background:
-    radial-gradient(ellipse at 50% -20%, rgba(91, 127, 212, 0.14), transparent 60%),
-    var(--crucible-bg);
-  padding: 24px;
-}
-.crucible-login-grid {
-  position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
-  background-size: 32px 32px;
-  -webkit-mask-image: radial-gradient(ellipse at center, rgba(0, 0, 0, 0.6), transparent 75%);
-  mask-image: radial-gradient(ellipse at center, rgba(0, 0, 0, 0.6), transparent 75%);
-  pointer-events: none;
-}
-.crucible-login-card {
-  width: 400px;
-  max-width: 100%;
-  border-radius: 16px;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.4);
-  position: relative;
-  animation: crucible-fade-in 360ms ease-out both;
-}
-.crucible-login-brand {
-  text-align: center;
-  margin-bottom: 28px;
-}
-.crucible-login-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 48px;
-  height: 48px;
-  border-radius: 12px;
-  background: linear-gradient(135deg, var(--crucible-primary), #3a5fb8);
-  color: #fff;
-  font-size: 22px;
-  box-shadow: 0 8px 24px rgba(91, 127, 212, 0.35);
-}
-
-/* ── 动效降级 ── */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

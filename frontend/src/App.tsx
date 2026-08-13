@@ -5,11 +5,11 @@ import { Providers } from './app/providers'
 import { LoginPage } from './pages/LoginPage'
 import { DashboardPage } from './pages/DashboardPage'
 import { TasksPage } from './pages/TasksPage'
+import { TaskDetailPage } from './pages/TaskDetailPage'
 import { ReportsPage } from './pages/ReportsPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { NotFoundPage } from './pages/NotFoundPage'
 
-// 路由守卫：无 token → /login（P0-3 JWT 闭环）
 function RequireAuth({ children }: { children: ReactNode }) {
   const token = localStorage.getItem('crucible_token')
   if (!token) {
@@ -24,6 +24,11 @@ export function App() {
       <AntApp>
         <Switch>
           <Route path="/login" component={LoginPage} />
+          <Route path="/tasks/:id">
+            <RequireAuth>
+              <TaskDetailPage />
+            </RequireAuth>
+          </Route>
           <Route path="/tasks">
             <RequireAuth>
               <TasksPage />

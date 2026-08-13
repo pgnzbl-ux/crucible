@@ -4,7 +4,7 @@ paths: ["backend/app/**/*.py", "backend/tests/**/*.py"]
 
 # Crucible 测试规范
 
-> 当前测试基线只有 `tests/smoke_sandbox.py`；pytest 单元测试为 P1 backlog。
+> 当前测试基线含 smoke_agent_runner.py / smoke_sse.py + pytest 单元测试(test_orchestrator/test_ai_runner/test_profile_detector 等)；pytest 单元测试为 P1 backlog。
 
 ## 1. 测试层级与时机
 
@@ -22,7 +22,7 @@ paths: ["backend/app/**/*.py", "backend/tests/**/*.py"]
 
 - **必须 Mock**：LLM API（外部依赖、不稳定）、Redis Pub/Sub（集成测试用 fake）、MinIO（S3 fake）
 - **必须真实**：SQLite/PostgreSQL（Repository 测试）、Docker 沙箱（smoke）
-- Agent 默认走 `MockExecutor`，`CLAUDE_CODE_ENABLED=true` 时切换 `ClaudeCodeExecutor`（由工厂选择）
+- Agent 默认走 Mock,`CLAUDE_AGENT_SDK_ENABLED=true` 时切换真实 Executor(6 节点编排)
 
 ## 3. 测试数据
 

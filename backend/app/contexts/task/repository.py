@@ -38,16 +38,42 @@ class TaskRepository:
         priority: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        q: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
     ) -> tuple[list[Task], int]:
+        from datetime import datetime, timezone
+
         stmt = select(Task).where(Task.owner_id == owner_id)
         count_stmt = select(func.count(Task.id)).where(Task.owner_id == owner_id)
 
         if status:
-            stmt = stmt.where(Task.status == status)
-            count_stmt = count_stmt.where(Task.status == status)
+            statuses = [s.strip() for s in status.split(",") if s.strip()]
+            if len(statuses) == 1:
+                stmt = stmt.where(Task.status == statuses[0])
+                count_stmt = count_stmt.where(Task.status == statuses[0])
+            elif statuses:
+                stmt = stmt.where(Task.status.in_(statuses))
+                count_stmt = count_stmt.where(Task.status.in_(statuses))
         if priority:
             stmt = stmt.where(Task.priority == priority)
             count_stmt = count_stmt.where(Task.priority == priority)
+        if q:
+            pattern = f"%{q}%"
+            stmt = stmt.where(Task.project_address.ilike(pattern))
+            count_stmt = count_stmt.where(Task.project_address.ilike(pattern))
+        if date_from:
+            start = datetime.fromisoformat(date_from).replace(
+                hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
+            )
+            stmt = stmt.where(Task.created_at >= start)
+            count_stmt = count_stmt.where(Task.created_at >= start)
+        if date_to:
+            end = datetime.fromisoformat(date_to).replace(
+                hour=23, minute=59, second=59, microsecond=999999, tzinfo=timezone.utc
+            )
+            stmt = stmt.where(Task.created_at <= end)
+            count_stmt = count_stmt.where(Task.created_at <= end)
 
         stmt = stmt.order_by(Task.created_at.desc()).limit(limit).offset(offset)
 
