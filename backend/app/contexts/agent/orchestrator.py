@@ -2,7 +2,7 @@
 
 替代旧 _run_analysis 的单次大调用。每节点:
   1. 查 NodeRun,已 completed → 复用 output_json,跳过执行
-  2. 代码节点(0/1)worker 内执行;AI 节点(2/3/4/5)起 agent-runner
+  2. 代码节点(0 source)worker 内执行;节点 1 profile 默认规则引擎(低置信才起 agent-runner)
   3. 持久化 NodeRun(status, output_json)
   4. 分支出口检查(非 web / 误报 / 基础设施失败)
 """
@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.contexts.task.models import NodeRun, Task, TaskRun
 from .nodes.audit import AuditNode
-from .nodes.base import NodeContext
+from .nodes.base import NodeContext, repo_dirname_from_outputs, source_tree_present
 from .nodes.env_ready import EnvReadyNode
 from .nodes.profile import ProfileNode
 from .nodes.report import ReportNode
@@ -26,6 +26,18 @@ from .nodes.reproduce import ReproduceNode
 from .nodes.source import SourceNode
 
 logger = logging.getLogger(__name__)
+
+
+async def _is_cancelled(session: AsyncSession, task: Task, run: TaskRun) -> bool:
+    """以库里最新状态为准（API 取消走另一个 session）。"""
+    await session.refresh(task)
+    await session.refresh(run)
+    return task.status == "cancelled" or run.status == "cancelled"
+
+
+def _cancelled_result() -> dict[str, Any]:
+    return {"status": "cancelled", "verdict": None}
+
 
 # 节点执行顺序(索引 0-5)
 NODE_ORDER = [
@@ -115,8 +127,15 @@ async def run_orchestration(
             session, run_id, task_id, node.node_index, node.node_key
         )
 
-        # 分支出口 A:节点 1 判 is_web=False → 跳过节点 2-5
-        if node.node_index >= 2 and not previous_outputs.get("profile", {}).get("is_web", True):
+        if await _is_cancelled(session, task, run):
+            if nr.status in ("pending", "running"):
+                nr.status = "cancelled"
+                nr.finished_at = datetime.now(timezone.utc)
+                await session.commit()
+            return _cancelled_result()
+
+        # 分支出口 A:节点 1 仅当 is_web 显式为 True 才进靶场；缺省/False 一律 skip
+        if node.node_index >= 2 and previous_outputs.get("profile", {}).get("is_web") is not True:
             if nr.status != "completed":
                 nr.status = "skipped"
                 await session.flush()
@@ -132,15 +151,25 @@ async def run_orchestration(
                 previous_outputs[node.node_key] = json.loads(nr.output_json or "{}")
             except json.JSONDecodeError:
                 previous_outputs[node.node_key] = {}
-            if on_node_event:
-                await on_node_event(node.node_key, "reused", previous_outputs[node.node_key])
-            if node.node_key == "audit":
-                verdict = await _skip_reproduce_if_gate_fail(
-                    session, run_id, task_id, previous_outputs, on_node_event
-                )
-                if verdict:
-                    final_verdict = verdict
-            continue
+            if node.node_key == "source" and not source_tree_present(
+                host_workdir, previous_outputs.get("source")
+            ):
+                # 重试拷贝了 completed source，但工作区已被清掉 → 必须重拉
+                nr.status = "pending"
+                previous_outputs.pop("source", None)
+                await session.flush()
+            else:
+                if node.node_key == "source":
+                    source_path = previous_outputs["source"].get("project_path") or source_path
+                if on_node_event:
+                    await on_node_event(node.node_key, "reused", previous_outputs[node.node_key])
+                if node.node_key == "audit":
+                    verdict = await _skip_reproduce_if_gate_fail(
+                        session, run_id, task_id, previous_outputs, on_node_event
+                    )
+                    if verdict:
+                        final_verdict = verdict
+                continue
 
         # 已被分支出口标 skipped(如 gate_fail 后的 reproduce)→ 不执行
         if nr.status == "skipped":
@@ -163,18 +192,34 @@ async def run_orchestration(
             project_address=task.project_address, project_ref=task.project_ref,
             previous_outputs=dict(previous_outputs), runner_env=runner_env,
             on_event=on_ai_event,
+            db_session=session,
+            project_id=getattr(task, "project_id", None),
+            owner_id=getattr(task, "owner_id", None),
+            lab_id=getattr(task, "lab_id", None),
         )
         try:
             output = await node.execute(ctx)
+            if await _is_cancelled(session, task, run):
+                nr.status = "cancelled"
+                nr.finished_at = datetime.now(timezone.utc)
+                await session.commit()
+                return _cancelled_result()
             nr.output_json = json.dumps(output, ensure_ascii=False, default=str)
             nr.status = "completed"
             nr.finished_at = datetime.now(timezone.utc)
             previous_outputs[node.node_key] = output
+            if node.node_key == "source":
+                source_path = output.get("project_path") or source_path
             await session.commit()
             if on_node_event:
                 await on_node_event(node.node_key, "completed", output)
         except Exception as e:  # noqa: BLE001
             logger.exception(f"节点 {node.node_key} 执行失败")
+            if await _is_cancelled(session, task, run):
+                nr.status = "cancelled"
+                nr.finished_at = datetime.now(timezone.utc)
+                await session.commit()
+                return _cancelled_result()
             from app.contexts.agent.errors import format_agent_error, humanize_agent_error
 
             title, hint = humanize_agent_error(str(e))
@@ -217,6 +262,8 @@ async def run_orchestration(
         final_verdict = report_out["final_verdict"]
 
     # 收尾(非 web 与正常路径统一 completed;非 web 的 verdict 已为 None)
+    if await _is_cancelled(session, task, run):
+        return _cancelled_result()
     task.verdict = final_verdict
     run.status = "completed"
     task.status = "completed"
@@ -228,4 +275,6 @@ async def run_orchestration(
         "verdict": final_verdict,
         "report_data": report_out.get("report_data") if report_out else None,
         "non_web": skipped_due_to_non_web,
+        "repo_dirname": repo_dirname_from_outputs(previous_outputs),
+        "project_path": previous_outputs.get("source", {}).get("project_path"),
     }
