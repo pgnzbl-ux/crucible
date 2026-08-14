@@ -9,23 +9,29 @@ function handleUnauthorized() {
   }
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
+async function request<T>(path: string, options?: RequestInit & { allow404?: boolean }): Promise<T> {
+  const { allow404, ...fetchOpts } = options ?? {}
   const token = localStorage.getItem('crucible_token')
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    ...(options?.headers as Record<string, string>),
+    ...(fetchOpts.headers as Record<string, string>),
   }
   if (token) {
     headers['Authorization'] = `Bearer ${token}`
   }
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers })
+  const res = await fetch(`${API_BASE}${path}`, { ...fetchOpts, headers })
   if (res.status === 401) {
     handleUnauthorized()
     throw new Error('登录已过期，请重新登录')
   }
+  if (res.status === 404 && allow404) {
+    return null as T
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: '请求失败' }))
-    throw new Error(err.detail || `HTTP ${res.status}`)
+    throw new Error(
+      (typeof err.detail === 'object' ? err.detail?.message : err.detail) || `HTTP ${res.status}`,
+    )
   }
   if (res.status === 204) {
     return undefined as T
@@ -87,11 +93,12 @@ export interface NodeRun {
   id: string
   node_index: number
   node_key: 'source' | 'profile' | 'env_ready' | 'audit' | 'reproduce' | 'report'
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'cancelled'
   attempt: number
   error_message: string | null
   started_at: string | null
   finished_at: string | null
+  output?: Record<string, unknown>
 }
 
 // 6 档判定(对齐后端 verdict)
@@ -140,6 +147,19 @@ export interface ReportDetail {
   evidence: Evidence[]
 }
 
+export interface ReportSummary {
+  id: string
+  task_id: string
+  status: string
+  conclusion: string
+  title: string
+  summary: string | null
+  verdict: string | null
+  severity: string | null
+  created_at: string
+  updated_at: string
+}
+
 export interface Evidence {
   id: string
   object_key: string
@@ -169,6 +189,49 @@ export interface Project {
   created_at: string
   updated_at: string
 }
+
+export interface SourceArtifact {
+  id: string
+  git_url: string
+  git_host: string
+  project_key: string
+  repo_dirname: string
+  ref_type: string
+  ref_name: string
+  commit_sha: string
+  object_url: string
+  size_bytes: number | null
+  created_at: string
+  updated_at: string
+}
+
+export interface LabContainer {
+  name: string
+  status: string
+  ports: string
+  image: string
+}
+
+export interface Lab {
+  id: string
+  project_id: string
+  commit_sha: string
+  status: string
+  target_url: string | null
+  ttl_remaining_seconds: number
+  containers: LabContainer[]
+  live_task_count: number
+  error_message?: string | null
+}
+
+export interface LabGroup {
+  project_id: string
+  project_name: string
+  labs: Lab[]
+}
+
+export type LabAction = 'stop' | 'start' | 'rebuild'
+export type LabContainerAction = 'stop' | 'start' | 'restart'
 
 export interface LlmProvider {
   id: string
@@ -267,7 +330,15 @@ export const api = {
   getTaskEvents: (id: string) => request<AgentEvent[]>(`/tasks/${id}/events?limit=1000`),
 
   // Reports
-  getReportByTask: (taskId: string) => request<ReportDetail>(`/reports/task/${taskId}`),
+  listReports: (params?: Record<string, string>) => {
+    const qs = params ? '?' + new URLSearchParams(params).toString() : ''
+    return request<{ items: ReportSummary[]; total: number; limit: number; offset: number }>(`/reports/${qs}`)
+  },
+
+  getReport: (reportId: string) => request<ReportDetail>(`/reports/${reportId}`),
+
+  getReportByTask: (taskId: string) =>
+    request<ReportDetail | null>(`/reports/task/${taskId}`, { allow404: true }),
 
   publishReport: (reportId: string) =>
     request<ReportDetail>(`/reports/${reportId}/publish`, { method: 'POST' }),
@@ -320,6 +391,9 @@ export const api = {
   testLlmProvider: (id: string) =>
     request<LlmProviderTestResult>(`/settings/llm/providers/${id}/test`, { method: 'POST' }),
 
+  testLlmConnection: (data: { base_url: string; api_key?: string; model: string }) =>
+    request<LlmProviderTestResult>('/settings/llm/test', { method: 'POST', body: JSON.stringify(data) }),
+
   // Credentials（P1-6）
   listCredentials: () => request<CredentialListResponse>('/settings/credentials'),
 
@@ -345,7 +419,7 @@ export const api = {
   getRunNodes: (taskId: string, runId: string) =>
     request<NodeRun[]>(`/tasks/${taskId}/runs/${runId}/nodes`),
 
-  // Reports — 导出
+  // Reports — 导出（带鉴权，避免 window.open 丢 token）
   exportReportUrl: (reportId: string, format: 'json' | 'md' = 'json') =>
     `${API_BASE}/reports/${reportId}/export?format=${format}`,
 
@@ -360,4 +434,22 @@ export const api = {
   updateProject: (id: string, data: Partial<{ name: string; default_ref: string; description: string }>) =>
     request<Project>(`/projects/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteProject: (id: string) => request<void>(`/projects/${id}`, { method: 'DELETE' }),
+  listProjectArtifacts: (id: string) =>
+    request<{ items: SourceArtifact[]; total: number }>(`/projects/${id}/artifacts`),
+
+  // Labs
+  listLabs: () => request<{ items: LabGroup[] }>('/labs'),
+  getLab: (id: string) => request<Lab>(`/labs/${id}`),
+  labAction: (id: string, action: LabAction) =>
+    request<{ status: string }>(`/labs/${id}/actions/${action}`, { method: 'POST' }),
+  deleteLab: (id: string) => request<{ status: string }>(`/labs/${id}`, { method: 'DELETE' }),
+  labContainerAction: (id: string, name: string, action: LabContainerAction) =>
+    request<{ status: string }>(
+      `/labs/${id}/containers/${encodeURIComponent(name)}/actions/${action}`,
+      { method: 'POST' },
+    ),
+  deleteLabContainer: (id: string, name: string) =>
+    request<{ status: string }>(`/labs/${id}/containers/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    }),
 }
