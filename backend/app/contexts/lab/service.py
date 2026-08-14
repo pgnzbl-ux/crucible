@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -8,9 +9,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.contexts.project.repository import ProjectRepository
+from app.contexts.project.service import ProjectService
 from app.contexts.task.models import Task
 from app.core.config import get_settings
 
+from .errors import LabBusyError, LabNotFoundError
 from .models import Lab
 from .repository import LabRepository
 
@@ -171,6 +175,128 @@ class LabService:
         )
         return list(result.scalars().all())
 
+    async def list_grouped(self, owner_id: str) -> list[dict]:
+        from . import docker_ops
+
+        labs = await self.repository.list_by_owner(owner_id)
+        grouped: dict[str, dict] = {}
+        project_service = ProjectService(ProjectRepository(self.session))
+        now = self._now()
+        for lab in labs:
+            group = grouped.get(lab.project_id)
+            if group is None:
+                project = await project_service.get_project(lab.project_id, owner_id)
+                group = {
+                    "project_id": lab.project_id,
+                    "project_name": project.name if project else lab.project_id,
+                    "labs": [],
+                }
+                grouped[lab.project_id] = group
+            live_ids = await self.live_task_ids(lab.id)
+            group["labs"].append(
+                await self._management_dict(
+                    lab,
+                    now=now,
+                    live_task_count=len(live_ids),
+                    containers=await docker_ops.list_containers(lab.compose_project),
+                )
+            )
+        return list(grouped.values())
+
+    async def get_detail(self, lab_id: str, *, owner_id: str) -> dict:
+        from . import docker_ops
+
+        lab = await self._require_owned_lab(lab_id, owner_id)
+        await self.touch(lab.id)
+        live_ids = await self.live_task_ids(lab.id)
+        return await self._management_dict(
+            lab,
+            now=self._now(),
+            live_task_count=len(live_ids),
+            containers=await docker_ops.list_containers(lab.compose_project),
+        )
+
+    async def stop_lab(self, lab_id: str, *, owner_id: str) -> str:
+        from . import docker_ops
+
+        lab = await self._require_writable_lab(lab_id, owner_id)
+        await docker_ops.compose_stop(lab.compose_project)
+        lab.status = "stopped"
+        await self._touch_and_commit(lab)
+        return lab.status
+
+    async def start_lab(self, lab_id: str, *, owner_id: str) -> str:
+        from . import docker_ops
+
+        lab = await self._require_writable_lab(lab_id, owner_id)
+        if not await docker_ops.compose_start(lab.compose_project):
+            raise RuntimeError("靶场 compose start 失败")
+        lab.status = "ready"
+        await self._touch_and_commit(lab)
+        return lab.status
+
+    async def rebuild_lab(self, lab_id: str, *, owner_id: str) -> str:
+        from . import docker_ops
+
+        lab = await self._require_writable_lab(lab_id, owner_id)
+        if not lab.compose_path:
+            raise ValueError("缺少配方，请从验证任务重新创建")
+        compose_file = (
+            f"{lab.workdir.rstrip('/')}/{lab.compose_path.lstrip('/')}"
+            .replace("\\", "/")
+        )
+        if not os.path.isfile(compose_file):
+            raise ValueError("缺少配方，请从验证任务重新创建")
+
+        lab.status = "creating"
+        await self.session.commit()
+        try:
+            await docker_ops.compose_up_build(
+                lab.compose_project, compose_file, lab.workdir
+            )
+        except Exception as exc:
+            lab.status = "failed"
+            lab.error_message = str(exc)
+            await self.session.commit()
+            raise
+        lab.status = "ready"
+        lab.error_message = None
+        await self._touch_and_commit(lab)
+        return lab.status
+
+    async def destroy_lab(self, lab_id: str, *, owner_id: str) -> str:
+        from . import docker_ops
+
+        lab = await self._require_writable_lab(lab_id, owner_id)
+        await docker_ops.compose_down(lab.compose_project)
+        lab.status = "destroyed"
+        await self._touch_and_commit(lab)
+        return lab.status
+
+    async def container_action(
+        self,
+        lab_id: str,
+        name: str,
+        *,
+        action: str,
+        owner_id: str,
+    ) -> str:
+        from . import docker_ops
+
+        lab = await self._require_writable_lab(lab_id, owner_id)
+        operations = {
+            "stop": docker_ops.container_stop,
+            "start": docker_ops.container_start,
+            "restart": docker_ops.container_restart,
+            "rm": docker_ops.container_rm,
+        }
+        operation = operations.get(action)
+        if operation is None:
+            raise ValueError(f"不支持的容器操作: {action}")
+        await operation(name, lab.compose_project)
+        await self._touch_and_commit(lab)
+        return lab.status
+
     async def expire_silent_labs(
         self, *, now: datetime | None = None
     ) -> list[str]:
@@ -251,6 +377,50 @@ class LabService:
         """返回现存 Lab ID，供历史 compose 孤儿识别。"""
         result = await self.session.execute(select(Lab.id))
         return {lab_id.lower() for lab_id in result.scalars().all()}
+
+    async def _require_owned_lab(self, lab_id: str, owner_id: str) -> Lab:
+        lab = await self.repository.get(lab_id)
+        if lab is None or lab.owner_id != owner_id:
+            raise LabNotFoundError(f"Lab 不存在: {lab_id}")
+        return lab
+
+    async def _require_writable_lab(self, lab_id: str, owner_id: str) -> Lab:
+        lab = await self._require_owned_lab(lab_id, owner_id)
+        task_ids = await self.live_task_ids(lab.id)
+        if task_ids:
+            raise LabBusyError(task_ids)
+        return lab
+
+    async def _touch_and_commit(self, lab: Lab) -> None:
+        lab.last_seen_at = self._now()
+        await self.session.commit()
+
+    async def _management_dict(
+        self,
+        lab: Lab,
+        *,
+        now: datetime,
+        live_task_count: int,
+        containers: list[dict[str, str]],
+    ) -> dict:
+        if lab.last_seen_at is None:
+            ttl_remaining = 0
+        else:
+            elapsed = (
+                self._as_utc(now) - self._as_utc(lab.last_seen_at)
+            ).total_seconds()
+            ttl_remaining = max(0, int(lab.ttl_seconds - elapsed))
+        return {
+            "id": lab.id,
+            "project_id": lab.project_id,
+            "commit_sha": lab.commit_sha,
+            "status": lab.status,
+            "target_url": lab.target_url,
+            "ttl_remaining_seconds": ttl_remaining,
+            "containers": containers,
+            "live_task_count": live_task_count,
+            "error_message": lab.error_message,
+        }
 
     async def _require_lab(self, lab_id: str) -> Lab:
         lab = await self.repository.get(lab_id)

@@ -25,6 +25,14 @@ class LabRepository:
         )
         return result.scalar_one_or_none()
 
+    async def list_by_owner(self, owner_id: str) -> list[Lab]:
+        result = await self.session.execute(
+            select(Lab)
+            .where(Lab.owner_id == owner_id)
+            .order_by(Lab.project_id, Lab.created_at.desc())
+        )
+        return list(result.scalars().all())
+
     async def add(self, lab: Lab) -> Lab:
         self.session.add(lab)
         await self.session.flush()

@@ -78,16 +78,18 @@ def create_app() -> FastAPI:
 
     # ── 挂载 Context 路由 ──
     from app.contexts.identity.api import router as auth_router
-    from app.contexts.task.api import router as task_router
+    from app.contexts.lab.api import router as lab_router
+    from app.contexts.project.api import router as project_router
     from app.contexts.report.api import router as report_router
     from app.contexts.settings.api import router as settings_router
-    from app.contexts.project.api import router as project_router
+    from app.contexts.task.api import router as task_router
 
     app.include_router(auth_router, prefix="/api/v1")
     app.include_router(task_router, prefix="/api/v1")
     app.include_router(report_router, prefix="/api/v1")
     app.include_router(settings_router, prefix="/api/v1")
     app.include_router(project_router, prefix="/api/v1")
+    app.include_router(lab_router, prefix="/api/v1")
 
     # ── 健康检查 ──
     @app.get("/health")
