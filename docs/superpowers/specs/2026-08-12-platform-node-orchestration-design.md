@@ -30,7 +30,7 @@
 | # | 节点 | node_key | 类型 |
 |---|---|---|---|
 | 0 | 源码获取 | `source` | ■代码 |
-| 1 | 项目画像 | `profile` | ■代码(含 web 门禁 early-exit) |
+| 1 | 项目画像 | `profile` | ■代码为主（强 Web / 强非 Web 走规则）；同 SHA 命中则跳过；有语言无框架等其余情况才 □AI |
 | 2 | 靶场就绪 | `env_ready` | □AI 为主 + ■代码协作 |
 | 3 | 白盒审计 | `audit` | □AI |
 | 4 | 复现验证 | `reproduce` | □AI |
@@ -67,7 +67,7 @@
 5 报告生成 (□AI+■代码)
    │ report_data(8 节) + final_verdict
    ▼
- 完成(归档 + 靶场清理)
+ 完成(归档 + 拆 agent-runner；靶场保留复用)
 ```
 
 ### 1.2 分支出口
@@ -82,11 +82,11 @@
 
 | 节点 | input_json | output_json |
 |---|---|---|
-| 0 source | `{git_url, ref}` | `{source_path, commit, ref}` |
-| 1 profile | `{source_path}` | `{is_web: bool, language, framework, port: int, has_dockerfile: bool, detected_services[]}` |
-| 2 env_ready | `{source_path, profile}` | `{target_url, transport_shape{protocol,listener,tls_termination,x_forwarded_proto,channel_check}, initial_creds{}, compose_path, started_containers[]}` |
+| 0 source | `{git_url, ref}` | `{source_path, project_path, repo_dirname, project_key, commit_sha, ref_type, ref_name, object_url, origin}` |
+| 1 profile | `{source_path, hints}` | `{is_web, language, framework, port, has_dockerfile, has_compose, detected_services[], start_command, non_web_reason}`（架构事实 + web 门禁；**不含** README 长文） |
+| 2 env_ready | `{source_path, profile}` | `{target_url`=`http://{宿主机IP}:{compose 映射的 Web 端口}`（只 publish Web 入口，不映射 postgres/redis；禁止 localhost）, `transport_shape{...}, initial_creds{}, compose_path, started_containers[]}` |
 | 3 audit | `{source_path, vulnerability_description, profile}` | `{kill_chain, defense_layers[{name,bypass}], payloads[], gate_verdict: pass\|fail, gate_reason}` |
-| 4 reproduce | `{target_url, audit, transport_shape}` | `{reproduced: bool, evidence[{type,detail}], screenshots[], verdict: confirmed\|partial\|code_reachable\|code_smell\|false_positive\|not_reproduced}` |
+| 4 reproduce | `{source_path, target_url, initial_creds, transport_shape, compose_path, started_containers, audit, vulnerability_description}`（`target_url` 等来自节点 2 最终产出，容器内改写成 host.docker.internal） | `{reproduced: bool, evidence[{type,detail}], screenshots[], verdict: confirmed\|partial\|code_reachable\|code_smell\|false_positive\|not_reproduced}` |
 | 5 report | `{全部前序 output}` | `{report_data{§1-§8}, final_verdict, cvss{vector,score,severity}}` |
 
 ### 1.4 判定档位(6 档,对齐插件)
@@ -129,12 +129,28 @@ llm_providers(独立,后台管理)
 | default_ref | String(255) | 默认分支/tag |
 | description | Text | 说明 |
 | owner_id | UUID FK→users | 所有者 |
-| detected_language | String(50) | 节点 1 画像后**回填**,后续任务复用省 AI |
+| detected_language | String(50) | 节点 1 后回填的**列表快照**；权威画像按 SHA 存在 `source_artifacts.profile_json` |
 | detected_framework | String(100) | 同上 |
-| is_web | Bool | 同上 |
-| last_cloned_at | DateTime | 源码缓存时间(P2 缓存复用用) |
+| is_web | Bool | 同上；`false` 时项目页禁止开验证任务 |
+| last_cloned_at | DateTime | 最近一次源码落地（clone 或 MinIO 缓存命中） |
 
-P1 阶段:project 记录元数据 + 画像缓存,**不长期持有源码**(每任务按 run clone 到临时目录,结束清理)。P2 再做源码缓存复用。
+源码 tar.gz 存在 MinIO `crucible-source`（key=`source/{git_host}/{space}/{project}/{commit_sha}.tar.gz`）。`source_artifacts` 按 **owner + host + space/project + ref** 隔离；规范化 Git URL 去掉 `.git` 与 https userinfo（不把 token 写入 DB）。节点 0：tag/完整 commit 命中表则拉 MinIO；**branch/HEAD 不以分支名为准**（`main`/`master` 名字不变），必须 `git ls-remote` 对上远端 SHA 才用缓存，SHA 变了或 ls-remote 失败则 clone 并覆盖——禁止在未确认新鲜度时用 MinIO。MinIO 解开失败同样回退 clone。Git 协议只允许 `https` / `http` / `ssh` / `git@host:path`，拒绝 `file://` `git://`。节点 1 画像挂在同一条 `SourceArtifact` 上（`profile_json` 对应该 `commit_sha`）；SHA 变则清空并重检。强 Web / 强非 Web 走规则，其余必须起 profiler。编排器仅当 `is_web is True` 才进入节点 2–5（缺省 fail-closed）。
+
+#### SourceArtifact（`source_artifacts`）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| owner_id | String(36) | 任务所有者；查找/列举必须带此字段，禁止跨用户复用缓存 |
+| git_url | String(1024) | 规范化地址（已去 `.git` 与 https userinfo） |
+| git_host | String(255) | github.com 等（参与唯一键，避免跨主机撞车） |
+| project_key | String(512) | `space/project`，如 `siteboon/claudecodeui` |
+| repo_dirname | String(255) | 落地目录名，如 `claudecodeui` |
+| ref_type | String(16) | `branch` / `tag` / `commit` |
+| ref_name | String(255) | `main` / `v1.0.0` / sha；空 ref 记为 `HEAD` |
+| commit_sha | String(40) | 实际检出的 commit |
+| profile_json | Text | 该 SHA 的画像（`is_web` / language / …）；**commit_sha 变更时清空**，禁止新树配旧画像 |
+| bucket / object_key / object_url | String | MinIO 桶、对象键、访问地址 |
+| Unique | `(owner_id, git_host, project_key, ref_type, ref_name)` | 同一用户同一远程同一引用覆盖更新 |
 
 ### 2.3 Task(改造)
 
@@ -166,7 +182,7 @@ P1 阶段:project 记录元数据 + 画像缓存,**不长期持有源码**(每�
 | task_id | UUID(索引) | 冗余,查询用 |
 | node_index | Int | 0-5 |
 | node_key | String(20) | `source\|profile\|env_ready\|audit\|reproduce\|report` |
-| status | String(20) | `pending\|running\|completed\|failed\|skipped` |
+| status | String(20) | `pending\|running\|completed\|failed\|skipped\|cancelled` |
 | **input_json** | Text(JSON) | 节点输入(前序 output 组装) |
 | **output_json** | Text(JSON) | 节点结构化产出(交接契约) |
 | attempt | Int | 排障重试计数(节点 2 用,max 5) |
@@ -247,17 +263,20 @@ async def _run_analysis(task_id, run_id):
         node5 report → validate report_data → render md → convert docx → archive
         finalize(task, verdict=report.final_verdict)
 
-    cleanup_lab_containers()
+    teardown_agent_runner()    # 成功/失败只拆本任务 agent-runner；靶场由 Lab TTL 管理
 ```
+
+取消任务时 worker 常被 `revoke(terminate=True)` 强杀，`finally` 不可靠（Windows 无 SIGTERM 钩子）。API `cancel_task` 必须先提交 `cancelled` 并立刻返回 HTTP，后台 `schedule_teardown_task_runtime` 仅按 `crucible.task_id` 拆 agent-runner（停 AI），不拆可复用靶场。编排器每节点刷新任务状态，已取消则停跑，runner 被拆导致 execute 失败时不得把 cancelled 改成 failed。删除任务同样只拆该任务的 agent-runner。Celery worker 每 5 分钟巡检：agent-runner 按任务状态与硬超时回收；靶场仅在静默满 TTL 1 小时且无 live 任务时销毁。历史 `crucible-lab-{task_id}` 仅作为升级残留孤儿清理，不是现行 compose 命名或任务清理路径。
 
 ### 3.2 执行单元
 
-**代码节点(0/1)**:worker 进程内函数。
+**代码节点(0)**:worker 进程内函数。
 
-- 节点 0:复用现有 `git_clone_to_workdir`(`core/agent_runner.py`)。
-- 节点 1:把 `plugins/.../references/project-detection.md` + `web-detection.md` 的规则表翻成 Python 规则引擎(plugin 调研确认是纯规则,预留了 `init_project.py` 入口)。产出 profile + web 门禁判定。
+- 节点 0:`acquire_source`（按 owner+host+project+ref 查 `source_artifacts`；branch/HEAD 对远端 SHA；命中 MinIO 否则 `git_clone_to_workdir` 落到 `{workdir}/{仓库名}`）。
 
-**AI 节点(2/3/4/5)**:每节点独立 agent-runner 容器。
+**AI 节点(1/2/3/4/5)**:每节点独立 agent-runner 容器。
+
+- 节点 1 `profile`：默认 `profile_detector`。强 Web（已知 Web 框架 / `index.php` / `web.xml` / SPA 标记）或强非 Web（README 明确 CLI/桌面且无 Web 信号）走规则、不起容器；有语言无框架等其余情况必须起 `profiler`。同 SHA 的 `profile_json` 命中则直接复用。`is_web` 必须是显式布尔；编排器只在 `is_web is True` 时进入节点 2–5。
 
 - worker 写 `.node.json`(node_key + input_json + output_schema)到 host_workdir。
 - 起 agent-runner 容器(bind mount host_workdir + 注入 ANTHROPIC_* env)。
@@ -267,18 +286,25 @@ async def _run_analysis(task_id, run_id):
 
 ### 3.3 节点 2 靶场协作循环
 
+平台控制循环,AI 不碰 docker.sock:
+
 ```
 for attempt in 1..5:
-    □AI: 读 source + profile + (attempt>1 ? 上轮 logs : ∅)
-         → 写/改 .vuln-env/Dockerfile, .vuln-env/docker-compose.yml
-    ■代码(worker): docker compose up -d --build
-                    + curl {port} 健康检查
+    ■代码(worker): docker ps 收集其他容器已映射的宿主端口 occupied_host_ports
+    □AI: 分析源码+画像 → 写/改 .vuln-env/Dockerfile + docker-compose.yml
+         写 ports 时避开 occupied_host_ports
+         (attempt>1 时只根据上轮失败日志改一处)
+         submit_result 只交配方,不得宣称已启动
+    ■代码(worker): 再 docker ps；配方宿主口已被占用 → 回喂 AI，不起 compose
+                    未占用则 docker compose up -d --build
+                    + 只对 compose 映射到宿主的 Web 端口探活（忽略 postgres/redis）
     if ready:
-        取 target_url + transport_shape + initial_creds
-        → output_json → node done
+        探活 127.0.0.1:{映射端口}（禁止扫本机 80/8080 常用口）
+        target_url = http://{宿主机IP}:{映射端口}   # 禁止对外返回 localhost / 容器内端口
+        → output_json → node done → 进入审计
     else:
-        收集 docker compose logs
-        → 回 AI 重试(attempt+1)
+        docker compose down + 收集 logs
+        → 回 AI 回溯(attempt+1)
 if 5 轮失败:
     node failed → 分支出口 C
 ```
@@ -380,15 +406,17 @@ final_verdict: "confirmed|partial|code_reachable|code_smell|false_positive|not_r
 
 ### 5.1 重试
 
-`POST /api/v1/tasks/{id}/retry` → 新建 TaskRun,**复用已成功 NodeRun.output_json**(断点续跑):
+`POST /api/v1/tasks/{id}/retry` → 新建 TaskRun，**从节点 0（源码获取）整条重跑**:
 
-- 遍历上一个 run 的 NodeRun,`completed` 的节点把 output_json 拷进新 run 的 context,标记新 run 对应 NodeRun 为 `completed`(不重算)。
-- 从第一个非 completed 节点起重跑。
+- 不拷贝上一 run 的 NodeRun；新 run 从空节点开始，source / profile / env_ready 全部重算。
+- 上一 run 的 NodeRun / 事件保留作历史。
+- 工作区按 `task_id` 固定路径；新 run 启动时若本 run 尚无 completed 节点，只清空任务工作区并重新获取源码，不拆可复用靶场。
 - 节点 2 的 max-5 排障是**节点内** `attempt`,与 task 级 retry 不同层。
+- 同一次 run 内 worker 崩溃仍可靠 NodeRun 断点续跑（与用户点「重试」不是同一条路径）。
 
 ### 5.2 删除
 
-- **软删**:`DELETE /api/v1/tasks/{id}` → `status=archived`,保留数据;级联清理活跃靶场容器。
+- **软删**:`DELETE /api/v1/tasks/{id}` → `status=archived`,保留数据；只拆该任务的 agent-runner，不拆可复用靶场。已归档任务再软删拒绝(400)。默认列表(`GET /tasks` 未传 `status`)不返回 archived；显式 `status=archived` 可查。
 - **硬删**:`DELETE /api/v1/tasks/{id}?hard=true` + 二次确认(header `X-Confirm: true`),物理删除 + 清 MinIO。
 - 受保护状态:running 中的任务不可删(先 cancel)。
 
@@ -403,7 +431,8 @@ Task `status` 增加 `archived`(软删)。verdict 6 档独立于 status(见 §1.
 ```
 plugins/vuln-verify-expert/
   agents/
-    env-builder.md   ← 节点 2(吃 run-project-env/references/*)
+    profiler.md      ← 节点 1(吃 run-project-env 第 1–2 步)
+    env-builder.md   ← 节点 2(吃 run-project-env 第 3 步起)
     auditor.md       ← 节点 3(吃 vuln-verify/SKILL.md Phase 1/2/2.5)
     reproducer.md    ← 节点 4(吃 vuln-verify Phase 3/4 + reproduction-guide.md)
     reporter.md      ← 节点 5(吃 report_template.md + Phase 5)
@@ -461,7 +490,7 @@ plugins/vuln-verify-expert/
 ```
 阶段 0(并行,解锁):凭据链路修复(§8)
 阶段 1(领域地基):project context + node_runs + task/report 模型改造 + Alembic 迁移
-阶段 2(编排核心):6 节点编排器 + submit_result 工具机制 + 代码节点(0/1)+ 插件多 agent 拆分
+阶段 2(编排核心):6 节点编排器 + submit_result 工具机制 + 代码节点 0 + AI 节点 1–5 + 插件多 agent 拆分
 阶段 3(AI 节点):节点 2(靶场,AI+代码协作)+ 节点 3/4(审计/复现)
 阶段 4(报告):节点 5 + report_data schema + md↔json 渲染 + docx 导出
 阶段 5(任务管理):retry / delete / 状态机对齐
@@ -491,7 +520,6 @@ plugins/vuln-verify-expert/
 ### 10.2 非目标(后续)
 
 - 浏览器 MCP 接入(独立子项目,见 `agent-workflow.md §8`)
-- 源码缓存复用(P2,project 长期持有 clone)
 - 多漏洞批量验证(当前一任务一漏洞)
 - OIDC/RBAC(`development-guide.md` P1-8/9)
 - DinD 生产部署(P2-15)

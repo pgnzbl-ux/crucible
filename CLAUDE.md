@@ -35,7 +35,7 @@ docker build -f infrastructure/agent-runner/Dockerfile -t crucible-agent-runner:
 
 # 3. 后端（端口统一 8010，与前端 Vite 代理对齐；`main.py` 直接运行入口默认 8000，请用 uvicorn 显式指定 8010）
 cd backend
-cp ../.env.example .env
+cp .env.example .env
 pip install -e ".[dev]"
 uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload
 
@@ -57,11 +57,12 @@ Crucible/
 │   │   │   │   ├── orchestrator.py     # ★ 6 节点编排器（循环 + 分支出口 + 断点续跑）
 │   │   │   │   ├── nodes/              # ★ 6 节点实现（source/profile/env_ready/audit/reproduce/report）
 │   │   │   │   ├── ai_runner.py        # AI 节点容器编排 + submit_result 工具 + schema 校验
-│   │   │   │   ├── profile_detector.py # 节点 1 规则引擎（7 语言 + web 门禁,纯代码）
+│   │   │   │   ├── profile_detector.py # 节点 1 规则引擎 hints / SDK 关闭回退
 │   │   │   │   ├── sdk_adapter.py      # Claude Agent SDK 适配器（env + prompt 构造）
 │   │   │   │   ├── executor.py         # ClaudeSdkExecutor / MockExecutor + 工厂（遗留兼容）
 │   │   │   │   └── tasks.py            # Celery 工作流（host clone + 调 orchestrator + 实时落库）
 │   │   │   ├── identity/        # 认证与用户管理
+│   │   │   ├── lab/             # Lab 靶场生命周期（复用、TTL、容器管理）
 │   │   │   ├── project/         # ★ 项目源码管理（projects 表 CRUD + 画像缓存）
 │   │   │   └── report/          # 报告与证据（结构化 report_data + md 渲染导出）
 │   │   └── shared/              # 共享基类、事件总线、SSE、鉴权依赖
@@ -71,8 +72,9 @@ Crucible/
 │       ├── pages/               # 页面组件
 │       ├── features/            # 领域功能模块（task/components 等）
 │       └── shared/              # api / hooks（useTaskEvents）/ lib / components（NodeSteps/ReportContent）
-├── plugins/                     # ★ Claude Code 插件（4 子 agent,平台 6 节点编排调用）
+├── plugins/                     # ★ Claude Code 插件（5 子 agent,平台 6 节点编排调用）
 │   └── vuln-verify-expert/
+│       ├── agents/profiler.md          # 节点 profile（项目全景 + web 门禁）
 │       ├── agents/env-builder.md       # 节点 env_ready（靶场）
 │       ├── agents/auditor.md           # 节点 audit（Phase 2.5 Gate）
 │       ├── agents/reproducer.md        # 节点 reproduce（复现）
@@ -98,19 +100,19 @@ Crucible/
 
 ## 对接第三方 LLM（DeepSeek）
 
-Celery worker 通过 `docker run --env` 把 Anthropic 兼容端点凭据注入 `crucible-agent-runner` 容器（容器销毁 env 消失，零落盘）：
+LLM 凭据只在后台「设置 → LLM Provider」配置。`.env` 只负责打开真实 Agent：
 
 ```bash
 # backend/.env
 CLAUDE_AGENT_SDK_ENABLED=true
-LLM_BASE_URL=https://api.deepseek.com/anthropic    # DeepSeek 官方端点
-LLM_API_KEY=sk-xxx                                  # 你的 DeepSeek API Key
-LLM_MODEL=deepseek-v4-flash                         # flash/pro 协议一致;思考 thinking.type=enabled|disabled(默认 enabled),强度 output_config.effort=low|high|max(默认 high)
 ```
 
+Celery worker 从默认 Provider 取端点/Key/模型，经 `docker run --env` 注入 `crucible-agent-runner`（容器销毁 env 消失，零落盘）。
+
 配置说明：
+- DeepSeek 官方：`https://api.deepseek.com/anthropic`（`deepseek-v4-flash` / `deepseek-v4-pro`；思考 thinking.type=enabled|disabled 默认 enabled，强度 output_config.effort=low|high|max 默认 high）
 - 腾讯云端点：`https://api.lkeap.cloud.tencent.com/anthropic`（模型 `deepseek-v3.2`）
 - 旧模型名 `deepseek-chat`/`deepseek-reasoner` 已于 2026-07-24 弃用
-- `ClaudeSdkAdapter.build_runner_env()` 自动注入 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` / `API_TIMEOUT_MS` / `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` / `PYTHONUNBUFFERED=1` 等环境变量
+- `ClaudeSdkAdapter.build_runner_env()` 注入 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` / `API_TIMEOUT_MS` / `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` / `PYTHONUNBUFFERED=1` 等环境变量
 - 容器内 SDK 通过 `canUseTool` 回调实现白盒审计黑白名单（只允许 `Read` / `Grep` / `Glob` + 受限的 `Bash` 子集：git-read / curl / python）
-- 沙箱镜像已精简（仅 Python + claude-agent-sdk + git + curl + tini），无需 Node/npm/chromium
+- 沙箱镜像：Python 3.11 + Node 20 + 完整 Linux 命令（非 slim）。靶场项目运行时仍在 `.vuln-env`，不在本镜像里装 JDK/Go/PHP/Chromium
