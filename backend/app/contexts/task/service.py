@@ -23,6 +23,7 @@ class TaskService:
 
     def __init__(self, repo: TaskRepository):
         self.repo = repo
+        self.session = repo.session
     @staticmethod
     def _to_detail(task: Task, runs: list[TaskRun] | None = None) -> TaskDetail:
         """安全地将 Task ORM 对象转为 TaskDetail，避免 async lazy-load 问题"""
@@ -124,6 +125,7 @@ class TaskService:
 
         # 1. 标记所有活跃 run 为 cancelled（并取出列表用于 revoke）
         cancelled_runs = await self.repo.cancel_active_runs(task_id)
+        await self.repo.cancel_incomplete_nodes([run.id for run in cancelled_runs])
 
         # 2. revoke 对应 celery 任务（task_id = run.id，见 create_task）
         from app.core.celery_app import celery_app
@@ -137,6 +139,15 @@ class TaskService:
 
         # 3. 任务整体状态 → cancelled
         await self.repo.update_status(task, "cancelled")
+        await self.repo.session.commit()
+
+        from app.contexts.lab.service import LabService
+
+        await LabService(self.session).mark_creator_cancelled(task_id)
+
+        from app.contexts.agent.runtime_cleanup import schedule_teardown_task_runtime
+
+        schedule_teardown_task_runtime(task_id)
         return self._to_detail(task, task.runs)
 
     async def get_task_events(self, task_id: str, limit: int = 1000) -> list[dict[str, Any]]:

@@ -1,0 +1,228 @@
+"""任务取消 / 结束 / 巡检时拆掉 agent-runner（best-effort）。
+
+热路径：cancel / 任务结束 / 删除调用 teardown_task_runtime。
+安全网：Celery worker 启动后每 5 分钟扫一次孤儿（含超时卡住的 running）。
+身份：agent-runner 标签 crucible.task_id，或从 host_workdir 挂载路径反查。
+发现源只认 Docker 容器，不把失败任务留下的 compose.yml 当成还活着的运行时。
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import threading
+import time
+from collections.abc import Awaitable, Callable, Iterable
+from datetime import datetime, timezone
+
+from app.core.agent_runner import agent_runner_manager
+from app.core.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+LAB_PROJECT_PREFIX = "crucible-lab-"
+SWEEP_INTERVAL_SECONDS = 300
+LIVE_STATUSES = frozenset({"pending", "queued", "running"})
+
+_sweeper_started = False
+
+
+def lab_project_name(lab_id: str) -> str:
+    """Docker Compose 项目名：小写、可扫、与其他靶场隔离。"""
+    return f"{LAB_PROJECT_PREFIX}{(lab_id or '').lower()}"
+
+
+def task_id_from_lab_project(name: str) -> str | None:
+    raw = (name or "").lower()
+    if raw.startswith(LAB_PROJECT_PREFIX):
+        tid = raw[len(LAB_PROJECT_PREFIX) :]
+        return tid or None
+    return None
+
+
+def task_id_from_host_path(path: str, workdir_base: str) -> str | None:
+    """从宿主机路径反查 task_id（含仓库子目录挂载）。"""
+    prefix = os.path.basename((workdir_base or "").rstrip("/").rstrip("\\")) + "-"
+    if prefix == "-":
+        return None
+    current = os.path.normpath((path or "").replace("/", os.sep))
+    while current and current != os.path.dirname(current):
+        name = os.path.basename(current)
+        if name.startswith(prefix):
+            tid = name[len(prefix) :]
+            return tid or None
+        current = os.path.dirname(current)
+    return None
+
+
+def should_keep_runtime(status: str | None, age_seconds: float, timeout_seconds: int) -> bool:
+    """仅保留未超时的 pending/queued/running。"""
+    return bool(status) and status in LIVE_STATUSES and age_seconds < timeout_seconds
+
+
+def utc_unix(dt: datetime | None) -> float | None:
+    """SQLite naive datetime 按 UTC 转 unix，避免东八区把 running 任务判超龄。"""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+async def teardown_task_runtime(task_id: str) -> None:
+    """只拆该任务的 agent-runner；共享靶场由 Lab 生命周期管理。幂等。"""
+    if not task_id:
+        return
+    workdir = agent_runner_manager.host_workdir_path(task_id)
+    try:
+        agent_runner_manager.remove_for_task(task_id, workdir)
+    except Exception:  # noqa: BLE001
+        logger.warning("拆 agent-runner 失败(best-effort) task=%s", task_id, exc_info=True)
+
+
+def schedule_teardown_task_runtime(task_id: str) -> None:
+    """后台拆容器，不阻塞取消接口。"""
+    if not task_id:
+        return
+
+    async def _run() -> None:
+        try:
+            await teardown_task_runtime(task_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("后台拆容器失败(best-effort) task=%s", task_id, exc_info=True)
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.warning("无事件循环，同步拆容器 task=%s", task_id)
+        asyncio.run(_run())
+        return
+    loop.create_task(_run())
+
+
+async def sweep_orphan_runtimes(
+    *,
+    discovered_ids: set[str] | None = None,
+    status_by_id: dict[str, tuple[str | None, float | None]] | None = None,
+    now: float | None = None,
+    timeout_seconds: int | None = None,
+    teardown: Callable[[str], Awaitable[None]] | None = None,
+) -> list[str]:
+    """拆掉已结束 / 超时 / 库里没有的任务运行时。返回被拆的 task_id。"""
+    clock = time.time() if now is None else now
+    timeout = (
+        get_settings().agent_runner_timeout_seconds if timeout_seconds is None else timeout_seconds
+    )
+    ids = discovered_ids if discovered_ids is not None else list_managed_task_ids()
+    statuses = status_by_id if status_by_id is not None else await load_task_runtime_status(ids)
+    tear = teardown or teardown_task_runtime
+    torn: list[str] = []
+    for tid in ids:
+        status, started = statuses.get(tid, (None, None))
+        age = (clock - started) if started is not None else timeout + 1
+        if should_keep_runtime(status, age, timeout):
+            continue
+        try:
+            await tear(tid)
+            torn.append(tid)
+        except Exception:  # noqa: BLE001
+            logger.warning("巡检拆容器失败 task=%s", tid, exc_info=True)
+    if torn:
+        logger.info("orphan runtime sweep 拆掉 %s 个任务: %s", len(torn), torn)
+    return torn
+
+
+def collect_task_ids_from_containers(containers: Iterable, workdir_base: str) -> set[str]:
+    """从任务标签、挂载路径收集 task_id；忽略共享 Lab 的 compose 项目名。"""
+    ids: set[str] = set()
+    for container in containers:
+        labels = getattr(container, "labels", None) or {}
+        tid = labels.get("crucible.task_id")
+        if tid:
+            ids.add(tid)
+        mounts = (getattr(container, "attrs", None) or {}).get("Mounts") or []
+        for mount in mounts:
+            from_mount = task_id_from_host_path(mount.get("Source") or "", workdir_base)
+            if from_mount:
+                ids.add(from_mount)
+    return ids
+
+
+def list_managed_task_ids() -> set[str]:
+    """从 Docker 容器收集 task_id。残留 host_workdir / compose.yml 不算运行时。"""
+    try:
+        client = agent_runner_manager._client  # noqa: SLF001 — 平台能力内部枚举
+        containers = client.containers.list(all=True)
+    except Exception:  # noqa: BLE001
+        logger.warning("列举托管容器失败(best-effort)", exc_info=True)
+        return set()
+    return collect_task_ids_from_containers(
+        containers, get_settings().agent_runner_workdir_base
+    )
+
+
+async def load_task_runtime_status(
+    task_ids: Iterable[str],
+) -> dict[str, tuple[str | None, float | None]]:
+    """task_id → (status, started_at unix)。缺行则不出现在 dict 里。"""
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    from app.contexts.task.models import Task, TaskRun
+
+    ids = [tid for tid in task_ids if tid]
+    if not ids:
+        return {}
+    engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    result: dict[str, tuple[str | None, float | None]] = {}
+    try:
+        async with factory() as session:
+            tasks = (await session.execute(select(Task).where(Task.id.in_(ids)))).scalars().all()
+            for task in tasks:
+                started = utc_unix(task.created_at)
+                result[task.id] = (task.status, started)
+            runs = (
+                (
+                    await session.execute(
+                        select(TaskRun)
+                        .where(TaskRun.task_id.in_(ids))
+                        .order_by(TaskRun.created_at.desc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            seen: set[str] = set()
+            for run in runs:
+                if run.task_id in seen:
+                    continue
+                seen.add(run.task_id)
+                status, created = result.get(run.task_id, (None, None))
+                ts = utc_unix(run.started_at) if run.started_at else created
+                result[run.task_id] = (status, ts)
+    finally:
+        await engine.dispose()
+    return result
+
+
+def start_background_sweeper() -> None:
+    """Celery worker 内守护线程：启动先扫一次，之后每 5 分钟。"""
+    global _sweeper_started
+    if _sweeper_started:
+        return
+    _sweeper_started = True
+
+    def _loop() -> None:
+        import asyncio
+
+        while True:
+            try:
+                asyncio.run(sweep_orphan_runtimes())
+            except Exception:  # noqa: BLE001
+                logger.exception("orphan runtime sweep 失败")
+            time.sleep(SWEEP_INTERVAL_SECONDS)
+
+    threading.Thread(target=_loop, name="crucible-runtime-sweeper", daemon=True).start()
+    logger.info("runtime sweeper 已启动 interval=%ss", SWEEP_INTERVAL_SECONDS)
