@@ -151,6 +151,52 @@ async def test_env_ready_create_compose_up_uses_lab_id(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_env_ready_create_strips_workspace_compose_path(tmp_path):
+    """AI 给出 /workspace/<repo>/... 时，lab compose 仍用拷贝后的相对配方路径。"""
+    repo = tmp_path / "b" / ".vuln-env"
+    repo.mkdir(parents=True)
+    (repo / "docker-compose.yml").write_text(
+        'services:\n  web:\n    image: x\n    ports:\n      - "3001:3000"\n',
+        encoding="utf-8",
+    )
+    lab_dir = tmp_path / "lab"
+    lab_dir.mkdir()
+    lab = SimpleNamespace(
+        lab_id="lab-create", role="create", status="creating", reused=False,
+        workdir=str(lab_dir), compose_project="crucible-lab-lab-create",
+        target_url=None, compose_path=".vuln-env/docker-compose.yml",
+        transport_shape={}, initial_creds={},
+    )
+    ctx = _ctx(tmp_path)
+    with patch("app.core.config.get_settings") as gs, \
+         patch("app.contexts.lab.service.LabService") as LS, \
+         patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
+         patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
+         patch("app.contexts.agent.nodes.env_ready.health_check", new_callable=AsyncMock) as hc, \
+         patch("app.contexts.agent.nodes.env_ready.host_advertise_ip", return_value="10.0.0.8"), \
+         patch("app.contexts.agent.nodes.env_ready.list_docker_occupied_host_ports", return_value=set()):
+        gs.return_value.claude_agent_sdk_enabled = True
+        LS.return_value.acquire = AsyncMock(return_value=lab)
+        LS.return_value.mark_ready = AsyncMock()
+        LS.return_value.mark_failed = AsyncMock()
+        ai.return_value = {
+            "compose_path": "/workspace/b/.vuln-env/docker-compose.yml",
+            "target_url": "http://localhost:3001",
+        }
+        up.return_value = (True, "")
+        hc.return_value = (True, 3001)
+        await EnvReadyNode().execute(ctx)
+    assert up.await_args.args[0] == ".vuln-env/docker-compose.yml"
+    assert up.await_args.args[1] == str(lab_dir)
+    repo_dirname = (
+        up.await_args.args[2]
+        if len(up.await_args.args) > 2
+        else up.await_args.kwargs.get("repo_dirname")
+    )
+    assert not repo_dirname
+
+
+@pytest.mark.asyncio
 async def test_env_ready_start_stopped_lab_without_ai(tmp_path):
     lab = SimpleNamespace(
         lab_id="lab1", role="start", status="stopped", reused=True,

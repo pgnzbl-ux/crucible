@@ -256,6 +256,20 @@ def _compose_ident(*, lab_id: str | None = None, task_id: str | None = None) -> 
     return lab_id if lab_id is not None else task_id
 
 
+def lab_recipe_compose_path(compose_path: str | None) -> str:
+    """把 AI 的 compose 路径收成 lab 目录下的相对路径（.vuln-env/...）。
+
+    丢掉 /workspace/<repo>/ 前缀；配方已拷到 labs/{id}/.vuln-env，不能再拼一层仓库名。
+    """
+    raw = (compose_path or ".vuln-env/docker-compose.yml").replace("\\", "/")
+    marker = ".vuln-env/"
+    idx = raw.find(marker)
+    if idx >= 0:
+        return raw[idx:]
+    name = raw.rsplit("/", 1)[-1] or "docker-compose.yml"
+    return f".vuln-env/{name}"
+
+
 def sync_recipe_to_lab(src_repo_dir: str, lab_workdir: str) -> None:
     """把任务 workspace 里的 .vuln-env 拷到 lab 目录（存在则覆盖）。"""
     from pathlib import Path
@@ -613,9 +627,10 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 continue
 
             sync_recipe_to_lab(src_repo, result.workdir)
+            lab_compose = lab_recipe_compose_path(compose_path)
             _emit(ctx, f"第 {attempt}/{MAX_ATTEMPTS} 轮：平台启动靶场（docker compose up --build）")
             ok, err = await docker_compose_up(
-                compose_path,
+                lab_compose,
                 result.workdir,
                 None,
                 lab_id=result.lab_id,
@@ -623,13 +638,13 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
             )
             if not ok:
                 logs = await collect_compose_logs(
-                    result.workdir, compose_path, None, lab_id=result.lab_id
+                    result.workdir, lab_compose, None, lab_id=result.lab_id
                 )
                 last_error = f"attempt {attempt} compose up 失败: {err}\n--- logs ---\n{logs}"
                 logger.warning(f"节点 2 attempt {attempt} 失败: {err[:200]}")
                 _emit(ctx, f"启动失败，回喂 AI 回溯（{attempt}/{MAX_ATTEMPTS}）")
                 await docker_compose_down(
-                    result.workdir, compose_path, None, lab_id=result.lab_id
+                    result.workdir, lab_compose, None, lab_id=result.lab_id
                 )
                 continue
 
@@ -639,14 +654,14 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
             ok, live_port = await health_check(web_ports)
             if not ok or live_port is None:
                 logs = await collect_compose_logs(
-                    result.workdir, compose_path, None, lab_id=result.lab_id
+                    result.workdir, lab_compose, None, lab_id=result.lab_id
                 )
                 last_error = (
                     f"attempt {attempt} 健康检查不过(mapped_ports={web_ports})\n--- logs ---\n{logs}"
                 )
                 _emit(ctx, f"探活失败，回喂 AI 回溯（{attempt}/{MAX_ATTEMPTS}）")
                 await docker_compose_down(
-                    result.workdir, compose_path, None, lab_id=result.lab_id
+                    result.workdir, lab_compose, None, lab_id=result.lab_id
                 )
                 continue
 
@@ -666,7 +681,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
             _emit(ctx, f"靶场就绪：{target_url}")
             output = {
                 "target_url": target_url,
-                "compose_path": compose_path,
+                "compose_path": lab_compose,
                 "transport_shape": recipe.get("transport_shape", {"protocol": "http"}),
                 "initial_creds": recipe.get("initial_creds", {}),
                 "started_containers": recipe.get("started_containers", []),
@@ -674,7 +689,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
             await svc.mark_ready(
                 result.lab_id,
                 target_url=target_url,
-                compose_path=compose_path,
+                compose_path=lab_compose,
                 transport_shape=output["transport_shape"],
                 initial_creds=output["initial_creds"],
             )
