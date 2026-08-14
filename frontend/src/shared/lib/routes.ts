@@ -12,10 +12,6 @@ const ROUTE_META: Record<string, RouteMeta> = {
     title: '任务管理',
     breadcrumb: [{ label: '业务' }, { label: '任务管理' }],
   },
-  '/projects': {
-    title: '源码管理',
-    breadcrumb: [{ label: '业务' }, { label: '源码管理' }],
-  },
   '/labs': {
     title: '靶场管理',
     breadcrumb: [{ label: '业务' }, { label: '靶场管理' }],
@@ -31,26 +27,6 @@ const ROUTE_META: Record<string, RouteMeta> = {
 }
 
 export function getRouteMeta(pathname: string): RouteMeta {
-  if (pathname.startsWith('/reports/') && pathname !== '/reports') {
-    return {
-      title: '报告详情',
-      breadcrumb: [
-        { label: '业务' },
-        { label: '验证报告', path: '/reports' },
-        { label: '详情' },
-      ],
-    }
-  }
-  if (pathname.startsWith('/projects/') && pathname !== '/projects') {
-    return {
-      title: '项目详情',
-      breadcrumb: [
-        { label: '业务' },
-        { label: '源码管理', path: '/projects' },
-        { label: '详情' },
-      ],
-    }
-  }
   if (pathname.startsWith('/tasks/') && pathname !== '/tasks') {
     const id = pathname.split('/')[2]
     return {

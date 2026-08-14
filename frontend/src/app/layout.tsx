@@ -3,44 +3,42 @@ import { App, Avatar, Dropdown, Layout, Menu, Space, Typography } from 'antd'
 import {
   BugOutlined,
   CloudServerOutlined,
-  CodeOutlined,
   DashboardOutlined,
   FileProtectOutlined,
   LogoutOutlined,
   SafetyCertificateOutlined,
   SettingOutlined,
 } from '@ant-design/icons'
-import { useQueryClient } from '@tanstack/react-query'
-import { useLocation } from 'wouter'
+import { Link, useLocation } from 'wouter'
 
 import { BreadcrumbNav } from '../shared/components/BreadcrumbNav'
+import { getRouteMeta } from '../shared/lib/routes'
 
 const { Header, Content, Sider } = Layout
 const { Text } = Typography
 
-const NAV_ITEMS = [
+const NAV_GROUPS = [
   {
     key: 'overview',
     label: '总览',
     type: 'group' as const,
-    children: [{ key: '/', icon: <DashboardOutlined />, label: '工作台' }],
+    children: [{ key: '/', icon: <DashboardOutlined />, label: <Link to="/">工作台</Link> }],
   },
   {
     key: 'operations',
     label: '业务',
     type: 'group' as const,
     children: [
-      { key: '/tasks', icon: <BugOutlined />, label: '任务管理' },
-      { key: '/projects', icon: <CodeOutlined />, label: '源码管理' },
-      { key: '/labs', icon: <CloudServerOutlined />, label: '靶场管理' },
-      { key: '/reports', icon: <FileProtectOutlined />, label: '验证报告' },
+      { key: '/tasks', icon: <BugOutlined />, label: <Link to="/tasks">任务管理</Link> },
+      { key: '/labs', icon: <CloudServerOutlined />, label: <Link to="/labs">靶场管理</Link> },
+      { key: '/reports', icon: <FileProtectOutlined />, label: <Link to="/reports">验证报告</Link> },
     ],
   },
   {
     key: 'system',
     label: '系统',
     type: 'group' as const,
-    children: [{ key: '/settings', icon: <SettingOutlined />, label: '设置' }],
+    children: [{ key: '/settings', icon: <SettingOutlined />, label: <Link to="/settings">设置</Link> }],
   },
 ]
 
@@ -60,29 +58,24 @@ function getCurrentUser(): CurrentUser | null {
 }
 
 export function AppLayout({ children }: { children: ReactNode }) {
-  const [location, navigate] = useLocation()
+  const [location] = useLocation()
   const { message } = App.useApp()
-  const qc = useQueryClient()
   const user = getCurrentUser()
 
-  const selectedKey = location.startsWith('/tasks')
+  const selectedKey = location.startsWith('/tasks/')
     ? '/tasks'
-    : location.startsWith('/projects')
-      ? '/projects'
-      : location.startsWith('/labs')
-        ? '/labs'
-        : location.startsWith('/reports')
-          ? '/reports'
-          : location === '/'
-            ? '/'
-            : location.split('?')[0]
+    : location.startsWith('/labs')
+      ? '/labs'
+      : location === '/'
+        ? '/'
+        : location.split('?')[0]
+  const pageMeta = getRouteMeta(location)
 
   const handleLogout = () => {
     localStorage.removeItem('crucible_token')
     localStorage.removeItem('crucible_user')
-    qc.clear()
     message.success('已退出登录')
-    navigate('/login')
+    window.location.href = '/login'
   }
 
   const userName = user?.display_name ?? user?.email ?? '未登录'
@@ -108,20 +101,13 @@ export function AppLayout({ children }: { children: ReactNode }) {
             <span className="crucible-brand-tagline">AI 漏洞验证平台</span>
           </span>
         </div>
-        <Menu
-          mode="inline"
-          selectedKeys={[selectedKey]}
-          items={NAV_ITEMS}
-          style={{ border: 'none' }}
-          onClick={({ key }) => {
-            if (key.startsWith('/')) navigate(key)
-          }}
-        />
+        <Menu mode="inline" selectedKeys={[selectedKey]} items={NAV_GROUPS} style={{ border: 'none' }} />
       </Sider>
       <Layout style={{ flex: 1, minWidth: 0 }}>
         <Header className="crucible-header">
           <div className="crucible-header-left">
             <BreadcrumbNav />
+            <Text className="crucible-header-title">/ {pageMeta.title}</Text>
           </div>
           <Dropdown
             menu={{

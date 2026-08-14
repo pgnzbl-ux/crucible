@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { App, Button, Collapse, Empty, Popconfirm, Space, Table, Tag, Tooltip, Typography } from 'antd'
+import { Alert, App, Button, Collapse, Empty, Popconfirm, Space, Table, Tag, Tooltip, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
@@ -64,10 +64,21 @@ type MutationInput =
   | { kind: 'container-action'; labId: string; containerName: string; action: LabContainerAction }
   | { kind: 'container-delete'; labId: string; containerName: string }
 
+function mutationRowKey(input: MutationInput) {
+  return 'containerName' in input
+    ? `container:${input.labId}:${input.containerName}`
+    : `lab:${input.labId}`
+}
+
+function mutationActionKey(input: MutationInput) {
+  const action = 'action' in input ? input.action : 'delete'
+  return `${mutationRowKey(input)}:${action}`
+}
+
 export function LabStacks() {
   const { message } = App.useApp()
   const queryClient = useQueryClient()
-  const { data, isLoading } = useQuery({
+  const { data, error, isError, isLoading } = useQuery({
     queryKey: ['labs'],
     queryFn: () => api.listLabs(),
   })
@@ -96,12 +107,20 @@ export function LabStacks() {
     confirmation?: string,
   ) => {
     const occupied = !canMutateLab(lab.live_task_count ?? 0)
+    const pendingSameRow =
+      mutation.isPending &&
+      mutation.variables !== undefined &&
+      mutationRowKey(mutation.variables) === mutationRowKey(input)
+    const loading =
+      mutation.isPending &&
+      mutation.variables !== undefined &&
+      mutationActionKey(mutation.variables) === mutationActionKey(input)
     const button = (
       <Button
         size="small"
         danger={danger}
-        disabled={occupied}
-        loading={mutation.isPending && mutation.variables === input}
+        disabled={occupied || pendingSameRow}
+        loading={loading}
         onClick={confirmation ? undefined : () => mutation.mutate(input)}
       >
         {label}
@@ -229,6 +248,10 @@ export function LabStacks() {
       ),
     },
   ]
+
+  if (isError) {
+    return <Alert type="error" showIcon message="靶场列表加载失败" description={error.message} />
+  }
 
   if (!isLoading && !(data?.items.length)) {
     return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无靶场" />
