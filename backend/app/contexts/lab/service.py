@@ -220,6 +220,8 @@ class LabService:
         from . import docker_ops
 
         lab = await self._require_writable_lab(lab_id, owner_id)
+        self._require_status(lab, {"ready"}, "stop")
+        await self._confirm_not_busy(lab.id)
         await docker_ops.compose_stop(lab.compose_project)
         lab.status = "stopped"
         await self._touch_and_commit(lab)
@@ -229,6 +231,8 @@ class LabService:
         from . import docker_ops
 
         lab = await self._require_writable_lab(lab_id, owner_id)
+        self._require_status(lab, {"stopped"}, "start")
+        await self._confirm_not_busy(lab.id)
         if not await docker_ops.compose_start(lab.compose_project):
             raise RuntimeError("靶场 compose start 失败")
         lab.status = "ready"
@@ -239,6 +243,11 @@ class LabService:
         from . import docker_ops
 
         lab = await self._require_writable_lab(lab_id, owner_id)
+        self._require_status(
+            lab,
+            {"ready", "stopped", "failed", "expired", "destroyed"},
+            "rebuild",
+        )
         if not lab.compose_path:
             raise ValueError("缺少配方，请从验证任务重新创建")
         compose_file = (
@@ -248,6 +257,7 @@ class LabService:
         if not os.path.isfile(compose_file):
             raise ValueError("缺少配方，请从验证任务重新创建")
 
+        await self._confirm_not_busy(lab.id)
         lab.status = "creating"
         await self.session.commit()
         try:
@@ -268,6 +278,10 @@ class LabService:
         from . import docker_ops
 
         lab = await self._require_writable_lab(lab_id, owner_id)
+        self._require_status(
+            lab, {"ready", "stopped", "failed", "expired"}, "destroy"
+        )
+        await self._confirm_not_busy(lab.id)
         await docker_ops.compose_down(lab.compose_project)
         lab.status = "destroyed"
         await self._touch_and_commit(lab)
@@ -284,6 +298,7 @@ class LabService:
         from . import docker_ops
 
         lab = await self._require_writable_lab(lab_id, owner_id)
+        self._require_status(lab, {"ready", "stopped"}, f"container {action}")
         operations = {
             "stop": docker_ops.container_stop,
             "start": docker_ops.container_start,
@@ -293,6 +308,7 @@ class LabService:
         operation = operations.get(action)
         if operation is None:
             raise ValueError(f"不支持的容器操作: {action}")
+        await self._confirm_not_busy(lab.id)
         await operation(name, lab.compose_project)
         await self._touch_and_commit(lab)
         return lab.status
@@ -386,10 +402,18 @@ class LabService:
 
     async def _require_writable_lab(self, lab_id: str, owner_id: str) -> Lab:
         lab = await self._require_owned_lab(lab_id, owner_id)
-        task_ids = await self.live_task_ids(lab.id)
+        await self._confirm_not_busy(lab.id)
+        return lab
+
+    async def _confirm_not_busy(self, lab_id: str) -> None:
+        task_ids = await self.live_task_ids(lab_id)
         if task_ids:
             raise LabBusyError(task_ids)
-        return lab
+
+    @staticmethod
+    def _require_status(lab: Lab, allowed: set[str], action: str) -> None:
+        if lab.status not in allowed:
+            raise ValueError(f"Lab 当前状态 {lab.status} 不允许执行 {action}")
 
     async def _touch_and_commit(self, lab: Lab) -> None:
         lab.last_seen_at = self._now()

@@ -118,6 +118,80 @@ async def test_stop_rejected_when_task_running(session):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "method_name", "docker_operation"),
+    [
+        ("failed", "stop_lab", "compose_stop"),
+        ("creating", "destroy_lab", "compose_down"),
+        ("ready", "start_lab", "compose_start"),
+    ],
+)
+async def test_management_rejects_invalid_state_before_docker(
+    session, status, method_name, docker_operation
+):
+    from app.contexts.lab.models import Lab
+
+    svc, result, task = await ready_lab(session)
+    task.status = "completed"
+    lab = await session.get(Lab, result.lab_id)
+    lab.status = status
+    await session.commit()
+
+    with patch(
+        f"app.contexts.lab.docker_ops.{docker_operation}",
+        new_callable=AsyncMock,
+    ) as docker:
+        with pytest.raises(ValueError, match=status):
+            await getattr(svc, method_name)(result.lab_id, owner_id="u1")
+
+    docker.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stop_rechecks_live_tasks_immediately_before_docker(session):
+    from app.contexts.lab.errors import LabBusyError
+
+    svc, result, task = await ready_lab(session)
+    task.status = "completed"
+    await session.commit()
+
+    with patch.object(
+        svc,
+        "live_task_ids",
+        new_callable=AsyncMock,
+        side_effect=[[], ["t1"]],
+    ), patch(
+        "app.contexts.lab.docker_ops.compose_stop", new_callable=AsyncMock
+    ) as stop:
+        with pytest.raises(LabBusyError) as exc_info:
+            await svc.stop_lab(result.lab_id, owner_id="u1")
+
+    assert exc_info.value.task_ids == ["t1"]
+    stop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_container_action_rejects_creating_lab_before_docker(session):
+    from app.contexts.lab.models import Lab
+
+    svc, result, task = await ready_lab(session)
+    task.status = "completed"
+    lab = await session.get(Lab, result.lab_id)
+    lab.status = "creating"
+    await session.commit()
+
+    with patch(
+        "app.contexts.lab.docker_ops.container_restart", new_callable=AsyncMock
+    ) as restart:
+        with pytest.raises(ValueError, match="creating"):
+            await svc.container_action(
+                result.lab_id, "web", action="restart", owner_id="u1"
+            )
+
+    restart.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_list_grouped_by_project(session):
     from app.contexts.lab.models import Lab
     from app.contexts.lab.service import LabService
