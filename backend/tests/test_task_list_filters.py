@@ -78,3 +78,51 @@ async def test_list_filters_by_q_and_date_range(session_factory):
         )
         assert total == 2
         assert all("acme" in t.project_address for t in items)
+
+
+@pytest.mark.asyncio
+async def test_list_excludes_archived_by_default(session_factory):
+    """未指定 status 时，已归档任务不出现在默认列表。"""
+    from app.contexts.task.models import Task
+    from app.contexts.task.repository import TaskRepository
+
+    async with session_factory() as session:
+        await _seed(session)
+        session.add(
+            Task(
+                project_address="https://github.com/acme/archived",
+                vulnerability_description="desc-archived",
+                owner_id="u1",
+                status="archived",
+                priority="medium",
+            )
+        )
+        await session.flush()
+        repo = TaskRepository(session)
+        items, total = await repo.list_by_owner("u1")
+        assert total == 3
+        assert all(t.status != "archived" for t in items)
+
+
+@pytest.mark.asyncio
+async def test_list_includes_archived_when_filtered(session_factory):
+    """显式 status=archived 时可以查到已归档任务。"""
+    from app.contexts.task.models import Task
+    from app.contexts.task.repository import TaskRepository
+
+    async with session_factory() as session:
+        await _seed(session)
+        session.add(
+            Task(
+                project_address="https://github.com/acme/archived",
+                vulnerability_description="desc-archived",
+                owner_id="u1",
+                status="archived",
+                priority="medium",
+            )
+        )
+        await session.flush()
+        repo = TaskRepository(session)
+        items, total = await repo.list_by_owner("u1", status="archived")
+        assert total == 1
+        assert items[0].status == "archived"

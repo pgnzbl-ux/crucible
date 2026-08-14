@@ -7,7 +7,7 @@ const RULES: [needle: string, title: string, hint: string][] = [
   ['超时', '节点执行超时被停止', '模型卡住或靶场过慢。可加大 AGENT_RUNNER_TIMEOUT_SECONDS，或检查 compose/健康检查。'],
   ['源码克隆失败', 'Git 克隆源码失败', '核对仓库地址、分支/tag，以及任务凭据是否有权限。'],
   ['agent-runner 镜像不存在', '缺少 agent-runner 镜像', '在项目根执行: docker build -f infrastructure/agent-runner/Dockerfile -t crucible-agent-runner:base .'],
-  ['缺少 LLM 凭据', '没有可用的 LLM API Key', '到「设置」配置默认 Provider，或在 backend/.env 填写 LLM_API_KEY。'],
+  ['缺少 LLM 凭据', '没有可用的 LLM API Key', '到「设置」配置并激活默认 LLM Provider。'],
   ['靶场搭建 5 轮全失败', '靶场 5 轮排障仍未就绪', '看最后一轮 compose/健康检查日志；配方可能端口冲突或依赖装不上。'],
   ['compose up', '靶场 docker compose 启动失败', '看错误后的 logs：端口占用、Dockerfile 语法、或 compose 是否写在 project/.vuln-env/。'],
   ['健康检查不过', '靶场容器起来了但端口探活失败', '确认 compose 端口映射、应用是否监听 0.0.0.0，以及 profile.port 是否正确。'],

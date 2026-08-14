@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo } from 'react'
 import {
   Alert,
   App,
@@ -13,69 +13,33 @@ import {
 } from 'antd'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
+import { useLocation } from 'wouter'
 
-import type { AgentEvent, TaskDetail } from '../../../shared/lib/api'
+import type { TaskDetail } from '../../../shared/lib/api'
 import { api } from '../../../shared/lib/api'
-import { getStatusMeta, getPriorityMeta, getVerdictMeta } from '../../../shared/lib/meta'
+import { getStatusMeta, getPriorityMeta, getVerdictMeta, getReportStatusMeta } from '../../../shared/lib/meta'
+import { canCancel, shouldFetchTaskReport } from '../../../shared/lib/taskActions'
+import type { TaskDetailTab } from '../../../shared/lib/taskActions'
 import { useTaskEvents, type SSEEvent } from '../../../shared/hooks/useTaskEvents'
+import { dropNoisyEvents, eventsForRun, mergeTaskEvents } from '../../../shared/lib/taskEvents'
 import { NodeSteps } from '../../../shared/components/NodeSteps'
 import { ReportContent } from '../../../shared/components/ReportContent'
 import { EvidenceList } from './EvidenceList'
 import { TaskEventTimeline } from './TaskEventTimeline'
+import { FileTextOutlined } from '@ant-design/icons'
 
 const { Title, Paragraph, Text } = Typography
 
-function unixToIso(ts: unknown): string | null {
-  if (typeof ts !== 'number' || !Number.isFinite(ts)) return null
-  const ms = ts > 1e12 ? ts : ts * 1000
-  return new Date(ms).toISOString()
-}
-
-function sseToAgentEvent(ev: SSEEvent): AgentEvent | null {
-  if (ev.type === 'ready' || ev.type === 'error') return null
-  const inner = (ev.event && typeof ev.event === 'object' ? ev.event : {}) as Record<string, unknown>
-  return {
-    id: `sse-${ev.sequence ?? 'x'}`,
-    run_id: ev.run_id ?? '',
-    sequence: ev.sequence ?? 0,
-    event_type: ev.type,
-    payload: inner,
-    source: 'sse',
-    created_at: unixToIso(inner.timestamp) ?? new Date().toISOString(),
-  }
-}
-
-function mergeTaskEvents(rest: AgentEvent[] | undefined, sse: SSEEvent[]): AgentEvent[] {
-  const map = new Map<string, AgentEvent>()
-  for (const ev of rest ?? []) {
-    map.set(`${ev.run_id}:${ev.sequence}`, ev)
-  }
-  for (const raw of sse) {
-    const mapped = sseToAgentEvent(raw)
-    if (!mapped) continue
-    const key = `${mapped.run_id}:${mapped.sequence}`
-    const existing = map.get(key)
-    if (existing) {
-      map.set(key, {
-        ...existing,
-        event_type: mapped.event_type || existing.event_type,
-        payload: Object.keys(mapped.payload).length ? mapped.payload : existing.payload,
-      })
-    } else {
-      map.set(key, mapped)
-    }
-  }
-  return [...map.values()].sort((a, b) => a.sequence - b.sequence)
-}
-
 interface TaskDetailTabsProps {
   taskId: string
+  activeTab: TaskDetailTab
+  onTabChange: (key: TaskDetailTab) => void
 }
 
-export function TaskDetailTabs({ taskId }: TaskDetailTabsProps) {
+export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTabsProps) {
   const { message } = App.useApp()
   const qc = useQueryClient()
-  const [activeTab, setActiveTab] = useState('overview')
+  const [, navigate] = useLocation()
 
   const { data: task, isLoading: taskLoading } = useQuery({
     queryKey: ['task', taskId],
@@ -105,15 +69,15 @@ export function TaskDetailTabs({ taskId }: TaskDetailTabsProps) {
     }
   }, [sseEvents, qc, taskId])
 
-  const events = useMemo(
-    () => mergeTaskEvents(restEvents, sseEvents as SSEEvent[]),
-    [restEvents, sseEvents],
-  )
+  const events = useMemo(() => {
+    const merged = mergeTaskEvents(restEvents, sseEvents as SSEEvent[])
+    return dropNoisyEvents(eventsForRun(merged, task?.runs[0]?.id))
+  }, [restEvents, sseEvents, task?.runs])
 
   const { data: report } = useQuery({
     queryKey: ['task-report', taskId],
     queryFn: () => api.getReportByTask(taskId),
-    enabled: !!taskId,
+    enabled: !!taskId && shouldFetchTaskReport(task?.status ?? ''),
     retry: false,
   })
 
@@ -128,10 +92,11 @@ export function TaskDetailTabs({ taskId }: TaskDetailTabsProps) {
   }
 
   if (!task) {
-    return <Alert type="error" message="任务不存在或无权访问" />
+    return <Alert type="error" title="任务不存在或无权访问" />
   }
 
   const st = getStatusMeta(task.status)
+  const pinNodes = canCancel(task.status)
 
   const tabItems = [
     {
@@ -140,12 +105,13 @@ export function TaskDetailTabs({ taskId }: TaskDetailTabsProps) {
       children: <OverviewTab task={task} statusColor={st.color ?? 'default'} statusLabel={st.label} />,
     },
     {
-      key: 'nodes',
-      label: '节点进度',
+      key: 'progress',
+      label: '进度',
       children: (
         <NodeSteps
           taskId={task.id}
           runId={task.runs[0]?.id}
+          taskStatus={task.status}
           sseEvents={sseEvents as unknown as SSEEvent[]}
         />
       ),
@@ -167,20 +133,41 @@ export function TaskDetailTabs({ taskId }: TaskDetailTabsProps) {
       key: 'report',
       label: '报告',
       children: report ? (
-        <Card bordered={false}>
-          <Descriptions column={2} size="small" bordered>
-            <Descriptions.Item label="状态">{report.status}</Descriptions.Item>
-            <Descriptions.Item label="判定">
-              {report.verdict ? (
-                <Tag color={getVerdictMeta(report.verdict).color}>{getVerdictMeta(report.verdict).label}</Tag>
-              ) : (
-                <Text type="secondary">—</Text>
-              )}
-            </Descriptions.Item>
-            <Descriptions.Item label="标题" span={2}>
-              {report.title}
-            </Descriptions.Item>
-          </Descriptions>
+        <Card variant="borderless">
+          <Descriptions
+            column={2}
+            size="small"
+            bordered
+            items={[
+              {
+                key: 'status',
+                label: '状态',
+                children: (
+                  <Tag color={getReportStatusMeta(report.status).color}>
+                    {getReportStatusMeta(report.status).label}
+                  </Tag>
+                ),
+              },
+              {
+                key: 'verdict',
+                label: '判定',
+                children: report.verdict ? (
+                  <Tag color={getVerdictMeta(report.verdict).color}>{getVerdictMeta(report.verdict).label}</Tag>
+                ) : (
+                  <Text type="secondary">—</Text>
+                ),
+              },
+              { key: 'title', label: '标题', span: 2, children: report.title },
+            ]}
+          />
+          <Button
+            type="link"
+            icon={<FileTextOutlined />}
+            style={{ paddingLeft: 0, marginTop: 8 }}
+            onClick={() => navigate(`/reports/${report.id}`)}
+          >
+            打开全文阅读页
+          </Button>
           <Divider style={{ margin: '12px 0' }} />
           <ReportContent report={report} />
           {report.status !== 'published' && (
@@ -196,13 +183,31 @@ export function TaskDetailTabs({ taskId }: TaskDetailTabsProps) {
           <EvidenceList reportId={report.id} />
         </Card>
       ) : (
-        <Alert type="info" message="暂无报告，任务完成后将自动生成" />
+        <Alert type="info" title="暂无报告，任务完成后将自动生成" />
       ),
     },
   ]
 
   return (
-    <Tabs activeKey={activeTab} onChange={setActiveTab} items={tabItems} type="card" />
+    <>
+      {pinNodes && (
+        <div className="crucible-detail-nodes-pin">
+          <NodeSteps
+            taskId={task.id}
+            runId={task.runs[0]?.id}
+            taskStatus={task.status}
+            sseEvents={sseEvents as unknown as SSEEvent[]}
+            compact
+          />
+        </div>
+      )}
+      <Tabs
+        activeKey={activeTab}
+        onChange={(key) => onTabChange(key as TaskDetailTab)}
+        items={tabItems}
+        type="card"
+      />
+    </>
   )
 }
 
@@ -221,7 +226,7 @@ function OverviewTab({
         <Alert
           type="error"
           showIcon
-          message="执行失败"
+          title="执行失败"
           description={
             <Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}>
               {task.runs[0].error_message}
@@ -230,26 +235,57 @@ function OverviewTab({
           style={{ marginBottom: 16 }}
         />
       )}
-      <Descriptions column={2} size="small" bordered>
-        <Descriptions.Item label="项目地址" span={2}>
-          <Text code>{task.project_address}</Text>
-        </Descriptions.Item>
-        <Descriptions.Item label="引用">{task.project_ref ?? '默认分支'}</Descriptions.Item>
-        <Descriptions.Item label="优先级">
-          <Tag color={getPriorityMeta(task.priority).color}>{getPriorityMeta(task.priority).label}</Tag>
-        </Descriptions.Item>
-        <Descriptions.Item label="状态">
-          <Tag color={statusColor}>{statusLabel}</Tag>
-        </Descriptions.Item>
-        <Descriptions.Item label="创建时间">
-          {dayjs(task.created_at).format('YYYY-MM-DD HH:mm:ss')}
-        </Descriptions.Item>
-        <Descriptions.Item label="漏洞描述" span={2}>
-          <Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}>
-            {task.vulnerability_description}
-          </Paragraph>
-        </Descriptions.Item>
-      </Descriptions>
+      <Descriptions
+        column={2}
+        size="small"
+        bordered
+        items={[
+          {
+            key: 'addr',
+            label: '项目地址',
+            span: 2,
+            children: <Text code>{task.project_address}</Text>,
+          },
+          { key: 'ref', label: '引用', children: task.project_ref ?? '默认分支' },
+          {
+            key: 'priority',
+            label: '优先级',
+            children: (
+              <Tag color={getPriorityMeta(task.priority).color}>{getPriorityMeta(task.priority).label}</Tag>
+            ),
+          },
+          {
+            key: 'status',
+            label: '状态',
+            children: <Tag color={statusColor}>{statusLabel}</Tag>,
+          },
+          {
+            key: 'verdict',
+            label: '判定',
+            children: task.verdict ? (
+              <Tag color={getVerdictMeta(task.verdict).color}>{getVerdictMeta(task.verdict).label}</Tag>
+            ) : (
+              <Text type="secondary">尚未判定</Text>
+            ),
+          },
+          {
+            key: 'created',
+            label: '创建时间',
+            span: 2,
+            children: dayjs(task.created_at).format('YYYY-MM-DD HH:mm:ss'),
+          },
+          {
+            key: 'desc',
+            label: '漏洞描述',
+            span: 2,
+            children: (
+              <Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}>
+                {task.vulnerability_description}
+              </Paragraph>
+            ),
+          },
+        ]}
+      />
       {task.vulnerability_reasoning && (
         <>
           <Divider />

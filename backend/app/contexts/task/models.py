@@ -115,7 +115,7 @@ class NodeRun(BaseModel):
     )
     status: Mapped[str] = mapped_column(
         String(20), default="pending",
-        comment="pending|running|completed|failed|skipped",
+        comment="pending|running|completed|failed|skipped|cancelled",
     )
     input_json: Mapped[str] = mapped_column(Text, default="{}", comment="节点输入(前序 output 组装)")
     output_json: Mapped[str] = mapped_column(Text, default="{}", comment="节点结构化产出(交接契约)")

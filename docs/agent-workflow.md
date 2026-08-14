@@ -35,7 +35,8 @@ development-guide.md P0-0 原描述「新增 agent/stages.py + preflight.py + pr
 ┌────────────────────────────────────────────────────────────────┐
 │ Celery Worker（Python）                                          │
 │   agent/tasks.py::_run_analysis                                  │
-│     ├─ host 上 git clone → host_workdir/project                  │
+│     ├─ 节点 0：owner+host+ref 查表；branch 对远端 SHA → MinIO 或 git clone → host_workdir/{仓库名} │
+│     ├─ 节点 1：同 SHA 的 profile_json 命中则复用；强 Web/强非 Web 走规则，其余才 AI │
 │     ├─ 写 .prompt.json + 注入 ANTHROPIC_* env（凭据零落盘）       │
 │     ├─ docker run agent-runner 容器（bind mount host_workdir）    │
 │     ├─ container.logs(stream=True) → LineBufferedJsonParser       │
@@ -50,8 +51,8 @@ development-guide.md P0-0 原描述「新增 agent/stages.py + preflight.py + pr
 │     ├─ 读 /workspace/.prompt.json                                │
 │     ├─ ClaudeAgentOptions(                                       │
 │     │     plugins=[{type:"local", path:"/app/plugins/vuln-verify-expert"}],│
-│     │     extra_args=["--agent", "vuln-verify-expert:vuln-verify-expert"],│
-│     │     cwd="/workspace/project", ...)                          │
+│     │     extra_args={"agent": "vuln-verify-expert:vuln-verify-expert"},│
+│     │     cwd="/workspace/{仓库名}", ...)                         │
 │     └─ async for msg in query(prompt, options):                  │
 │          print(json.dumps(translate(msg)))   # stdout JSONL      │
 └────────────────────────────────────────────────────────────────┘
@@ -119,6 +120,8 @@ docker build -f infrastructure/agent-runner/Dockerfile -t crucible-agent-runner:
 
 Dockerfile 会 `COPY plugins/vuln-verify-expert /app/plugins/vuln-verify-expert`，
 并通过 ENV 暴露 `PLUGIN_DIR` / `PLUGIN_NAME` / `AGENT_NAME` 给 `run_one.py`。
+镜像是分析员工具箱（Python 3.11 + Node 20 + 完整 Linux 命令，非 slim）；
+被测项目的运行时仍写在 `.vuln-env`，由宿主机 `docker compose up` 拉起。
 
 `.dockerignore` 排除 `.venv/` `node_modules/` `.git/` 等，只保留
 `infrastructure/agent-runner/` 与 `plugins/vuln-verify-expert/`。
@@ -137,17 +140,19 @@ Dockerfile 会 `COPY plugins/vuln-verify-expert /app/plugins/vuln-verify-expert`
 # 主路径（SDK 0.2.x typed）：
 ClaudeAgentOptions(
     plugins=[{"type": "local", "path": "/app/plugins/vuln-verify-expert"}],
-    extra_args=["--agent", "vuln-verify-expert:vuln-verify-expert"],
+    extra_args={"agent": "vuln-verify-expert:vuln-verify-expert"},
     ...
 )
 
 # 降级路径（extra_args CLI flag 透传，所有版本支持）：
 ClaudeAgentOptions(
-    extra_args=["--plugin-dir", "/app/plugins/vuln-verify-expert",
-                "--agent", "vuln-verify-expert:vuln-verify-expert"],
+    extra_args={"plugin-dir": "/app/plugins/vuln-verify-expert",
+                "agent": "vuln-verify-expert:vuln-verify-expert"},
     ...
 )
 ```
+
+`extra_args` 必须是 `dict[str, str | None]`（key 不含 `--`）。传 list 会在 SDK `_build_command` 里炸 `list object has no attribute 'items'`。
 
 `run_one.py` 先 try 主路径，`TypeError/ValueError` 时降级 —— 跨 SDK 版本兼容。
 
@@ -214,7 +219,7 @@ shadow `can_use_tool`（`CanUseToolShadowedWarning`，自动批准发生在回�
 | gap | 影响 | 状态 / 路线 |
 |---|---|---|
 | 权限 hook 重构 | ~~Bash 黑白名单不生效~~ | ✅ v0.2 完成（PreToolUse hook） |
-| 插件产物自动归档 | ~~报告/截图须手动上传~~ | ✅ v0.2 完成（worker 扫 host_workdir/project → MinIO + Evidence） |
+| 插件产物自动归档 | ~~报告/截图须手动上传~~ | ✅ v0.2 完成（worker 扫 host_workdir/{仓库名} → MinIO + Evidence） |
 | browser MCP 未接入 | XSS/DOM 类证据须降级 HTTP | P1（独立子项目，见下） |
 | 容器内无法 docker compose 搭靶场 | 阶段 B 自建环境受限 | P1（DinD / docker.sock 架构决策） |
 | credential_store 未接入 | ~~需登录的漏洞进 `needs_credentials`~~ | ✅ v0.2 完成（P1-6 Credential Proxy：env_var/file 注入） |

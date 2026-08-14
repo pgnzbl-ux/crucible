@@ -48,27 +48,27 @@ class ClaudeSdkAdapter:
     """
 
     def __init__(self) -> None:
-        self.model = settings.llm_model
         self.max_turns = settings.claude_sdk_max_turns
 
     def build_runner_env(self, provider_env: dict[str, str] | None = None) -> dict[str, str]:
         """构造注入 agent-runner 容器的环境变量（凭据零落盘）。
 
-        优先级：provider_env（DB 默认 Provider 解密后） > settings.llm_*
-        provider_env 由 tasks.py 在拉起前传入；不传则直接用 settings。
+        凭据只来自 provider_env（DB 默认 Provider）；不传则不注入 LLM 凭据。
         """
         env: dict[str, str] = {
             # 强制项：保证容器内 Python 不缓冲输出
             "PYTHONUNBUFFERED": "1",
             # HOME 强制指向 /workspace（tmpfs 可写）：rootfs 只读时 SDK/CLI cache 可写
             "HOME": "/workspace",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            "CLAUDE_SDK_MAX_TURNS": str(self.max_turns),
         }
         src = provider_env or {}
 
-        base_url = src.get("ANTHROPIC_BASE_URL") or settings.llm_base_url
-        api_key = src.get("ANTHROPIC_AUTH_TOKEN") or src.get("ANTHROPIC_API_KEY") or settings.llm_api_key
-        model = src.get("ANTHROPIC_MODEL") or settings.llm_model
-        timeout = src.get("API_TIMEOUT_MS") or str(settings.llm_timeout_ms)
+        base_url = src.get("ANTHROPIC_BASE_URL")
+        api_key = src.get("ANTHROPIC_AUTH_TOKEN") or src.get("ANTHROPIC_API_KEY")
+        model = src.get("ANTHROPIC_MODEL")
+        timeout = src.get("API_TIMEOUT_MS")
 
         if base_url:
             env["ANTHROPIC_BASE_URL"] = base_url
@@ -82,11 +82,6 @@ class ClaudeSdkAdapter:
             env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
         if timeout:
             env["API_TIMEOUT_MS"] = timeout
-        if settings.llm_disable_nonessential_traffic:
-            env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
-
-        # max_turns 也走 env（容器内 run_one.py 读取）
-        env["CLAUDE_SDK_MAX_TURNS"] = str(self.max_turns)
 
         return env
 
@@ -112,21 +107,13 @@ class ClaudeSdkAdapter:
 
 
 async def resolve_runner_env(session: AsyncSession) -> dict[str, str]:
-    """tasks.py 调用的辅助：从 settings context 取默认 Provider 的明文 env，fallback 到 settings.llm_*。
-
-    返回值直接传给 docker run --env。
-    """
+    """从后台默认 Provider 构造 docker run --env；无默认 Provider 则不注入凭据。"""
     adapter = ClaudeSdkAdapter()
-    try:
-        svc = SettingsService(SettingsRepository(session))
-        provider = await svc.get_default_provider()
-        if provider is not None:
-            provider_env = svc.build_env_from_provider(provider)
-            if provider_env:
-                return adapter.build_runner_env(provider_env)
-    except Exception:  # noqa: BLE001 — DB 失败 fallback
-        pass
-    return adapter.build_runner_env()
+    svc = SettingsService(SettingsRepository(session))
+    provider = await svc.get_default_provider()
+    if provider is None:
+        return adapter.build_runner_env()
+    return adapter.build_runner_env(svc.build_env_from_provider(provider))
 
 
 def redact_env_for_log(env: dict[str, str]) -> dict[str, str]:

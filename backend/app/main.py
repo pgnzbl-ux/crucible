@@ -31,16 +31,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 启动：开发环境自动建表
     if settings.environment == "development" and "sqlite" in settings.database_url:
         await init_db()
-    # 启动：环境变量 LLM 配置 → DB 种子迁移（幂等，仅在 DB 无 Provider 时执行）
-    from app.core.database import async_session_factory
-    from app.contexts.settings.seed import seed_llm_provider_from_env
-
-    try:
-        async with async_session_factory() as session:
-            await seed_llm_provider_from_env(session)
-            await session.commit()
-    except Exception:
-        pass  # 种子失败不阻塞启动
     yield
     # 关闭：释放数据库连接
     await close_db()

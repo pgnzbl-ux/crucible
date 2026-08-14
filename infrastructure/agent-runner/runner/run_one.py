@@ -69,7 +69,7 @@ except ImportError:
 #
 # 策略（v0.2）：黑名单 deny + 工具白名单（allowed_tools）双层模型。
 # - Bash：黑名单拦截破坏性命令（rm/mv/chmod/dd/mkfs/|bash/>/etc//proc//sys），
-#   其余放开（插件工作流需要 docker compose / git / curl / python）
+#   其余放开（插件工作流需要 git / curl / python / node / 常规 Linux 命令）
 # - 工具类型白名单：allowed_tools 限定（Write/Edit/WebFetch 等显式列出）
 # - can_use_tool 不再用：bypassPermissions 会 shadow 它（SDK CanUseToolShadowedWarning）；
 #   PreToolUse hook 在所有 permission_mode 下都执行（CLI 原生消费 permissionDecision）
@@ -227,7 +227,35 @@ def _classify_conclusion(text: str) -> str:
     return "unconfirmed"
 
 
-async def _stream_messages(options: ClaudeAgentOptions, prompt: str) -> AsyncIterator[dict]:
+# SDK SystemMessage 里 thinking_tokens 是逐 token 用量心跳，不是阶段变更
+_KEEP_SYSTEM_SUBTYPES = frozenset({"init"})
+
+
+def _system_phase_event(
+    message: Any,
+    *,
+    seq: int,
+    timestamp: float,
+    session_id: str | None,
+) -> dict[str, Any] | None:
+    subtype = getattr(message, "subtype", None) or "init"
+    if subtype not in _KEEP_SYSTEM_SUBTYPES:
+        return None
+    return {
+        "type": "phase.updated",
+        "phase": "start",
+        "message": subtype,
+        "session_id": session_id,
+        "sequence": seq,
+        "timestamp": timestamp,
+    }
+
+
+async def _stream_messages(
+    options: ClaudeAgentOptions,
+    prompt: str,
+    node_key: str | None = None,
+) -> AsyncIterator[dict]:
     """包裹 SDK async generator，把每条 Message 翻译为 dict。"""
     seq = 0
     session_id_seen: str | None = None
@@ -239,18 +267,13 @@ async def _stream_messages(options: ClaudeAgentOptions, prompt: str) -> AsyncIte
             sid = getattr(message, "session_id", None) or session_id_seen
             message_type = type(message).__name__
 
-            # SystemMessage（init）
+            # SystemMessage：只保留 init；thinking_tokens 等用量心跳丢弃
             if isinstance(message, SystemMessage):
                 if sid and sid != session_id_seen:
                     session_id_seen = sid
-                yield {
-                    "type": "phase.updated",
-                    "phase": "start",
-                    "message": getattr(message, "subtype", "init") or "init",
-                    "session_id": sid,
-                    "sequence": seq,
-                    "timestamp": ts,
-                }
+                event = _system_phase_event(message, seq=seq, timestamp=ts, session_id=sid)
+                if event:
+                    yield event
                 continue
 
             # AssistantMessage（含 TextBlock / ToolUseBlock / 错误）
@@ -354,7 +377,7 @@ async def _stream_messages(options: ClaudeAgentOptions, prompt: str) -> AsyncIte
                     )
                 yield {
                     "type": "agent.completed",
-                    "conclusion": _classify_conclusion(result_text),
+                    **({"conclusion": _classify_conclusion(result_text)} if not node_key else {}),
                     "reasoning": result_text,
                     "session_id": sid,
                     "duration_ms": getattr(message, "duration_ms", None),
@@ -400,7 +423,7 @@ def _build_prompt(task: dict[str, Any]) -> str:
     """构造发给插件 agent 的 user message（只含任务信息，不含 system prompt）。"""
     parts = [
         f"项目地址: {task.get('project_address', '')}",
-        f"项目引用: {task.get('project_ref') or 'default branch'}（已 clone 到 /workspace/project）",
+        f"项目引用: {task.get('project_ref') or 'default branch'}（已 clone 到工作区仓库目录）",
         "",
         f"待验证漏洞描述:\n{task.get('vulnerability_description', '')}",
     ]
@@ -426,22 +449,92 @@ def _build_prompt(task: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def _container_source_dir(
+    input_json: dict[str, Any] | None = None,
+    *,
+    workspace_root: str = "/workspace",
+) -> str:
+    """容器内源码根：优先 input_json.source_path；旧的 /workspace/project 不存在时扫真实仓库名。"""
+    root = Path(workspace_root)
+    raw = str((input_json or {}).get("source_path") or "").strip().replace("\\", "/")
+    name = ""
+    if raw.startswith("/workspace/"):
+        name = raw[len("/workspace/"):].strip("/")
+    elif raw:
+        name = raw.rstrip("/").split("/")[-1]
+
+    candidate = (root / name) if name else None
+    if candidate is not None and candidate.is_dir():
+        return f"/workspace/{name}"
+
+    discovered = _discover_workspace_repo(root)
+    if discovered:
+        return f"/workspace/{discovered.name}"
+
+    if name:
+        return f"/workspace/{name}"
+    return "/workspace"
+
+
+def _sdk_cwd(
+    input_json: dict[str, Any] | None = None,
+    *,
+    workspace_root: str = "/workspace",
+) -> str:
+    """SDK cwd 必须是已存在的目录，否则 subprocess 直接炸 Working directory does not exist。"""
+    root = Path(workspace_root)
+    mapped = _container_source_dir(input_json, workspace_root=workspace_root)
+    rel = mapped[len("/workspace/"):].strip("/") if mapped.startswith("/workspace/") else ""
+    if rel:
+        on_disk = root / rel
+        if on_disk.is_dir():
+            return f"/workspace/{rel}"
+    discovered = _discover_workspace_repo(root)
+    if discovered:
+        return f"/workspace/{discovered.name}"
+    if root.is_dir():
+        return "/workspace"
+    return mapped
+
+
+def _discover_workspace_repo(root: Path) -> Path | None:
+    if not root.is_dir():
+        return None
+    skip = {".secrets", ".git"}
+    found = [
+        p for p in sorted(root.iterdir())
+        if p.is_dir() and not p.name.startswith(".") and p.name not in skip
+    ]
+    return found[0] if found else None
+
+
 def _build_node_prompt(node_key: str, input_json: dict[str, Any]) -> str:
-    """按节点构造 user message。源码在容器内固定为 /workspace/project。"""
+    """按节点构造 user message。源码目录来自 input_json.source_path。"""
     payload = json.dumps(input_json, ensure_ascii=False, indent=2, default=str)
+    src = _container_source_dir(input_json)
     headers = {
+        "profile": (
+            f"你是项目画像员。源码在 {src}。"
+            "完成 run-project-env 第 1–2 步（项目全景 + web 门禁），"
+            "完成后必须调用 submit_result。"
+            "不要写 Dockerfile / compose，不要执行 docker。"
+        ),
         "env_ready": (
-            "你是靶场工程师。源码在 /workspace/project。"
-            "根据以下输入产出 Dockerfile / docker-compose.yml 到 "
-            "/workspace/project/.vuln-env/，完成后必须调用 submit_result。"
-            "不要自己执行 docker compose（由平台 worker 执行）。"
+            f"你是靶场工程师。源码在 {src}。"
+            "闭环:你分析并写出 Dockerfile/compose 到 "
+            f"{src}/.vuln-env/ → 必须 submit_result → 平台负责启动和探活。"
+            "不要执行 docker compose,不要宣称已经启动。"
+            "若 previous_error 非空:只根据失败日志改配方(一次一处),再 submit_result。"
         ),
         "audit": (
-            "你是白盒审计员。源码在 /workspace/project。"
+            f"你是白盒审计员。源码在 {src}。"
             "根据以下输入完成利用链审计与 Phase 2.5 Gate，完成后必须调用 submit_result。"
         ),
         "reproduce": (
-            "你是漏洞复现员。根据以下输入对靶标发一次 HTTP 验证，完成后必须调用 submit_result。"
+            f"你是漏洞复现员。源码在 {src}。"
+            "输入里的 target_url / initial_creds / transport_shape / compose_path "
+            "来自靶场就绪节点，必须用它们发 HTTP，不要自己猜地址或账号。"
+            "完成后必须调用 submit_result。"
             "target_url 中的 host.docker.internal 指向宿主机上的靶场（不要改用 localhost）。"
         ),
         "report": (
@@ -453,7 +546,7 @@ def _build_node_prompt(node_key: str, input_json: dict[str, Any]) -> str:
         node_key,
         "根据以下输入完成节点任务，完成后必须调用 submit_result。",
     )
-    return f"{head}\n\n源码目录: /workspace/project\n\n输入(JSON):\n{payload}"
+    return f"{head}\n\n源码目录: {src}\n\n输入(JSON):\n{payload}"
 
 
 # ── 插件 agent 加载 ──
@@ -466,6 +559,7 @@ AGENT_NAME = os.environ.get("AGENT_NAME", "vuln-verify-expert")
 # 节点 → 插件 agent 映射(阶段 2 多 agent 拆分)
 # NODE_KEY 由 worker 通过 docker run --env 注入;为空时走旧的 vuln-verify-expert 总 agent(兼容)
 NODE_AGENT_MAP: dict[str, str] = {
+    "profile": "profiler",
     "env_ready": "env-builder",
     "audit": "auditor",
     "reproduce": "reproducer",
@@ -474,6 +568,22 @@ NODE_AGENT_MAP: dict[str, str] = {
 
 # 各 AI 节点的 submit_result 工具 input schema(与 worker 侧 ai_runner.NODE_INPUT_SCHEMAS 对齐)
 NODE_INPUT_SCHEMAS: dict[str, dict] = {
+    "profile": {
+        "type": "object",
+        "properties": {
+            "is_web": {"type": "boolean"},
+            "language": {"type": "string"},
+            "framework": {"type": "string"},
+            "port": {"type": "integer"},
+            "has_dockerfile": {"type": "boolean"},
+            "has_compose": {"type": "boolean"},
+            "detected_services": {"type": "array"},
+            "summary": {"type": "string"},
+            "start_command": {"type": "string"},
+            "non_web_reason": {"type": "string"},
+        },
+        "required": ["is_web"],
+    },
     "env_ready": {
         "type": "object",
         "properties": {
@@ -535,7 +645,12 @@ def _make_submit_result_tool(schema: dict):
     return submit_result
 
 
-def _build_options(model: str, max_turns: int, node_key: str | None = None) -> ClaudeAgentOptions:
+def _build_options(
+    model: str,
+    max_turns: int,
+    node_key: str | None = None,
+    cwd: str | None = None,
+) -> ClaudeAgentOptions:
     """构造 SDK options。
 
     节点化(node_key 非空):按 node_key 选插件子 agent + 注入 submit_result MCP 工具。
@@ -551,19 +666,23 @@ def _build_options(model: str, max_turns: int, node_key: str | None = None) -> C
     common: dict[str, Any] = {
         "model": model,
         "max_turns": max_turns,
-        "cwd": "/workspace/project",
+        "cwd": cwd or "/workspace",
         "permission_mode": "bypassPermissions",
-        "allowed_tools": [
-            "Read", "Grep", "Glob", "Bash",         # 白盒审计 + PoC
-            "Write", "Edit",                         # 写配置 / report
-            "WebFetch", "WebSearch",                 # 查 CVE / 利用资料
-        ],
+        "allowed_tools": (
+            ["Read", "Grep", "Glob"]
+            if node_key == "profile"
+            else [
+                "Read", "Grep", "Glob", "Bash",
+                "Write", "Edit",
+                "WebFetch", "WebSearch",
+            ]
+        ),
         "hooks": {
             "PreToolUse": [
                 {"matcher": "Bash", "hooks": [_pre_tool_use_hook]},
             ],
         },
-        "extra_args": ["--agent", agent_flag],
+        "extra_args": {"agent": agent_flag},
     }
 
     # 节点化:注入 submit_result MCP 工具 + 限定工具集含它
@@ -591,7 +710,7 @@ def _build_options(model: str, max_turns: int, node_key: str | None = None) -> C
             **common,
         )
     except (TypeError, ValueError):
-        common["extra_args"] = ["--plugin-dir", PLUGIN_DIR, "--agent", agent_flag]
+        common["extra_args"] = {"plugin-dir": PLUGIN_DIR, "agent": agent_flag}
         # mcp_servers 可能不被旧构造接受,移除后重试
         common.pop("mcp_servers", None)
         return ClaudeAgentOptions(**common)
@@ -638,7 +757,9 @@ async def _main() -> int:
     except ValueError:
         max_turns = 180
 
-    options = _build_options(model, max_turns, node_key=node_key)
+    options = _build_options(
+        model, max_turns, node_key=node_key, cwd=_sdk_cwd(input_json)
+    )
 
     if node_key and node_key in NODE_AGENT_MAP:
         prompt = _build_node_prompt(node_key, input_json)
@@ -648,7 +769,7 @@ async def _main() -> int:
     exit_code = 0
     saw_completion = False
     saw_failure = False
-    async for event in _stream_messages(options, prompt):
+    async for event in _stream_messages(options, prompt, node_key=node_key):
         print(json.dumps(event, ensure_ascii=False, default=str), flush=True)
         if event.get("type") == "agent.completed":
             saw_completion = True

@@ -1,8 +1,13 @@
 """把 Agent/编排异常翻成人类可读的短句 + 排错提示。"""
 from __future__ import annotations
 
-# (子串匹配, 标题, 下一步)
+# (子串匹配, 标题, 下一步) — 更具体的规则必须排在前面
 _RULES: list[tuple[str, str, str]] = [
+    (
+        "No module named 'runner'",
+        "agent-runner 入口模块找不到",
+        "host_workdir 会盖掉 /workspace。确认镜像把 runner 放到 /app 且 PYTHONPATH=/app，然后在项目根重建: docker build -f infrastructure/agent-runner/Dockerfile -t crucible-agent-runner:base .",
+    ),
     (
         "未产出 .node_output.json",
         "Agent 没有提交节点结果就结束了",
@@ -19,14 +24,29 @@ _RULES: list[tuple[str, str, str]] = [
         "submit_result 写出的内容损坏。看容器 stderr 或重跑该节点。",
     ),
     (
-        "超时",
-        "节点执行超时被停止",
-        "模型卡住或靶场过慢。可加大 AGENT_RUNNER_TIMEOUT_SECONDS，或检查 compose/健康检查。",
+        "网络错误",
+        "Git 拉取网络失败",
+        "检查本机能否访问 Git 远程（DNS、代理、防火墙），稍后重试。",
+    ),
+    (
+        "仓库不存在或无权访问",
+        "仓库不存在或无权访问",
+        "核对 Git 地址，以及任务凭据是否有 clone 权限。",
+    ),
+    (
+        "分支/tag 不存在",
+        "指定的分支或 tag 不存在",
+        "核对任务填写的 branch / tag 是否在远程仓库中。",
     ),
     (
         "源码克隆失败",
         "Git 克隆源码失败",
         "核对仓库地址、分支/tag，以及任务凭据是否有权限。",
+    ),
+    (
+        "超时",
+        "节点执行超时被停止",
+        "模型卡住或靶场过慢。可加大 AGENT_RUNNER_TIMEOUT_SECONDS，或检查 compose/健康检查。",
     ),
     (
         "agent-runner 镜像不存在",
@@ -36,7 +56,7 @@ _RULES: list[tuple[str, str, str]] = [
     (
         "缺少 LLM 凭据",
         "没有可用的 LLM API Key",
-        "到「设置」配置默认 Provider，或在 backend/.env 填写 LLM_API_KEY。",
+        "到「设置」配置并激活默认 LLM Provider。",
     ),
     (
         "靶场搭建 5 轮全失败",
@@ -46,7 +66,7 @@ _RULES: list[tuple[str, str, str]] = [
     (
         "compose up",
         "靶场 docker compose 启动失败",
-        "看错误后的 logs：端口占用、Dockerfile 语法、或 compose 是否写在 project/.vuln-env/。",
+        "看错误后的 logs：端口占用、Dockerfile 语法、或 compose 是否写在仓库/.vuln-env/。",
     ),
     (
         "健康检查不过",

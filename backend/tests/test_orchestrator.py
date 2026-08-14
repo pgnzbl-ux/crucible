@@ -90,6 +90,42 @@ async def test_non_web_exits_after_profile(session_factory):
 
 
 @pytest.mark.asyncio
+async def test_missing_is_web_does_not_enter_env_ready(session_factory):
+    """画像未给出显式 is_web=True 时 fail-closed，不得当 web 继续搭靶场。"""
+    from app.contexts.agent import orchestrator as orch
+    from app.contexts.task.models import NodeRun
+    from sqlalchemy import select
+
+    async with session_factory() as session:
+        task, run = await _seed_task_run(session)
+        real_nodes = orch.NODE_ORDER
+
+        async def fake_source(ctx):
+            return {"source_path": ctx.source_path}
+
+        async def fake_profile(ctx):
+            return {"language": "python"}
+
+        with patch.object(real_nodes[0], "execute", fake_source), \
+             patch.object(real_nodes[1], "execute", fake_profile):
+            for n in real_nodes[2:]:
+                patch.object(n, "execute", AsyncMock(side_effect=AssertionError("不该执行"))).__enter__()
+
+            result = await orch.run_orchestration(
+                task_id=task.id, run_id=run.id, session=session,
+                host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
+            )
+
+        assert result["status"] == "completed"
+        assert result["non_web"] is True
+        nodes = (await session.execute(
+            select(NodeRun).where(NodeRun.run_id == run.id).order_by(NodeRun.node_index)
+        )).scalars().all()
+        for n in nodes[2:]:
+            assert n.status == "skipped"
+
+
+@pytest.mark.asyncio
 async def test_gate_fail_skips_reproduce_and_sets_false_positive(session_factory):
     """节点 3 gate_verdict=fail → 节点 4 skipped,verdict=false_positive。"""
     from app.contexts.agent import orchestrator as orch
@@ -209,6 +245,64 @@ async def test_breakpoint_resume_skips_completed_nodes(session_factory):
 
 
 @pytest.mark.asyncio
+async def test_resume_reruns_source_when_workdir_has_no_repo(session_factory, tmp_path):
+    """重试会拷贝 completed source，但工作区可能已被清掉；没有仓库目录就必须重拉。"""
+    from app.contexts.agent import orchestrator as orch
+    from app.contexts.task.models import NodeRun
+
+    async with session_factory() as session:
+        task, run = await _seed_task_run(session)
+        session.add(NodeRun(
+            run_id=run.id, task_id=task.id, node_index=0, node_key="source",
+            status="completed",
+            output_json='{"repo_dirname":"claudecodeui","workspace_path":"/workspace/claudecodeui"}',
+        ))
+        session.add(NodeRun(
+            run_id=run.id, task_id=task.id, node_index=1, node_key="profile",
+            status="completed", output_json='{"is_web": true, "language": "nodejs"}',
+        ))
+        await session.flush()
+
+        calls = {"source": 0}
+
+        async def counting_source(ctx):
+            calls["source"] += 1
+            dest = tmp_path / "claudecodeui"
+            dest.mkdir(exist_ok=True)
+            return {
+                "repo_dirname": "claudecodeui",
+                "project_path": str(dest),
+                "workspace_path": "/workspace/claudecodeui",
+            }
+
+        async def fake_env(ctx):
+            return {"target_url": "http://x:8080", "compose_path": "y.yml"}
+
+        async def fake_audit(ctx):
+            return {"gate_verdict": "pass"}
+
+        async def fake_reproduce(ctx):
+            return {"verdict": "confirmed", "reproduced": True}
+
+        async def fake_report(ctx):
+            return {"report_data": {"x": 1}, "final_verdict": "confirmed"}
+
+        real_nodes = orch.NODE_ORDER
+        with patch.object(real_nodes[0], "execute", counting_source), \
+             patch.object(real_nodes[2], "execute", fake_env), \
+             patch.object(real_nodes[3], "execute", fake_audit), \
+             patch.object(real_nodes[4], "execute", fake_reproduce), \
+             patch.object(real_nodes[5], "execute", fake_report):
+            result = await orch.run_orchestration(
+                task_id=task.id, run_id=run.id, session=session,
+                host_workdir=str(tmp_path), source_path=str(tmp_path), runner_env={},
+            )
+
+        assert calls["source"] == 1
+        assert result["status"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_resume_reuses_audit_gate_fail_skips_reproduce(session_factory):
     """断点续跑:已 completed 的 audit=fail 仍须跳过 reproduce,不得重跑 HTTP。"""
     from app.contexts.agent import orchestrator as orch
@@ -254,3 +348,75 @@ async def test_resume_reuses_audit_gate_fail_skips_reproduce(session_factory):
         statuses = {n.node_key: n.status for n in nodes}
         assert statuses["reproduce"] == "skipped"
         assert statuses["report"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_orchestration_stops_after_cancel(session_factory):
+    """取消后不得继续跑后续节点，也不能把 task 写成 completed。"""
+    from app.contexts.agent import orchestrator as orch
+    from app.contexts.task.models import NodeRun
+    from sqlalchemy import select
+
+    async with session_factory() as session:
+        task, run = await _seed_task_run(session)
+        profile_calls = {"n": 0}
+
+        async def fake_source(ctx):
+            t = await ctx.db_session.get(type(task), ctx.task_id)
+            r = await ctx.db_session.get(type(run), ctx.run_id)
+            t.status = "cancelled"
+            r.status = "cancelled"
+            await ctx.db_session.commit()
+            return {"source_path": ctx.source_path}
+
+        async def fake_profile(ctx):
+            profile_calls["n"] += 1
+            return {"is_web": True}
+
+        real_nodes = orch.NODE_ORDER
+        with patch.object(real_nodes[0], "execute", fake_source), \
+             patch.object(real_nodes[1], "execute", fake_profile):
+            result = await orch.run_orchestration(
+                task_id=task.id, run_id=run.id, session=session,
+                host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
+            )
+
+        assert result["status"] == "cancelled"
+        assert profile_calls["n"] == 0
+        await session.refresh(task)
+        assert task.status == "cancelled"
+        nodes = (await session.execute(
+            select(NodeRun).where(NodeRun.run_id == run.id).order_by(NodeRun.node_index)
+        )).scalars().all()
+        by_key = {n.node_key: n.status for n in nodes}
+        assert by_key.get("profile") in (None, "pending", "cancelled")
+
+
+@pytest.mark.asyncio
+async def test_orchestration_killed_node_does_not_overwrite_cancelled(session_factory):
+    """容器被拆掉后 execute 抛错，不得把已取消任务改成 failed。"""
+    from app.contexts.agent import orchestrator as orch
+
+    async with session_factory() as session:
+        task, run = await _seed_task_run(session)
+
+        async def fake_source(ctx):
+            t = await ctx.db_session.get(type(task), ctx.task_id)
+            r = await ctx.db_session.get(type(run), ctx.run_id)
+            t.status = "cancelled"
+            r.status = "cancelled"
+            await ctx.db_session.commit()
+            raise RuntimeError("container killed")
+
+        real_nodes = orch.NODE_ORDER
+        with patch.object(real_nodes[0], "execute", fake_source):
+            result = await orch.run_orchestration(
+                task_id=task.id, run_id=run.id, session=session,
+                host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
+            )
+
+        assert result["status"] == "cancelled"
+        await session.refresh(task)
+        await session.refresh(run)
+        assert task.status == "cancelled"
+        assert run.status == "cancelled"

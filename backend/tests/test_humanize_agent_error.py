@@ -13,10 +13,19 @@ from app.contexts.agent.errors import humanize_agent_error
     "raw,expect_title_part",
     [
         ("AI 节点 env_ready 未产出 .node_output.json (exit=1)", "没有提交节点结果"),
+        (
+            "AI 节点 env_ready 未产出 .node_output.json (exit=1): "
+            "/usr/local/bin/python: Error while finding module specification for "
+            "'runner.run_one' (ModuleNotFoundError: No module named 'runner')",
+            "入口模块找不到",
+        ),
+        ("ModuleNotFoundError: No module named 'runner'", "入口模块找不到"),
         ("AI 节点 audit output 校验失败: 缺必需字段: gate_verdict", "缺必填字段"),
         ("源码克隆失败: Authentication failed", "克隆源码失败"),
+        ("源码克隆失败: 网络错误（无法解析主机）: github.com", "Git 拉取网络失败"),
+        ("源码克隆失败: 仓库不存在或无权访问: 404", "仓库不存在或无权访问"),
         ("agent-runner 镜像不存在: crucible-agent-runner:base", "缺少 agent-runner 镜像"),
-        ("缺少 LLM 凭据：DB 默认 Provider 与 settings.llm_api_key 都为空", "没有可用的 LLM"),
+        ("缺少 LLM 凭据：未配置默认 Provider", "没有可用的 LLM"),
         ("靶场搭建 5 轮全失败: attempt 5 compose up 失败", "5 轮排障"),
         ("AI 节点 reproduce 超时(1800s)", "超时"),
         ("节点 audit 未调用 submit_result(无 .node_output.json)", "没有提交节点结果"),
@@ -41,3 +50,16 @@ def test_format_agent_error_includes_next_step():
     assert "env_ready" in text
     assert "下一步:" in text
     assert "原因:" in text
+
+
+def test_runner_module_missing_not_misclassified_as_submit_result():
+    """容器没起来时不能说成模型没调 submit_result。"""
+    raw = (
+        "AI 节点 env_ready 未产出 .node_output.json (exit=1): "
+        "ModuleNotFoundError: No module named 'runner'"
+    )
+    title, hint = humanize_agent_error(raw)
+    assert "submit_result" not in title
+    assert "入口模块" in title
+    assert "重建" in hint
+    assert "agent-runner" in hint.lower() or "Dockerfile" in hint

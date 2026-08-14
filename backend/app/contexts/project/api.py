@@ -11,6 +11,7 @@ from .schemas import (
     ProjectListResponse,
     ProjectResponse,
     ProjectUpdateRequest,
+    SourceArtifactListResponse,
 )
 from .service import ProjectService
 
@@ -46,11 +47,24 @@ async def create_project(
 async def get_project(
     project_id: str,
     svc: Annotated[ProjectService, Depends(get_project_service)],
+    user_id: CurrentUserId,
 ) -> ProjectResponse:
-    p = await svc.get_project(project_id)
+    p = await svc.get_project(project_id, user_id)
     if not p:
         raise HTTPException(404, "项目不存在")
     return p
+
+
+@router.get("/{project_id}/artifacts", response_model=SourceArtifactListResponse)
+async def list_project_artifacts(
+    project_id: str,
+    svc: Annotated[ProjectService, Depends(get_project_service)],
+    user_id: CurrentUserId,
+) -> SourceArtifactListResponse:
+    items = await svc.list_artifacts(project_id, user_id)
+    if items is None:
+        raise HTTPException(404, "项目不存在")
+    return SourceArtifactListResponse(items=items, total=len(items))
 
 
 @router.put("/{project_id}", response_model=ProjectResponse)
@@ -58,8 +72,9 @@ async def update_project(
     project_id: str,
     request: ProjectUpdateRequest,
     svc: Annotated[ProjectService, Depends(get_project_service)],
+    user_id: CurrentUserId,
 ) -> ProjectResponse:
-    p = await svc.update_project(project_id, request)
+    p = await svc.update_project(project_id, request, user_id)
     if not p:
         raise HTTPException(404, "项目不存在")
     return p
@@ -69,7 +84,8 @@ async def update_project(
 async def delete_project(
     project_id: str,
     svc: Annotated[ProjectService, Depends(get_project_service)],
+    user_id: CurrentUserId,
 ) -> None:
-    deleted = await svc.delete_project(project_id)
+    deleted = await svc.delete_project(project_id, user_id)
     if not deleted:
         raise HTTPException(404, "项目不存在")

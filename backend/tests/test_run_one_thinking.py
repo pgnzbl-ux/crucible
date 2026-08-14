@@ -16,7 +16,7 @@ sys.path.insert(
 
 sys.modules.setdefault("claude_agent_sdk", MagicMock())
 
-from runner.run_one import extract_thinking_text, humanize_container_error, _failed_event  # noqa: E402
+from runner.run_one import extract_thinking_text, humanize_container_error, _failed_event, _system_phase_event  # noqa: E402
 
 
 def test_extract_thinking_from_attr():
@@ -53,3 +53,18 @@ def test_failed_event_carries_title_hint():
     assert ev["title"]
     assert ev["hint"]
     assert "导入失败" in ev["error"]
+
+
+def test_system_init_emits_start_phase():
+    msg = SimpleNamespace(subtype="init", session_id="s1")
+    ev = _system_phase_event(msg, seq=1, timestamp=1.0, session_id="s1")
+    assert ev is not None
+    assert ev["type"] == "phase.updated"
+    assert ev["phase"] == "start"
+    assert ev["message"] == "init"
+
+
+def test_system_thinking_tokens_is_dropped():
+    msg = SimpleNamespace(subtype="thinking_tokens")
+    assert _system_phase_event(msg, seq=2, timestamp=1.0, session_id=None) is None
+

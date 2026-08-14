@@ -1,4 +1,5 @@
-"""任务 retry(断点续跑)测试。"""
+"""任务 retry（从节点 0 整条重跑）测试。"""
+import asyncio
 import sys
 import os
 
@@ -27,8 +28,8 @@ async def session_factory():
 
 
 @pytest.mark.asyncio
-async def test_retry_creates_new_run_and_reuses_completed_nodes(session_factory):
-    """retry 新建 run,旧 run 已完成的 NodeRun 拷为新 run 的 completed 节点(断点续跑)。"""
+async def test_retry_creates_new_run_without_reusing_nodes(session_factory):
+    """retry 新建 run，不拷贝上一 run 的 NodeRun，从源码获取整条重跑。"""
     from app.contexts.task.models import Task, TaskRun, NodeRun
     from app.contexts.task.repository import TaskRepository
     from app.contexts.task.service import TaskService
@@ -46,7 +47,6 @@ async def test_retry_creates_new_run_and_reuses_completed_nodes(session_factory)
         old_run = TaskRun(task_id=task.id, status="failed")
         session.add(old_run)
         await session.flush()
-        # 旧 run: 节点 0/1 completed, 节点 2 failed
         for i, (key, st) in enumerate(
             [("source", "completed"), ("profile", "completed"), ("env_ready", "failed")]
         ):
@@ -63,21 +63,21 @@ async def test_retry_creates_new_run_and_reuses_completed_nodes(session_factory)
         await session.flush()
 
         svc = TaskService(TaskRepository(session))
-        # mock Celery send_task(避免真连 broker)
         with patch("app.core.celery_app.celery_app.send_task"):
             new_run_id = await svc.retry_task(task.id)
 
-        # 新 run: 节点 0/1 应 completed(复用),节点 2 pending
         from sqlalchemy import select
         new_nodes = (
             await session.execute(
                 select(NodeRun).where(NodeRun.run_id == new_run_id).order_by(NodeRun.node_index)
             )
         ).scalars().all()
-        assert len(new_nodes) == 2  # 只有 completed 的 0/1 被复刻
-        assert new_nodes[0].status == "completed"
-        assert new_nodes[0].output_json == '{"x":1}'
-        assert new_nodes[1].status == "completed"
+        assert new_run_id != old_run.id
+        assert new_nodes == []
+        old_nodes = (
+            await session.execute(select(NodeRun).where(NodeRun.run_id == old_run.id))
+        ).scalars().all()
+        assert len(old_nodes) == 3
 
 
 @pytest.mark.asyncio
@@ -102,11 +102,143 @@ async def test_retry_rejects_running_task(session_factory):
 
 
 @pytest.mark.asyncio
-async def test_soft_delete_archives(session_factory):
-    """软删把 status 改 archived,不删行。"""
+async def test_cancel_marks_running_and_pending_nodes_cancelled(session_factory):
+    """取消任务后，正在跑/未开始的节点必须离开 running，进度条不能继续转圈。"""
+    from app.contexts.task.models import Task, TaskRun, NodeRun
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+    from unittest.mock import patch, AsyncMock
+    from sqlalchemy import select
+
+    async with session_factory() as session:
+        task = Task(
+            project_address="x",
+            vulnerability_description="d",
+            owner_id="u1",
+            status="running",
+        )
+        session.add(task)
+        await session.flush()
+        run = TaskRun(task_id=task.id, status="running")
+        session.add(run)
+        await session.flush()
+        for i, (key, st) in enumerate(
+            [
+                ("source", "completed"),
+                ("profile", "completed"),
+                ("env_ready", "running"),
+                ("audit", "pending"),
+            ]
+        ):
+            session.add(
+                NodeRun(
+                    run_id=run.id,
+                    task_id=task.id,
+                    node_index=i,
+                    node_key=key,
+                    status=st,
+                    output_json="{}",
+                )
+            )
+        await session.flush()
+
+        svc = TaskService(TaskRepository(session))
+        with patch("app.core.celery_app.celery_app.control.revoke"), patch(
+            "app.contexts.agent.runtime_cleanup.teardown_task_runtime",
+            new_callable=AsyncMock,
+        ):
+            detail = await svc.cancel_task(task.id)
+            await asyncio.sleep(0)
+
+        assert detail is not None
+        assert detail.status == "cancelled"
+        nodes = (
+            await session.execute(select(NodeRun).where(NodeRun.run_id == run.id).order_by(NodeRun.node_index))
+        ).scalars().all()
+        by_key = {n.node_key: n for n in nodes}
+        assert by_key["source"].status == "completed"
+        assert by_key["profile"].status == "completed"
+        assert by_key["env_ready"].status == "cancelled"
+        assert by_key["env_ready"].finished_at is not None
+        assert by_key["audit"].status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancel_tears_down_lab_and_runner(session_factory):
+    """取消不能只改库：必须拆靶场 compose 和该任务的 agent-runner。"""
+    from app.contexts.task.models import Task, TaskRun
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+    from unittest.mock import patch, AsyncMock
+
+    async with session_factory() as session:
+        task = Task(
+            project_address="x",
+            vulnerability_description="d",
+            owner_id="u1",
+            status="running",
+        )
+        session.add(task)
+        await session.flush()
+        session.add(TaskRun(task_id=task.id, status="running"))
+        await session.flush()
+
+        svc = TaskService(TaskRepository(session))
+        with patch("app.core.celery_app.celery_app.control.revoke"), patch(
+            "app.contexts.agent.runtime_cleanup.teardown_task_runtime",
+            new_callable=AsyncMock,
+        ) as mock_teardown:
+            await svc.cancel_task(task.id)
+            await asyncio.sleep(0)
+
+        mock_teardown.assert_awaited_once_with(task.id)
+
+
+@pytest.mark.asyncio
+async def test_cancel_returns_before_teardown_finishes(session_factory):
+    """取消 HTTP 不能等 compose down：库标 cancelled 后立刻返回，拆容器后台做。"""
+    from app.contexts.task.models import Task, TaskRun
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+    from unittest.mock import patch
+
+    hang = asyncio.Event()
+
+    async def never_finishes(_task_id: str) -> None:
+        await hang.wait()
+
+    async with session_factory() as session:
+        task = Task(
+            project_address="x",
+            vulnerability_description="d",
+            owner_id="u1",
+            status="running",
+        )
+        session.add(task)
+        await session.flush()
+        session.add(TaskRun(task_id=task.id, status="running"))
+        await session.flush()
+
+        svc = TaskService(TaskRepository(session))
+        with patch("app.core.celery_app.celery_app.control.revoke"), patch(
+            "app.contexts.agent.runtime_cleanup.teardown_task_runtime",
+            never_finishes,
+        ):
+            detail = await asyncio.wait_for(svc.cancel_task(task.id), timeout=0.5)
+
+        assert detail is not None
+        assert detail.status == "cancelled"
+        hang.set()
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_delete_tears_down_lab_and_runner(session_factory):
+    """删除已结束任务时也要拆残留靶场，避免历史容器堆积。"""
     from app.contexts.task.models import Task
     from app.contexts.task.repository import TaskRepository
     from app.contexts.task.service import TaskService
+    from unittest.mock import patch, AsyncMock
 
     async with session_factory() as session:
         task = Task(
@@ -118,6 +250,59 @@ async def test_soft_delete_archives(session_factory):
         session.add(task)
         await session.flush()
         svc = TaskService(TaskRepository(session))
-        ok = await svc.delete_task(task.id)
+        with patch(
+            "app.contexts.agent.runtime_cleanup.teardown_task_runtime",
+            new_callable=AsyncMock,
+        ) as mock_teardown:
+            ok = await svc.delete_task(task.id)
+        assert ok is True
+        mock_teardown.assert_awaited_once_with(task.id)
+
+
+@pytest.mark.asyncio
+async def test_soft_delete_archives(session_factory):
+    """软删把 status 改 archived,不删行。"""
+    from app.contexts.task.models import Task
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+    from unittest.mock import patch, AsyncMock
+
+    async with session_factory() as session:
+        task = Task(
+            project_address="x",
+            vulnerability_description="d",
+            owner_id="u1",
+            status="completed",
+        )
+        session.add(task)
+        await session.flush()
+        svc = TaskService(TaskRepository(session))
+        with patch(
+            "app.contexts.agent.runtime_cleanup.teardown_task_runtime",
+            new_callable=AsyncMock,
+        ) as mock_teardown:
+            ok = await svc.delete_task(task.id)
         assert ok is True
         assert task.status == "archived"
+        mock_teardown.assert_awaited_once_with(task.id)
+
+
+@pytest.mark.asyncio
+async def test_soft_delete_rejects_already_archived(session_factory):
+    """已归档任务不能再软删（避免前端反复点删除都提示成功）。"""
+    from app.contexts.task.models import Task
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+
+    async with session_factory() as session:
+        task = Task(
+            project_address="x",
+            vulnerability_description="d",
+            owner_id="u1",
+            status="archived",
+        )
+        session.add(task)
+        await session.flush()
+        svc = TaskService(TaskRepository(session))
+        with pytest.raises(ValueError, match="已归档"):
+            await svc.delete_task(task.id)

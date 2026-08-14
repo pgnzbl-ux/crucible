@@ -55,6 +55,8 @@ class ReportSummary(BaseModel):
     conclusion: str
     title: str
     summary: str | None
+    verdict: str | None = None
+    severity: str | None = None
     created_at: datetime
     updated_at: datetime
 

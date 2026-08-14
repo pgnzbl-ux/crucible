@@ -52,24 +52,17 @@ async def _replay_history(task_id: str, limit: int = 1000) -> list[str]:
     """订阅前先回放历史事件（DB 已落库），让前端一连接就拿到完整进度
 
     通过 DB 读 AgentEvent 行 — 比 Redis Pub/Sub 持久可靠（Pub/Sub 离线即丢）。
-    取最近 limit 条（按 sequence 升序回放），避免 thinking 流把早期错误挤出窗口。
+    取当前 run 最近 limit 条（按 sequence 升序回放），避免历史重试的 phase.updated 混进事件流。
     """
     # 这里不能直接 await ORM session，因为 SSE generator 在 FastAPI 请求内；
     # 通过独立 engine + session_factory 短生命周期会话读一次即可。
     from app.core.database import async_session_factory
-    from app.contexts.task.models import AgentEvent
-    from sqlalchemy import select
+    from app.contexts.task.repository import TaskRepository
 
     frames: list[str] = []
     try:
         async with async_session_factory() as session:
-            result = await session.execute(
-                select(AgentEvent)
-                .where(AgentEvent.task_id == task_id)
-                .order_by(AgentEvent.sequence.desc())
-                .limit(limit)
-            )
-            events = list(reversed(list(result.scalars().all())))
+            events = await TaskRepository(session).get_events_for_task(task_id, limit)
     except Exception as e:  # noqa: BLE001 — DB 读失败不影响后续实时流
         logger.warning(f"SSE 历史回放失败（仅实时流可用）: {e}")
         return frames

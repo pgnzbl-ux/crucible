@@ -98,7 +98,7 @@ description: 为漏洞验证场景搭建可复现靶场：从源码把 web 项�
 - 数据库/缓存等中间件用官方镜像作为独立 service，**不要装到宿主机**。
 - 应用通过 service 名（如 `db`、`redis`）互连，不用 `localhost`。
 - 数据持久化用**命名卷或项目内相对目录**，避免污染宿主机任意路径。
-- 端口映射到宿主机时，避开常用占用端口（见排障文档的端口冲突处理）。
+- **只把浏览器要访问的 Web 入口端口映射到宿主机**（`ports: ["3001:3000"]`）。postgres / redis / mysql / mq **不要**写 `ports` 到宿主，只留在 compose 内部网络。冲突时改宿主侧映射口，不要改容器内监听口。
 - 所有 service 加 `restart: unless-stopped` 与健康检查。
 
 产物统一放在**项目目录内**（或专门的 `.vuln-env/` 子目录），命名清晰，便于用户复用与清理。
@@ -132,7 +132,7 @@ docker compose up -d               # 纯现成镜像
 
 环境跑通后：
 
-- **返回访问地址**：如 `http://localhost:<port>`，如有后台/API 文档路径（如 `/swagger-ui`、`/admin`）一并给出；如有初始账号密码从代码/文档中找出并说明。
+- **返回访问地址**：在 Crucible 平台上不要猜宿主机 IP；最终对外地址由平台填成 `http://{宿主机IP}:{映射端口}`。独立使用时再写 `http://localhost:<port>`。如有后台/API 文档路径（如 `/swagger-ui`、`/admin`）一并给出；如有初始账号密码从代码/文档中找出并说明。
 - **沉淀最终配置**：确认项目目录内留下的 `Dockerfile`、`docker-compose.yml` 是本次实际跑通的版本，清理调试过程中的废弃文件。
 - **写一份简短启动说明**（可写入 `RUN_ENV.md`）：启动命令、访问地址、各 service 说明、数据目录位置、如何停止与清理（`docker compose down`，加 `-v` 清数据卷）。
 - **写环境状态文件 `.vuln-env.json`**（位于 `<project_root>` 下）：记录访问地址、端口、`docker-compose.yml` 路径、初始账号/口令、实际 commit。该文件供跨会话复用——下次同项目可直接读取判定环境是否已启动，跳过重建。

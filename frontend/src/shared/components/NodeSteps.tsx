@@ -6,11 +6,21 @@ import {
   LoadingOutlined,
   MinusCircleOutlined,
   ClockCircleOutlined,
+  StopOutlined,
 } from '@ant-design/icons'
 import { useQuery } from '@tanstack/react-query'
 import { api, type NodeRun } from '../lib/api'
 import type { SSEEvent } from '../hooks/useTaskEvents'
 import { NODE_LABELS, NODE_STATUS_META } from '../lib/meta'
+import {
+  applyNodeOverlay,
+  compactNodeCaption,
+  displayNodeStatus,
+  isNodeListLoading,
+  isNodeTerminal,
+  overlayFromSseEvents,
+  summarizeNodeOutput,
+} from '../lib/nodeOutput'
 
 const { Text } = Typography
 
@@ -19,34 +29,40 @@ const NODE_ORDER: NodeRun['node_key'][] = ['source', 'profile', 'env_ready', 'au
 interface NodeStepsProps {
   taskId: string
   runId: string | null | undefined
-  /** SSE 事件流(含 node.updated),用于实时驱动状态 */
+  taskStatus?: string
   sseEvents?: SSEEvent[]
+  compact?: boolean
 }
 
-/**
- * 6 节点步骤条 — 展示编排进度。
- *
- * 数据源:
- *  1. getRunNodes(taskId, runId) 拉历史/初始状态
- *  2. sseEvents 里的 node.updated 实时覆盖
- */
-export function NodeSteps({ taskId, runId, sseEvents = [] }: NodeStepsProps) {
-  // 拉历史节点状态(runId 变化或 node.updated 触发时刷新)
+function nodeIcon(status: NodeRun['status']) {
+  if (status === 'completed') return <CheckCircleOutlined style={{ color: 'var(--crucible-success)' }} />
+  if (status === 'failed') return <CloseCircleOutlined style={{ color: 'var(--crucible-error)' }} />
+  if (status === 'cancelled') return <StopOutlined style={{ color: 'var(--crucible-text-disabled)' }} />
+  if (status === 'running') return <LoadingOutlined />
+  if (status === 'skipped') return <MinusCircleOutlined style={{ color: 'var(--crucible-text-disabled)' }} />
+  return <ClockCircleOutlined />
+}
+
+function nodeSummary(n: Pick<NodeRun, 'node_key' | 'status' | 'output' | 'error_message'>): string {
+  if (n.status === 'failed' && n.error_message) return n.error_message
+  return summarizeNodeOutput(n.node_key, n.output, n.status)
+}
+
+export function NodeSteps({ taskId, runId, taskStatus, sseEvents = [], compact = false }: NodeStepsProps) {
   const { data: nodes, refetch } = useQuery({
     queryKey: ['run-nodes', taskId, runId],
     queryFn: () => api.getRunNodes(taskId, runId!),
     enabled: !!taskId && !!runId,
     refetchInterval: (query) => {
-      // 节点全终态后停止轮询(SSE 不可用时的兜底)
+      if (taskStatus === 'cancelled') return false
       const ns = query.state.data
-      if (ns && ns.length === 6 && ns.every((n) => ['completed', 'failed', 'skipped'].includes(n.status))) {
+      if (ns && ns.length === 6 && ns.every((n) => isNodeTerminal(n.status))) {
         return false
       }
       return 3000
     },
   })
 
-  // SSE node.updated 事件 → 触发 refetch(拿最新持久化状态)
   const lastNodeUpdate = useMemo(() => {
     for (let i = sseEvents.length - 1; i >= 0; i--) {
       if (sseEvents[i].type === 'node.updated') return sseEvents[i]
@@ -58,75 +74,112 @@ export function NodeSteps({ taskId, runId, sseEvents = [] }: NodeStepsProps) {
     if (lastNodeUpdate) refetch()
   }, [lastNodeUpdate, refetch])
 
+  const sseOverlay = useMemo(() => overlayFromSseEvents(sseEvents), [sseEvents])
+
   if (!runId) {
     return <Text type="secondary">尚无运行记录</Text>
   }
 
-  if (!nodes || nodes.length === 0) {
+  if (isNodeListLoading(nodes)) {
     return <Text type="secondary">节点状态加载中...</Text>
   }
 
-  // 按 node_key 补齐 6 节点(后端可能只建了部分)
   const nodeMap = new Map(nodes.map((n) => [n.node_key, n]))
   const ordered = NODE_ORDER.map((key, idx) => {
     const n = nodeMap.get(key)
-    return (
-      n ?? {
-        id: `pending-${key}`,
-        node_index: idx,
-        node_key: key,
-        status: 'pending' as const,
-        attempt: 0,
-        error_message: null,
-        started_at: null,
-        finished_at: null,
-      }
-    )
+    const base: NodeRun = n ?? {
+      id: `pending-${key}`,
+      node_index: idx,
+      node_key: key,
+      status: 'pending',
+      attempt: 0,
+      error_message: null,
+      started_at: null,
+      finished_at: null,
+      output: {},
+    }
+    const over = sseOverlay.get(key)
+    const merged = over
+      ? {
+          ...base,
+          ...over,
+          node_key: key,
+          output: { ...(base.output ?? {}), ...(over.output ?? {}) },
+          status: applyNodeOverlay(base, over) as NodeRun['status'],
+        }
+      : base
+    const status = displayNodeStatus(merged.status, taskStatus) as NodeRun['status']
+    return { ...merged, status }
   })
 
   const currentIdx = ordered.findIndex((n) => n.status === 'running')
   const firstFailed = ordered.findIndex((n) => n.status === 'failed')
 
-  const items = ordered.map((n) => {
-    const meta = NODE_STATUS_META[n.status] ?? NODE_STATUS_META.pending
-    let icon
-    if (n.status === 'completed') icon = <CheckCircleOutlined style={{ color: 'var(--crucible-success)' }} />
-    else if (n.status === 'failed') icon = <CloseCircleOutlined style={{ color: 'var(--crucible-error)' }} />
-    else if (n.status === 'running') icon = <LoadingOutlined />
-    else if (n.status === 'skipped') icon = <MinusCircleOutlined style={{ color: 'var(--crucible-text-disabled)' }} />
-    else icon = <ClockCircleOutlined />
-
-    const title = (
-      <span>
-        {NODE_LABELS[n.node_key] ?? n.node_key}
-        {n.attempt > 1 && <Text type="secondary" style={{ fontSize: 11 }}> · 第 {n.attempt} 次</Text>}
-      </span>
+  if (compact) {
+    const items = ordered.map((n) => {
+      const meta = NODE_STATUS_META[n.status] ?? NODE_STATUS_META.pending
+      const caption = compactNodeCaption(n.node_key, n.output, n.status)
+      return {
+        title: NODE_LABELS[n.node_key] ?? n.node_key,
+        content: caption || undefined,
+        status: meta.status as 'wait' | 'process' | 'finish' | 'error',
+        icon: nodeIcon(n.status),
+      }
+    })
+    return (
+      <Steps
+        size="small"
+        ellipsis
+        className="crucible-node-steps-compact"
+        classNames={{
+          itemTitle: 'crucible-node-steps-compact__title',
+          itemContent: 'crucible-node-steps-compact__content',
+        }}
+        current={currentIdx >= 0 ? currentIdx : firstFailed >= 0 ? firstFailed : ordered.length}
+        items={items}
+        orientation="horizontal"
+      />
     )
-    const desc = n.error_message ? (
-      <Text type="danger" style={{ fontSize: 12, whiteSpace: 'pre-wrap', display: 'block' }}>
-        {n.error_message}
-      </Text>
-    ) : n.status === 'skipped' ? (
-      <Text type="secondary" style={{ fontSize: 11 }}>跳过</Text>
-    ) : n.status === 'completed' && n.finished_at ? (
-      <Text type="secondary" style={{ fontSize: 11 }}>完成</Text>
-    ) : null
-
-    return {
-      title,
-      description: desc,
-      status: meta.status as 'wait' | 'process' | 'finish' | 'error',
-      icon,
-    }
-  })
+  }
 
   return (
-    <Steps
-      size="small"
-      current={currentIdx >= 0 ? currentIdx : firstFailed >= 0 ? firstFailed : ordered.length}
-      items={items}
-      direction="vertical"
-      style={{ marginTop: 8 }}
-    />
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+      {ordered.map((n) => {
+        const summary = nodeSummary(n)
+        const failed = n.status === 'failed'
+        return (
+          <div
+            key={n.id}
+            style={{
+              display: 'grid',
+              gridTemplateColumns: '24px 96px 1fr',
+              gap: 12,
+              alignItems: 'start',
+              padding: '10px 12px',
+              border: '1px solid var(--crucible-border)',
+              borderRadius: 8,
+              background: n.status === 'running' ? 'var(--crucible-bg)' : undefined,
+            }}
+          >
+            <span style={{ lineHeight: '22px' }}>{nodeIcon(n.status)}</span>
+            <Text strong>
+              {NODE_LABELS[n.node_key] ?? n.node_key}
+              {n.attempt > 1 && (
+                <Text type="secondary" style={{ fontSize: 11 }}>
+                  {' '}
+                  · 第 {n.attempt} 次
+                </Text>
+              )}
+            </Text>
+            <Text
+              type={failed ? 'danger' : 'secondary'}
+              style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}
+            >
+              {summary}
+            </Text>
+          </div>
+        )
+      })}
+    </div>
   )
 }

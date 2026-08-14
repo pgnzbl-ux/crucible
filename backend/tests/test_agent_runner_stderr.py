@@ -78,6 +78,69 @@ def test_extra_hosts_maps_host_docker_internal():
     assert AGENT_EXTRA_HOSTS.get("host.docker.internal") == "host-gateway"
 
 
+def test_runner_uses_public_dns_servers():
+    from app.core.agent_runner import AGENT_RUNNER_DNS
+
+    assert "8.8.8.8" in AGENT_RUNNER_DNS
+    assert "1.1.1.1" in AGENT_RUNNER_DNS
+    assert "223.5.5.5" in AGENT_RUNNER_DNS
+
+
+def test_create_passes_dns_and_keeps_egress():
+    """Windows 自定义网的 127.0.0.11 经常不能解析公网，必须注入公共 DNS。"""
+    from app.core.agent_runner import AGENT_RUNNER_DNS, AgentRunnerManager, AgentRunnerSpec
+
+    fake_container = MagicMock()
+    fake_container.id = "cid-dns"
+
+    mgr = AgentRunnerManager.__new__(AgentRunnerManager)
+    mgr._client = MagicMock()
+    mgr._client.containers.create.return_value = fake_container
+    mgr._active_ids = set()
+
+    with patch.object(mgr, "_ensure_image"):
+        mgr.create(AgentRunnerSpec(host_workdir="/tmp/x", image="crucible-agent-runner:base"))
+
+    kwargs = mgr._client.containers.create.call_args.kwargs
+    assert kwargs["network_disabled"] is False
+    assert kwargs["dns"] == AGENT_RUNNER_DNS
+    assert kwargs["network"]
+
+
+def test_ensure_network_rebuilds_internal_for_egress():
+    """旧沙箱若把网建成 internal，必须拆掉重建，否则有 DNS 也出不去。"""
+    from app.core.agent_runner import AGENT_RUNNER_NETWORK, AgentRunnerManager
+
+    mgr = AgentRunnerManager.__new__(AgentRunnerManager)
+    mgr._client = MagicMock()
+    net = MagicMock()
+    net.attrs = {"Internal": True}
+    mgr._client.networks.get.return_value = net
+
+    mgr._ensure_network()
+
+    net.remove.assert_called_once()
+    mgr._client.networks.create.assert_called_once()
+    create_kwargs = mgr._client.networks.create.call_args
+    assert create_kwargs.args[0] == AGENT_RUNNER_NETWORK
+    assert create_kwargs.kwargs.get("internal") is False
+
+
+def test_ensure_network_leaves_egress_network_alone():
+    from app.core.agent_runner import AgentRunnerManager
+
+    mgr = AgentRunnerManager.__new__(AgentRunnerManager)
+    mgr._client = MagicMock()
+    net = MagicMock()
+    net.attrs = {"Internal": False}
+    mgr._client.networks.get.return_value = net
+
+    mgr._ensure_network()
+
+    net.remove.assert_not_called()
+    mgr._client.networks.create.assert_not_called()
+
+
 def test_run_with_streaming_registers_and_clears_active():
     fake_container = MagicMock()
     fake_container.logs.side_effect = [iter([])]
@@ -136,3 +199,33 @@ def test_timeout_stops_container():
 
     fake_container.stop.assert_called()
     assert summary.get("timed_out") is True or exit_code == 137
+
+
+def test_failed_container_combined_logs_when_stderr_stream_empty():
+    """Windows Docker 上 stdout=False/stderr=True 可能空，必须回退抓 stdout+stderr。"""
+    fake_container = MagicMock()
+    fake_container.logs.side_effect = [
+        iter([]),
+        b"",  # stderr-only 空
+        b"/usr/local/bin/python: ModuleNotFoundError: No module named 'runner'\n",
+    ]
+    fake_container.wait.return_value = {"StatusCode": 1}
+    fake_container.attrs = {"State": {"OOMKilled": False}}
+    fake_container.id = "cid-empty-stderr"
+    fake_container.reload = MagicMock()
+
+    fake_runner = MagicMock()
+    fake_runner.container = fake_container
+    fake_runner.id = "cid-empty-stderr"
+    fake_runner.name = "empty-stderr-runner"
+    fake_runner.stop_and_remove = MagicMock()
+
+    mgr = AgentRunnerManager.__new__(AgentRunnerManager)
+    mgr._client = MagicMock()
+
+    with patch.object(mgr, "create", return_value=fake_runner):
+        spec = AgentRunnerSpec(host_workdir="/tmp/x", env={})
+        exit_code, summary = mgr.run_with_streaming(spec, lambda e: None)
+
+    assert exit_code == 1
+    assert "No module named 'runner'" in summary["stderr_tail"]

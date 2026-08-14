@@ -258,7 +258,7 @@ class MockExecutor:
             f"项目: {ctx.project_address}@{ctx.project_ref or 'default'}\n"
             f"漏洞描述: {ctx.vulnerability_description[:200]}\n\n"
             "这是开发模式的模拟输出，未连接真实 Claude Agent SDK。"
-            "设置 CLAUDE_AGENT_SDK_ENABLED=true 并配置 LLM_API_KEY 后启用真实分析。"
+            "设置 CLAUDE_AGENT_SDK_ENABLED=true 并在后台配置默认 LLM Provider 后启用真实分析。"
         )
         ev = {
             "event_id": f"evt_{uuid.uuid4().hex[:12]}",

@@ -38,3 +38,24 @@ class ProjectResponse(PydBase):
 class ProjectListResponse(PydBase):
     items: list[ProjectResponse]
     total: int
+
+
+class SourceArtifactResponse(PydBase):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    git_url: str
+    git_host: str
+    project_key: str
+    repo_dirname: str
+    ref_type: str
+    ref_name: str
+    commit_sha: str
+    object_url: str
+    size_bytes: int | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SourceArtifactListResponse(PydBase):
+    items: list[SourceArtifactResponse]
+    total: int

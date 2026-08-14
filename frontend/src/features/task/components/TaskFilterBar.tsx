@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { Button, DatePicker, Input, Select, Space } from 'antd'
 import { SearchOutlined, ClearOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
@@ -21,6 +22,7 @@ const STATUS_OPTIONS = [
   { value: 'completed', label: '已完成' },
   { value: 'failed', label: '失败' },
   { value: 'cancelled', label: '已取消' },
+  { value: 'archived', label: '已归档' },
 ]
 
 const PRIORITY_OPTIONS = [
@@ -31,6 +33,20 @@ const PRIORITY_OPTIONS = [
 ]
 
 export function TaskFilterBar({ params, onChange, onClear }: TaskFilterBarProps) {
+  const [keyword, setKeyword] = useState(params.q ?? '')
+
+  useEffect(() => {
+    setKeyword(params.q ?? '')
+  }, [params.q])
+
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      const next = keyword.trim() || undefined
+      if (next !== params.q) onChange({ q: next })
+    }, 300)
+    return () => window.clearTimeout(handle)
+  }, [keyword, onChange, params.q])
+
   const dateRange =
     params.dateFrom || params.dateTo
       ? [params.dateFrom ? dayjs(params.dateFrom) : null, params.dateTo ? dayjs(params.dateTo) : null]
@@ -38,7 +54,7 @@ export function TaskFilterBar({ params, onChange, onClear }: TaskFilterBarProps)
 
   return (
     <div className="crucible-filter-bar">
-      <Space wrap size="middle">
+      <Space wrap size="medium">
         <Select
           allowClear
           placeholder="状态"
@@ -70,9 +86,9 @@ export function TaskFilterBar({ params, onChange, onClear }: TaskFilterBarProps)
           placeholder="搜索项目地址"
           prefix={<SearchOutlined />}
           style={{ width: 220 }}
-          value={params.q ?? ''}
-          onChange={(e) => onChange({ q: e.target.value || undefined })}
-          onPressEnter={(e) => onChange({ q: (e.target as HTMLInputElement).value || undefined })}
+          value={keyword}
+          onChange={(e) => setKeyword(e.target.value)}
+          onPressEnter={(e) => onChange({ q: (e.target as HTMLInputElement).value.trim() || undefined })}
         />
         <Button icon={<ClearOutlined />} onClick={onClear}>
           重置

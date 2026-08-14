@@ -14,7 +14,7 @@ from app.contexts.task.models import Task, TaskRun, AgentEvent
 from app.contexts.task.models import NodeRun  # 阶段 1 新增
 from app.contexts.report.models import Report, Evidence
 from app.contexts.settings.models import LlmProvider, Credential
-from app.contexts.project.models import Project  # 阶段 1 新增
+from app.contexts.project.models import Project, SourceArtifact  # 阶段 1 + 源码制品
 from app.contexts.lab.models import Lab
 
 config = context.config

@@ -28,6 +28,13 @@ logger = logging.getLogger(__name__)
 
 # 各 AI 节点的 output schema(校验最小必需字段,spec §1.3)
 NODE_OUTPUT_SCHEMAS: dict[str, dict] = {
+    "profile": {
+        "required": ["is_web"],
+        "optional": [
+            "language", "framework", "port", "has_dockerfile", "has_compose",
+            "detected_services", "start_command", "non_web_reason",
+        ],
+    },
     "env_ready": {
         "required": ["target_url", "compose_path"],
         "optional": ["transport_shape", "initial_creds", "started_containers"],
@@ -48,6 +55,22 @@ NODE_OUTPUT_SCHEMAS: dict[str, dict] = {
 
 # 各 AI 节点的 submit_result 工具 input schema(传给容器内 run_one.py 构造工具)
 NODE_INPUT_SCHEMAS: dict[str, dict] = {
+    "profile": {
+        "type": "object",
+        "properties": {
+            "is_web": {"type": "boolean", "description": "是否 web / web api"},
+            "language": {"type": "string", "description": "主语言"},
+            "framework": {"type": "string", "description": "Web 框架"},
+            "port": {"type": "integer", "description": "默认或配置中的监听端口"},
+            "has_dockerfile": {"type": "boolean"},
+            "has_compose": {"type": "boolean"},
+            "detected_services": {"type": "array", "description": "中间件名列表"},
+            "summary": {"type": "string", "description": "一两句项目全景"},
+            "start_command": {"type": "string", "description": "文档中的启动命令"},
+            "non_web_reason": {"type": "string", "description": "非 web 时的类型说明"},
+        },
+        "required": ["is_web"],
+    },
     "env_ready": {
         "type": "object",
         "properties": {
@@ -100,19 +123,24 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
 
 
 def rewrite_url_for_agent_container(url: str | None) -> str | None:
-    """把宿主机 localhost 靶标改写成 agent-runner 容器可达的 host.docker.internal。"""
-    if not url:
-        return url
-    return (
-        url.replace("http://localhost", "http://host.docker.internal")
-        .replace("https://localhost", "https://host.docker.internal")
-        .replace("http://127.0.0.1", "http://host.docker.internal")
-        .replace("https://127.0.0.1", "https://host.docker.internal")
-    )
+    """把宿主机靶标改写成 agent-runner 容器可达的 host.docker.internal。"""
+    from app.contexts.agent.target_url import rewrite_url_for_agent_container as _rewrite
+    return _rewrite(url)
 
 
 def _mock_output(node_key: str, input_json: dict[str, Any]) -> dict[str, Any]:
     """Mock 模式:SDK 未启用时返回模拟 output(通过 schema 校验),供编排链路联调。"""
+    if node_key == "profile":
+        hints = input_json.get("hints") or {}
+        return {
+            "is_web": hints.get("is_web", True),
+            "language": hints.get("language") or "python",
+            "framework": hints.get("framework") or "fastapi",
+            "port": hints.get("port") or 8000,
+            "has_dockerfile": bool(hints.get("has_dockerfile")),
+            "has_compose": bool(hints.get("has_compose")),
+            "detected_services": hints.get("detected_services") or [],
+        }
     if node_key == "env_ready":
         return {
             "target_url": "http://localhost:8080",
@@ -183,6 +211,7 @@ async def run_ai_node(
     runner_env: dict[str, str],
     on_event: Callable[[dict], None] | None = None,
     timeout_seconds: int = 1800,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
     """起 agent-runner 容器跑一个 AI 节点,返回 output_json。
 
@@ -219,9 +248,21 @@ async def run_ai_node(
         env={**runner_env, "NODE_KEY": node_key},
         host_workdir=host_workdir,
         timeout_seconds=timeout_seconds,
+        extra_labels={"crucible.task_id": task_id, "task_id": task_id} if task_id else {},
     )
 
+    last_fail = ""
+
     def _on_event(event: dict) -> None:
+        nonlocal last_fail
+        et = event.get("type")
+        if et in ("agent.failed", "raw"):
+            last_fail = (
+                event.get("error")
+                or event.get("content")
+                or event.get("message")
+                or ""
+            )
         if on_event:
             on_event(event)
 
@@ -236,8 +277,9 @@ async def run_ai_node(
     output_path = Path(host_workdir) / ".node_output.json"
     if not output_path.exists():
         stderr_tail = summary.get("stderr_tail", "") if summary else ""
+        detail = (stderr_tail or last_fail or "").strip()
         raise AgentRunnerError(
-            f"AI 节点 {node_key} 未产出 .node_output.json (exit={exit_code}): {stderr_tail[:300]}"
+            f"AI 节点 {node_key} 未产出 .node_output.json (exit={exit_code}): {detail[:300]}"
         )
 
     try:

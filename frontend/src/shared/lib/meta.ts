@@ -38,6 +38,12 @@ export const VERDICT_META: Record<string, { label: string; color: TagProps['colo
   not_reproduced: { label: '未复现', color: 'default' },
 }
 
+export const REPORT_STATUS_META: Record<string, { label: string; color: TagProps['color'] }> = {
+  draft: { label: '草稿', color: 'default' },
+  generated: { label: '已生成', color: 'blue' },
+  published: { label: '已发布', color: 'green' },
+}
+
 // 6 节点(node_key,对齐编排器)
 export const NODE_LABELS: Record<string, string> = {
   source: '源码获取',
@@ -53,7 +59,7 @@ export const NODE_STATUS_META: Record<string, { label: string; color: TagProps['
   running: { label: '执行中', color: 'processing', status: 'process' },
   completed: { label: '完成', color: 'success', status: 'finish' },
   failed: { label: '失败', color: 'error', status: 'error' },
-  skipped: { label: '跳过', color: 'default', status: 'wait' },
+  cancelled: { label: '已取消', color: 'default', status: 'wait' },
 }
 
 export const EVENT_PHASE_LABELS: Record<string, string> = {
@@ -61,6 +67,7 @@ export const EVENT_PHASE_LABELS: Record<string, string> = {
   preflight: '环境准备',
   credentials: '凭据注入',
   running: '执行分析',
+  env_ready: '靶场构建',
   scanning: '代码审计',
   reproducing: '尝试复现',
   completed: '完成',
@@ -94,4 +101,8 @@ export function getConclusionMeta(conclusion: string) {
 
 export function getVerdictMeta(verdict: string) {
   return VERDICT_META[verdict] ?? { label: verdict, color: 'default' as const }
+}
+
+export function getReportStatusMeta(status: string) {
+  return REPORT_STATUS_META[status] ?? { label: status, color: 'default' as const }
 }

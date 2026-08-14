@@ -34,15 +34,7 @@ alembic downgrade base   # 全回
 
 生产回滚需用户确认（参考 `git-workflow.md` §5 不可逆操作）。
 
-## 5. LLM Provider 种子迁移（settings）
-
-```bash
-cd backend && python -m app.contexts.settings.seed
-```
-
-幂等：已有 active provider 不覆盖。
-
-## 6. 注意事项
+## 5. 注意事项
 
 - 不要在迁移里塞业务代码 / 数据回填（用单独脚本）
 - 不要 drop 列只做 `server_default` 移除，迁移历史要可回滚

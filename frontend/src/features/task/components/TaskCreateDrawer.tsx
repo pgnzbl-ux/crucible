@@ -1,23 +1,44 @@
-import { App, Button, Drawer, Form, Input, Select, Space } from 'antd'
+import { useEffect } from 'react'
+import { App, AutoComplete, Button, Drawer, Form, Input, Select, Space } from 'antd'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useLocation } from 'wouter'
 
 import { api } from '../../../shared/lib/api'
 
 interface TaskCreateDrawerProps {
   open: boolean
   onClose: () => void
+  initialValues?: {
+    project_address?: string
+    project_ref?: string
+  }
 }
 
-export function TaskCreateDrawer({ open, onClose }: TaskCreateDrawerProps) {
+export function TaskCreateDrawer({ open, onClose, initialValues }: TaskCreateDrawerProps) {
   const { message } = App.useApp()
   const qc = useQueryClient()
   const [form] = Form.useForm()
+  const [, navigate] = useLocation()
 
   const { data: credentialsData } = useQuery({
     queryKey: ['credentials'],
     queryFn: () => api.listCredentials(),
     enabled: open,
   })
+
+  const { data: projectsData } = useQuery({
+    queryKey: ['projects'],
+    queryFn: () => api.listProjects({ limit: '100' }),
+    enabled: open,
+  })
+
+  useEffect(() => {
+    if (!open || !initialValues?.project_address) return
+    form.setFieldsValue({
+      project_address: initialValues.project_address,
+      project_ref: initialValues.project_ref,
+    })
+  }, [open, form, initialValues?.project_address, initialValues?.project_ref])
 
   const createMutation = useMutation({
     mutationFn: (values: {
@@ -27,29 +48,46 @@ export function TaskCreateDrawer({ open, onClose }: TaskCreateDrawerProps) {
       priority: string
       credential_refs?: string[]
     }) => api.createTask(values),
-    onSuccess: () => {
-      message.success('任务已创建，进入分析队列')
+    onSuccess: (task) => {
+      message.success('任务已创建，正在进入分析')
       form.resetFields()
       onClose()
       qc.invalidateQueries({ queryKey: ['tasks'] })
+      qc.invalidateQueries({ queryKey: ['projects'] })
+      navigate(`/tasks/${task.id}?tab=progress`)
     },
     onError: (e: Error) => message.error(e.message),
   })
 
+  const projectOptions = (projectsData?.items ?? []).map((p) => ({
+    value: p.git_url,
+    label: `${p.name}  ${p.git_url}`,
+  }))
+
   return (
-    <Drawer open={open} onClose={onClose} width={560} title="新建漏洞验证任务">
+    <Drawer open={open} onClose={onClose} size={560} title="新建漏洞验证任务">
       <Form
         form={form}
         layout="vertical"
         onFinish={(v) => createMutation.mutate(v)}
-        initialValues={{ priority: 'medium', source_type: 'git' }}
+        initialValues={{ priority: 'medium' }}
       >
         <Form.Item
           name="project_address"
           label="项目地址 (Git URL)"
           rules={[{ required: true, message: '请输入项目 Git 地址' }]}
+          extra="可直接粘贴，或从已登记仓库里选。同一地址会复用源码缓存。"
         >
-          <Input placeholder="https://github.com/org/repo.git" />
+          <AutoComplete
+            options={projectOptions}
+            placeholder="https://github.com/org/repo.git"
+            onSelect={(url) => {
+              const hit = (projectsData?.items ?? []).find((p) => p.git_url === url)
+              if (hit?.default_ref) form.setFieldValue('project_ref', hit.default_ref)
+            }}
+          >
+            <Input />
+          </AutoComplete>
         </Form.Item>
         <Form.Item name="project_ref" label="分支 / Commit / Tag">
           <Input placeholder="默认分支（留空）" />

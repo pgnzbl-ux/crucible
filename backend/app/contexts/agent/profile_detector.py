@@ -2,7 +2,7 @@
 
 把 plugin run-project-env/references/project-detection.md(7 语言规则表)
 + web-detection.md(web 门禁关键字表)翻成 Python 确定性检测。
-画像后回填 Project 表,后续任务复用省 AI。
+画像后按 commit SHA 写入 source_artifacts.profile_json,后续同 SHA 任务复用,省 AI。
 """
 from __future__ import annotations
 
@@ -63,6 +63,9 @@ DEPENDENCY_FILES = {
 }
 
 
+SPA_MARKERS = ('"vite"', "'vite'", '"react"', "'react'", '"vue"', "'vue'", '"svelte"', "'svelte'", '"@angular/core"')
+
+
 def _read_file(p: Path) -> str:
     try:
         return p.read_text(encoding="utf-8", errors="ignore").lower()
@@ -70,10 +73,64 @@ def _read_file(p: Path) -> str:
         return ""
 
 
+def _readme_text(root: Path) -> str:
+    for rname in ["README.md", "readme.md", "README.rst", "README"]:
+        if (root / rname).exists():
+            return _read_file(root / rname)
+    return ""
+
+
+def _readme_matches(readme: str, patterns: list[str]) -> bool:
+    return any(re.search(signal, readme, re.IGNORECASE) for signal in patterns)
+
+
+def _has_php_entry(root: Path) -> bool:
+    return (root / "index.php").exists() or (root / "public" / "index.php").exists()
+
+
+def _has_java_web(root: Path) -> bool:
+    return (root / "WEB-INF" / "web.xml").exists() or (
+        root / "src" / "main" / "webapp" / "WEB-INF" / "web.xml"
+    ).exists()
+
+
+def _has_spa_marker(root: Path) -> bool:
+    pkg = root / "package.json"
+    if not pkg.exists():
+        return False
+    blob = _read_file(pkg)
+    return any(marker in blob for marker in SPA_MARKERS)
+
+
+def _has_strong_web(root: Path, language: str | None, framework: str | None) -> bool:
+    if framework and framework in WEB_FRAMEWORKS:
+        return True
+    if language == "static":
+        return True
+    if _has_php_entry(root):
+        return True
+    if _has_java_web(root):
+        return True
+    if language == "nodejs" and _has_spa_marker(root):
+        return True
+    return False
+
+
+def _has_strong_non_web(root: Path, language: str | None, framework: str | None) -> bool:
+    if _has_strong_web(root, language, framework):
+        return False
+    readme = _readme_text(root)
+    return _readme_matches(readme, NON_WEB_SIGNALS) and not _readme_matches(readme, WEB_SIGNALS)
+
+
 def _detect_language(root: Path) -> str | None:
     for lang, files in LANGUAGE_RULES:
         if any((root / f).exists() for f in files):
             return lang
+    if _has_php_entry(root):
+        return "php"
+    if _has_java_web(root):
+        return "java"
     return None
 
 
@@ -107,30 +164,44 @@ def _detect_port(root: Path) -> int | None:
 
 
 def _is_web(root: Path, language: str | None, framework: str | None) -> bool:
-    if framework and framework in WEB_FRAMEWORKS:
+    if _has_strong_web(root, language, framework):
         return True
-    readme = ""
-    for rname in ["README.md", "readme.md", "README.rst", "README"]:
-        if (root / rname).exists():
-            readme = _read_file(root / rname)
-            break
-    for signal in WEB_SIGNALS:
-        if re.search(signal, readme, re.IGNORECASE):
-            return True
-    for signal in NON_WEB_SIGNALS:
-        if re.search(signal, readme, re.IGNORECASE):
-            return False
-    if language == "static":
+    readme = _readme_text(root)
+    return _readme_matches(readme, WEB_SIGNALS)
+
+
+def _root_languages(root: Path) -> list[str]:
+    found: list[str] = []
+    for lang, files in LANGUAGE_RULES:
+        if lang == "static":
+            continue
+        if any((root / f).exists() for f in files):
+            found.append(lang)
+    return found
+
+
+def profile_needs_ai(source_path: str, hints: dict) -> bool:
+    """三档：强 Web / 强非 Web 走规则；其余（含有语言无框架）必须问 AI。"""
+    root = Path(source_path)
+    language = hints.get("language")
+    framework = hints.get("framework")
+    if not language:
         return True
-    return False
+    if len(_root_languages(root)) > 1:
+        return True
+    if _has_strong_web(root, language, framework):
+        return False
+    if _has_strong_non_web(root, language, framework):
+        return False
+    return True
 
 
 def detect_profile(source_path: str) -> dict:
     """对 clone 后的源码做画像,返回节点 1 output schema。
 
-    source_path 指向 host_workdir,源码在其 `project/` 子目录(由 git_clone_to_workdir 产出)。
+    source_path 指向仓库根（host_workdir/{repo_dirname}）。
     """
-    root = Path(source_path) / "project" if (Path(source_path) / "project").exists() else Path(source_path)
+    root = Path(source_path)
     language = _detect_language(root)
     framework = _detect_framework(root, language)
     port = _detect_port(root)

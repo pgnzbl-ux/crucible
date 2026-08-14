@@ -1,10 +1,13 @@
 from datetime import datetime, timezone
 from typing import Any
 import json
+import logging
 
 from .models import Task, TaskRun, AgentEvent
 from .repository import TaskRepository
 from .schemas import TaskCreateRequest, TaskDetail, TaskListResponse, TaskSummary, RunSummary
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_refs(refs_raw: str | None) -> list[str]:
@@ -16,6 +19,31 @@ def _parse_refs(refs_raw: str | None) -> list[str]:
         return v if isinstance(v, list) else []
     except (ValueError, TypeError):
         return []
+
+
+def _parse_node_output(raw: str | None) -> dict[str, Any]:
+    """NodeRun.output_json → dict；坏 JSON 给空对象，前端仍能画步骤。"""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _serialize_node_run(nr: Any) -> dict[str, Any]:
+    return {
+        "id": nr.id,
+        "node_index": nr.node_index,
+        "node_key": nr.node_key,
+        "status": nr.status,
+        "attempt": nr.attempt,
+        "error_message": nr.error_message,
+        "started_at": nr.started_at.isoformat() if nr.started_at else None,
+        "finished_at": nr.finished_at.isoformat() if nr.finished_at else None,
+        "output": _parse_node_output(nr.output_json),
+    }
 
 
 class TaskService:
@@ -62,8 +90,16 @@ class TaskService:
         except Exception:  # noqa: BLE001 — project 建失败不阻断建任务(回退 project_address)
             pass
 
+        stored_address = request.project_address
+        try:
+            from app.contexts.project.git_url import parse_git_url
+
+            stored_address = parse_git_url(request.project_address).normalized
+        except ValueError:
+            pass
+
         task = Task(
-            project_address=request.project_address,
+            project_address=stored_address,
             project_id=project_id,
             project_ref=request.project_ref,
             source_type=request.source_type,
@@ -112,10 +148,12 @@ class TaskService:
         )
 
     async def cancel_task(self, task_id: str) -> TaskDetail | None:
-        """取消任务：状态机校验 → revoke 所有活跃 celery 任务 → 标记 cancelled。
+        """取消任务：状态机校验 → 标 cancelled 并提交 → revoke → 后台拆容器。
 
-        revoke(terminate=True, signal=SIGTERM) 触发 agent/tasks.py::_on_sigterm 钩子，
-        自动销毁 agent-runner 容器（双重保险的另一端是 cleanup_stale 巡检）。
+        HTTP 不能等 `docker compose down`（build 中可能卡住数分钟），否则前端取消按钮
+        一直转圈，且 cancelled 未提交时 worker 会把状态写回 running/failed。
+        revoke(terminate=True) 在 Windows solo pool 上经常杀不掉正在跑的 worker；
+        后台 teardown 先拆 agent-runner 停 AI，编排器刷新到 cancelled 后停后续节点。
         """
         task = await self.repo.get_by_id_with_runs(task_id)
         if not task:
@@ -137,21 +175,24 @@ class TaskService:
                 # broker 不可用不能阻断 DB 状态更新（任务已标 cancelled，worker 侧 SIGTERM 钩子兜底）
                 pass
 
-        # 3. 任务整体状态 → cancelled
+        # 3. 任务整体状态 → cancelled，先提交让 worker 刷新能看见
         await self.repo.update_status(task, "cancelled")
         await self.repo.session.commit()
 
+        # 4. 创建中的 Lab 若失去创建者，标记失败供其他任务回收
         from app.contexts.lab.service import LabService
 
         await LabService(self.session).mark_creator_cancelled(task_id)
 
+        # 5. 只拆 agent-runner（后台；HTTP 立刻返回）
         from app.contexts.agent.runtime_cleanup import schedule_teardown_task_runtime
 
         schedule_teardown_task_runtime(task_id)
+
         return self._to_detail(task, task.runs)
 
     async def get_task_events(self, task_id: str, limit: int = 1000) -> list[dict[str, Any]]:
-        """任务 Agent 事件流（前端进度展示用）"""
+        """当前 run 的 Agent 事件流（前端进度展示用；不含历史重试）"""
         events = await self.repo.get_events_for_task(task_id, limit)
         result: list[dict[str, Any]] = []
         for ev in events:
@@ -175,48 +216,19 @@ class TaskService:
         return result
 
     async def retry_task(self, task_id: str) -> str:
-        """重试任务:新建 TaskRun,复用上一 run 已完成的 NodeRun.output_json(断点续跑),
-        从第一个非 completed 节点起重跑。返回新 run_id。
+        """重试任务:新建 TaskRun，从节点 0（源码获取）整条重跑。返回新 run_id。
 
-        复用策略:遍历上一 run 的 NodeRun,把 status=completed 的节点以 completed 形态
-        拷进新 run(保留 output_json),这样编排器从失败节点起重跑,之前的不重算。
+        不拷贝上一 run 的 NodeRun。上一 run 的节点/事件保留作历史。
+        工作区清空由 worker 在新 run 启动时处理（本 run 尚无 completed 节点）。
         """
-        from app.contexts.task.models import NodeRun
-        from sqlalchemy import select as sa_select
-
         task = await self.repo.get_by_id_with_runs(task_id)
         if not task:
             raise ValueError("任务不存在")
         if task.status not in ("failed", "completed", "cancelled", "needs_review"):
             raise ValueError(f"状态为 {task.status} 的任务不能重试")
 
-        # 最新 run(repo 按 created_at desc 排,第一个即最新)
-        last_run = task.runs[0] if task.runs else None
         new_run = TaskRun(task_id=task_id, status="pending")
         new_run = await self.repo.create_run(new_run)
-
-        # 复用上一 run 已完成节点的 output_json
-        if last_run:
-            result = await self.repo.session.execute(
-                sa_select(NodeRun)
-                .where(NodeRun.run_id == last_run.id, NodeRun.status == "completed")
-                .order_by(NodeRun.node_index)
-            )
-            for nr in result.scalars().all():
-                self.repo.session.add(
-                    NodeRun(
-                        run_id=new_run.id,
-                        task_id=task_id,
-                        node_index=nr.node_index,
-                        node_key=nr.node_key,
-                        status="completed",  # 直接标完成,断点续跑
-                        output_json=nr.output_json,
-                        input_json=nr.input_json,
-                        started_at=nr.started_at,
-                        finished_at=nr.finished_at,
-                    )
-                )
-            await self.repo.session.flush()
 
         task.status = "running"
         await self.repo.session.flush()
@@ -243,6 +255,15 @@ class TaskService:
             return False
         if task.status == "running":
             raise ValueError("运行中的任务不能删除,请先取消")
+        if task.status == "archived" and not hard:
+            raise ValueError("任务已归档")
+
+        try:
+            from app.contexts.agent.runtime_cleanup import teardown_task_runtime
+
+            await teardown_task_runtime(task_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("删除任务时拆容器失败(best-effort) task=%s", task_id, exc_info=True)
 
         if hard:
             await self.repo.delete_hard(task)
@@ -261,16 +282,4 @@ class TaskService:
             .where(NodeRun.run_id == run_id, NodeRun.task_id == task_id)
             .order_by(NodeRun.node_index)
         )
-        return [
-            {
-                "id": nr.id,
-                "node_index": nr.node_index,
-                "node_key": nr.node_key,
-                "status": nr.status,
-                "attempt": nr.attempt,
-                "error_message": nr.error_message,
-                "started_at": nr.started_at.isoformat() if nr.started_at else None,
-                "finished_at": nr.finished_at.isoformat() if nr.finished_at else None,
-            }
-            for nr in result.scalars().all()
-        ]
+        return [_serialize_node_run(nr) for nr in result.scalars().all()]

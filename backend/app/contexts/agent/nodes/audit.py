@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import NodeContext
+from .base import NodeContext, repo_dirname_from_outputs, workspace_repo_path
 
 
 class AuditNode:
@@ -17,8 +17,10 @@ class AuditNode:
     async def execute(self, ctx: NodeContext) -> dict[str, Any]:
         from app.contexts.agent.ai_runner import run_ai_node
 
+        src = ctx.previous_outputs.get("source", {})
+        repo = src.get("repo_dirname") or repo_dirname_from_outputs(ctx.previous_outputs)
         input_json = {
-            "source_path": "/workspace/project",
+            "source_path": src.get("workspace_path") or workspace_repo_path(repo),
             "vulnerability_description": ctx.vulnerability_description,
             "profile": ctx.previous_outputs.get("profile", {}),
         }
@@ -28,4 +30,5 @@ class AuditNode:
             host_workdir=ctx.host_workdir,
             runner_env=ctx.runner_env,
             on_event=ctx.on_event,
+            task_id=ctx.task_id,
         )

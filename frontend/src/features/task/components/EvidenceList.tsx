@@ -78,10 +78,25 @@ export function EvidenceList({ reportId }: { reportId: string }) {
                 </Space>
               }
               description={
-                <Text type="secondary" style={{ fontSize: 11 }}>
-                  {ev.content_type} · {(ev.size_bytes / 1024).toFixed(1)} KB ·{' '}
-                  {dayjs(ev.created_at).format('MM-DD HH:mm')}
-                </Text>
+                <div>
+                  {(ev.kind === 'screenshot' || ev.content_type.startsWith('image/')) && ev.download_url ? (
+                    <img
+                      src={ev.download_url}
+                      alt={ev.file_name}
+                      style={{
+                        maxWidth: 280,
+                        maxHeight: 160,
+                        borderRadius: 6,
+                        display: 'block',
+                        marginBottom: 8,
+                      }}
+                    />
+                  ) : null}
+                  <Text type="secondary" style={{ fontSize: 11 }}>
+                    {ev.content_type} · {(ev.size_bytes / 1024).toFixed(1)} KB ·{' '}
+                    {dayjs(ev.created_at).format('MM-DD HH:mm')}
+                  </Text>
+                </div>
               }
             />
           </List.Item>

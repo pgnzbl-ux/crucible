@@ -24,12 +24,37 @@ async def test_reproduce_rewrites_localhost_target():
         source_path="/tmp/w", vulnerability_description="d",
         project_address="x", project_ref=None,
         previous_outputs={
-            "env_ready": {"target_url": "http://localhost:8080", "transport_shape": {}},
+            "source": {"repo_dirname": "claudecodeui", "workspace_path": "/workspace/claudecodeui"},
+            "env_ready": {
+                "target_url": "http://localhost:8080",
+                "transport_shape": {"protocol": "http"},
+                "initial_creds": {"username": "admin", "password": "admin123"},
+                "compose_path": ".vuln-env/docker-compose.yml",
+                "started_containers": ["app"],
+            },
             "audit": {"gate_verdict": "pass"},
         },
     )
     with patch("app.contexts.agent.ai_runner.run_ai_node", fake_run_ai_node):
         await ReproduceNode().execute(ctx)
 
-    assert captured["input_json"]["target_url"] == "http://host.docker.internal:8080"
+    inp = captured["input_json"]
+    assert inp["target_url"] == "http://host.docker.internal:8080"
+    assert inp["initial_creds"] == {"username": "admin", "password": "admin123"}
+    assert inp["compose_path"] == ".vuln-env/docker-compose.yml"
+    assert inp["started_containers"] == ["app"]
+    assert inp["source_path"] == "/workspace/claudecodeui"
+    assert inp["audit"]["gate_verdict"] == "pass"
     assert "on_event" in captured
+
+
+@pytest.mark.asyncio
+async def test_reproduce_fails_without_env_ready_target_url():
+    ctx = NodeContext(
+        task_id="t1", run_id="r1", host_workdir="/tmp/w",
+        source_path="/tmp/w", vulnerability_description="d",
+        project_address="x", project_ref=None,
+        previous_outputs={"env_ready": {}, "audit": {"gate_verdict": "pass"}},
+    )
+    with pytest.raises(RuntimeError, match="target_url"):
+        await ReproduceNode().execute(ctx)

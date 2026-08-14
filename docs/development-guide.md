@@ -72,7 +72,7 @@ backend/app/
 │   │   ├── orchestrator.py   #   ★ 6 节点编排器（循环 + 分支出口 + 断点续跑）
 │   │   ├── nodes/            #   ★ 6 节点实现（source/profile/env_ready/audit/reproduce/report）
 │   │   ├── ai_runner.py      #   AI 节点容器编排 + submit_result 工具 + schema 校验
-│   │   ├── profile_detector.py #  节点 1 规则引擎（7 语言 + web 门禁,纯代码）
+│   │   ├── profile_detector.py #  节点 1 规则引擎（强 Web/非 Web 走规则，其余才 AI）
 │   │   ├── sdk_adapter.py     #   Claude Agent SDK 适配器（env + prompt 构造）
 │   │   ├── executor.py        #   ClaudeSdkExecutor / MockExecutor + 工厂（遗留兼容）
 │   │   └── tasks.py           #   Celery 工作流（host clone → 调 orchestrator → 实时落库）
@@ -103,8 +103,8 @@ frontend/src/
 ```
 infrastructure/
 ├── docker-compose.yml         # postgres(5433) + redis(6380) + minio(9000/9001) + createbuckets
-└── agent-runner/              # Agent Runner 镜像（专用，Claude Agent SDK 隔离执行环境）
-    ├── Dockerfile             # build context=项目根；COPY plugins/ 进镜像 + python:3.11-slim + claude-agent-sdk + git + curl + tini
+└── agent-runner/              # Agent Runner 镜像（Python + Node + 完整 Linux 命令，Claude Agent SDK 隔离执行）
+    ├── Dockerfile             # build context=项目根；runner 复制到 /app/runner（勿放 /workspace，会被 host bind-mount 盖掉）
     ├── requirements.txt       # claude-agent-sdk==0.2.134
     └── runner/run_one.py      # 容器内 entrypoint（加载插件 + 指定 agent + JSONL 流输出）
 
@@ -144,11 +144,12 @@ Task 加 project_id(FK→projects) + verdict(6 档);Report 加 report_data 等�
 | Repository 现代化 | ✅ | 每 Context repository.py（类型化 + select） |
 | Agent Adapter 抽象 | ✅ | executor.py（Protocol + 双实现 + 工厂） |
 | Agent Runner 编排 | ✅ | core/agent_runner.py（容器编排 + 流式消费 + 行缓冲 + 凭据零落盘） |
-| **平台 6 节点编排** | ✅ | agent/orchestrator.py 驱动 6 节点 + node_runs 表 + submit_result 工具回传 + 4 子 agent(见 docs/agent-workflow.md) |
+| **平台 6 节点编排** | ✅ | agent/orchestrator.py 驱动 6 节点 + node_runs 表 + submit_result 工具回传 + 5 子 agent(见 docs/agent-workflow.md) |
 | Event Bus（Redis Pub/Sub） | ✅ | shared/events.py（统一事件结构） |
 | 事件持久化 + 查询 | ✅ | agent_events 表 + GET /tasks/{id}/events |
 | **SSE 实时事件推送（P0-1）** | ✅ | shared/sse.py（StreamingResponse + 历史回放 + 15s 心跳 + 断开清理）+ GET /tasks/{id}/events/stream + 前端 useTaskEvents hook |
 | 报告生成 + MinIO 归档 | ✅ | report/service.py + storage.py |
+| **源码 MinIO 缓存** | ✅ | `source_artifacts` 按 owner+host+project+ref；branch/HEAD 必须 ls-remote 对上 SHA 才用 MinIO；画像 `profile_json` 绑同一 SHA，SHA 变则清空重检 |
 | LLM 后台配置（新增） | ✅ | settings context（Fernet 加密 + 测试连接 + 种子迁移） |
 | DeepSeek 对接 | ✅ | ClaudeSdkAdapter.build_runner_env() 注入 ANTHROPIC_* env(零落盘,容器销毁消失) |
 | 前端 pages/ shared/ 分层 | ✅ | AppLayout + 4 页面 |
@@ -176,7 +177,7 @@ Task 加 project_id(FK→projects) + verdict(6 档);Report 加 report_data 等�
 
 | # | 任务 | 现状 | 目标 | 涉及 |
 |---|------|------|------|------|
-| 0 | **平台 6 节点编排** ✅ | agent/orchestrator.py 驱动 6 节点(source/profile/env_ready/audit/reproduce/report) + node_runs 表 + 4 子 agent(env-builder/auditor/reproducer/reporter) + submit_result 工具回传;分支出口:非 web skip、audit gate_fail 判误报、env 5 轮失败 | orchestrator.py + nodes/ + agent/tasks.py |
+| 0 | **平台 6 节点编排** ✅ | agent/orchestrator.py 驱动 6 节点(source/profile/env_ready/audit/reproduce/report) + node_runs 表 + 5 子 agent(profiler/env-builder/auditor/reproducer/reporter) + submit_result 工具回传;分支出口:非 web skip、audit gate_fail 判误报、env 5 轮失败 | orchestrator.py + nodes/ + agent/tasks.py |
 | 1 | **SSE 实时事件推送** ✅ | `GET /api/v1/tasks/{id}/events/stream` 已就绪，前端 `useTaskEvents` 替换 3s 轮询 | （已完成） | shared/sse.py + task/api.py + frontend shared/hooks/useTaskEvents.ts |
 | 2 | **取消任务真正生效** ✅ | 提交 cancelled 后立刻返回；后台只拆 agent-runner；靶场由 TTL 1h 静默销毁，并在 `/labs` 管理；编排器遇取消停跑 | （已完成） | task/service.py + agent/runtime_cleanup.py + orchestrator.py |
 | 3 | **JWT 登录闭环** ✅ | `shared/deps.py::CurrentUserId` 注入 owner_id（去硬编码 "system"）；前端路由守卫 + 401 跳登录 + SSE `?token=` 鉴权 | （已完成） | shared/deps.py + task/report api.py + App.tsx + LoginPage + layout.tsx |
@@ -253,7 +254,7 @@ P0 全部完成。每个 P1 完成后跑一遍全链路冒烟（任务创建 →
 | 容器 user=1000 写不了 tmpfs | tmpfs 挂载加 `uid=1000,gid=1000,mode=0755` |
 | Celery worker 复用 async engine 报 "attached to a different loop" | worker 用独立 NullPool engine（`tasks.py::_worker_engine`） |
 | 沙箱 internal 网络断外联导致 git clone 失败 | 默认 `sandbox_network_internal=False`（可外联），专用网络只隔离平台 |
-| agent-runner 网络断外联导致 git clone 失败 | 默认 `agent_runner_network=crucible-sandbox-net`（可外联）；如需断外联设 `internal=True` |
+| agent-runner 网络断外联 / DNS 失败 | 网必须 `internal=False`（旧 internal 网会重建）；容器 `dns=223.5.5.5,8.8.8.8,1.1.1.1`（Docker Desktop 自定义网的 127.0.0.11 经常失效） |
 | agent-runner / 靶场容器残留堆积 | `teardown_task_runtime` 只拆任务 runner；靶场静默满 TTL 1h 且无 live 任务才销毁，管理入口为 `/labs`；worker 每 5 分钟巡检。历史 task-id 靶场只作升级孤儿清理 |
 | container.logs(stream=True) 按字节 chunk 切分破坏 JSONL 行边界 | `LineBufferedJsonParser` 按 `\n` 累积字节再 json.loads；EOF 时调 `flush()` 处理最后一行 |
 | 宿主机端口冲突（5432/6379 已被占用） | Crucible 用 5433/6380 |
@@ -272,7 +273,7 @@ P0 全部完成。每个 P1 完成后跑一遍全链路冒烟（任务创建 →
 
 ```bash
 cd infrastructure && docker compose up -d          # 基础设施
-# agent-runner 镜像：build context 必须是项目根（Dockerfile 要 COPY plugins/）
+# agent-runner 镜像（Python + Node + 完整 Linux 命令；build context 必须是项目根）
 docker build -f infrastructure/agent-runner/Dockerfile -t crucible-agent-runner:base .
 cd backend && python -m uvicorn app.main:app --port 8010        # API
 cd backend && python run_worker.py                              # Celery worker
@@ -293,9 +294,12 @@ pytest                           # 单元测试（待补，见 backlog P1）
 | 变量 | 说明 |
 |------|------|
 | `CLAUDE_AGENT_SDK_ENABLED` | `true` 启用真实 Agent（否则 Mock），见 README「对接第三方 LLM」 |
-| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | DeepSeek 等第三方 LLM（Anthropic 兼容端点） |
+| `REDIS_URL` / `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` | Redis 6380，db0 事件 / db1 broker / db2 result |
+| `S3_ENDPOINT` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | MinIO 连接；bucket 写死 artifacts / evidence / source |
 | `AGENT_RUNNER_IMAGE` / `AGENT_RUNNER_TIMEOUT_SECONDS` | Agent Runner 镜像与超时 |
 | `SETTINGS_ENCRYPT_KEY` | 遗留配置(当前 settings 明文存取,Fernet 未生效) |
+
+LLM Provider（端点 / API Key / 模型）只在后台「设置」配置，不走 `.env`。
 
 ---
 

@@ -23,7 +23,7 @@ description: 启动基础设施 + 后端 API + Celery worker + 前端 dev server
 3. **后端**
    ```bash
    cd backend
-   cp ../.env.example .env   # 首次
+   cp .env.example .env   # 首次
    pip install -e ".[dev]"
    python -m uvicorn app.main:app --port 8010
    ```

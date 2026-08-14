@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -55,6 +57,9 @@ class TaskRepository:
             elif statuses:
                 stmt = stmt.where(Task.status.in_(statuses))
                 count_stmt = count_stmt.where(Task.status.in_(statuses))
+        else:
+            stmt = stmt.where(Task.status != "archived")
+            count_stmt = count_stmt.where(Task.status != "archived")
         if priority:
             stmt = stmt.where(Task.priority == priority)
             count_stmt = count_stmt.where(Task.priority == priority)
@@ -103,6 +108,27 @@ class TaskRepository:
             await self.session.flush()
         return cancelled
 
+    async def cancel_incomplete_nodes(self, run_ids: list[str]) -> int:
+        """把指定 run 下 pending/running 的 NodeRun 标 cancelled；completed/failed/skipped 不动。"""
+        if not run_ids:
+            return 0
+        result = await self.session.execute(
+            select(NodeRun).where(
+                NodeRun.run_id.in_(run_ids),
+                NodeRun.status.in_(("pending", "running")),
+            )
+        )
+        nodes = result.scalars().all()
+        now = datetime.now(timezone.utc)
+        for nr in nodes:
+            nr.status = "cancelled"
+            nr.finished_at = now
+            if not nr.error_message:
+                nr.error_message = "任务已取消"
+        if nodes:
+            await self.session.flush()
+        return len(nodes)
+
     async def create_run(self, run: TaskRun) -> TaskRun:
         self.session.add(run)
         await self.session.flush()
@@ -124,10 +150,20 @@ class TaskRepository:
         return list(result.scalars().all())
 
     async def get_events_for_task(self, task_id: str, limit: int = 1000) -> list[AgentEvent]:
-        """任务全部 Agent 事件（最近 limit 条，按 sequence 升序）"""
+        """当前（最新）run 的 Agent 事件。重试会新建 run，历史 run 的 phase.updated 不再混进事件流。"""
+        latest_run = (
+            await self.session.execute(
+                select(TaskRun.id)
+                .where(TaskRun.task_id == task_id)
+                .order_by(TaskRun.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if latest_run is None:
+            return []
         result = await self.session.execute(
             select(AgentEvent)
-            .where(AgentEvent.task_id == task_id)
+            .where(AgentEvent.task_id == task_id, AgentEvent.run_id == latest_run)
             .order_by(AgentEvent.sequence.desc())
             .limit(limit)
         )

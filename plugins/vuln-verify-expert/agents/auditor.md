@@ -13,7 +13,7 @@ skills:
 
 ## 输入(平台通过 .node.json 注入)
 
-- `source_path`:源码根目录(`/workspace/project`)
+- `source_path`:源码根目录(通常 `/workspace/<仓库名>`，以输入为准)
 - `vulnerability_description`:待验证的漏洞描述(类型标签 CWE-XXX + 推理过程)
 - `profile`:项目画像(`{language, framework, ...}`)
 

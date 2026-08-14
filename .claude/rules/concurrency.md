@@ -13,7 +13,8 @@ paths: ["backend/app/**/*.py"]
 - `worker_prefetch_multiplier=1`：单 worker 单任务，避免饿死
 - `task_soft_time_limit` + `task_time_limit`：软超时先发信号，硬超时强制 kill
 - Windows：`--pool=solo`（`run_worker.py` 已固定）
-- 取消任务：`celery_app.control.revoke(task_id, terminate=True)` + agent-runner 容器销毁（`tasks.py::_on_sigterm` 钩子）
+- 取消：先提交 cancelled 并立刻返回 HTTP；后台 `schedule_teardown_task_runtime`（先拆 agent-runner 再 compose down）。删除 / 任务结束仍可同步 `teardown_task_runtime`。
+- 孤儿巡检：Celery `worker_ready` 启动守护线程，每 5 分钟扫一次 Docker 容器；活着且未超时的 running 任务不误杀。残留 host_workdir / compose.yml 不算运行时。年龄按 UTC 计算（`utc_unix`），避免 SQLite naive datetime 在东八区被 `.timestamp()` 算超龄。
 
 ## 2. asyncio 三件坑
 
@@ -22,7 +23,8 @@ paths: ["backend/app/**/*.py"]
 | Celery worker 复用主进程 async engine 报"attached to a different loop" | worker 用独立 NullPool engine（`agent/tasks.py::_worker_engine`） |
 | Celery 任务本体同步却要调 async 代码 | 用 `asyncio.run()` 临时 loop，不要 `loop.run_until_complete`（已废弃） |
 | `await` 跨进程 / 跨线程 | 不要 await 跨边界；Celery 任务内 async 代码必须包在 `asyncio.run` |
-| agent-runner 流式回调要在同步线程内落 DB | 用 `asyncio.run_coroutine_threadsafe(_persist_event(), loop).result(timeout=5)` 跨入主 loop |
+| 孤儿巡检 naive UTC 当成本地时 | `utc_unix()` 再算 age；否则东八区会把刚启动的 running 判超龄并拆掉 |
+| agent-runner 流式回调要在同步线程内落 DB | 独立 session + `run_coroutine_threadsafe`；已在事件循环线程则 `create_task`，禁止 `.result()` 死锁 |
 
 ## 3. 资源锁
 

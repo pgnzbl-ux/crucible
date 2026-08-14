@@ -22,7 +22,7 @@ from app.core.config import get_settings
 from . import storage
 from .models import Evidence, Report
 from .repository import ReportRepository
-from .schemas import EvidenceResponse, ReportDetail
+from .schemas import EvidenceResponse, ReportDetail, ReportSummary
 
 settings = get_settings()
 
@@ -73,6 +73,10 @@ class ReportService:
             updated_at=report.updated_at,
             evidence=[ReportService._to_evidence_detail(e, with_url=True) for e in report.evidence],
         )
+
+    @staticmethod
+    def _to_summary(report: Report) -> ReportSummary:
+        return ReportSummary.model_validate(report)
 
     @staticmethod
     def _to_evidence_detail(ev: Evidence, *, with_url: bool = False) -> EvidenceResponse:
@@ -160,8 +164,9 @@ class ReportService:
 
     async def list_reports(
         self, owner_id: str, status: str | None = None, limit: int = 50, offset: int = 0
-    ) -> tuple[list[Report], int]:
-        return await self.repo.list_by_owner(owner_id, status, limit, offset)
+    ) -> tuple[list[ReportSummary], int]:
+        rows, total = await self.repo.list_by_owner(owner_id, status, limit, offset)
+        return [self._to_summary(r) for r in rows], total
 
     # ── 发布 ──
 

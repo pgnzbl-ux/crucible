@@ -12,6 +12,7 @@ import dayjs from 'dayjs'
 
 import type { AgentEvent } from '../../../shared/lib/api'
 import { EVENT_PHASE_LABELS, EVENT_TYPE_LABELS, NODE_LABELS, NODE_STATUS_META } from '../../../shared/lib/meta'
+import { summarizeNodeOutput } from '../../../shared/lib/nodeOutput'
 import { humanizeAgentError } from '../../../shared/lib/humanizeAgentError'
 import type { SSEStatus } from '../../../shared/hooks/useTaskEvents'
 
@@ -51,6 +52,18 @@ function asText(value: unknown): string {
 function truncate(text: string, max = 600): string {
   if (text.length <= max) return text
   return `${text.slice(0, max)}…`
+}
+
+function streamFooterHint(events: AgentEvent[] | undefined): string {
+  const last = events?.[events.length - 1]
+  const t = last?.event_type ?? ''
+  if (t === 'agent.thinking' || t === 'agent.message' || t === 'tool.call.started') {
+    return 'Agent 正在输出…'
+  }
+  if (t === 'agent.completed' || t === 'phase.updated' || t === 'node.updated') {
+    return '节点执行中…'
+  }
+  return '任务进行中…'
 }
 
 function matchesFilter(ev: AgentEvent, filter: StreamFilter): boolean {
@@ -157,7 +170,7 @@ export function TaskEventTimeline({
         />
       </Space>
       {sseError && sseStatus === 'reconnecting' && (
-        <Alert type="warning" showIcon message={sseError} style={{ marginBottom: 12 }} />
+        <Alert type="warning" showIcon title={sseError} style={{ marginBottom: 12 }} />
       )}
       {filtered.length > 0 ? (
         <div
@@ -177,7 +190,7 @@ export function TaskEventTimeline({
           ))}
           {running && (
             <div style={{ padding: '8px 16px', color: 'var(--crucible-text-secondary)', fontSize: 12 }}>
-              Agent 正在输出…
+              {streamFooterHint(events)}
             </div>
           )}
         </div>
@@ -207,7 +220,7 @@ function StreamRow({ ev }: { ev: AgentEvent }) {
       <Text type="secondary" style={{ fontSize: 11, lineHeight: '22px' }}>
         {eventTime(ev)}
       </Text>
-      <Tag style={{ marginInlineEnd: 0, fontSize: 11 }} bordered={false}>
+      <Tag style={{ marginInlineEnd: 0, fontSize: 11 }} variant="filled">
         {label}
       </Tag>
       <div style={{ minWidth: 0 }}>{renderBody(ev, p)}</div>
@@ -306,7 +319,7 @@ function renderBody(ev: AgentEvent, p: Record<string, unknown>) {
         type="error"
         showIcon
         icon={<CloseCircleOutlined />}
-        message={title}
+        title={title}
         description={
           <div>
             {raw && raw !== title && (
@@ -333,13 +346,17 @@ function renderBody(ev: AgentEvent, p: Record<string, unknown>) {
     const key = asText(p.node_key)
     const status = asText(p.status)
     const meta = NODE_STATUS_META[status]
+    const output = (p.output && typeof p.output === 'object' ? p.output : {}) as Record<string, unknown>
+    const summary = summarizeNodeOutput(key, output, status)
     return (
-      <Space>
+      <Space wrap>
         <NodeIndexOutlined />
         <Text>{NODE_LABELS[key] ?? key}</Text>
         <Tag color={meta?.color}>{meta?.label ?? status}</Tag>
-        {status === 'failed' && (
-          <Text type="danger">{asText(p.title || p.error || (p.output as { error?: string } | undefined)?.error)}</Text>
+        {summary && summary !== (meta?.label ?? status) && (
+          <Text type={status === 'failed' ? 'danger' : 'secondary'} style={{ fontSize: 12 }}>
+            {truncate(summary, 240)}
+          </Text>
         )}
       </Space>
     )

@@ -82,6 +82,7 @@ services:
       mc alias set local http://minio:9000 minioadmin minioadmin &&
       mc mb --ignore-existing local/crucible-artifacts &&
       mc mb --ignore-existing local/crucible-evidence &&
+      mc mb --ignore-existing local/crucible-source &&
       echo 'buckets ready' &&
       exit 0
       "

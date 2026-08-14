@@ -22,7 +22,7 @@ paths: ["backend/app/**/*.py", "backend/tests/**/*.py"]
 | rootfs | 只读 |
 | capabilities | `cap_drop: ["ALL"]` |
 | 内存/CPU/PIDs | 必须限 |
-| 网络 | 默认 `False`（可外联 git clone），专用网络只隔离平台服务 |
+| 网络 | 默认可外联；容器注入公共 DNS（`223.5.5.5`/`8.8.8.8`/`1.1.1.1`）；专用网禁止 `internal` |
 | 超时 | 必须有，到点强制回收 |
 | tmpfs | `uid=1000,gid=1000,mode=0755` |
 
@@ -51,7 +51,7 @@ dev 环境跳过这些校验，但提醒日志要打。
 - Agent（Claude Code CLI / 自研 Agent）输出视为**不可信**
 - Agent 写出的报告、证据、命令结果都要走 schema 校验才能落库
 - Agent 不能直接访问平台数据库 / Redis / MinIO——只能通过沙箱 + 受控 API
-- 取消任务必须 `celery_app.control.revoke(task_id, terminate=True)` + 沙箱销毁 + run 标记 cancelled(已落地,task/service.py + SIGTERM 钩子)
+- 取消任务必须先提交 cancelled 再返回；`revoke(terminate=True)` + 后台拆 agent-runner/靶场；编排器不得把 cancelled 写回 failed(已落地,task/service.py + orchestrator.py)
 
 ## 7. 安全事件上报
 

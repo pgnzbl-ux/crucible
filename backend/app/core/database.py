@@ -73,6 +73,18 @@ async def _ensure_dev_columns(conn) -> None:
     if cols and "lab_id" not in col_names:
         await conn.execute(text("ALTER TABLE tasks ADD COLUMN lab_id VARCHAR(36)"))
 
+    artifact_cols = (await conn.execute(text("PRAGMA table_info(source_artifacts)"))).fetchall()
+    artifact_names = {c[1] for c in artifact_cols}
+    if artifact_cols and "owner_id" not in artifact_names:
+        await conn.execute(
+            text(
+                "ALTER TABLE source_artifacts "
+                "ADD COLUMN owner_id VARCHAR(36) NOT NULL DEFAULT ''"
+            )
+        )
+    if artifact_cols and "profile_json" not in artifact_names:
+        await conn.execute(text("ALTER TABLE source_artifacts ADD COLUMN profile_json TEXT"))
+
 
 async def close_db() -> None:
     await engine.dispose()

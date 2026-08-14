@@ -122,7 +122,7 @@ async def retry_task(
     task_id: str,
     svc: Annotated[TaskService, Depends(get_task_service)],
 ) -> dict:
-    """重试任务(断点续跑:复用上一 run 已完成的节点 output_json)。"""
+    """重试任务（从节点 0 整条重跑，不复用上一 run 的 NodeRun）。"""
     try:
         new_run_id = await svc.retry_task(task_id)
     except ValueError as e:

@@ -99,9 +99,11 @@ export function useTaskEvents<T = unknown>(
             return
           }
           setEvents((prev) => {
-            // 去重：sequence 一致的事件不重复（历史回放 + 实时推送短暂重叠）
+            // 去重：同一 run 的 sequence 不重复（历史回放 + 实时推送短暂重叠）
             if (parsed.sequence != null) {
-              const exists = prev.some((x) => x.sequence === parsed.sequence)
+              const exists = prev.some(
+                (x) => x.sequence === parsed.sequence && (x.run_id ?? '') === (parsed.run_id ?? ''),
+              )
               if (exists) return prev
             }
             return [...prev, parsed]

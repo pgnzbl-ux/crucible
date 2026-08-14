@@ -4,14 +4,14 @@ Agent 漏洞分析工作流（Celery 任务）。
 流程：
   1. 加载任务 → 创建/获取 TaskRun（running）
   2. 最小预检：LLM Provider / agent-runner 镜像 / 凭据
-  3. 准备 host 临时目录 + git clone（host 上，避免容器销毁源码丢）
+  3. 准备 host 临时目录（源码由节点 0 按表/MinIO 或 git clone 落到 {workdir}/{仓库名}）
   4. 构造 .prompt.json + 注入凭据 env
   5. 拉起 agent-runner 容器 + 流式消费 stdout JSONL → 实时落 AgentEvent + 发 Redis Pub/Sub
   6. 容器结束 → 状态分流（completed / needs_review / failed / cancelled）
   7. 持久化 reasoning + session_id
   8. 生成报告（report context）
   9. 发布 domain 事件
- 10. finally 清理：docker rm -f 容器 + shutil.rmtree host_workdir
+  10. finally：成功则清理 host_workdir；失败/取消保留目录供排查
 
 SDK 改造要点（v0.3.0+）：
 - 不再依赖 SandboxManager；唯一容器抽象为 core/agent_runner.py::AgentRunnerManager
@@ -39,14 +39,14 @@ from sqlalchemy.pool import NullPool
 
 from app.contexts.identity.models import User  # noqa: F401 — 注册 users 表到 metadata，保证 FK 解析
 from app.contexts.lab.models import Lab  # noqa: F401
-from app.contexts.project.models import Project  # noqa: F401 — 注册 projects 表(阶段 1)
+from app.contexts.project.models import Project, SourceArtifact  # noqa: F401 — 注册 projects/source_artifacts
 from app.contexts.report.models import Report, Evidence  # noqa: F401 — 注册 reports/evidences 表
 from app.contexts.report.repository import ReportRepository
 from app.contexts.report.service import ReportService
 from app.contexts.settings.models import LlmProvider  # noqa: F401 — 注册 llm_providers 表
 from app.contexts.task.models import AgentEvent, Task, TaskRun, NodeRun  # noqa: F401 — NodeRun 注册(阶段 1)
 from app.contexts.agent.errors import format_agent_error, humanize_agent_error
-from app.core.agent_runner import AgentRunnerError, agent_runner_manager, git_clone_to_workdir
+from app.core.agent_runner import AgentRunnerError, agent_runner_manager
 from app.core.celery_app import celery_app
 from app.core.config import get_settings
 from app.shared.events import Event, event_bus
@@ -87,6 +87,16 @@ async def _get_or_create_run(session: AsyncSession, task_id: str, run_id: str) -
     return run
 
 
+_SKIP_PHASE_MESSAGES = frozenset({"thinking_tokens"})
+
+
+def should_persist_agent_event(event: dict) -> bool:
+    """丢弃 SDK 用量心跳，避免事件流被 thinking_tokens 刷屏。"""
+    if event.get("type") != "phase.updated":
+        return True
+    return str(event.get("message") or "") not in _SKIP_PHASE_MESSAGES
+
+
 async def _append_events(session: AsyncSession, run: TaskRun, events: list[dict]) -> None:
     """将执行器事件流持久化为 AgentEvent 行，sequence 从运行内已有事件后递增"""
     base = 0
@@ -98,6 +108,8 @@ async def _append_events(session: AsyncSession, run: TaskRun, events: list[dict]
         base = latest
 
     for i, ev in enumerate(events, start=base + 1):
+        if not should_persist_agent_event(ev):
+            continue
         session.add(
             AgentEvent(
                 run_id=run.id,
@@ -113,6 +125,8 @@ async def _append_events(session: AsyncSession, run: TaskRun, events: list[dict]
 
 async def _persist_single_event(session: AsyncSession, run: TaskRun, event: dict) -> None:
     """实时落单条事件（流式回调使用），并发布到 Redis Pub/Sub 以驱动 SSE 推送"""
+    if not should_persist_agent_event(event):
+        return
     # 取本 run 当前最大 sequence
     result = await session.execute(
         select(AgentEvent.sequence).where(AgentEvent.run_id == run.id).order_by(AgentEvent.sequence.desc()).limit(1)
@@ -207,6 +221,17 @@ if os.name != "nt":
         pass
 
 
+from celery.signals import worker_ready
+
+
+@worker_ready.connect
+def _on_worker_ready(**_kwargs: object) -> None:
+    """worker 起来立刻开巡检线程：启动扫一次，之后每 5 分钟扫孤儿容器。"""
+    from app.contexts.agent.runtime_cleanup import start_background_sweeper
+
+    start_background_sweeper()
+
+
 # ── 最小预检 ──
 
 
@@ -221,20 +246,14 @@ async def _platform_preflight_minimal(session: AsyncSession) -> tuple[bool, str 
     if not exists:
         return False, f"agent-runner 镜像不存在: {settings.agent_runner_image}（先 docker build）"
 
-    # 2. 凭据：检查默认 Provider 或 settings.llm_api_key
+    # 2. 凭据：必须有后台默认 Provider
     from app.contexts.settings.repository import SettingsRepository
     from app.contexts.settings.service import SettingsService
 
-    try:
-        provider = await SettingsService(SettingsRepository(session)).get_default_provider()
-        if provider is not None:
-            return True, None
-    except Exception:  # noqa: BLE001 — DB 失败不阻断
-        pass
-
-    if settings.llm_api_key:
+    provider = await SettingsService(SettingsRepository(session)).get_default_provider()
+    if provider is not None:
         return True, None
-    return False, "缺少 LLM 凭据：DB 默认 Provider 与 settings.llm_api_key 都为空"
+    return False, "缺少 LLM 凭据：未配置默认 Provider"
 
 
 # ── Celery 任务 ──
@@ -284,39 +303,23 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
                 summary.update(status="failed", error=title)
                 return summary
 
-            # 2. host 临时目录 + git clone
+            # 2. host 临时目录（源码由节点 0 获取，按真实仓库名落地）
             host_workdir = agent_runner_manager.host_workdir_path(task_id)
-            os.makedirs(host_workdir, exist_ok=True)
+            if await _run_has_completed_nodes(session, run.id):
+                os.makedirs(host_workdir, exist_ok=True)
+            else:
+                try:
+                    from app.contexts.agent.nodes.env_ready import docker_compose_down
+                    await docker_compose_down(host_workdir, task_id=task_id)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("重试前拆靶场失败（继续清空工作区）: %s", e)
+                reset_host_workdir(host_workdir)
             await _append_events(
                 session, run,
-                [{"type": "phase.updated", "phase": "preflight", "message": "在 host 上克隆源码",
+                [{"type": "phase.updated", "phase": "preflight", "message": "创建工作区，源码由节点 0 获取",
                   "source": "crucible"}],
             )
             await session.commit()
-
-            clone_ok, clone_err = await asyncio.to_thread(
-                git_clone_to_workdir, host_workdir, task.project_address, task.project_ref
-            )
-            if not clone_ok:
-                err = f"源码克隆失败: {clone_err[:500]}"
-                title, hint = humanize_agent_error(err)
-                detail = format_agent_error(err)
-                await _update_run(session, run, "failed", detail[:1000])
-                task.status = "failed"
-                await _persist_single_event(
-                    session,
-                    run,
-                    {
-                        "type": "agent.failed",
-                        "error": err,
-                        "title": title,
-                        "hint": hint,
-                    },
-                )
-                await session.commit()
-                _cleanup_hostdir(host_workdir)
-                summary.update(status="failed", error=title)
-                return summary
 
             # 3. 构造 runner env（凭据从默认 Provider 解密或 settings.llm_* 兜底）
             runner_env = await resolve_runner_env(session)
@@ -355,15 +358,36 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
             captured: dict = {}
             loop = asyncio.get_running_loop()
 
+            async def _persist_ai_event(event: dict) -> None:
+                """独立 session，避免和编排器抢同一条 AsyncSession。"""
+                async with session_factory() as ev_session:
+                    ev_run = await ev_session.get(TaskRun, run.id)
+                    if ev_run is None:
+                        return
+                    await _persist_single_event(ev_session, ev_run, event)
+
             def _on_ai_event(event: dict) -> None:
-                """AI 节点 JSONL → 落 AgentEvent + Redis(从 docker 线程跨回 loop)。"""
+                """AI 节点 JSONL → 落 AgentEvent + Redis。
+
+                docker 线程用 run_coroutine_threadsafe；事件循环线程（env_ready._emit）
+                不能 .result() 死锁，改为 create_task。
+                """
                 try:
-                    fut = asyncio.run_coroutine_threadsafe(
-                        _persist_single_event(session, run, event), loop
-                    )
+                    try:
+                        running = asyncio.get_running_loop()
+                    except RuntimeError:
+                        running = None
+                    if running is loop:
+                        loop.create_task(_persist_ai_event(event))
+                        return
+                    fut = asyncio.run_coroutine_threadsafe(_persist_ai_event(event), loop)
                     fut.result(timeout=5)
                 except Exception as e:  # noqa: BLE001
-                    logger.warning(f"AI 事件落库失败(不影响主流程): {e}")
+                    logger.warning(
+                        "AI 事件落库失败(不影响主流程): %s %s",
+                        type(e).__name__,
+                        e or repr(e),
+                    )
 
             async def _on_node_event(node_key: str, status: str, output) -> None:
                 """节点状态变化 → 落 AgentEvent + Redis（SSE 步骤条与事件流共用）。"""
@@ -389,7 +413,7 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
                     run_id=run_id,
                     session=session,
                     host_workdir=host_workdir,
-                    source_path=host_workdir,  # source 在 host_workdir/project 下
+                    source_path=host_workdir,
                     runner_env=runner_env,
                     on_node_event=_on_node_event,
                     on_ai_event=_on_ai_event,
@@ -498,23 +522,27 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
             pass
         summary.update(status="failed", error=str(e))
     finally:
-        # 9. 清理容器与 host_workdir
-        if host_workdir:
-            try:
-                from app.contexts.agent.nodes.env_ready import docker_compose_down
-                await docker_compose_down(host_workdir)
-            except Exception:  # noqa: BLE001
-                logger.warning("任务结束拆靶场失败(best-effort)", exc_info=True)
+        # 9. 清理容器与 host_workdir（成功/失败都拆容器；失败才留目录排查）
+        try:
+            from app.contexts.agent.runtime_cleanup import teardown_task_runtime
+
+            await teardown_task_runtime(task_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("任务结束拆容器失败(best-effort)", exc_info=True)
         if container_id:
-            try:
-                await asyncio.to_thread(agent_runner_manager.remove_by_id, container_id)
-            except Exception:
-                pass
             _unregister_container(container_id)
-        _cleanup_hostdir(host_workdir)
+        if should_retain_hostdir(summary.get("status")):
+            logger.warning("任务未成功，保留 host_workdir 供排查: %s", host_workdir)
+        else:
+            _cleanup_hostdir(host_workdir)
         await engine.dispose()
 
     return summary
+
+
+def should_retain_hostdir(status: str | None) -> bool:
+    """失败/取消时保留工作目录，便于对照源码与节点产物。"""
+    return status in ("failed", "cancelled")
 
 
 def _cleanup_hostdir(path: str) -> None:
@@ -526,6 +554,40 @@ def _cleanup_hostdir(path: str) -> None:
             shutil.rmtree(path, ignore_errors=True)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"清理 host_workdir 失败 {path}: {e}")
+
+
+def reset_host_workdir(path: str) -> None:
+    """清空并重建工作区，避免重试吃到上一轮残留的桩目录。"""
+    _cleanup_hostdir(path)
+    if path:
+        os.makedirs(path, exist_ok=True)
+
+
+async def _run_has_completed_nodes(session: AsyncSession, run_id: str) -> bool:
+    result = await session.execute(
+        select(NodeRun.id).where(NodeRun.run_id == run_id, NodeRun.status == "completed").limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
+def _discover_repo_dir(host_workdir: str) -> str:
+    """工作区下真实仓库目录（audit-uuid/<repo_dirname>），兼容旧的 project/。"""
+    if not os.path.isdir(host_workdir):
+        return os.path.join(host_workdir, "project")
+    skip = {".secrets", ".git"}
+    named = os.path.join(host_workdir, "project")
+    found: list[str] = []
+    for entry in sorted(os.listdir(host_workdir)):
+        if entry.startswith(".") or entry in skip:
+            continue
+        path = os.path.join(host_workdir, entry)
+        if os.path.isdir(path):
+            found.append(path)
+    if named in found:
+        return named
+    if found:
+        return found[0]
+    return named
 
 
 # ── 插件产物自动归档（P1：补 P0-4 手动上传的自动补充） ──
@@ -627,14 +689,14 @@ def _scan_and_upload(project_dir: str, task_id: str) -> list[dict]:
 
 
 async def _archive_artifacts(session: AsyncSession, report: Report, host_workdir: str) -> int:
-    """扫描 host_workdir/project 的插件产物，上传 MinIO + 落 Evidence（关联 report）。
+    """扫描仓库目录的插件产物，上传 MinIO + 落 Evidence（关联 report）。
 
     同步扫描 + 上传走 asyncio.to_thread（storage 是同步客户端）；
     返回归档文件数。失败仅日志（不阻塞主流程）。
     """
     from app.contexts.report.models import Evidence
 
-    project_dir = os.path.join(host_workdir, "project")
+    project_dir = _discover_repo_dir(host_workdir)
     metas = await asyncio.to_thread(_scan_and_upload, project_dir, report.task_id)
     for meta in metas:
         session.add(Evidence(report_id=report.id, task_id=report.task_id, **meta))

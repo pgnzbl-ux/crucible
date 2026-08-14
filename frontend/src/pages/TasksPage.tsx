@@ -1,9 +1,9 @@
-import { useState } from 'react'
 import { App, Button, Space } from 'antd'
 import { PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api } from '../shared/lib/api'
+import { buildTaskListApiParams, DEFAULT_PAGE_SIZE } from '../shared/lib/taskListQuery'
 import { AppLayout } from '../app/layout'
 import { PageHeader } from '../shared/components/PageHeader'
 import { PageContainer } from '../shared/components/PageContainer'
@@ -15,18 +15,24 @@ import { useTaskListParams } from '../features/task/hooks/useTaskListParams'
 export function TasksPage() {
   const { message } = App.useApp()
   const qc = useQueryClient()
-  const [createOpen, setCreateOpen] = useState(false)
   const { params, setParams, clearParams } = useTaskListParams()
 
-  const apiParams: Record<string, string> = { limit: '100' }
-  if (params.status) apiParams.status = params.status
-  if (params.priority) apiParams.priority = params.priority
-  if (params.q) apiParams.q = params.q
-  if (params.dateFrom) apiParams.date_from = params.dateFrom
-  if (params.dateTo) apiParams.date_to = params.dateTo
+  const page = params.page ?? 1
+  const pageSize = params.pageSize ?? DEFAULT_PAGE_SIZE
+  const createOpen = params.create === true
+
+  const apiParams = buildTaskListApiParams({
+    status: params.status,
+    priority: params.priority,
+    q: params.q,
+    dateFrom: params.dateFrom,
+    dateTo: params.dateTo,
+    page,
+    pageSize,
+  })
 
   const { data, isLoading, refetch } = useQuery({
-    queryKey: ['tasks', params],
+    queryKey: ['tasks', apiParams],
     queryFn: () => api.listTasks(apiParams),
     refetchInterval: 5000,
   })
@@ -43,7 +49,7 @@ export function TasksPage() {
   const retryMutation = useMutation({
     mutationFn: (id: string) => api.retryTask(id),
     onSuccess: () => {
-      message.success('任务已重新提交(断点续跑)')
+      message.success('任务已重新提交，将从源码获取开始重跑')
       qc.invalidateQueries({ queryKey: ['tasks'] })
     },
     onError: (e: Error) => message.error(e.message),
@@ -58,6 +64,12 @@ export function TasksPage() {
     onError: (e: Error) => message.error(e.message),
   })
 
+  const pendingId =
+    (cancelMutation.isPending && cancelMutation.variables) ||
+    (retryMutation.isPending && retryMutation.variables) ||
+    (deleteMutation.isPending && deleteMutation.variables) ||
+    null
+
   return (
     <AppLayout>
       <PageHeader
@@ -68,7 +80,7 @@ export function TasksPage() {
             <Button icon={<ReloadOutlined />} onClick={() => refetch()}>
               刷新
             </Button>
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => setParams({ create: true })}>
               新建任务
             </Button>
           </Space>
@@ -82,16 +94,18 @@ export function TasksPage() {
           data={data?.items ?? []}
           loading={isLoading}
           total={data?.total ?? 0}
+          page={page}
+          pageSize={pageSize}
+          onPageChange={(nextPage, nextSize) => setParams({ page: nextPage, pageSize: nextSize })}
           onCancel={(id) => cancelMutation.mutate(id)}
           onRetry={(id) => retryMutation.mutate(id)}
           onDelete={(id) => deleteMutation.mutate(id)}
-          cancelPending={cancelMutation.isPending}
-          retryPending={retryMutation.isPending}
-          deletePending={deleteMutation.isPending}
+          onCreate={() => setParams({ create: true })}
+          pendingId={pendingId}
         />
       </PageContainer>
 
-      <TaskCreateDrawer open={createOpen} onClose={() => setCreateOpen(false)} />
+      <TaskCreateDrawer open={createOpen} onClose={() => setParams({ create: undefined })} />
     </AppLayout>
   )
 }

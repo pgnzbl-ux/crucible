@@ -30,7 +30,6 @@ backend/crucible.db
 # 敏感：环境变量绝不进镜像（凭据零落盘）
 .env
 .env.*
-!.env.example
 
 # 工作区临时
 .workbuddy/

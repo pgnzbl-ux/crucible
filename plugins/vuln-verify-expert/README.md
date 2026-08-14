@@ -8,7 +8,13 @@
 plugins/vuln-verify-expert/
 ├── .claude-plugin/plugin.json
 ├── settings.json
-├── agents/vuln-verify-expert.md
+├── agents/
+│   ├── profiler.md
+│   ├── env-builder.md
+│   ├── auditor.md
+│   ├── reproducer.md
+│   ├── reporter.md
+│   └── vuln-verify-expert.md
 ├── skills/vuln-verify/
 │   ├── SKILL.md
 │   ├── references/
@@ -19,7 +25,9 @@ plugins/vuln-verify-expert/
     └── references/
 ```
 
-- `agents/vuln-verify-expert.md`：白盒优先的漏洞验证 Agent。
+- `agents/profiler.md`：节点 profile，读 README/依赖建立全景并做 web 门禁。
+- `agents/env-builder.md`：节点 env_ready，按画像写靶场配方。
+- `agents/auditor.md` / `reproducer.md` / `reporter.md`：白盒、复现、报告。
 - `skills/vuln-verify`：利用链推理、验证门禁、证据判定和中文报告规则。
 - `skills/run-project-env`：Web 项目识别、隔离环境和启动状态规则。
 

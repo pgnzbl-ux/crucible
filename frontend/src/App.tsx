@@ -7,7 +7,10 @@ import { DashboardPage } from './pages/DashboardPage'
 import { TasksPage } from './pages/TasksPage'
 import { TaskDetailPage } from './pages/TaskDetailPage'
 import { ReportsPage } from './pages/ReportsPage'
+import { ReportDetailPage } from './pages/ReportDetailPage'
 import { SettingsPage } from './pages/SettingsPage'
+import { ProjectsPage } from './pages/ProjectsPage'
+import { ProjectDetailPage } from './pages/ProjectDetailPage'
 import { LabsPage } from './pages/LabsPage'
 import { NotFoundPage } from './pages/NotFoundPage'
 
@@ -35,9 +38,24 @@ export function App() {
               <TasksPage />
             </RequireAuth>
           </Route>
+          <Route path="/reports/:id">
+            <RequireAuth>
+              <ReportDetailPage />
+            </RequireAuth>
+          </Route>
           <Route path="/reports">
             <RequireAuth>
               <ReportsPage />
+            </RequireAuth>
+          </Route>
+          <Route path="/projects/:id">
+            <RequireAuth>
+              <ProjectDetailPage />
+            </RequireAuth>
+          </Route>
+          <Route path="/projects">
+            <RequireAuth>
+              <ProjectsPage />
             </RequireAuth>
           </Route>
           <Route path="/labs">

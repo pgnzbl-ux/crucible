@@ -1,5 +1,5 @@
-import { useMemo } from 'react'
-import { App, Button, Card, Col, Empty, Row, Skeleton, Table, Tag, Typography } from 'antd'
+import { useQueries, useQuery } from '@tanstack/react-query'
+import { Button, Card, Col, Empty, Row, Skeleton, Table, Tag, Typography } from 'antd'
 import {
   BugOutlined,
   CheckCircleOutlined,
@@ -10,7 +10,6 @@ import {
   ArrowRightOutlined,
 } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
-import { useQuery } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 import { useLocation } from 'wouter'
 
@@ -18,32 +17,38 @@ import { api, type TaskSummary } from '../shared/lib/api'
 import { getStatusMeta, getPriorityMeta } from '../shared/lib/meta'
 import { AppLayout } from '../app/layout'
 import { PageHeader } from '../shared/components/PageHeader'
-import { PageContainer } from '../shared/components/PageContainer'
 import { StatCard } from '../features/dashboard/components/StatCard'
 import { TaskTrendChart } from '../features/dashboard/components/TaskTrendChart'
 
 const { Text } = Typography
 
+const COUNT_QUERIES = [
+  { key: 'queued', title: '排队中', status: 'pending,queued', icon: <ClockCircleOutlined />, tone: 'default' as const, filter: 'pending,queued' },
+  { key: 'running', title: '分析中', status: 'running', icon: <ThunderboltOutlined />, tone: 'primary' as const, filter: 'running' },
+  { key: 'needsReview', title: '待复核', status: 'needs_review', icon: <BugOutlined />, tone: 'warning' as const, filter: 'needs_review' },
+  { key: 'completed', title: '已完成', status: 'completed', icon: <CheckCircleOutlined />, tone: 'success' as const, filter: 'completed' },
+  { key: 'failed', title: '失败', status: 'failed', icon: <BugOutlined />, tone: 'error' as const, filter: 'failed' },
+  { key: 'total', title: '任务总数', status: undefined, icon: <FileProtectOutlined />, tone: 'default' as const, filter: undefined },
+]
+
 export function DashboardPage() {
   const [, navigate] = useLocation()
+
+  const countQueries = useQueries({
+    queries: COUNT_QUERIES.map((card) => ({
+      queryKey: ['tasks-count', card.key],
+      queryFn: () => api.listTasks(card.status ? { limit: '1', status: card.status } : { limit: '1' }),
+      refetchInterval: 5000,
+    })),
+  })
+
   const { data, isLoading } = useQuery({
-    queryKey: ['tasks'],
-    queryFn: () => api.listTasks({ limit: '100' }),
+    queryKey: ['tasks', 'dashboard-recent'],
+    queryFn: () => api.listTasks({ limit: '200' }),
     refetchInterval: 5000,
   })
 
   const tasks = data?.items ?? []
-
-  const stats = useMemo(() => {
-    return {
-      queued: tasks.filter((t) => ['pending', 'queued'].includes(t.status)).length,
-      running: tasks.filter((t) => t.status === 'running').length,
-      needsReview: tasks.filter((t) => t.status === 'needs_review').length,
-      completed: tasks.filter((t) => t.status === 'completed').length,
-      failed: tasks.filter((t) => t.status === 'failed').length,
-      total: tasks.length,
-    }
-  }, [tasks])
 
   const recentColumns: ColumnsType<TaskSummary> = [
     {
@@ -75,72 +80,27 @@ export function DashboardPage() {
     },
   ]
 
-  const statCards = [
-    {
-      title: '排队中',
-      value: stats.queued,
-      icon: <ClockCircleOutlined />,
-      tone: 'default' as const,
-      filter: 'pending,queued',
-    },
-    {
-      title: '分析中',
-      value: stats.running,
-      icon: <ThunderboltOutlined />,
-      tone: 'primary' as const,
-      filter: 'running',
-    },
-    {
-      title: '待复核',
-      value: stats.needsReview,
-      icon: <BugOutlined />,
-      tone: 'warning' as const,
-      filter: 'needs_review',
-    },
-    {
-      title: '已完成',
-      value: stats.completed,
-      icon: <CheckCircleOutlined />,
-      tone: 'success' as const,
-      filter: 'completed',
-    },
-    {
-      title: '失败',
-      value: stats.failed,
-      icon: <BugOutlined />,
-      tone: 'error' as const,
-      filter: 'failed',
-    },
-    {
-      title: '任务总数',
-      value: stats.total,
-      icon: <FileProtectOutlined />,
-      tone: 'default' as const,
-      filter: undefined,
-    },
-  ]
-
   return (
     <AppLayout>
       <PageHeader
         title="工作台"
         subtitle="AI 漏洞自动验证平台 · 任务总览"
         extra={
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/tasks')}>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/tasks?create=1')}>
             新建任务
           </Button>
         }
       />
 
       <Row gutter={[16, 16]} className="crucible-stagger">
-        {statCards.map((card) => (
-          <Col xs={24} sm={12} lg={8} key={card.title}>
+        {COUNT_QUERIES.map((card, i) => (
+          <Col xs={24} sm={12} lg={8} key={card.key}>
             <StatCard
               title={card.title}
-              value={card.value}
+              value={countQueries[i]?.data?.total ?? 0}
               icon={card.icon}
               tone={card.tone}
-              trend="近 7 日"
+              trend={card.key === 'total' ? '全部任务' : '点击筛选'}
               onClick={() =>
                 card.filter ? navigate(`/tasks?status=${card.filter}`) : navigate('/tasks')
               }
@@ -170,17 +130,21 @@ export function DashboardPage() {
             ) : tasks.length ? (
               <Table
                 rowKey="id"
-                size="middle"
+                size="medium"
                 columns={recentColumns}
                 dataSource={tasks.slice(0, 8)}
                 pagination={false}
                 onRow={(row) => ({
-                  onClick: () => navigate(`/tasks/${row.id}`),
+                  onClick: () => navigate(`/tasks/${row.id}?tab=progress`),
                   style: { cursor: 'pointer' },
                 })}
               />
             ) : (
-              <Empty description="暂无任务" />
+              <Empty description="暂无任务">
+                <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/tasks?create=1')}>
+                  新建任务
+                </Button>
+              </Empty>
             )}
           </Card>
         </Col>

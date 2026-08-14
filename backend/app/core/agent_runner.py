@@ -40,10 +40,44 @@ logger = logging.getLogger(__name__)
 AGENT_RUNNER_NAME_PREFIX = "crucible-agent-runner"
 AGENT_RUNNER_NETWORK = "crucible-sandbox-net"
 AGENT_EXTRA_HOSTS = {"host.docker.internal": "host-gateway"}
+# 自定义 bridge 在 Docker Desktop 上 127.0.0.11 经常解析不了公网；写死公共 DNS。
+AGENT_RUNNER_DNS = ["223.5.5.5", "8.8.8.8", "1.1.1.1"]
 
 
 class AgentRunnerError(Exception):
     """agent-runner 容器编排失败"""
+
+
+def _mount_matches_workdir(source: str, workdir: str) -> bool:
+    """比较 Docker Mount.Source 与任务 host_workdir（容忍斜杠差异）。"""
+    if not source or not workdir:
+        return False
+    a = os.path.normcase(os.path.normpath(source.replace("/", os.sep)))
+    b = os.path.normcase(os.path.normpath(workdir.replace("/", os.sep)))
+    return a == b
+
+
+def _task_id_from_workdir(path: str) -> str:
+    name = os.path.basename(os.path.abspath(path or ""))
+    if name.startswith("audit-"):
+        return name[6:]
+    return ""
+
+
+def _runner_labels(name: str, spec: AgentRunnerSpec) -> dict[str, str]:
+    labels = {
+        "managed_by": "crucible-agent-runner",
+        "agent_runner_id": name,
+        **(spec.extra_labels or {}),
+    }
+    tid = (
+        labels.get("crucible.task_id")
+        or labels.get("task_id")
+        or _task_id_from_workdir(spec.host_workdir)
+    )
+    if tid:
+        labels["crucible.task_id"] = tid
+    return labels
 
 
 # ─ ── 行缓冲 JSONL 解析器（应对 docker logs 按字节 chunk 切分） ──
@@ -139,19 +173,32 @@ class AgentRunnerManager:
         self._ensure_network()
 
     def _ensure_network(self) -> None:
-        """确保专用网络存在（默认 internal=False，可外联 git clone）"""
+        """确保专用网络存在且可外联（internal=False）。旧沙箱若建成 internal 则重建。"""
         try:
-            self._client.networks.get(AGENT_RUNNER_NETWORK)
+            net = self._client.networks.get(AGENT_RUNNER_NETWORK)
         except NotFound:
+            net = None
+        if net is not None:
+            if not net.attrs.get("Internal"):
+                return
+            logger.warning("网络 %s 为 internal，重建为可外联", AGENT_RUNNER_NETWORK)
             try:
-                self._client.networks.create(
-                    AGENT_RUNNER_NETWORK,
-                    driver="bridge",
-                    internal=False,
-                    labels={"managed_by": "crucible-agent-runner"},
-                )
+                net.remove()
             except DockerException as e:
-                logger.warning(f"创建网络 {AGENT_RUNNER_NETWORK} 失败（继续）: {e}")
+                logger.warning("无法删除 internal 网络 %s（可能仍有容器）: %s", AGENT_RUNNER_NETWORK, e)
+                return
+        try:
+            self._client.networks.create(
+                AGENT_RUNNER_NETWORK,
+                driver="bridge",
+                internal=False,
+                options={
+                    "com.docker.network.bridge.enable_ip_masquerade": "true",
+                },
+                labels={"managed_by": "crucible-agent-runner"},
+            )
+        except DockerException as e:
+            logger.warning("创建网络 %s 失败（继续）: %s", AGENT_RUNNER_NETWORK, e)
 
     # ── 容器编排 ──
 
@@ -169,18 +216,14 @@ class AgentRunnerManager:
         container_config: dict = {
             "image": spec.image,
             "name": name,
-            "command": ["python", "-m", "runner.run_one"],
-            "environment": spec.env,
+            # 不覆盖镜像 ENTRYPOINT（tini → python -m runner.run_one）
+            "environment": {**spec.env, "PYTHONPATH": "/app"},
             "working_dir": spec.workdir_container,
             "user": spec.user,
             "volumes": {
                 spec.host_workdir: {"bind": spec.workdir_container, "mode": "rw"},
             },
-            "labels": {
-                "managed_by": "crucible-agent-runner",
-                "agent_runner_id": name,
-                **spec.extra_labels,
-            },
+            "labels": _runner_labels(name, spec),
             "nano_cpus": nano_cpus,
             "mem_limit": spec.memory_limit,
             "memswap_limit": spec.memory_limit,
@@ -195,6 +238,7 @@ class AgentRunnerManager:
             "network_disabled": spec.network_disabled,
             "network": None if spec.network_disabled else spec.network,
             "extra_hosts": AGENT_EXTRA_HOSTS,
+            "dns": None if spec.network_disabled else AGENT_RUNNER_DNS,
             "log_config": LogConfig(
                 type="json-file",
                 config={"max-size": "10m", "max-file": "3"},
@@ -320,11 +364,19 @@ class AgentRunnerManager:
             stderr_tail = ""
             if exit_code != 0 and not oom_killed:
                 try:
-                    raw = runner.container.logs(tail=50, stdout=False, stderr=True)
+                    raw = runner.container.logs(tail=80, stdout=False, stderr=True)
                     if isinstance(raw, bytes):
                         stderr_tail = raw.decode("utf-8", errors="replace")
                     else:
                         stderr_tail = str(raw)
+                    # Windows Docker 上 stderr-only 常为空；python -m 的 ModuleNotFound
+                    # 也可能落在未分离的 stdout。stderr 空则回退抓双流。
+                    if not stderr_tail.strip():
+                        raw = runner.container.logs(tail=80)
+                        if isinstance(raw, bytes):
+                            stderr_tail = raw.decode("utf-8", errors="replace")
+                        else:
+                            stderr_tail = str(raw)
                 except Exception:  # noqa: BLE001 — 抓 stderr 失败不阻断
                     pass
 
@@ -351,6 +403,57 @@ class AgentRunnerManager:
                     runner.stop_and_remove()
                 except Exception:
                     pass
+
+    def remove_for_workdir(self, host_workdir: str) -> int:
+        """删除 bind 了该 host_workdir 的 agent-runner（取消时 worker 可能已被杀掉）。"""
+        if not host_workdir:
+            return 0
+        removed = 0
+        try:
+            containers = self._client.containers.list(
+                all=True, filters={"label": "managed_by=crucible-agent-runner"}
+            )
+        except DockerException as e:
+            logger.warning("列举 agent-runner 失败: %s", e)
+            return 0
+        for container in containers:
+            try:
+                attrs = container.attrs or {}
+                mounts = attrs.get("Mounts") or []
+                if not mounts:
+                    container.reload()
+                    mounts = (container.attrs or {}).get("Mounts") or []
+                if not any(
+                    _mount_matches_workdir(m.get("Source", ""), host_workdir) for m in mounts
+                ):
+                    continue
+                self.remove_by_id(container.id)
+                removed += 1
+            except Exception:  # noqa: BLE001
+                logger.warning("按工作区移除 agent-runner 失败", exc_info=True)
+        return removed
+
+    def remove_for_task(self, task_id: str, host_workdir: str | None = None) -> int:
+        """按 crucible.task_id 标签拆 runner，并兜底按工作区挂载再扫一遍。"""
+        if not task_id:
+            return self.remove_for_workdir(host_workdir or "")
+        removed = 0
+        try:
+            containers = self._client.containers.list(
+                all=True, filters={"label": f"crucible.task_id={task_id}"}
+            )
+        except DockerException as e:
+            logger.warning("按 task_id 列举 agent-runner 失败: %s", e)
+            containers = []
+        for container in containers:
+            try:
+                self.remove_by_id(container.id)
+                removed += 1
+            except Exception:  # noqa: BLE001
+                logger.warning("按 task_id 移除 agent-runner 失败", exc_info=True)
+        if host_workdir:
+            removed += self.remove_for_workdir(host_workdir)
+        return removed
 
     def remove_by_id(self, container_id: str) -> None:
         """按 ID 移除容器（幂等）"""
@@ -480,13 +583,18 @@ def _parse_docker_time(s: str) -> float:
     return _dt.datetime.fromisoformat(s).timestamp()
 
 
-def git_clone_to_workdir(workdir: str, project_address: str, project_ref: str | None) -> tuple[bool, str]:
-    """在 host 上 git clone 源码到 workdir/project。
+def git_clone_to_workdir(
+    workdir: str,
+    project_address: str,
+    project_ref: str | None,
+    dest_dirname: str | None = None,
+) -> tuple[bool, str]:
+    """在 host 上 git clone 到 workdir/{dest_dirname}（仓库名，而非固定 project）。
 
-    返回 (ok, error_or_empty)。clone 后校验 project 非空(防静默半失败)。
+    返回 (ok, error_or_empty)。失败信息带「源码克隆失败」前缀，便于节点 0 展示。
     """
-    project_dir = os.path.join(workdir, "project")
-    # 清理上次残留(retry 复用 host_workdir,旧 project 必须强删;只读文件也要删)
+    name = dest_dirname or _dirname_from_url(project_address)
+    project_dir = os.path.join(workdir, name)
     if os.path.isdir(project_dir):
 
         def _force_remove(func, path, _exc):  # noqa: ANN001
@@ -499,7 +607,7 @@ def git_clone_to_workdir(workdir: str, project_address: str, project_ref: str | 
         shutil.rmtree(project_dir, onerror=_force_remove)
 
     cmd = ["git", "clone", "--depth", "1"]
-    if project_ref:
+    if project_ref and not _looks_like_commit(project_ref) and project_ref.upper() != "HEAD":
         cmd += ["--branch", project_ref]
     cmd += [project_address, project_dir]
 
@@ -512,23 +620,57 @@ def git_clone_to_workdir(workdir: str, project_address: str, project_ref: str | 
             timeout=300,
         )
         if result.returncode != 0:
-            return False, (result.stderr or result.stdout)[:1000]
-        # clone 后校验:project 目录必须非空(防 .git 建了但 checkout 失败的静默半失败)
+            return False, _classify_clone_error(result.stderr or result.stdout)
+        if _looks_like_commit(project_ref or ""):
+            co = subprocess.run(
+                ["git", "-C", project_dir, "fetch", "--depth", "1", "origin", project_ref],
+                capture_output=True, text=True, timeout=120,
+            )
+            if co.returncode != 0:
+                return False, _classify_clone_error(co.stderr or co.stdout or "无法获取指定 commit")
+            ck = subprocess.run(
+                ["git", "-C", project_dir, "checkout", project_ref],
+                capture_output=True, text=True, timeout=60,
+            )
+            if ck.returncode != 0:
+                return False, f"源码克隆失败: 引用不存在或无法检出: {(ck.stderr or ck.stdout)[:300]}"
         if not os.path.isdir(project_dir):
-            return False, f"clone 返回 0 但 project 目录不存在: {project_dir}"
+            return False, f"源码克隆失败: clone 返回 0 但目录不存在: {project_dir}"
         entries = [e for e in os.listdir(project_dir) if e != ".git"]
         if not entries:
-            # .git 在但无工作区文件 = checkout 失败
-            git_log = subprocess.run(
-                ["git", "-C", project_dir, "log", "--oneline", "-1"],
-                capture_output=True, text=True,
-            ).stderr
-            return False, f"clone 后 project 目录为空(checkout 失败): {(git_log or '')[:300]}"
+            return False, f"源码克隆失败: 工作区为空（checkout 失败）: {project_dir}"
         return True, ""
     except subprocess.TimeoutExpired:
-        return False, "git clone 超时(>300s)"
+        return False, "源码克隆失败: 网络超时（>300s）"
     except Exception as e:
-        return False, f"git clone 异常: {e}"
+        return False, f"源码克隆失败: {e}"
+
+
+def _dirname_from_url(url: str) -> str:
+    name = url.rstrip("/").split("/")[-1]
+    if name.lower().endswith(".git"):
+        name = name[: -len(".git")]
+    return name or "repo"
+
+
+def _looks_like_commit(ref: str) -> bool:
+    import re
+    return bool(re.fullmatch(r"[0-9a-fA-F]{7,40}", ref))
+
+
+def _classify_clone_error(stderr: str) -> str:
+    text = (stderr or "").strip()
+    low = text.lower()
+    snippet = text[:400]
+    if "could not resolve" in low or "name or service not known" in low or "nodename nor servname" in low:
+        return f"源码克隆失败: 网络错误（无法解析主机）: {snippet}"
+    if "timed out" in low or "timeout" in low or "failed to connect" in low or "connection refused" in low:
+        return f"源码克隆失败: 网络错误: {snippet}"
+    if "remote branch" in low and "not found" in low:
+        return f"源码克隆失败: 分支/tag 不存在: {snippet}"
+    if "not found" in low or "authentication failed" in low or "permission denied" in low or "could not read username" in low:
+        return f"源码克隆失败: 仓库不存在或无权访问: {snippet}"
+    return f"源码克隆失败: {snippet or '未知 git 错误'}"
 
 
 # ─ ── 异步包装（FastAPI 场景） ─ ──

@@ -107,7 +107,7 @@ function ProviderFormDrawer({
 
   const handleTypeChange = (type: string) => {
     const preset = PROVIDER_TYPES[type]
-    if (preset && !form.getFieldValue('base_url')) {
+    if (preset) {
       form.setFieldsValue({ base_url: preset.defaultUrl, model: preset.defaultModel })
     }
   }
@@ -122,7 +122,7 @@ function ProviderFormDrawer({
       const result =
         editing && !values.api_key
           ? await api.testLlmProvider(editing.id)
-          : await fetchTest({
+          : await api.testLlmConnection({
               base_url: values.base_url,
               api_key: values.api_key,
               model: values.model,
@@ -135,20 +135,11 @@ function ProviderFormDrawer({
     }
   }
 
-  const fetchTest = async (target: { base_url: string; api_key?: string; model: string }) => {
-    const res = await fetch('/api/v1/settings/llm/test', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(target),
-    })
-    return res.json()
-  }
-
   return (
     <Drawer
       open={open}
       onClose={onClose}
-      width={560}
+      size={560}
       title={editing ? `编辑 Provider · ${editing.name}` : '新增 LLM Provider'}
     >
       <Form
@@ -459,7 +450,7 @@ function CredentialsPanel() {
       <Drawer
         open={open}
         onClose={() => { setOpen(false); setEditing(null); form.resetFields() }}
-        width={480}
+        size={480}
         title={editing ? `编辑凭据 · ${editing.name}` : '新增任务凭据'}
       >
         <Form

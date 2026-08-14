@@ -31,4 +31,5 @@ class ReportNode:
             host_workdir=ctx.host_workdir,
             runner_env=ctx.runner_env,
             on_event=ctx.on_event,
+            task_id=ctx.task_id,
         )

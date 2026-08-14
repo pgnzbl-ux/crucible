@@ -9,6 +9,7 @@
 Bucket 约定（由 createbuckets 容器初始化）：
 - crucible-artifacts  报告等结构化产物
 - crucible-evidence   原始证据文件（扫描日志、复现输出）
+- crucible-source     项目源码 tar.gz（见 project/source_cache.py）
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
-ARTIFACTS_BUCKET = settings.s3_bucket
+ARTIFACTS_BUCKET = "crucible-artifacts"
 EVIDENCE_BUCKET = "crucible-evidence"
 
 _client: Minio | None = None
