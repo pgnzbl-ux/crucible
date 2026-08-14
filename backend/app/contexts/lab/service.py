@@ -1,7 +1,8 @@
 import json
+import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -12,6 +13,8 @@ from app.core.config import get_settings
 
 from .models import Lab
 from .repository import LabRepository
+
+logger = logging.getLogger(__name__)
 
 LIVE_TASK_STATUSES = frozenset({"pending", "queued", "running"})
 RECLAIMABLE_LAB_STATUSES = frozenset({"failed", "expired", "destroyed"})
@@ -168,6 +171,60 @@ class LabService:
         )
         return list(result.scalars().all())
 
+    async def expire_silent_labs(
+        self, *, now: datetime | None = None
+    ) -> list[str]:
+        """销毁超过 TTL 且没有 live 任务占用的 ready/stopped Lab。"""
+        from . import docker_ops
+
+        clock = self._as_utc(now or self._now())
+        result = await self.session.execute(
+            select(Lab).where(Lab.status.in_({"ready", "stopped"}))
+        )
+        expired: list[str] = []
+        for lab in result.scalars().all():
+            last_seen = (
+                self._as_utc(lab.last_seen_at) if lab.last_seen_at is not None else None
+            )
+            ttl = lab.ttl_seconds if lab.ttl_seconds is not None else 3600
+            if last_seen is not None and clock < last_seen + timedelta(seconds=ttl):
+                continue
+            if await self.live_task_ids(lab.id):
+                continue
+            await docker_ops.compose_down(lab.compose_project)
+            lab.status = "expired"
+            await self.session.commit()
+            expired.append(lab.id)
+        return expired
+
+    async def fail_stale_creating(self) -> list[str]:
+        """标记无 live 任务的 creating Lab 失败，并 best-effort 清理 compose。"""
+        from . import docker_ops
+
+        result = await self.session.execute(select(Lab).where(Lab.status == "creating"))
+        stale = [
+            lab for lab in result.scalars().all() if not await self.live_task_ids(lab.id)
+        ]
+        for lab in stale:
+            lab.status = "failed"
+        if stale:
+            await self.session.commit()
+        for lab in stale:
+            try:
+                await docker_ops.compose_down(lab.compose_project)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "清理僵死 creating Lab 失败(best-effort) lab=%s",
+                    lab.id,
+                    exc_info=True,
+                )
+        return [lab.id for lab in stale]
+
+    async def known_lab_ids(self) -> set[str]:
+        """返回现存 Lab ID，供历史 compose 孤儿识别。"""
+        result = await self.session.execute(select(Lab.id))
+        return {lab_id.lower() for lab_id in result.scalars().all()}
+
     async def _require_lab(self, lab_id: str) -> Lab:
         lab = await self.repository.get(lab_id)
         if lab is None:
@@ -196,6 +253,12 @@ class LabService:
         except (json.JSONDecodeError, TypeError):
             return {}
         return decoded if isinstance(decoded, dict) else {}
+
+    @staticmethod
+    def _as_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
     @staticmethod
     def _now() -> datetime:

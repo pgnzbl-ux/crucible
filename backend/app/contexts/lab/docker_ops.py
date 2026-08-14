@@ -31,3 +31,37 @@ async def compose_start(compose_project: str) -> bool:
         )
         return False
     return True
+
+
+async def compose_down(project: str) -> None:
+    """`docker compose -p {project} down -v --remove-orphans`。"""
+    if not (project or "").strip():
+        raise ValueError("compose project 不能为空")
+    cmd = [
+        "docker",
+        "compose",
+        "-p",
+        project,
+        "down",
+        "-v",
+        "--remove-orphans",
+    ]
+    result = await asyncio.to_thread(
+        subprocess.run,
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        logger.error(
+            "docker compose down 失败 project=%s: %s",
+            project,
+            (result.stderr or result.stdout or "")[:300],
+        )
+        raise subprocess.CalledProcessError(
+            result.returncode,
+            cmd,
+            output=result.stdout,
+            stderr=result.stderr,
+        )

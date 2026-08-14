@@ -253,3 +253,27 @@ def test_list_managed_ids_ignores_leftover_compose_yaml(tmp_path):
         ids = list_managed_task_ids()
     assert ghost not in ids
     assert ids == set()
+
+
+@pytest.mark.asyncio
+async def test_legacy_lab_orphans_are_down_but_known_labs_are_kept():
+    """历史 task compose 要清；大小写不同的现存 lab compose 不能误拆。"""
+    from app.contexts.agent.runtime_cleanup import cleanup_legacy_lab_projects
+
+    downed: list[str] = []
+
+    async def fake_down(project: str) -> None:
+        downed.append(project)
+
+    await cleanup_legacy_lab_projects(
+        {
+            "crucible-lab-old-task",
+            "Crucible-Lab-LAB-ABC",
+            "postgres",
+            "crucible-lab-",
+        },
+        {"lab-abc"},
+        down=fake_down,
+    )
+
+    assert downed == ["crucible-lab-old-task"]

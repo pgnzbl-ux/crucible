@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterable
@@ -132,6 +133,100 @@ async def sweep_orphan_runtimes(
     return torn
 
 
+async def list_lab_compose_projects() -> set[str]:
+    """从 Docker 枚举所有 crucible-lab-* compose 项目。"""
+    cmd = [
+        "docker",
+        "ps",
+        "-a",
+        "--format",
+        '{{.Label "com.docker.compose.project"}}',
+    ]
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("列举 Lab compose 项目失败(best-effort)", exc_info=True)
+        return set()
+    if result.returncode != 0:
+        logger.warning(
+            "列举 Lab compose 项目失败(best-effort): %s",
+            (result.stderr or result.stdout or "")[:300],
+        )
+        return set()
+    return {
+        project.strip()
+        for project in result.stdout.splitlines()
+        if project.strip().lower().startswith(LAB_PROJECT_PREFIX)
+    }
+
+
+async def cleanup_legacy_lab_projects(
+    projects: Iterable[str],
+    known_lab_ids: set[str],
+    *,
+    down: Callable[[str], Awaitable[None]] | None = None,
+) -> list[str]:
+    """清理后缀不对应任何 labs.id 的历史 crucible-lab-{task_id}。"""
+    from app.contexts.lab.docker_ops import compose_down
+
+    known = {lab_id.lower() for lab_id in known_lab_ids}
+    cleanup = down or compose_down
+    removed: list[str] = []
+    for project in sorted(set(projects), key=str.lower):
+        raw = (project or "").strip()
+        lowered = raw.lower()
+        if not lowered.startswith(LAB_PROJECT_PREFIX):
+            continue
+        suffix = lowered[len(LAB_PROJECT_PREFIX) :]
+        if not suffix or suffix in known:
+            continue
+        try:
+            await cleanup(raw)
+            removed.append(raw)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "清理历史 Lab compose 失败(best-effort) project=%s",
+                raw,
+                exc_info=True,
+            )
+    return removed
+
+
+async def sweep_lab_lifecycle() -> None:
+    """用独立 DB session 执行 TTL、僵死 creating 与历史孤儿巡检。"""
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    from app.contexts.lab.service import LabService
+
+    engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with factory() as session:
+            service = LabService(session)
+            await service.expire_silent_labs()
+            await service.fail_stale_creating()
+            known_lab_ids = await service.known_lab_ids()
+        projects = await list_lab_compose_projects()
+        removed = await cleanup_legacy_lab_projects(projects, known_lab_ids)
+        if removed:
+            logger.info("清理 %s 个历史 Lab compose: %s", len(removed), removed)
+    finally:
+        await engine.dispose()
+
+
+async def sweep_all_runtimes() -> None:
+    """先扫 agent-runner，再巡检共享 Lab 生命周期。"""
+    await sweep_orphan_runtimes()
+    await sweep_lab_lifecycle()
+
+
 def collect_task_ids_from_containers(containers: Iterable, workdir_base: str) -> set[str]:
     """从任务标签、挂载路径收集 task_id；忽略共享 Lab 的 compose 项目名。"""
     ids: set[str] = set()
@@ -219,7 +314,7 @@ def start_background_sweeper() -> None:
 
         while True:
             try:
-                asyncio.run(sweep_orphan_runtimes())
+                asyncio.run(sweep_all_runtimes())
             except Exception:  # noqa: BLE001
                 logger.exception("orphan runtime sweep 失败")
             time.sleep(SWEEP_INTERVAL_SECONDS)
