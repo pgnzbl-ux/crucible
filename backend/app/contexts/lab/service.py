@@ -183,6 +183,7 @@ class LabService:
         )
         expired: list[str] = []
         for lab in result.scalars().all():
+            original_status = lab.status
             last_seen = (
                 self._as_utc(lab.last_seen_at) if lab.last_seen_at is not None else None
             )
@@ -191,9 +192,27 @@ class LabService:
                 continue
             if await self.live_task_ids(lab.id):
                 continue
-            await docker_ops.compose_down(lab.compose_project)
-            lab.status = "expired"
+            claimed = await self.repository.cas_status(
+                lab.id, {original_status}, "expired"
+            )
+            if not claimed:
+                continue
             await self.session.commit()
+            if await self.live_task_ids(lab.id):
+                await self.repository.cas_status(lab.id, {"expired"}, original_status)
+                await self.session.commit()
+                continue
+            await self.session.refresh(lab)
+            if lab.status != "expired":
+                continue
+            try:
+                await docker_ops.compose_down(lab.compose_project)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "TTL 清理 Lab 失败(best-effort) lab=%s",
+                    lab.id,
+                    exc_info=True,
+                )
             expired.append(lab.id)
         return expired
 
@@ -202,14 +221,21 @@ class LabService:
         from . import docker_ops
 
         result = await self.session.execute(select(Lab).where(Lab.status == "creating"))
-        stale = [
-            lab for lab in result.scalars().all() if not await self.live_task_ids(lab.id)
-        ]
-        for lab in stale:
-            lab.status = "failed"
-        if stale:
+        failed: list[str] = []
+        for lab in result.scalars().all():
+            if await self.live_task_ids(lab.id):
+                continue
+            claimed = await self.repository.cas_status(lab.id, {"creating"}, "failed")
+            if not claimed:
+                continue
             await self.session.commit()
-        for lab in stale:
+            if await self.live_task_ids(lab.id):
+                await self.repository.cas_status(lab.id, {"failed"}, "creating")
+                await self.session.commit()
+                continue
+            await self.session.refresh(lab)
+            if lab.status != "failed":
+                continue
             try:
                 await docker_ops.compose_down(lab.compose_project)
             except Exception:  # noqa: BLE001
@@ -218,7 +244,8 @@ class LabService:
                     lab.id,
                     exc_info=True,
                 )
-        return [lab.id for lab in stale]
+            failed.append(lab.id)
+        return failed
 
     async def known_lab_ids(self) -> set[str]:
         """返回现存 Lab ID，供历史 compose 孤儿识别。"""

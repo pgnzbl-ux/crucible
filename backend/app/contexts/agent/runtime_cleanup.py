@@ -198,6 +198,31 @@ async def cleanup_legacy_lab_projects(
     return removed
 
 
+async def run_lab_lifecycle_phases(service) -> None:
+    """隔离 TTL、僵死 creating 与历史孤儿三个巡检阶段。"""
+    try:
+        await service.expire_silent_labs()
+    except Exception:  # noqa: BLE001
+        logger.exception("Lab TTL 巡检失败")
+        await service.session.rollback()
+
+    try:
+        await service.fail_stale_creating()
+    except Exception:  # noqa: BLE001
+        logger.exception("Lab creating 巡检失败")
+        await service.session.rollback()
+
+    try:
+        known_lab_ids = await service.known_lab_ids()
+        projects = await list_lab_compose_projects()
+        removed = await cleanup_legacy_lab_projects(projects, known_lab_ids)
+        if removed:
+            logger.info("清理 %s 个历史 Lab compose: %s", len(removed), removed)
+    except Exception:  # noqa: BLE001
+        logger.exception("历史 Lab compose 巡检失败")
+        await service.session.rollback()
+
+
 async def sweep_lab_lifecycle() -> None:
     """用独立 DB session 执行 TTL、僵死 creating 与历史孤儿巡检。"""
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -210,13 +235,7 @@ async def sweep_lab_lifecycle() -> None:
     try:
         async with factory() as session:
             service = LabService(session)
-            await service.expire_silent_labs()
-            await service.fail_stale_creating()
-            known_lab_ids = await service.known_lab_ids()
-        projects = await list_lab_compose_projects()
-        removed = await cleanup_legacy_lab_projects(projects, known_lab_ids)
-        if removed:
-            logger.info("清理 %s 个历史 Lab compose: %s", len(removed), removed)
+            await run_lab_lifecycle_phases(service)
     finally:
         await engine.dispose()
 

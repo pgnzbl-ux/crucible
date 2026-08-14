@@ -277,3 +277,28 @@ async def test_legacy_lab_orphans_are_down_but_known_labs_are_kept():
     )
 
     assert downed == ["crucible-lab-old-task"]
+
+
+@pytest.mark.asyncio
+async def test_lab_sweep_phases_continue_after_expire_failure():
+    """TTL 阶段异常不能跳过 creating 与历史孤儿阶段。"""
+    from app.contexts.agent.runtime_cleanup import run_lab_lifecycle_phases
+
+    service = MagicMock()
+    service.expire_silent_labs = AsyncMock(side_effect=RuntimeError("ttl failed"))
+    service.fail_stale_creating = AsyncMock()
+    service.known_lab_ids = AsyncMock(return_value={"known"})
+    service.session.rollback = AsyncMock()
+
+    with patch(
+        "app.contexts.agent.runtime_cleanup.list_lab_compose_projects",
+        new_callable=AsyncMock,
+        return_value={"crucible-lab-legacy"},
+    ), patch(
+        "app.contexts.agent.runtime_cleanup.cleanup_legacy_lab_projects",
+        new_callable=AsyncMock,
+    ) as cleanup:
+        await run_lab_lifecycle_phases(service)
+
+    service.fail_stale_creating.assert_awaited_once()
+    cleanup.assert_awaited_once_with({"crucible-lab-legacy"}, {"known"})

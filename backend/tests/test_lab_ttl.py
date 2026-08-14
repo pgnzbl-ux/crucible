@@ -180,6 +180,96 @@ async def test_creating_without_live_task_is_failed_and_cleaned(session):
 
 
 @pytest.mark.asyncio
+async def test_ttl_down_failure_does_not_block_other_labs(session):
+    from app.contexts.lab.models import Lab
+
+    first_service, first = await ready_lab(session)
+    await seed(session, task_id="t2", status="completed")
+    second = await first_service.acquire(
+        owner_id="u1", project_id="p1", commit_sha="b" * 40, task_id="t2"
+    )
+    await first_service.mark_ready(
+        second.lab_id,
+        target_url="http://10.0.0.9:3002",
+        compose_path=".vuln-env/docker-compose.yml",
+        transport_shape={"protocol": "http"},
+        initial_creds={},
+    )
+    (await session.get(Lab, first.lab_id)).last_seen_at = None
+    (await session.get(Lab, second.lab_id)).last_seen_at = None
+    await session.commit()
+
+    async def down_one_fails(project: str) -> None:
+        if project == first.compose_project:
+            raise RuntimeError("first down failed")
+
+    with patch(
+        "app.contexts.lab.docker_ops.compose_down",
+        new_callable=AsyncMock,
+        side_effect=down_one_fails,
+    ) as down:
+        expired = await first_service.expire_silent_labs()
+
+    assert set(expired) == {first.lab_id, second.lab_id}
+    assert down.await_count == 2
+    assert (await session.get(Lab, first.lab_id)).status == "expired"
+    assert (await session.get(Lab, second.lab_id)).status == "expired"
+
+
+@pytest.mark.asyncio
+async def test_ttl_restores_ready_when_task_appears_after_claim(session):
+    from app.contexts.lab.models import Lab
+
+    svc, result = await ready_lab(session)
+    lab = await session.get(Lab, result.lab_id)
+    lab.last_seen_at = None
+    await session.commit()
+
+    with patch.object(
+        svc,
+        "live_task_ids",
+        new_callable=AsyncMock,
+        side_effect=[[], ["new-live-task"]],
+    ), patch(
+        "app.contexts.lab.docker_ops.compose_down", new_callable=AsyncMock
+    ) as down:
+        expired = await svc.expire_silent_labs()
+
+    assert expired == []
+    down.assert_not_awaited()
+    assert (await session.get(Lab, result.lab_id)).status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_creating_restores_claim_when_task_appears_after_claim(session):
+    from app.contexts.lab.models import Lab
+    from app.contexts.lab.service import LabService
+    from app.contexts.task.models import Task
+
+    await seed(session)
+    svc = LabService(session)
+    result = await svc.acquire(
+        owner_id="u1", project_id="p1", commit_sha=SHA, task_id="t1"
+    )
+    (await session.get(Task, "t1")).status = "cancelled"
+    await session.commit()
+
+    with patch.object(
+        svc,
+        "live_task_ids",
+        new_callable=AsyncMock,
+        side_effect=[[], ["new-live-task"]],
+    ), patch(
+        "app.contexts.lab.docker_ops.compose_down", new_callable=AsyncMock
+    ) as down:
+        failed = await svc.fail_stale_creating()
+
+    assert failed == []
+    down.assert_not_awaited()
+    assert (await session.get(Lab, result.lab_id)).status == "creating"
+
+
+@pytest.mark.asyncio
 async def test_compose_down_uses_project_only_command():
     from app.contexts.lab.docker_ops import compose_down
 

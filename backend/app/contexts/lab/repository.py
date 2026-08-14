@@ -42,3 +42,16 @@ class LabRepository:
             .values(status="creating", creator_task_id=creator_task_id)
         )
         return result.rowcount == 1
+
+    async def cas_status(
+        self,
+        lab_id: str,
+        from_statuses: Collection[str],
+        to_status: str,
+    ) -> bool:
+        result = await self.session.execute(
+            update(Lab)
+            .where(Lab.id == lab_id, Lab.status.in_(from_statuses))
+            .values(status=to_status)
+        )
+        return result.rowcount == 1
