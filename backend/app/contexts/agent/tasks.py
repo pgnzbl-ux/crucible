@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 from app.contexts.identity.models import User  # noqa: F401 — 注册 users 表到 metadata，保证 FK 解析
+from app.contexts.lab.models import Lab  # noqa: F401
 from app.contexts.project.models import Project  # noqa: F401 — 注册 projects 表(阶段 1)
 from app.contexts.report.models import Report, Evidence  # noqa: F401 — 注册 reports/evidences 表
 from app.contexts.report.repository import ReportRepository

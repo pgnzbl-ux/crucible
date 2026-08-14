@@ -16,6 +16,10 @@ class Task(BaseModel):
         String(36), ForeignKey("projects.id"), index=True,
         comment="关联 Project(P1 新增,project_address 保留兼容)",
     )
+    lab_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("labs.id"), index=True,
+        comment="共用靶场 Lab",
+    )
     source_type: Mapped[str] = mapped_column(String(20), default="git", comment="git | local_upload")
     vulnerability_description: Mapped[str] = mapped_column(Text, nullable=False, comment="漏洞描述")
     vulnerability_reasoning: Mapped[str | None] = mapped_column(Text, comment="漏洞推理过程")

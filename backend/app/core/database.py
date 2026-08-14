@@ -70,6 +70,8 @@ async def _ensure_dev_columns(conn) -> None:
         await conn.execute(
             text("ALTER TABLE tasks ADD COLUMN credential_refs TEXT NOT NULL DEFAULT '[]'")
         )
+    if cols and "lab_id" not in col_names:
+        await conn.execute(text("ALTER TABLE tasks ADD COLUMN lab_id VARCHAR(36)"))
 
 
 async def close_db() -> None:
