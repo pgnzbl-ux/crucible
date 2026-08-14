@@ -70,7 +70,7 @@
 ### GET `/api/v1/tasks`
 
 分页查询。Query：
-- `status`：单状态，或逗号分隔多状态（如 `pending,queued`）。**未传时默认排除 `archived`**；查归档任务需显式 `status=archived`
+- `status`：单状态，或逗号分隔多状态（如 `pending,queued`）
 - `priority` / `q`（项目地址关键词）/ `date_from` / `date_to`（`YYYY-MM-DD`）
 - `limit`（默认 50，最大 200）/ `offset`
 
@@ -84,35 +84,19 @@
 
 ### POST `/api/v1/tasks/{id}/retry`  *(阶段 1 新增)*
 
-重试任务(202 返 `{task_id, run_id, status:retrying}`)。新建 TaskRun，**从节点 0（源码获取）整条重跑**，不复用上一 run 的 NodeRun。上一 run 的节点/事件保留作历史。同一次 run 内 worker 崩溃仍可靠 NodeRun 断点续跑，与用户点「重试」不是同一条路径。
+重试任务(202 返 `{task_id, run_id, status:retrying}`)。**断点续跑**:复用上一 run 已完成的 NodeRun.output_json,从第一个非 completed 节点起重跑。
 
 ### DELETE `/api/v1/tasks/{id}?hard=true|false`  *(阶段 1 新增)*
 
-删除任务。默认软删(`status=archived`)，已归档再软删返回 400；`hard=true` 物理删除需 `X-Confirm: true` header(级联清理 runs/nodes/events)。删除时 `teardown_task_runtime` 只拆该任务的 agent-runner，不拆可复用靶场。默认列表不返回已归档任务。
+删除任务。默认软删(`status=archived`);`hard=true` 物理删除需 `X-Confirm: true` header(级联清理 runs/nodes/events)。删除时 `teardown_task_runtime` 只拆该任务的 agent-runner，不拆可复用靶场。
 
 ### GET `/api/v1/tasks/{id}/runs/{run_id}/nodes`  *(阶段 1 新增)*
 
-返回该 run 的节点列表（前端进度条数据源）:
-
-```json
-[{
-  "id": "uuid",
-  "node_index": 0,
-  "node_key": "source",
-  "status": "pending|running|completed|failed|skipped|cancelled",
-  "attempt": 1,
-  "error_message": null,
-  "started_at": "...",
-  "finished_at": "...",
-  "output": { "origin": "minio", "repo_dirname": "claudecodeui" }
-}]
-```
-
-`output` 为解析后的节点产出（坏 JSON 为空对象）。源码节点含 origin/repo_dirname/commit_sha；画像含 language/framework/is_web/port/detected_services（不含 AI 长文）；靶场含 target_url（`http://{宿主机IP}:{compose 映射的 Web 端口}`，不是 localhost / 容器端口）与 initial_creds（登录账号密码，若有）。
+返回该 run 的 6 节点 NodeRun 列表(前端步骤条数据源):`[{node_index, node_key, status, attempt, error_message, started_at, finished_at}]`。
 
 ### GET `/api/v1/tasks/{id}/events`
 
-历史事件（默认当前/最新一次 run，最近 1000 条，`limit` 1–1000）。重试会新建 run，历史 run 的 `phase.updated` 不混进本接口。含 `agent.thinking` / `agent.message` / `tool.call.*` / `agent.failed`（`title`+`hint`）/ `node.updated`。
+历史事件（默认最近 1000 条，`limit` 1–1000）。含 `agent.thinking` / `agent.message` / `tool.call.*` / `agent.failed`（`title`+`hint`）/ `node.updated`。
 
 ### GET `/api/v1/tasks/{id}/events/stream`
 
@@ -120,7 +104,7 @@
 
 - 响应头：`X-Accel-Buffering: no` + `Cache-Control: no-cache, no-transform`（防 nginx/反代缓冲）
 - 事件名 = `Event.event_type`（`phase.updated` / `agent.thinking` / `agent.message` / `tool.call.*` / `agent.completed` / `agent.failed` / `node.updated` / `ready` / `error`）
-- 启动先回放 **当前 run** DB 最近 1000 条（帧含 `replayed: true`），再订阅 Redis `task.{id}.events` 频道转发实时事件
+- 启动先回放 DB 最近 1000 条（帧含 `replayed: true`），再订阅 Redis `task.{id}.events` 频道转发实时事件
 - `agent.failed` 的 `event` 含 `error`（原文）、`title`（人类可读）、`hint`（下一步）
 - 15s 心跳：`: heartbeat\n\n`
 - 客户端断开 → 立即 `unsubscribe` + 关闭 Redis 连接（防泄漏）
@@ -138,7 +122,7 @@
 
 ### GET `/api/v1/reports`
 
-分页查询。`{ items, total, limit, offset }`。每条含 `id, task_id, title, verdict, severity, status, summary, created_at`。
+分页查询。
 
 ### GET `/api/v1/reports/{id}`
 
@@ -160,32 +144,6 @@ owner 校验：生产严格（`report.owner_id` 必须匹配 token），开发�
 
 ---
 
-## Project Context
-
-### GET `/api/v1/projects/`
-
-当前用户的项目列表：`{ items, total }`。任务创建时按 Git 地址自动登记。
-
-### GET `/api/v1/projects/{id}`
-
-项目元数据 + 画像快照（`detected_language` / `detected_framework` / `is_web` / `last_cloned_at`）。权威画像按 commit SHA 存在对应 `source_artifacts.profile_json`。`is_web=false` 时前端禁止从该项目开验证任务。非所有者或不存在 → 404。
-
-### GET `/api/v1/projects/{id}/artifacts`
-
-当前用户在该仓库已缓存的 MinIO 源码包（按 owner + host + `project_key` 匹配，`.git` 后缀不区分）。
-
-```json
-{ "items": [{ "ref_type": "branch", "ref_name": "main", "commit_sha": "...", "object_url": "...", "repo_dirname": "claudecodeui" }], "total": 1 }
-```
-
-非所有者或不存在 → 404。
-
-### POST `/api/v1/projects/` / PUT `/api/v1/projects/{id}` / DELETE `/api/v1/projects/{id}`
-
-手工登记/改备注/删除。日常用任务创建自动 upsert 即可。GET/PUT/DELETE 均校验 owner；非所有者或不存在 → 404。
-
----
-
 ## Lab Context
 
 所有端点只访问当前用户的 lab。列表与详情中的 lab 对象包含 `live_task_count`；大于 0 时，所有靶场级和容器级写操作均拒绝。
@@ -203,7 +161,17 @@ owner 校验：生产严格（`report.owner_id` 必须匹配 token），开发�
 | POST | `/api/v1/labs/{id}/containers/{name}/actions/restart` | `docker restart` |
 | DELETE | `/api/v1/labs/{id}/containers/{name}` | `docker rm -f` |
 
-`{name}` 不属于该 lab 的 compose 项目时返回 404。存在 live 任务时，上述所有写操作返回 **409**，错误码 `LAB_IN_USE`，响应中带当前 `live_task_count`。
+`{name}` 不属于该 lab 的 compose 项目时返回 404。存在 live 任务时，上述所有写操作返回 **409**，错误码 `LAB_IN_USE`：
+
+```json
+{
+  "detail": {
+    "code": "LAB_IN_USE",
+    "message": "靶场正被任务使用",
+    "task_ids": ["uuid"]
+  }
+}
+```
 
 ---
 
@@ -244,7 +212,7 @@ owner 校验：生产严格（`report.owner_id` 必须匹配 token），开发�
 | 401 | `UNAUTHENTICATED` | 缺 / 错 token |
 | 403 | `FORBIDDEN` | 权限不足（待 P1-9 RBAC） |
 | 404 | `NOT_FOUND` / `TASK_NOT_FOUND` / `REPORT_NOT_FOUND` | 资源不存在 |
-| 409 | `CONFLICT` / `STATE_INVALID` | 状态机非法转换 / username 重名 |
+| 409 | `CONFLICT` / `STATE_INVALID` / `LAB_IN_USE` | 状态机非法转换 / username 重名 / 靶场正被 live 任务占用 |
 | 422 | `VALIDATION_FAILED` | Pydantic 字段错误 |
 | 429 | `RATE_LIMITED` | （待补） |
 | 503 | `SERVICE_UNAVAILABLE` | Docker / Redis / MinIO 不可用 |

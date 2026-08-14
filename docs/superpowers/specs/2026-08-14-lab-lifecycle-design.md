@@ -149,7 +149,7 @@ expired / destroyed / failed ── rebuild 或再次 acquire──► creating
 
 前缀 `/api/v1`，需登录，只返回 `owner_id = 当前用户` 的 lab。
 
-占用拒绝：该 lab 存在 live 任务时，下列写操作 **409**，body 说明哪些 task_id 占用中。
+占用拒绝：该 lab 存在 live 任务时，下列写操作 **409**，body 为 `detail: {code, message, task_ids}`，其中 `code=LAB_IN_USE`。
 
 | 方法 | 路径 | 行为 |
 |---|---|---|
@@ -181,6 +181,7 @@ expired / destroyed / failed ── rebuild 或再次 acquire──► creating
           "status": "ready",
           "target_url": "http://10.0.0.8:3001",
           "ttl_remaining_seconds": 2400,
+          "live_task_count": 0,
           "containers": [{ "name": "...", "status": "running", "ports": "3001->3000" }]
         }
       ]
