@@ -258,8 +258,15 @@ class LabService:
             raise ValueError("缺少配方，请从验证任务重新创建")
 
         await self._confirm_not_busy(lab.id)
+        previous_status = lab.status
         lab.status = "creating"
         await self.session.commit()
+        try:
+            await self._confirm_not_busy(lab.id)
+        except LabBusyError:
+            lab.status = previous_status
+            await self.session.commit()
+            raise
         try:
             await docker_ops.compose_up_build(
                 lab.compose_project, compose_file, lab.workdir

@@ -171,6 +171,38 @@ async def test_stop_rechecks_live_tasks_immediately_before_docker(session):
 
 
 @pytest.mark.asyncio
+async def test_rebuild_restores_status_when_task_binds_after_creating_commit(
+    session, tmp_path
+):
+    from app.contexts.lab.errors import LabBusyError
+    from app.contexts.lab.models import Lab
+
+    svc, result, task = await ready_lab(session)
+    task.status = "completed"
+    lab = await session.get(Lab, result.lab_id)
+    lab.workdir = str(tmp_path).replace("\\", "/")
+    compose_file = tmp_path / ".vuln-env" / "docker-compose.yml"
+    compose_file.parent.mkdir()
+    compose_file.write_text("services: {}", encoding="utf-8")
+    await session.commit()
+
+    with patch.object(
+        svc,
+        "live_task_ids",
+        new_callable=AsyncMock,
+        side_effect=[[], [], ["t1"]],
+    ), patch(
+        "app.contexts.lab.docker_ops.compose_up_build", new_callable=AsyncMock
+    ) as rebuild:
+        with pytest.raises(LabBusyError) as exc_info:
+            await svc.rebuild_lab(result.lab_id, owner_id="u1")
+
+    assert exc_info.value.task_ids == ["t1"]
+    assert lab.status == "ready"
+    rebuild.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_container_action_rejects_creating_lab_before_docker(session):
     from app.contexts.lab.models import Lab
 
