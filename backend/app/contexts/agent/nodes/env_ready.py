@@ -84,19 +84,22 @@ def resolve_compose_host_path(
 ) -> str:
     """把 AI 给出的 compose 路径解析为宿主机绝对路径。
 
-    约定:配方写在 host_workdir/{repo_dirname}/.vuln-env/。
+    约定:任务 workspace 下配方在 host_workdir/{repo_dirname}/.vuln-env/。
+    lab 目录（repo_dirname 为空）下配方在 host_workdir/.vuln-env/。
     兼容容器内绝对路径 /workspace/<repo>/... 以及误放在 host_workdir 根下的文件。
     """
     from pathlib import Path
 
     raw = (compose_path or ".vuln-env/docker-compose.yml").replace("\\", "/")
     host = Path(host_workdir)
-    name = (repo_dirname or "").strip() or "project"
+    name = (repo_dirname or "").strip()
     if raw.startswith("/workspace/"):
         rel = raw[len("/workspace/"):].lstrip("/")
         return str(host / rel)
     if raw.startswith("/") and os.path.exists(raw):
         return raw
+    if not name:
+        return str(host / raw)
     repo_hit = host / name / raw
     root_hit = host / raw
     if repo_hit.exists():
@@ -498,10 +501,11 @@ def _reused_output(result: Any) -> dict[str, Any]:
 async def _resolve_project_id(ctx: NodeContext) -> str:
     if ctx.project_id:
         return ctx.project_id
+    from app.contexts.project.repository import ProjectRepository
     from app.contexts.project.service import ProjectService
 
     try:
-        project = await ProjectService(ctx.db_session).upsert_by_git_url(
+        project = await ProjectService(ProjectRepository(ctx.db_session)).upsert_by_git_url(
             git_url=ctx.project_address,
             owner_id=ctx.owner_id,
         )
@@ -613,19 +617,19 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
             ok, err = await docker_compose_up(
                 compose_path,
                 result.workdir,
-                repo,
+                None,
                 lab_id=result.lab_id,
                 on_progress=lambda line: _emit(ctx, line),
             )
             if not ok:
                 logs = await collect_compose_logs(
-                    result.workdir, compose_path, repo, lab_id=result.lab_id
+                    result.workdir, compose_path, None, lab_id=result.lab_id
                 )
                 last_error = f"attempt {attempt} compose up 失败: {err}\n--- logs ---\n{logs}"
                 logger.warning(f"节点 2 attempt {attempt} 失败: {err[:200]}")
                 _emit(ctx, f"启动失败，回喂 AI 回溯（{attempt}/{MAX_ATTEMPTS}）")
                 await docker_compose_down(
-                    result.workdir, compose_path, repo, lab_id=result.lab_id
+                    result.workdir, compose_path, None, lab_id=result.lab_id
                 )
                 continue
 
@@ -635,14 +639,14 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
             ok, live_port = await health_check(web_ports)
             if not ok or live_port is None:
                 logs = await collect_compose_logs(
-                    result.workdir, compose_path, repo, lab_id=result.lab_id
+                    result.workdir, compose_path, None, lab_id=result.lab_id
                 )
                 last_error = (
                     f"attempt {attempt} 健康检查不过(mapped_ports={web_ports})\n--- logs ---\n{logs}"
                 )
                 _emit(ctx, f"探活失败，回喂 AI 回溯（{attempt}/{MAX_ATTEMPTS}）")
                 await docker_compose_down(
-                    result.workdir, compose_path, repo, lab_id=result.lab_id
+                    result.workdir, compose_path, None, lab_id=result.lab_id
                 )
                 continue
 

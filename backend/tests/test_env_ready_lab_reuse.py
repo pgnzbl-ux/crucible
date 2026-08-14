@@ -135,7 +135,15 @@ async def test_env_ready_create_compose_up_uses_lab_id(tmp_path):
         hc.return_value = (True, 3001)
         out = await EnvReadyNode().execute(ctx)
     assert up.await_args.kwargs["lab_id"] == "lab-create"
-    assert up.await_args.args[1] == str(lab_dir)
+    host_workdir = up.await_args.args[1]
+    assert host_workdir == str(lab_dir)
+    assert host_workdir != str(lab_dir / "b")
+    repo_dirname = (
+        up.await_args.args[2]
+        if len(up.await_args.args) > 2
+        else up.await_args.kwargs.get("repo_dirname")
+    )
+    assert not repo_dirname
     assert (lab_dir / ".vuln-env" / "docker-compose.yml").is_file()
     assert out["target_url"] == "http://10.0.0.8:3001"
     LS.return_value.mark_ready.assert_awaited()

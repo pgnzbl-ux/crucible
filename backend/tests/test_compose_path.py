@@ -40,6 +40,13 @@ def test_missing_file_still_points_at_repo(tmp_path):
     assert got.replace("\\", "/").endswith("claudecodeui/.vuln-env/x.yml")
 
 
+def test_empty_repo_dirname_uses_workdir_root(tmp_path):
+    got = resolve_compose_host_path(
+        ".vuln-env/docker-compose.yml", str(tmp_path), repo_dirname=None
+    )
+    assert got == str(tmp_path / ".vuln-env" / "docker-compose.yml")
+
+
 def test_compose_progress_throttle_emits_first_urgent_and_flush():
     """构建日志很多，只把首行、失败、以及节流窗口末行推给前端。"""
     from app.contexts.agent.nodes.env_ready import ComposeProgressThrottle
