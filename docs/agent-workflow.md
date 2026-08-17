@@ -44,7 +44,7 @@
 └────────────────────────────────────────────────────────────────┘
 ```
 
-分支出口、节点 schema 见编排设计 spec §1。reproduce 只交结构化测试事实（verdict / attempts / evidence），**不写报告**；report 节点是唯一文档作者：confirmed/partial 出漏洞报告，其余出验证记录（无 PoC、无 CVSS）。
+分支出口、节点 schema 见编排设计 spec §1。reproduce 交结构化测试事实（verdict / attempts / evidence）；confirmed/partial 须交 `poc` 正本，**不写报告**；report 节点是唯一文档作者：confirmed/partial 出漏洞报告，其余出验证记录（无 PoC、无 CVSS）。
 
 ---
 
