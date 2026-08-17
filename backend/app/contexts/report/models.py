@@ -39,6 +39,10 @@ class Report(BaseModel):
     report_data: Mapped[str | None] = mapped_column(Text, comment="8 节结构化 JSON(对齐 report_template)")
     md_artifact_key: Mapped[str | None] = mapped_column(String(512), comment="MinIO:原始 md key")
     docx_artifact_key: Mapped[str | None] = mapped_column(String(512), comment="MinIO:导出 docx key")
+    poc_language: Mapped[str | None] = mapped_column(String(16), comment="python/bash/other")
+    poc_filename: Mapped[str | None] = mapped_column(String(255))
+    poc_code: Mapped[str | None] = mapped_column(Text, comment="完整 PoC 源码")
+    poc_usage: Mapped[str | None] = mapped_column(String(1024))
 
     published_at: Mapped[datetime | None] = mapped_column(comment="发布时间")
 

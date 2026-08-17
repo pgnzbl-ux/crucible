@@ -40,6 +40,10 @@ class ReportDetail(BaseModel):
     report_data: dict[str, Any] | None = None
     md_artifact_key: str | None = None
     docx_artifact_key: str | None = None
+    poc_language: str | None = None
+    poc_filename: str | None = None
+    poc_code: str | None = None
+    poc_usage: str | None = None
     published_at: datetime | None
     created_at: datetime
     updated_at: datetime

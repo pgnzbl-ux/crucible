@@ -105,6 +105,12 @@ def test_report_columns_from_orch_result_confirmed():
         "report_data": _md_sections(product_intro="产品X介绍" * 20),
         "cvss": {"base_score": 9.8, "severity": "Critical"},
         "vulnerable_file": "app/login.py",
+        "poc": {
+            "language": "python",
+            "filename": "poc.py",
+            "code": "print('x')\n",
+            "usage": "python poc.py --url http://x",
+        },
     })
     assert cols["cvss_score"] == 9.8
     assert cols["severity"] == "Critical"
@@ -112,6 +118,10 @@ def test_report_columns_from_orch_result_confirmed():
     assert cols["summary"].startswith("产品X")
     assert len(cols["summary"]) <= 500
     assert cols["title"].startswith("漏洞验证报告")
+    assert cols["poc_language"] == "python"
+    assert cols["poc_filename"] == "poc.py"
+    assert cols["poc_code"] == "print('x')\n"
+    assert cols["poc_usage"] == "python poc.py --url http://x"
 
 
 def test_report_columns_drop_cvss_for_not_reproduced():
@@ -120,8 +130,11 @@ def test_report_columns_drop_cvss_for_not_reproduced():
         "report_data": _record_sections(product_intro="产品Y"),
         "cvss": {"base_score": 8.9, "severity": "Critical"},
         "vulnerable_file": "server/agent.routes.ts",
+        "poc": {"language": "python", "filename": "poc.py", "code": "print(1)", "usage": "x"},
     })
     assert cols["cvss_score"] is None
     assert cols["severity"] is None
     assert cols["title"].startswith("漏洞验证记录")
     assert cols["summary"] == "产品Y"
+    assert cols["poc_language"] is None
+    assert cols["poc_code"] is None

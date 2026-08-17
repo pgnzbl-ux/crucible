@@ -64,6 +64,7 @@ def report_columns_from_orch_result(orch_result: dict) -> dict:
     """从编排收尾 dict 抽出 Report 索引列。未确认判定强制无 CVSS。"""
     rd = orch_result.get("report_data") or {}
     cvss = orch_result.get("cvss") or {}
+    poc = orch_result.get("poc") if isinstance(orch_result.get("poc"), dict) else {}
     intro = rd.get("product_intro") if isinstance(rd, dict) else ""
     verdict = orch_result.get("verdict")
     confirmed = verdict in _CONFIRMED_VERDICTS
@@ -75,6 +76,10 @@ def report_columns_from_orch_result(orch_result: dict) -> dict:
         "vulnerable_file": orch_result.get("vulnerable_file") or None,
         "summary": str(intro or "")[:500],
         "title": "漏洞验证报告" if confirmed else "漏洞验证记录",
+        "poc_language": (str(poc["language"]) if confirmed and poc.get("language") else None),
+        "poc_filename": (str(poc["filename"]) if confirmed and poc.get("filename") else None),
+        "poc_code": (str(poc["code"]) if confirmed and poc.get("code") else None),
+        "poc_usage": (str(poc["usage"]) if confirmed and poc.get("usage") else None),
     }
 
 
@@ -490,6 +495,10 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
                                 report_data=json.dumps(report_data, ensure_ascii=False, default=str),
                                 title=f"{cols['title']} — {task_id[:8]}",
                                 summary=cols["summary"],
+                                poc_language=cols["poc_language"],
+                                poc_filename=cols["poc_filename"],
+                                poc_code=cols["poc_code"],
+                                poc_usage=cols["poc_usage"],
                             )
                             session.add(report)
                         await session.commit()

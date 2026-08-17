@@ -325,6 +325,7 @@ async def run_orchestration(
         "report_data": report_out.get("report_data") if report_out else None,
         "cvss": report_out.get("cvss") if report_out else None,
         "vulnerable_file": report_out.get("vulnerable_file") if report_out else None,
+        "poc": report_out.get("poc") if report_out else None,
         "non_web": skipped_due_to_non_web,
         "repo_dirname": repo_dirname_from_outputs(previous_outputs),
         "project_path": previous_outputs.get("source", {}).get("project_path"),
