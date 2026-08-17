@@ -82,6 +82,39 @@ async def test_retry_creates_new_run_without_reusing_nodes(session_factory):
 
 
 @pytest.mark.asyncio
+async def test_retry_marks_task_queued_until_worker_starts(session_factory):
+    """重试后任务应排队，不能提前标 running，否则列表误显「分析中」。"""
+    from app.contexts.task.models import Task, TaskRun
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+    from unittest.mock import patch
+    from sqlalchemy import select
+
+    async with session_factory() as session:
+        task = Task(
+            project_address="x",
+            vulnerability_description="d",
+            owner_id="u1",
+            status="failed",
+        )
+        session.add(task)
+        await session.flush()
+        session.add(TaskRun(task_id=task.id, status="failed"))
+        await session.flush()
+
+        svc = TaskService(TaskRepository(session))
+        with patch("app.core.celery_app.celery_app.send_task"):
+            new_run_id = await svc.retry_task(task.id, "u1")
+
+        await session.refresh(task)
+        new_run = (
+            await session.execute(select(TaskRun).where(TaskRun.id == new_run_id))
+        ).scalar_one()
+        assert task.status == "queued"
+        assert new_run.status == "pending"
+
+
+@pytest.mark.asyncio
 async def test_retry_rejects_running_task(session_factory):
     """running 中的任务不能 retry(应先 cancel 或等完成)。"""
     from app.contexts.task.models import Task

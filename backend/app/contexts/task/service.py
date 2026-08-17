@@ -250,7 +250,8 @@ class TaskService:
         new_run = TaskRun(task_id=task_id, status="pending")
         new_run = await self.repo.create_run(new_run)
 
-        task.status = "running"
+        # 与 create_task 一致：投递后先排队；worker 接管后再标 running
+        task.status = "queued"
         await self.repo.session.flush()
         await self.repo.session.commit()
 
