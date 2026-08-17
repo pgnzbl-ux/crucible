@@ -9,6 +9,8 @@ import pytest
 from app.contexts.agent.ai_runner import (
     NODE_INPUT_SCHEMAS,
     _mock_output,
+    apply_poc_to_report_output,
+    render_poc_markdown,
     rewrite_url_for_agent_container,
     validate_output,
 )
@@ -235,6 +237,34 @@ def _poc_ok(**over):
     }
     base.update(over)
     return base
+
+
+def test_render_poc_markdown_python_fence():
+    md = render_poc_markdown(_poc_ok())
+    assert md.startswith("```python\n")
+    assert "argparse" in md
+    assert "用法：`python poc.py --url http://host.docker.internal:8080`" in md
+
+
+def test_apply_poc_overwrites_model_poc_commands():
+    out = apply_poc_to_report_output(
+        {"report_data": _md_sections(poc_commands="```bash\ncurl x\n```"), "final_verdict": "confirmed"},
+        _poc_ok(code="print('REAL')\n"),
+        "confirmed",
+    )
+    assert "print('REAL')" in out["report_data"]["poc_commands"]
+    assert "curl x" not in out["report_data"]["poc_commands"]
+    assert out["poc"]["code"].startswith("print")
+
+
+def test_apply_poc_strips_on_verification_record():
+    out = apply_poc_to_report_output(
+        {"report_data": _record_sections(), "final_verdict": "false_positive"},
+        None,
+        "false_positive",
+    )
+    assert "poc" not in out
+    assert "poc_commands" not in out["report_data"]
 
 
 def _confirmed_ok(**over):

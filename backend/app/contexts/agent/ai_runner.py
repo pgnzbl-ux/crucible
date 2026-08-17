@@ -464,6 +464,7 @@ def _validate_screenshots(shots: list[str], host_workdir: str | None) -> tuple[b
 
 
 _POC_LANGS = ("python", "bash", "other")
+_POC_FENCE = {"python": "python", "bash": "bash", "other": "text"}
 
 
 def _poc_has_code(poc: Any) -> bool:
@@ -491,6 +492,35 @@ def _validate_poc(poc: Any, *, required: bool) -> tuple[bool, str | None]:
         if not isinstance(reason, str) or not reason.strip():
             return False, "非 python 的 poc 需要 language_reason"
     return True, None
+
+
+def render_poc_markdown(poc: dict[str, Any]) -> str:
+    fence = _POC_FENCE.get(str(poc.get("language") or ""), "text")
+    code = str(poc.get("code") or "").rstrip()
+    usage = str(poc.get("usage") or "").strip()
+    return f"```{fence}\n{code}\n```\n\n用法：`{usage}`\n"
+
+
+def apply_poc_to_report_output(
+    output: dict[str, Any], poc: dict[str, Any] | None, expected_verdict: str,
+) -> dict[str, Any]:
+    if expected_verdict in _CONFIRMED_VERDICTS:
+        ok, err = _validate_poc(poc, required=True)
+        if not ok:
+            if poc is None:
+                raise RuntimeError("confirmed/partial 缺少 reproduce.poc")
+            raise RuntimeError(err or "confirmed/partial 缺少 reproduce.poc")
+        assert isinstance(poc, dict)
+        rd = dict(output.get("report_data") or {})
+        rd["poc_commands"] = render_poc_markdown(poc)
+        output["report_data"] = rd
+        output["poc"] = poc
+        return output
+    output.pop("poc", None)
+    rd = output.get("report_data")
+    if isinstance(rd, dict):
+        rd.pop("poc_commands", None)
+    return output
 
 
 def _validate_reproduce_output(

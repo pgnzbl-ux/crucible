@@ -14,6 +14,7 @@ from tests.test_ai_runner import (
     _confirmed_ok,
     _md_sections,
     _not_reproduced_ok,
+    _poc_ok,
     _record_sections,
 )
 
@@ -65,6 +66,22 @@ async def test_report_node_rejects_verdict_drift():
                 reproduce=_not_reproduced_ok(),
                 audit={"gate_verdict": "pass"},
             ))
+
+
+@pytest.mark.asyncio
+async def test_report_node_overwrites_poc_commands_from_reproduce():
+    repro = _confirmed_ok(poc=_poc_ok(code="print('FROM_REPRO')\n"))
+    fake = AsyncMock(return_value={
+        "report_data": _md_sections(poc_commands="```bash\ncurl rewritten\n```"),
+        "final_verdict": "confirmed",
+        "cvss": repro["cvss"],
+        "vulnerable_file": repro["vulnerable_file"],
+    })
+    with patch("app.contexts.agent.ai_runner.run_ai_node", fake):
+        out = await ReportNode().execute(_ctx(reproduce=repro, audit={"gate_verdict": "pass"}))
+    assert "FROM_REPRO" in out["report_data"]["poc_commands"]
+    assert "curl rewritten" not in out["report_data"]["poc_commands"]
+    assert out["poc"]["filename"] == "poc.py"
 
 
 @pytest.mark.asyncio

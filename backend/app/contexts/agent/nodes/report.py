@@ -50,5 +50,9 @@ class ReportNode:
         final = output.get("final_verdict")
         if final != expected:
             raise RuntimeError(f"verdict 漂移: expected={expected} got={final}")
+        from app.contexts.agent.ai_runner import apply_poc_to_report_output
+
+        repro_poc = repro.get("poc") if isinstance(repro.get("poc"), dict) else None
+        output = apply_poc_to_report_output(output, repro_poc, expected)
         output["authored_by"] = "reporter"
         return output
