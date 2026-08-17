@@ -34,13 +34,14 @@
 | 2 | 靶场就绪 | `env_ready` | □AI 为主 + ■代码协作 |
 | 3 | 白盒审计 | `audit` | □AI |
 | 4 | 复现验证 | `reproduce` | □AI |
-| 5 | 报告生成 | `report` | □AI + ■代码校验导出 |
+| 5 | 报告生成 | `report` | ■代码落库；仅出口 B 为 □AI |
 
 **其他关键决策(已与用户确认):**
 - 节点 2 协作模式:**AI 出配方(Dockerfile/compose)+ 代码执行 docker compose**(AI 不碰 docker.sock,守 `cap_drop ALL` 红线),排障循环 max 5 轮。
 - AI 节点输出方式:**`submit_result` 工具**(强制 `tool_choice`),平台从 tool_call 取结构化 output_json,不靠解析文本。
 - AI 节点用**独立 agent-runner 容器**(限幻觉的物理保证)。
 - 插件改多 agent(领域知识 skills/references 零改动,只拆壳)。
+- **2026-08-17**：桌面 `plugins/` 不再进镜像；每 AI 节点一份蒸馏 skill 作 system_prompt。见 `2026-08-17-node-skill-injection-design.md`。
 
 ---
 
@@ -59,13 +60,14 @@
    │ {target_url, transport_shape, initial_creds, compose_path}
    ▼
 3 白盒审计 (□AI)  ── gate_verdict=fail ──► 分支出口 B(误报,跳过节点 4)
-   │ {kill_chain, defense_layers[], payloads[], gate_verdict}
+                   ── gate_verdict=uncertain ──► 分支出口 D(待复核,跳过节点 4 和 5)
+   │ {kill_chain, defense_layers[], payloads[], gate_verdict: pass|fail|uncertain, gate_reason, runtime_dependent}
    ▼
 4 复现验证 (□AI)
-   │ {reproduced, evidence[], screenshots[], verdict}
+   │ {reproduced, evidence[], screenshots[], verdict, report_data 8 md, cvss, vulnerable_file}
    ▼
-5 报告生成 (□AI+■代码)
-   │ report_data(8 节) + final_verdict
+5 报告落库 (■代码；仅出口 B 为 □AI)
+   │ report_data(8 节 Markdown) + final_verdict + authored_by
    ▼
  完成(归档 + 拆 agent-runner；靶场保留复用)
 ```
@@ -77,6 +79,7 @@
 | A 非 web | 节点 1 | node 2-5 标 `skipped` | `completed`,verdict 空(非 web 不下结论) |
 | B 误报 | 节点 3 `gate_verdict=fail` | node 4 标 `skipped` | `completed`,verdict=`false_positive` |
 | C 基础设施失败 | 节点 2 排障 5 轮失败 | run 标 `failed` | `failed`(可 retry) |
+| D 待复核 | 节点 3 `gate_verdict=uncertain` | node 4 和 5 标 skipped | `needs_review`，verdict 空 |
 
 ### 1.3 节点 input/output schema(结构化交接契约)
 
@@ -85,9 +88,9 @@
 | 0 source | `{git_url, ref}` | `{source_path, project_path, repo_dirname, project_key, commit_sha, ref_type, ref_name, object_url, origin}` |
 | 1 profile | `{source_path, hints}` | `{is_web, language, framework, port, has_dockerfile, has_compose, detected_services[], start_command, non_web_reason}`（架构事实 + web 门禁；**不含** README 长文） |
 | 2 env_ready | `{source_path, profile}` | `{target_url`=`http://{宿主机IP}:{compose 映射的 Web 端口}`（只 publish Web 入口，不映射 postgres/redis；禁止 localhost）, `transport_shape{...}, initial_creds{}, compose_path, started_containers[]}` |
-| 3 audit | `{source_path, vulnerability_description, profile}` | `{kill_chain, defense_layers[{name,bypass}], payloads[], gate_verdict: pass\|fail, gate_reason}` |
-| 4 reproduce | `{source_path, target_url, initial_creds, transport_shape, compose_path, started_containers, audit, vulnerability_description}`（`target_url` 等来自节点 2 最终产出，容器内改写成 host.docker.internal） | `{reproduced: bool, evidence[{type,detail}], screenshots[], verdict: confirmed\|partial\|code_reachable\|code_smell\|false_positive\|not_reproduced}` |
-| 5 report | `{全部前序 output}` | `{report_data{§1-§8}, final_verdict, cvss{vector,score,severity}}` |
+| 3 audit | `{source_path, vulnerability_description, profile}` | `{gate_verdict: pass\|fail\|uncertain, gate_reason(必填), kill_chain, defense_layers[{name,bypass}], payloads[], runtime_dependent(pass 必填)}`；pass 须 payloads≥1 且 `runtime_dependent` 为 bool；uncertain 不得带非空 payloads |
+| 4 reproduce | `{source_path, target_url, initial_creds, transport_shape, compose_path, started_containers, audit, vulnerability_description}`（`target_url` 等来自节点 2 最终产出，容器内改写成 host.docker.internal） | `{reproduced, evidence[{type,detail}], screenshots[], verdict, report_data{8 节 Markdown 字符串}, cvss, vulnerable_file}`。confirmed/partial 须 reproduced=true 且 evidence≥1；false_positive/not_reproduced 须 reproduced=false。一次 AI，5 次变体在容器内。 |
+| 5 report | 成功路径吃 reproduce 的 report_data；出口 B 吃 audit | 成功路径：■代码拷贝 `{report_data, final_verdict=reproduce.verdict, cvss, vulnerable_file, authored_by:reproduce}`，不启 runner。出口 B：□AI `{report_data 8 md, final_verdict=false_positive, authored_by:reporter}` |
 
 ### 1.4 判定档位(6 档,对齐插件)
 
@@ -286,7 +289,16 @@ async def _run_analysis(task_id, run_id):
 
 ### 3.3 节点 2 靶场协作循环
 
-平台控制循环,AI 不碰 docker.sock:
+平台控制循环,AI 不碰 docker.sock。创建者进入 max-5 循环**之前**先配方命中短路：
+
+```
+download_recipe → 落到 lab 目录
+命中：平台改宿主口（若占用）+ 一次 compose up + 探活
+    成功 → 跳过 AI，mark_ready + upload_recipe → node done
+    失败 → 立即把构建/探活日志回喂 AI 循环 attempt=1（不二次同一稿）
+未命中 → 进入下方 max-5 循环
+docker 不可用 → 节点失败（fail-fast，不进 AI）
+```
 
 ```
 for attempt in 1..5:
@@ -308,6 +320,8 @@ for attempt in 1..5:
 if 5 轮失败:
     node failed → 分支出口 C
 ```
+
+循环内某轮探活成功后同样 `upload_recipe`。构建/探活失败立即回喂下一轮，不拿同一份配方再 up。
 
 安全:AI 在 agent-runner 内只读写 `{source_path}/.vuln-env/` 文本(容器可写区),**不碰 docker.sock**;平台复制配方到 lab workdir 后，由 worker 在宿主/独立网络执行 docker compose。守 `cap_drop ALL` + 只读 rootfs 红线。
 
@@ -335,70 +349,36 @@ ClaudeAgentOptions(
 
 ## 4. 报告结构化
 
-### 4.1 report_data JSON schema(8 节,对齐 `report_template.md`)
+### 4.1 report_data（8 节 Markdown 字符串；旧嵌套 JSON 树作废）
+
+正文不含 `## N.` 标题（导出与 Collapse 由平台加）。索引字段 `verdict` / `cvss` / `vulnerable_file` 不从 Markdown 解析。
 
 ```yaml
 report_data:
-  # §1 产品介绍
-  product_intro: ""
+  product_intro: "Markdown 正文"
+  vulnerability: "Markdown 正文"
+  impact: "Markdown 正文"
+  details: "Markdown 正文"
+  reproduction: "Markdown 正文"
+  poc_commands: "Markdown 正文"
+  fix_suggestions: "Markdown 正文"
+  reporting_decision: "Markdown 正文"
 
-  # §2 漏洞描述
-  vulnerability:
-    type: "CWE-XXX: 名称"
-    cvss:
-      vector: "AV:N/AC:L/PR:N/UI:N/C:H/I:H/A:H"
-      base_score: 9.8
-      severity: "Critical"
-      scenarios: [{name, vector, score, condition}]
-    vulnerable_file: "path/to/file"
-    vulnerable_lines: "123-145"
-    preconditions: ""
-    entry_point: "URL"
-    core_harm: ""
-    environment_constraint: ""
-    trigger_default: ""
-
-  # §3 影响范围
-  impact:
-    affected_versions: ""
-    unaffected_versions: ""
-    trigger_condition_defaults: ""
-
-  # §4 漏洞详情
-  details:
-    audit_analysis: [{file, lines, content, flaw_explanation}]
-    poc_construction: {endpoint_choice_reason, bypass_methods[], payload_design, exploitation_chain}
-
-  # §5 漏洞复现
-  reproduction:
-    transport_shape: {protocol, listener, tls_termination, x_forwarded_proto, channel_check}
-    target_product: ""
-    frontend_url: ""
-    steps: [{step, action, observation, screenshot}]
-    result_verification: [{item, result}]
-    attack_chain_diagram: ""
-
-  # §6 POC
-  poc_commands: ["curl ..."]
-
-  # §7 修复建议
-  fix_suggestions: [{priority, suggestion, code_example}]
-
-  # §8 报送判定
-  reporting_decision: {recommendation, actual_harm, fix_priority, reason, risk_description}
-
-# 横切
 final_verdict: "confirmed|partial|code_reachable|code_smell|false_positive|not_reproduced"
+cvss: {vector, base_score, severity}
+vulnerable_file: "path/to/file 或空串"
 ```
+
+详见 `2026-08-14-reproduce-live-gate-design.md` §3.2。
 
 ### 4.2 报告生成与导出
 
-- **节点 5 agent**:吃全部前序 output_json,按 `report_template.md` 8 节调 `submit_result` 回传 report_data。
-- **校验**:复用 plugin `md_to_docx.py::_validate_report`(8 节齐全 / transport-shape 关键字 / 截图引用 / 截图存在)的等价校验逻辑,改成作用于 report_data JSON。
-- **渲染 md**:report_data JSON → markdown(模板填空,生成人读友好的 §1-§8 md)。
-- **转 docx**:复用 plugin `md_to_docx.py`(650 行,python-docx)。
-- **存储**:report_data 落 `reports.report_data`;md/docx 上传 MinIO(`md_artifact_key` / `docx_artifact_key`)。
-- **导出**:`GET /reports/{id}/export?format=docx|md` → 从 MinIO 取或按需生成。
+- **成功路径**：reproduce 同一会话交 8 节 Markdown；节点 5 **不默认开 Agent**，只校验拷贝。
+- **出口 B（audit fail）**：节点 5 短 AI reporter，同构 8 节误报稿，`final_verdict=false_positive`。
+- **校验**：8 键齐全且值为非空字符串；不扫 transport-shape 关键字、不核对截图落盘。
+- **渲染 md**：每节加 `## N. 标题` 后拼接正文。
+- **存储**：report_data 落 `reports.report_data`；索引列写 `verdict` / `cvss_score` / `severity` / `vulnerable_file`。
+- **导出**：`GET /reports/{id}/export?format=json|md`（不生成 docx）。
 
 ---
 
@@ -426,24 +406,14 @@ Task `status` 增加 `archived`(软删)。verdict 6 档独立于 status(见 §1.
 
 ---
 
-## 6. 插件改造:单 agent → 多 agent
+## 6. 插件与蒸馏 skill
 
-```
-plugins/vuln-verify-expert/
-  agents/
-    profiler.md      ← 节点 1(吃 run-project-env 第 1–2 步)
-    env-builder.md   ← 节点 2(吃 run-project-env 第 3 步起)
-    auditor.md       ← 节点 3(吃 vuln-verify/SKILL.md Phase 1/2/2.5)
-    reproducer.md    ← 节点 4(吃 vuln-verify Phase 3/4 + reproduction-guide.md)
-    reporter.md      ← 节点 5(吃 report_template.md + Phase 5)
-  skills/            ← 原样保留,作为各 agent 的知识库(system prompt 资产)
-    run-project-env/references/
-    vuln-verify/references/
-```
+`plugins/vuln-verify-expert/` 是桌面 Claude Code 插件（母本），**不**打进 agent-runner。
+平台运行时 SOP 在 `infrastructure/agent-runner/node-skills/{profile,env_ready,audit,reproduce,report}/SKILL.md`，
+由 `run_one.py` 以 `system_prompt` append 注入。user message 只带本轮 `input_json`。
 
-- `vuln-verify-expert.md`(原总编排 agent)**退役**——阶段控制权移交平台编排器,领域知识拆进 4 个子 agent。
-- skills/references **一行不改**,继续给子 agent 当 system prompt 资产。
-- 每个 agent 的 `submit_result` 工具 schema 由平台按节点定义(§1.3)注入。
+`vuln-verify-expert.md` 仍可用于桌面独立跑；平台控制流在 `orchestrator.py`。
+`submit_result` 工具 schema 由平台按节点定义(§1.3)注入。
 
 ---
 

@@ -77,7 +77,7 @@ Crucible 是一个 **Web 平台 + Agent 执行引擎** 的组合：
 
 ## ✨ 核心特性
 
-- 🤖 **平台 6 节点编排** —— Celery worker 的 orchestrator 驱动 6 节点(source/profile/env_ready/audit/reproduce/report)。source 为代码节点;profile 起为 AI 节点(独立 agent-runner + `submit_result`);分支出口:非 web skip、audit gate_fail 判误报、env 5 轮失败。方法论封装为 `vuln-verify-expert` 插件(profiler / env-builder / auditor / reproducer / reporter)
+- 🤖 **平台 6 节点编排** —— Celery orchestrator 驱动 6 节点。AI 节点各自注入蒸馏 skill（`node-skills/`），桌面 `plugins/vuln-verify-expert` 只当方法论母本。分支出口：非 web skip、audit fail 判误报、env 5 轮失败、audit uncertain 待复核。
 - 🔄 **实时进度推送** —— 任务详情通过 SSE 展示节点进度与 Agent 过程（思考、工具调用、结论），无需轮询
 - 🧱 **模块化单体** —— Bounded Context 组织代码（task / agent / report / identity / settings），事件驱动通信，未来可拆
 - 🔒 **Security by Default** —— Agent 跑在独立隔离容器(非 root + 只读 rootfs + cap_drop ALL + 资源限制)。LLM 凭据通过 `docker run --env` 注入容器(容器销毁 env 消失)；平台设置库中的 API Key 明文存储，接口回显掩码
@@ -117,18 +117,13 @@ Crucible 是一个 **Web 平台 + Agent 执行引擎** 的组合：
                                             │                          │
                                             │  tini → run_one.py       │
                                             │   ├─ 读 .node.json        │
-                                            │   ├─ 按 NODE_KEY 选 agent │
-                                            │   │   (profiler/          │
-                                            │   │    env-builder/       │
-                                            │   │    auditor/           │
-                                            │   │    reproducer/        │
-                                            │   │    reporter)          │
-                                            │   ├─ 注入 submit_result   │
-                                            │   │   MCP 工具(schema 校验)│
-                                            │   └─ query() → JSONL      │
-                                            │                          │
-                                            │  _bundled/claude (CLI)   │
-                                            │  + 5 子 agent + 2 skills │
+                                            │   ├─ 读 node-skills/{NODE_KEY}/SKILL.md │
+                                            │   ├─ system_prompt append（claude_code） │
+                                            │   ├─ 注入 submit_result MCP            │
+                                            │   └─ query() → JSONL                   │
+                                            │                                        │
+                                            │  _bundled/claude (CLI)                 │
+                                            │  + 每节点一份蒸馏 skill                 │
                                             └────────────────────────┘
                                                       │
                                                       ▼
@@ -225,25 +220,19 @@ Crucible/
 │       ├── features/                # 领域模块（task 列表与详情）
 │       └── shared/                  # api / hooks / 共享组件
 │
-├── plugins/                         # ★ Claude Code 插件（5 子 agent,平台 6 节点编排调用）
+├── plugins/                         # 桌面 Claude Code 插件（母本，不进 runner）
 │   └── vuln-verify-expert/
 │       ├── .claude-plugin/plugin.json
-│       ├── agents/                  # profiler / env-builder / auditor / reproducer / reporter
-│       │   ├── profiler.md          # 节点 profile（项目全景 + web 门禁）
-│       │   ├── env-builder.md       # 节点 env_ready（靶场）
-│       │   ├── auditor.md           # 节点 audit
-│       │   ├── reproducer.md        # 节点 reproduce
-│       │   └── reporter.md          # 节点 report
-│       └── skills/
-│           ├── run-project-env/     # 搭建隔离靶场方法论
-│           └── vuln-verify/         # 白盒审计 + 复现方法论
+│       ├── agents/vuln-verify-expert.md
+│       └── skills/                  # run-project-env / vuln-verify
 │
 ├── infrastructure/                  # Docker
 │   ├── docker-compose.yml           # postgres(5433) + redis(6380) + minio(9000/9001)
 │   └── agent-runner/                # Agent Runner 专用镜像
-│       ├── Dockerfile               # build context=项目根，COPY plugins/ 进镜像
-│       ├── requirements.txt         # claude-agent-sdk==0.2.134
-│       └── runner/run_one.py        # 容器内 entrypoint（加载插件 + JSONL 流）
+│       ├── Dockerfile               # COPY node-skills/，不 COPY plugins/
+│       ├── node-skills/             # 每 AI 节点蒸馏 SKILL.md
+│       ├── requirements.txt
+│       └── runner/run_one.py        # skill → system_prompt + JSONL
 │
 ├── docs/                            # 设计文档
 │   ├── development-guide.md         # 架构决策 + P0/P1/P2 路线

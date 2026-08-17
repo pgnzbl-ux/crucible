@@ -4,7 +4,7 @@
 > 定位: Crucible 架构决策与开发路线 —— 从 v2.0 分层架构痛点复盘到 v3.0 六原则六决策落地
 > 阅读对象: 任何接手本项目的开发者
 >
-> **平台 6 节点编排是核心方向，完整设计见 `docs/agent-workflow.md`**（6 节点 source/profile/env_ready/audit/reproduce/report + 3 分支出口：非 web skip、audit gate_fail 判误报、env 5 轮失败）
+> **平台 6 节点编排是核心方向，完整设计见 `docs/agent-workflow.md`**（6 节点 source/profile/env_ready/audit/reproduce/report + 4 分支出口：非 web skip、audit gate_fail 判误报、env 5 轮失败、audit uncertain 待复核）
 
 ---
 
@@ -106,10 +106,11 @@ infrastructure/
 └── agent-runner/              # Agent Runner 镜像（Python + Node + 完整 Linux 命令，Claude Agent SDK 隔离执行）
     ├── Dockerfile             # build context=项目根；runner 复制到 /app/runner（勿放 /workspace，会被 host bind-mount 盖掉）
     ├── requirements.txt       # claude-agent-sdk==0.2.134
-    └── runner/run_one.py      # 容器内 entrypoint（加载插件 + 指定 agent + JSONL 流输出）
+    └── runner/run_one.py      # 容器内 entrypoint（蒸馏 skill → system_prompt + JSONL）
+    └── node-skills/           # 每 AI 节点一份 SKILL.md（不加载桌面插件）
 
-plugins/                       # ★ Claude Code 插件（阶段化编排的载体，见 docs/agent-workflow.md）
-└── vuln-verify-expert/        #   白盒验证 agent + 2 skills（搭靶场 / 验证出报告）
+plugins/                       # 桌面 Claude Code 插件（母本 / 指导材料，不进 runner 镜像）
+└── vuln-verify-expert/        #   总 agent + 2 skills；平台蒸馏见 agent-runner/node-skills
 ```
 
 ### 2.4 数据模型
@@ -144,12 +145,13 @@ Task 加 project_id(FK→projects) + verdict(6 档);Report 加 report_data 等�
 | Repository 现代化 | ✅ | 每 Context repository.py（类型化 + select） |
 | Agent Adapter 抽象 | ✅ | executor.py（Protocol + 双实现 + 工厂） |
 | Agent Runner 编排 | ✅ | core/agent_runner.py（容器编排 + 流式消费 + 行缓冲 + 凭据零落盘） |
-| **平台 6 节点编排** | ✅ | agent/orchestrator.py 驱动 6 节点 + node_runs 表 + submit_result 工具回传 + 5 子 agent(见 docs/agent-workflow.md) |
+| **平台 6 节点编排** | ✅ | orchestrator 驱动 6 节点 + 蒸馏 skill 注入 runner；audit uncertain→needs_review |
 | Event Bus（Redis Pub/Sub） | ✅ | shared/events.py（统一事件结构） |
 | 事件持久化 + 查询 | ✅ | agent_events 表 + GET /tasks/{id}/events |
 | **SSE 实时事件推送（P0-1）** | ✅ | shared/sse.py（StreamingResponse + 历史回放 + 15s 心跳 + 断开清理）+ GET /tasks/{id}/events/stream + 前端 useTaskEvents hook |
 | 报告生成 + MinIO 归档 | ✅ | report/service.py + storage.py |
 | **源码 MinIO 缓存** | ✅ | `source_artifacts` 按 owner+host+project+ref；branch/HEAD 必须 ls-remote 对上 SHA 才用 MinIO；画像 `profile_json` 绑同一 SHA，SHA 变则清空重检 |
+| **靶场配方 MinIO 复用** | ✅ | `lab/recipe_store` 按 owner+project+SHA 存 `.vuln-env/`；env_ready 创建者先 download 短路（命中改宿主口 + 一次 up），未命中/失败再 AI；成功 upload；rebuild 可从 MinIO 拉回 |
 | LLM 后台配置（新增） | ✅ | settings context（Fernet 加密 + 测试连接 + 种子迁移） |
 | DeepSeek 对接 | ✅ | ClaudeSdkAdapter.build_runner_env() 注入 ANTHROPIC_* env(零落盘,容器销毁消失) |
 | 前端 pages/ shared/ 分层 | ✅ | AppLayout + 4 页面 |
@@ -177,14 +179,14 @@ Task 加 project_id(FK→projects) + verdict(6 档);Report 加 report_data 等�
 
 | # | 任务 | 现状 | 目标 | 涉及 |
 |---|------|------|------|------|
-| 0 | **平台 6 节点编排** ✅ | agent/orchestrator.py 驱动 6 节点(source/profile/env_ready/audit/reproduce/report) + node_runs 表 + 5 子 agent(profiler/env-builder/auditor/reproducer/reporter) + submit_result 工具回传;分支出口:非 web skip、audit gate_fail 判误报、env 5 轮失败 | orchestrator.py + nodes/ + agent/tasks.py |
+| 0 | **平台 6 节点编排** ✅ | orchestrator 驱动 6 节点；AI 节点注入 `node-skills/` 蒸馏 skill（不加载桌面插件）。reproduce 一次 AI、拒 docker、成功路径报告同会话；节点 5 成功路径只落库 | orchestrator.py + nodes/ + node-skills/ |
 | 1 | **SSE 实时事件推送** ✅ | `GET /api/v1/tasks/{id}/events/stream` 已就绪，前端 `useTaskEvents` 替换 3s 轮询 | （已完成） | shared/sse.py + task/api.py + frontend shared/hooks/useTaskEvents.ts |
 | 2 | **取消任务真正生效** ✅ | 提交 cancelled 后立刻返回；后台只拆 agent-runner；靶场由 TTL 1h 静默销毁，并在 `/labs` 管理；编排器遇取消停跑 | （已完成） | task/service.py + agent/runtime_cleanup.py + orchestrator.py |
 | 3 | **JWT 登录闭环** ✅ | `shared/deps.py::CurrentUserId` 注入 owner_id（去硬编码 "system"）；前端路由守卫 + 401 跳登录 + SSE `?token=` 鉴权 | （已完成） | shared/deps.py + task/report api.py + App.tsx + LoginPage + layout.tsx |
 | 4 | **Evidence 上传链路** ✅ | `POST/GET /reports/{id}/evidences`（MinIO + 预签名 URL）+ 前端 EvidenceList 上传/下载 | （已完成） | report/service.py + report/api.py + frontend EvidenceList |
 
 > **P0 顺序**：~~0（阶段化编排骨架）~~ ✅ → ~~1（SSE）~~ ✅ → ~~2（cancel）~~ ✅ → ~~3（登录）~~ ✅ → ~~4（证据）~~ ✅。
-> **P0 全部完成**。阶段化编排是插件化实现（非 Python Stage 类），完整设计见 `docs/agent-workflow.md`。
+> **P0 全部完成**。6 节点编排由 Python orchestrator 驱动；AI 节点注入蒸馏 skill（见 `docs/agent-workflow.md`）。
 
 ### P1 — 提案明确要求
 

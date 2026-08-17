@@ -30,7 +30,7 @@ Crucible 是一个 AI 驱动的漏洞自动验证平台。安全研究员提交�
 cd infrastructure && docker compose up -d
 
 # 2. Agent Runner 镜像（首次构建一次即可）
-#    build context 必须是项目根，Dockerfile 要 COPY plugins/ 进镜像
+#    build context 必须是项目根，Dockerfile COPY node-skills/ 与 runner/
 docker build -f infrastructure/agent-runner/Dockerfile -t crucible-agent-runner:base .
 
 # 3. 后端（端口统一 8010，与前端 Vite 代理对齐；`main.py` 直接运行入口默认 8000，请用 uvicorn 显式指定 8010）
@@ -72,22 +72,18 @@ Crucible/
 │       ├── pages/               # 页面组件
 │       ├── features/            # 领域功能模块（task/components 等）
 │       └── shared/              # api / hooks（useTaskEvents）/ lib / components（NodeSteps/ReportContent）
-├── plugins/                     # ★ Claude Code 插件（5 子 agent,平台 6 节点编排调用）
+├── plugins/                     # 桌面 Claude Code 插件（母本，不进 runner）
 │   └── vuln-verify-expert/
-│       ├── agents/profiler.md          # 节点 profile（项目全景 + web 门禁）
-│       ├── agents/env-builder.md       # 节点 env_ready（靶场）
-│       ├── agents/auditor.md           # 节点 audit（Phase 2.5 Gate）
-│       ├── agents/reproducer.md        # 节点 reproduce（复现）
-│       ├── agents/reporter.md          # 节点 report（生成 report_data JSON）
-│       ├── agents/vuln-verify-expert.md # 旧单体 agent,保留兼容
-│       ├── skills/run-project-env/      # 靶场环境搭建方法论
-│       └── skills/vuln-verify/          # 漏洞验证方法论
+│       ├── agents/vuln-verify-expert.md
+│       ├── skills/run-project-env/
+│       └── skills/vuln-verify/
 └── infrastructure/              # Docker Compose
     ├── docker-compose.yml
     └── agent-runner/            # Agent Runner 专用镜像
-        ├── Dockerfile           # build context=项目根，COPY plugins/ 进镜像
+        ├── Dockerfile           # build context=项目根，COPY node-skills/ 进镜像
         ├── requirements.txt
-        └── runner/run_one.py    # 容器内 entrypoint（加载插件 + 指定 agent + JSONL 流）
+        ├── node-skills/         # 每 AI 节点蒸馏 SKILL.md
+        └── runner/run_one.py    # 容器内 entrypoint（skill → system_prompt + JSONL）
 ```
 
 ## 开发规范
@@ -115,4 +111,4 @@ Celery worker 从默认 Provider 取端点/Key/模型，经 `docker run --env` �
 - 旧模型名 `deepseek-chat`/`deepseek-reasoner` 已于 2026-07-24 弃用
 - `ClaudeSdkAdapter.build_runner_env()` 注入 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` / `API_TIMEOUT_MS` / `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` / `PYTHONUNBUFFERED=1` 等环境变量
 - 容器内 SDK 通过 `canUseTool` 回调实现白盒审计黑白名单（只允许 `Read` / `Grep` / `Glob` + 受限的 `Bash` 子集：git-read / curl / python）
-- 沙箱镜像：Python 3.11 + Node 20 + 完整 Linux 命令（非 slim）。靶场项目运行时仍在 `.vuln-env`，不在本镜像里装 JDK/Go/PHP/Chromium
+- 沙箱镜像：Python 3.11.15 + Node 20.20.2 + 完整 Linux 命令（非 slim）。靶场项目运行时仍在 `.vuln-env`，不在本镜像里装 JDK/Go/PHP/Chromium

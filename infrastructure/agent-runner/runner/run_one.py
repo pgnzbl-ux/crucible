@@ -1,7 +1,8 @@
 """
 agent-runner 容器内 entrypoint。
 
-职责：读取 /workspace/.prompt.json → 构造 ClaudeAgentOptions → 调用 query() →
+职责：读取 /workspace/.node.json（节点模式）或 .prompt.json（兼容）→
+       按 NODE_KEY 加载蒸馏 skill 作 system_prompt → 调用 query() →
        逐条翻译 SDK Message 为统一事件结构 → 写到 stdout（JSONL 一行一条）。
 
 环境变量由 worker 在 docker run 时通过 --env 注入：
@@ -91,12 +92,57 @@ BLACKLIST_RES = [
     (re.compile(r"/sys/"), "/sys/"),
 ]
 
+# env_ready 额外拒绝：装依赖 / docker（配方由平台 compose 启动，Agent 只写文件）
+ENV_READY_DENY_RES = [
+    (re.compile(r"\bnpm\b"), "npm"),
+    (re.compile(r"\bnpx\b"), "npx"),
+    (re.compile(r"\byarn\b"), "yarn"),
+    (re.compile(r"\bpnpm\b"), "pnpm"),
+    (re.compile(r"\bpip3?\b"), "pip"),
+    (re.compile(r"\bapt(-get)?\b"), "apt"),
+    (re.compile(r"\bapk\b"), "apk"),
+    (re.compile(r"\b(yum|dnf)\b"), "yum"),
+    (re.compile(r"\bdocker\b"), "docker"),
+]
 
-def _classify_bash(cmd: str) -> tuple[str, str | None]:
-    """返回 (decision, reason)：黑名单 deny，其余 allow（放开 Bash 给插件工作流）。"""
+# audit 额外拒绝：HTTP 客户端（白盒节点禁止打活靶；不拦 python urllib）
+AUDIT_DENY_RES = [
+    (re.compile(r"\bcurl\b"), "curl"),
+    (re.compile(r"\bwget\b"), "wget"),
+    (re.compile(r"\bhttpie\b"), "httpie"),
+]
+
+# reproduce 额外拒绝：靶场已由平台 compose 启动，禁止 Agent 自己 docker
+REPRODUCE_DENY_RES = [
+    (re.compile(r"\bdocker\b"), "docker"),
+]
+
+
+def _allowed_tools_for(node_key: str | None) -> list[str]:
+    if node_key == "profile":
+        return ["Read", "Grep", "Glob"]
+    if node_key == "audit":
+        return ["Read", "Grep", "Glob", "Bash", "WebSearch"]
+    return ["Read", "Grep", "Glob", "Bash", "Write", "Edit", "WebFetch", "WebSearch"]
+
+
+def _classify_bash(cmd: str, node_key: str | None = None) -> tuple[str, str | None]:
+    """返回 (decision, reason)：先全局黑名单，再按节点额外拒绝。"""
     for pat, name in BLACKLIST_RES:
         if pat.search(cmd):
             return ("deny", f"blocked by policy: {name}")
+    if node_key == "env_ready":
+        for pat, name in ENV_READY_DENY_RES:
+            if pat.search(cmd):
+                return ("deny", f"blocked by policy: {name}")
+    if node_key == "audit":
+        for pat, name in AUDIT_DENY_RES:
+            if pat.search(cmd):
+                return ("deny", f"blocked by policy: {name}")
+    if node_key == "reproduce":
+        for pat, name in REPRODUCE_DENY_RES:
+            if pat.search(cmd):
+                return ("deny", f"blocked by policy: {name}")
     return ("allow", None)
 
 
@@ -116,7 +162,7 @@ async def _pre_tool_use_hook(hook_input: Any, _tool_use_id: str | None, _ctx: An
         return None  # 非 Bash 不处理（matcher 已限定，兜底）
 
     cmd = tool_input.get("command", "") if isinstance(tool_input, dict) else str(tool_input)
-    decision, reason = _classify_bash(cmd)
+    decision, reason = _classify_bash(cmd, os.environ.get("NODE_KEY"))
     if decision == "deny":
         # 审计事件（worker 侧落 AgentEvent，前端可见）
         print(json.dumps({
@@ -413,10 +459,8 @@ async def _stream_messages(
 
 # ── Prompt 构造 ──
 #
-# 插件 agent（vuln-verify-expert）自带 system prompt（agents/vuln-verify-expert.md 的
-# frontmatter + 正文），这里不再拼 SYSTEM_PROMPT —— 传给 query() 的只是任务本身的
-# user message。agent 的阶段化工作流（阶段 0 平台预检 / A 接单建仓 / B 搭靶场 /
-# C 漏洞验证 / D 交付收尾）与 skills（run-project-env / vuln-verify）由插件自动加载。
+# 节点模式：system_prompt = 蒸馏 SKILL.md（append 到 claude_code preset）；
+# user message 只含本轮 input_json。不加载桌面 plugins/。
 
 
 def _build_prompt(task: dict[str, Any]) -> str:
@@ -509,62 +553,41 @@ def _discover_workspace_repo(root: Path) -> Path | None:
 
 
 def _build_node_prompt(node_key: str, input_json: dict[str, Any]) -> str:
-    """按节点构造 user message。源码目录来自 input_json.source_path。"""
+    """user message：只带本轮 JSON。角色/禁令/工作流在蒸馏 skill（system_prompt）。"""
     payload = json.dumps(input_json, ensure_ascii=False, indent=2, default=str)
-    src = _container_source_dir(input_json)
-    headers = {
-        "profile": (
-            f"你是项目画像员。源码在 {src}。"
-            "完成 run-project-env 第 1–2 步（项目全景 + web 门禁），"
-            "完成后必须调用 submit_result。"
-            "不要写 Dockerfile / compose，不要执行 docker。"
-        ),
-        "env_ready": (
-            f"你是靶场工程师。源码在 {src}。"
-            "闭环:你分析并写出 Dockerfile/compose 到 "
-            f"{src}/.vuln-env/ → 必须 submit_result → 平台负责启动和探活。"
-            "不要执行 docker compose,不要宣称已经启动。"
-            "若 previous_error 非空:只根据失败日志改配方(一次一处),再 submit_result。"
-        ),
-        "audit": (
-            f"你是白盒审计员。源码在 {src}。"
-            "根据以下输入完成利用链审计与 Phase 2.5 Gate，完成后必须调用 submit_result。"
-        ),
-        "reproduce": (
-            f"你是漏洞复现员。源码在 {src}。"
-            "输入里的 target_url / initial_creds / transport_shape / compose_path "
-            "来自靶场就绪节点，必须用它们发 HTTP，不要自己猜地址或账号。"
-            "完成后必须调用 submit_result。"
-            "target_url 中的 host.docker.internal 指向宿主机上的靶场（不要改用 localhost）。"
-        ),
-        "report": (
-            "你是报告撰写员。根据以下全部前序输出生成 8 节 report_data，"
-            "完成后必须调用 submit_result。"
-        ),
-    }
-    head = headers.get(
-        node_key,
-        "根据以下输入完成节点任务，完成后必须调用 submit_result。",
+    return (
+        "按 system 完成本节点。完成后必须调用 submit_result。\n\n"
+        f"输入(JSON):\n{payload}"
     )
-    return f"{head}\n\n源码目录: {src}\n\n输入(JSON):\n{payload}"
 
 
-# ── 插件 agent 加载 ──
+# ── 节点蒸馏 skill（system_prompt）──
 
-# 容器内插件路径（Dockerfile ENV 注入，可被 docker run --env 覆盖）
-PLUGIN_DIR = os.environ.get("PLUGIN_DIR", "/app/plugins/vuln-verify-expert")
-PLUGIN_NAME = os.environ.get("PLUGIN_NAME", "vuln-verify-expert")
-AGENT_NAME = os.environ.get("AGENT_NAME", "vuln-verify-expert")
+NODE_AI_KEYS = frozenset({"profile", "env_ready", "audit", "reproduce", "report"})
 
-# 节点 → 插件 agent 映射(阶段 2 多 agent 拆分)
-# NODE_KEY 由 worker 通过 docker run --env 注入;为空时走旧的 vuln-verify-expert 总 agent(兼容)
-NODE_AGENT_MAP: dict[str, str] = {
-    "profile": "profiler",
-    "env_ready": "env-builder",
-    "audit": "auditor",
-    "reproduce": "reproducer",
-    "report": "reporter",
-}
+
+def _node_skill_dir() -> Path:
+    override = os.environ.get("NODE_SKILL_DIR")
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parent.parent / "node-skills"
+
+
+def _load_node_skill(node_key: str) -> str:
+    path = _node_skill_dir() / node_key / "SKILL.md"
+    if not path.is_file():
+        raise FileNotFoundError(f"节点 skill 不存在: {path}")
+    return path.read_text(encoding="utf-8")
+
+
+def _system_prompt_for(node_key: str | None) -> dict[str, str] | None:
+    if not node_key or node_key not in NODE_AI_KEYS:
+        return None
+    return {
+        "type": "preset",
+        "preset": "claude_code",
+        "append": _load_node_skill(node_key),
+    }
 
 # 各 AI 节点的 submit_result 工具 input schema(与 worker 侧 ai_runner.NODE_INPUT_SCHEMAS 对齐)
 NODE_INPUT_SCHEMAS: dict[str, dict] = {
@@ -598,13 +621,18 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
     "audit": {
         "type": "object",
         "properties": {
-            "kill_chain": {"type": "string"},
-            "defense_layers": {"type": "array"},
-            "payloads": {"type": "array"},
-            "gate_verdict": {"type": "string", "enum": ["pass", "fail"]},
-            "gate_reason": {"type": "string"},
+            "kill_chain": {"type": "string", "description": "entry→sink 完整调用链"},
+            "defense_layers": {"type": "array", "description": "每层防御 + 是否 bypass"},
+            "payloads": {"type": "array", "description": "构造的 payload 候选"},
+            "gate_verdict": {
+                "type": "string",
+                "enum": ["pass", "fail", "uncertain"],
+                "description": "Phase 2.5 三问结论:纸上通/runtime-dependent=pass;结构性阻断=fail;描述对不上/锁不住 harm=uncertain",
+            },
+            "gate_reason": {"type": "string", "description": "三问各一句或阻断/待复核原因"},
+            "runtime_dependent": {"type": "boolean"},
         },
-        "required": ["gate_verdict"],
+        "required": ["gate_verdict", "gate_reason"],
     },
     "reproduce": {
         "type": "object",
@@ -613,13 +641,16 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
             "evidence": {"type": "array"},
             "screenshots": {"type": "array"},
             "verdict": {"type": "string", "enum": ["confirmed", "partial", "code_reachable", "code_smell", "false_positive", "not_reproduced"]},
+            "report_data": {"type": "object", "description": "8 节 Markdown 字符串"},
+            "cvss": {"type": "object", "description": "CVSS 向量/分数/等级"},
+            "vulnerable_file": {"type": "string", "description": "漏洞文件定位"},
         },
         "required": ["verdict"],
     },
     "report": {
         "type": "object",
         "properties": {
-            "report_data": {"type": "object"},
+            "report_data": {"type": "object", "description": "8 节 Markdown 字符串"},
             "final_verdict": {"type": "string", "enum": ["confirmed", "partial", "code_reachable", "code_smell", "false_positive", "not_reproduced"]},
             "cvss": {"type": "object"},
         },
@@ -653,39 +684,25 @@ def _build_options(
 ) -> ClaudeAgentOptions:
     """构造 SDK options。
 
-    节点化(node_key 非空):按 node_key 选插件子 agent + 注入 submit_result MCP 工具。
-    兼容模式(node_key 空):走旧的 vuln-verify-expert 总 agent(单次大调用)。
+    节点化:蒸馏 skill → system_prompt append + submit_result MCP。
+    兼容(.prompt.json 且无 NODE_KEY):不加载插件、不读 skill。
     """
-    # 选 agent
-    if node_key and node_key in NODE_AGENT_MAP:
-        agent_name = NODE_AGENT_MAP[node_key]
-    else:
-        agent_name = AGENT_NAME
-    agent_flag = f"{PLUGIN_NAME}:{agent_name}"
-
     common: dict[str, Any] = {
         "model": model,
         "max_turns": max_turns,
         "cwd": cwd or "/workspace",
         "permission_mode": "bypassPermissions",
-        "allowed_tools": (
-            ["Read", "Grep", "Glob"]
-            if node_key == "profile"
-            else [
-                "Read", "Grep", "Glob", "Bash",
-                "Write", "Edit",
-                "WebFetch", "WebSearch",
-            ]
-        ),
+        "allowed_tools": _allowed_tools_for(node_key),
         "hooks": {
             "PreToolUse": [
                 {"matcher": "Bash", "hooks": [_pre_tool_use_hook]},
             ],
         },
-        "extra_args": {"agent": agent_flag},
     }
+    system_prompt = _system_prompt_for(node_key)
+    if system_prompt is not None:
+        common["system_prompt"] = system_prompt
 
-    # 节点化:注入 submit_result MCP 工具 + 限定工具集含它
     if node_key and node_key in NODE_INPUT_SCHEMAS:
         try:
             from claude_agent_sdk import create_sdk_mcp_server
@@ -696,22 +713,18 @@ def _build_options(
             common["mcp_servers"] = {"crucible": server}
             common["allowed_tools"] = common["allowed_tools"] + ["submit_result"]
         except (ImportError, TypeError, Exception) as e:  # noqa: BLE001
-            # MCP 注入失败:降级(prompt 要求 ```json 块,可靠性降级但不阻塞)
             print(json.dumps({
                 "type": "agent.warning",
                 "message": f"submit_result MCP 注入失败,降级文本模式: {type(e).__name__}: {e}",
                 "timestamp": time.time(),
             }, ensure_ascii=False), flush=True)
 
-    # 插件加载
     try:
-        return ClaudeAgentOptions(
-            plugins=[{"type": "local", "path": PLUGIN_DIR}],
-            **common,
-        )
+        return ClaudeAgentOptions(**common)
     except (TypeError, ValueError):
-        common["extra_args"] = {"plugin-dir": PLUGIN_DIR, "agent": agent_flag}
-        # mcp_servers 可能不被旧构造接受,移除后重试
+        # 旧 SDK 可能不接受 system_prompt dict / mcp_servers
+        if isinstance(common.get("system_prompt"), dict):
+            common["system_prompt"] = common["system_prompt"].get("append") or ""
         common.pop("mcp_servers", None)
         return ClaudeAgentOptions(**common)
 
@@ -761,7 +774,7 @@ async def _main() -> int:
         model, max_turns, node_key=node_key, cwd=_sdk_cwd(input_json)
     )
 
-    if node_key and node_key in NODE_AGENT_MAP:
+    if node_key and node_key in NODE_AI_KEYS:
         prompt = _build_node_prompt(node_key, input_json)
     else:
         prompt = _build_prompt(task)
@@ -779,7 +792,7 @@ async def _main() -> int:
             saw_failure = True
 
     # 节点模式:校验 submit_result 是否被调用(.node_output.json 存在)
-    if node_key and node_key in NODE_AGENT_MAP:
+    if node_key and node_key in NODE_AI_KEYS:
         if not Path("/workspace/.node_output.json").exists():
             print(json.dumps(_failed_event(
                 f"节点 {node_key} 未调用 submit_result(无 .node_output.json)",

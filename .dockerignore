@@ -36,9 +36,8 @@ backend/crucible.db
 memory/
 docs/
 *.md
-!plugins/vuln-verify-expert/**/*.md
 !infrastructure/agent-runner/runner/**
+!infrastructure/agent-runner/node-skills/**
 
 # 只保留：
-#   infrastructure/agent-runner/{Dockerfile,requirements.txt,runner/}
-#   plugins/vuln-verify-expert/
+#   infrastructure/agent-runner/{Dockerfile,requirements.txt,runner/,node-skills/}
