@@ -4,7 +4,7 @@ import type { ReportDetail } from '../lib/api'
 import { api } from '../lib/api'
 import { downloadAuthenticated } from '../lib/download'
 import { getVerdictMeta } from '../lib/meta'
-import { asMarkdownSection, asRecord, documentKindOf, sectionsFor } from '../lib/reportData'
+import { asMarkdownSection, asRecord, documentKindOf, pocToMarkdown, sectionsFor } from '../lib/reportData'
 import { AuditPanel } from './AuditPanel'
 import { MarkdownBody } from './MarkdownBody'
 
@@ -109,10 +109,17 @@ export function ReportContent({ report }: ReportContentProps) {
       <Collapse
         defaultActiveKey={[sections[0].key]}
         items={sections.map((section) => {
-          const md = asMarkdownSection(rd[section.key])
+          const isPoc = section.key === 'poc_commands'
+          const pocMd = isPoc
+            ? pocToMarkdown(report.poc_language, report.poc_code, report.poc_usage)
+            : null
+          const md = pocMd ?? asMarkdownSection(rd[section.key])
           return {
             key: section.key,
-            label: section.label,
+            label: isPoc && report.poc_filename
+              ? `${section.label} · ${report.poc_filename}`
+              : section.label,
+            forceRender: Boolean(pocMd),
             children: md ? (
               <MarkdownBody source={md} />
             ) : (

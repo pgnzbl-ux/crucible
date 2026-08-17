@@ -37,6 +37,20 @@ export function asMarkdownSection(value: unknown): string | null {
   return trimmed ? value : null
 }
 
+export function pocToMarkdown(
+  language: string | null | undefined,
+  code: string | null | undefined,
+  usage: string | null | undefined,
+): string | null {
+  const src = (code ?? '').trim()
+  if (!src) return null
+  const fence = language === 'python' ? 'python' : language === 'bash' ? 'bash' : 'text'
+  const how = (usage ?? '').trim()
+  return how
+    ? `\`\`\`${fence}\n${src}\n\`\`\`\n\n用法：\`${how}\`\n`
+    : `\`\`\`${fence}\n${src}\n\`\`\`\n`
+}
+
 export function asRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
   return value as Record<string, unknown>

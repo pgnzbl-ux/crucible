@@ -138,6 +138,10 @@ export interface ReportDetail {
   cvss_score: number | null
   severity: string | null
   vulnerable_file: string | null
+  poc_language: string | null
+  poc_filename: string | null
+  poc_code: string | null
+  poc_usage: string | null
   report_data: Record<string, unknown> | null
   md_artifact_key: string | null
   docx_artifact_key: string | null

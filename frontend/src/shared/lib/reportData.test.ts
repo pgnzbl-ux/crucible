@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { asMarkdownSection, asRecord, asRecordArray, asStringArray, documentKindOf, RECORD_SECTIONS, REPORT_SECTIONS, sectionsFor } from './reportData'
+import { asMarkdownSection, asRecord, asRecordArray, asStringArray, documentKindOf, pocToMarkdown, RECORD_SECTIONS, REPORT_SECTIONS, sectionsFor } from './reportData'
 
 describe('reportData guards', () => {
   it('accepts plain records and rejects arrays and primitives', () => {
@@ -43,5 +43,16 @@ describe('reportData guards', () => {
     expect(asMarkdownSection('  ')).toBeNull()
     expect(asMarkdownSection({ type: 'CWE-89' })).toBeNull()
     expect(asMarkdownSection(['curl'])).toBeNull()
+  })
+
+  it('builds python fence from poc columns', () => {
+    const md = pocToMarkdown('python', "print('x')\n", 'python poc.py --url http://x')
+    expect(md).toContain('```python')
+    expect(md).toContain("print('x')")
+    expect(md).toContain('用法：`python poc.py --url http://x`')
+  })
+
+  it('returns null when poc code is empty', () => {
+    expect(pocToMarkdown('python', '  ', 'x')).toBeNull()
   })
 })

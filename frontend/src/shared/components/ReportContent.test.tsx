@@ -38,6 +38,10 @@ const base = {
   cvss_score: null,
   severity: null,
   vulnerable_file: null,
+  poc_language: null,
+  poc_filename: null,
+  poc_code: null,
+  poc_usage: null,
   report_data: null,
 } as ReportDetail
 
@@ -115,5 +119,33 @@ describe('ReportContent', () => {
       />,
     )
     expect(html).toMatch(/报告格式已升级/)
+  })
+
+  it('renders poc_code fence instead of leftover curl markdown', () => {
+    const html = render(
+      <ReportContent
+        report={{
+          ...base,
+          verdict: 'confirmed',
+          poc_language: 'python',
+          poc_filename: 'poc.py',
+          poc_code: "print('FROM_COLUMN')\n",
+          poc_usage: 'python poc.py --url http://x',
+          report_data: {
+            product_intro: 'p',
+            vulnerability: 'v',
+            impact: 'i',
+            details: 'd',
+            reproduction: 'r',
+            poc_commands: '```bash\ncurl leftover\n```',
+            fix_suggestions: 'f',
+            reporting_decision: 's',
+          },
+        }}
+      />,
+    )
+    expect(html).toContain('FROM_COLUMN')
+    expect(html).toContain('poc.py')
+    expect(html).not.toContain('curl leftover')
   })
 })
