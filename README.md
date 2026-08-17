@@ -78,8 +78,9 @@ Crucible 是一个 **Web 平台 + Agent 执行引擎** 的组合：
 ## ✨ 核心特性
 
 - 🤖 **平台 6 节点编排** —— Celery orchestrator 驱动 6 节点。AI 节点各自注入蒸馏 skill（`node-skills/`），桌面 `plugins/vuln-verify-expert` 只当方法论母本。分支出口：非 web skip、audit fail 判误报、env 5 轮失败、audit uncertain 待复核。
-- 🔄 **实时进度推送** —— 任务详情通过 SSE 展示节点进度与 Agent 过程（思考、工具调用、结论），无需轮询
-- 🧱 **模块化单体** —— Bounded Context 组织代码（task / agent / report / identity / settings），事件驱动通信，未来可拆
+- 🧪 **靶场就绪与复用** —— AI 写 Dockerfile/compose，worker 启动并探活；同项目可复用已就绪靶场与配方缓存。按 README / 鉴权判断是否需要登录：有默认或可初始化账号则给出账密，公开入口标明免登录，否则说明需自行注册等前置条件
+- 🔄 **实时进度推送** —— 任务详情通过 SSE 展示节点进度与 Agent 过程（思考、工具调用、结论）；完成节点分区展示审计结论与靶场地址/凭据
+- 🧱 **模块化单体** —— Bounded Context 组织代码（task / agent / lab / report / identity / project / settings），事件驱动通信，未来可拆
 - 🔒 **Security by Default** —— Agent 跑在独立隔离容器(非 root + 只读 rootfs + cap_drop ALL + 资源限制)。LLM 凭据通过 `docker run --env` 注入容器(容器销毁 env 消失)；平台设置库中的 API Key 明文存储，接口回显掩码
 - 🌐 **多 LLM 后端** —— 通过 Anthropic 兼容端点对接 DeepSeek / 腾讯云等第三方 LLM，后台可配置多 Provider + 测试连接
 - 📦 **证据归档** —— 报告与证据文件归档到 MinIO（S3 兼容），支持手动上传补充证据 + 预签名下载
@@ -99,7 +100,7 @@ Crucible 是一个 **Web 平台 + Agent 执行引擎** 的组合：
                             ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  后端 API（FastAPI · async）                                       │
-│    contexts/ {task, agent, report, identity, project, settings}    │
+│    contexts/ {task, agent, lab, report, identity, project, settings} │
 │    shared/  {events, sse, deps}                                   │
 └──────┬────────────────────┬──────────────────────┬──────────────┘
        │                    │                      │
@@ -109,7 +110,7 @@ Crucible 是一个 **Web 平台 + Agent 执行引擎** 的组合：
 │ / SQLite     │   │  agent/tasks.py    │◄──┤ broker + pubsub  │
 │              │   │   host git clone   │   └──────────────────┘
 │ tasks/runs/  │   │   docker run ──────┼──┐
-│ nodes/       │   │   消费 JSONL 流    │  │ 每 AI 节点独立起容器
+│ nodes/labs/  │   │   消费 JSONL 流    │  │ 每 AI 节点独立起容器
 │ reports      │   │   落库 + 发布事件   │  ▼
 └──────────────┘   └────────────────────┘   ┌────────────────────────┐
                                             │ agent-runner 容器        │
@@ -132,6 +133,7 @@ Crucible 是一个 **Web 平台 + Agent 执行引擎** 的组合：
                                             │  crucible-artifacts     │
                                             │  crucible-evidence      │
                                             │  crucible-source        │
+                                            │  crucible-lab-recipe    │
                                             └────────────────────────┘
 ```
 
@@ -156,15 +158,15 @@ Crucible 是一个 **Web 平台 + Agent 执行引擎** 的组合：
    ┌─ 节点 0 source      ■代码:clone 结果包装
    ├─ 节点 1 profile    □AI:读 README/依赖建立全景 + web 门禁(规则引擎作 hints)
    │                     └─ 分支:is_web=false → skip 2-5,task completed 不下结论
-   ├─ 节点 2 env_ready  □AI+■代码:AI 产 Dockerfile/compose,worker 执行 docker compose
-   │                     │  + 健康检查,失败回喂 AI(max 5 轮)→ 取 target_url
+   ├─ 节点 2 env_ready  □AI+■代码:写/复用靶场配方 → worker compose up + 探活
+   │                     │  按登录能力给出账密、免登录说明或「需自行注册」等前置条件
    │                     └─ 分支:5 轮失败 → task failed(可 retry)
-   ├─ 节点 3 audit      □AI:白盒审计 + Phase 2.5 Gate 三问
-   │                     └─ 分支:gate_fail → skip 4,判 false_positive(不发请求)
+   ├─ 节点 3 audit      □AI:白盒审计 + Gate 三问（不发 HTTP）
+   │                     └─ 分支:gate_fail → skip 4,判 false_positive
    ├─ 节点 4 reproduce  □AI:一次 HTTP 复现 + 6 档判定（只交 attempts/evidence，不写报告）
    └─ 节点 5 report     □AI:唯一文档作者 → 漏洞报告或验证记录 → 落 Report 表
         │
-4. 每 AI 节点:写 .node.json → 起 agent-runner 容器(NODE_KEY 选 agent)
+4. 每 AI 节点:写 .node.json → 起 agent-runner 容器(按 NODE_KEY 注入对应 skill)
    → 容器内调 submit_result MCP 工具回传结构化 output
    → worker schema 校验 → 落 NodeRun.output_json(断点续跑复用)
         │
@@ -187,7 +189,7 @@ Crucible 是一个 **Web 平台 + Agent 执行引擎** 的组合：
 | **数据库** | PostgreSQL 16（生产）· SQLite（开发）|
 | **缓存/消息** | Redis 7（Celery broker + 事件总线 Pub/Sub + SSE 转发）|
 | **对象存储** | MinIO（S3 兼容，报告 + 证据归档）|
-| **Agent** | `claude-agent-sdk==0.2.134`（wheel 自带 Claude Code CLI `2.1.226`）+ `vuln-verify-expert` 插件 |
+| **Agent** | `claude-agent-sdk==0.2.134`（wheel 自带 Claude Code CLI `2.1.226`）+ 每节点 `node-skills/`（桌面 `vuln-verify-expert` 为方法论母本） |
 | **编排** | Docker Compose（基础设施）+ Docker SDK（Agent 容器生命周期）|
 
 ---
@@ -203,6 +205,7 @@ Crucible/
 │   │   ├── contexts/                # Bounded Contexts
 │   │   │   ├── task/                # 任务管理（CRUD + 节点进度 + 事件流 + 取消/重试）
 │   │   │   ├── agent/               # 6 节点编排（orchestrator / nodes / ai_runner）
+│   │   │   ├── lab/                 # 靶场生命周期（复用、TTL、配方缓存）
 │   │   │   ├── project/             # 项目源码管理
 │   │   │   ├── report/              # 报告 + 证据（MinIO 归档）
 │   │   │   ├── identity/            # 认证（JWT + bcrypt）
@@ -218,7 +221,7 @@ Crucible/
 │       ├── app/                     # providers / layout
 │       ├── pages/                   # Dashboard / Tasks / TaskDetail / Reports / Settings / Login
 │       ├── features/                # 领域模块（task 列表与详情）
-│       └── shared/                  # api / hooks / 共享组件
+│       └── shared/                  # api / hooks / 节点与报告展示组件
 │
 ├── plugins/                         # 桌面 Claude Code 插件（母本，不进 runner）
 │   └── vuln-verify-expert/
@@ -236,7 +239,7 @@ Crucible/
 │
 ├── docs/                            # 设计文档
 │   ├── development-guide.md         # 架构决策 + P0/P1/P2 路线
-│   ├── agent-workflow.md            # 插件化编排设计
+│   ├── agent-workflow.md            # 6 节点编排 + skill 注入
 │   ├── governance/                  # 开发宪法 + 协作标准
 │   └── superpowers/                 # 已评审 spec / plan
 │
@@ -271,7 +274,7 @@ git clone <repo-url> Crucible && cd Crucible
 cd infrastructure && docker compose up -d
 cd ..
 
-# ── 3. 构建 Agent Runner 镜像（首次或改 plugins/Dockerfile 后必需）──
+# ── 3. 构建 Agent Runner 镜像（首次或改 node-skills / Dockerfile 后必需）──
 #    ⚠️ build context 必须是项目根；镜像含 Python + Node + 完整 Linux 命令
 docker build -f infrastructure/agent-runner/Dockerfile -t crucible-agent-runner:base .
 
@@ -356,7 +359,7 @@ curl -X POST http://localhost:8010/api/v1/auth/login \
 | `S3_ENDPOINT` | MinIO API 地址 | `http://localhost:9000` |
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | 与 compose 中 MinIO 账号一致 | `minioadmin` |
 
-报告桶 `crucible-artifacts`、证据桶 `crucible-evidence`、源码缓存桶 `crucible-source` 由平台写死，启动时 `createbuckets` 容器负责创建。同一 `space/project`（如 `siteboon/claudecodeui`）加同一 branch/tag/commit 会命中 `source_artifacts` 表，直接从 MinIO 解开到工作区 `{audit-uuid}/{仓库名}`，不再先 `ls-remote` 对 SHA。
+报告桶 `crucible-artifacts`、证据桶 `crucible-evidence`、源码缓存桶 `crucible-source` 由平台写死，启动时 `createbuckets` 容器负责创建；靶场配方桶 `crucible-lab-recipe` 在首次上传配方时按需创建。同一 `space/project`（如 `siteboon/claudecodeui`）加同一 branch/tag/commit 会命中 `source_artifacts` 表，直接从 MinIO 解开到工作区 `{audit-uuid}/{仓库名}`，不再先 `ls-remote` 对 SHA。
 
 ---
 
@@ -401,8 +404,8 @@ CLAUDE_AGENT_SDK_ENABLED=true
 
 ### 真实模式
 
-`CLAUDE_AGENT_SDK_ENABLED=true` 且后台已配置默认 LLM Provider 后，Worker 会拉起 agent-runner 容器，
-加载 `vuln-verify-expert` 插件执行真实白盒验证。
+`CLAUDE_AGENT_SDK_ENABLED=true` 且后台已配置默认 LLM Provider 后，Worker 会按节点拉起 agent-runner 容器，
+注入对应 `node-skills/` 蒸馏 skill，执行真实白盒验证（桌面插件不进容器）。
 
 ### API 调用示例
 
@@ -528,6 +531,7 @@ cd frontend && npm run typecheck
 - CI/CD
 - 生产部署（DinD + mTLS）
 - PostgreSQL 生产验证
+- 任务/报告详情独立路由体验打磨
 
 ---
 
@@ -536,7 +540,7 @@ cd frontend && npm run typecheck
 | 文档 | 内容 |
 |---|---|
 | [docs/development-guide.md](docs/development-guide.md) | 架构决策溯源 + P0/P1/P2 完整路线 + 踩坑记录 |
-| [docs/agent-workflow.md](docs/agent-workflow.md) | 平台 6 节点编排设计 + 平台↔插件契约 + 权限策略 |
+| [docs/agent-workflow.md](docs/agent-workflow.md) | 平台 6 节点编排 + 蒸馏 skill 注入 + 平台↔方法论母本契约 |
 | [docs/governance/](docs/governance/) | 开发宪法 `constitution.md` + 协作标准 `AGENTS.md` |
 | [CLAUDE.md](CLAUDE.md) | 项目级 AI 协作约定（技术栈/启动/规范） |
 | [.claude/api-contract.md](.claude/api-contract.md) | API 端点契约（路由/请求/响应/错误码） |

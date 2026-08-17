@@ -326,10 +326,12 @@ def _validate_cvss(cvss: Any) -> tuple[bool, str | None]:
     return True, None
 
 
-def _validate_evidence(evidence: Any) -> tuple[bool, str | None]:
+def _validate_evidence(
+    evidence: Any, *, min_items: int = 1,
+) -> tuple[bool, str | None]:
     if not isinstance(evidence, list):
         return False, "confirmed/partial 需要 evidence 至少 1 条"
-    if len(evidence) < 1:
+    if len(evidence) < min_items:
         return False, "confirmed/partial 需要 evidence 至少 1 条"
     for item in evidence:
         if not isinstance(item, dict):
@@ -415,7 +417,8 @@ def _validate_reproduce_output(
 
     evidence = output.get("evidence")
     if evidence is not None:
-        ok, err = _validate_evidence(evidence)
+        # 未确认档允许空数组；有条目时仍须 type/detail 非空
+        ok, err = _validate_evidence(evidence, min_items=0)
         if not ok:
             return False, err
 

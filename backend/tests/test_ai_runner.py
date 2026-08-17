@@ -278,6 +278,15 @@ def test_validate_reproduce_shape_accepts(output):
     assert ok, err
 
 
+def test_validate_reproduce_allows_empty_evidence_for_not_reproduced():
+    """未确认档可交 evidence=[]；空数组不得误判为 confirmed/partial 缺证据。"""
+    ok, err = validate_output(
+        "reproduce",
+        _not_reproduced_ok(evidence=[]),
+    )
+    assert ok, err
+
+
 def test_validate_report_vulnerability_and_record_kinds():
     ok, err = validate_output(
         "report",
