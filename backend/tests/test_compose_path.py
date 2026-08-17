@@ -88,8 +88,8 @@ async def test_compose_up_uses_lab_project_name(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_compose_up_streams_plain_progress(tmp_path):
-    """无 TTY 时必须 --progress plain，并把构建行回调出去，否则前端会假死。"""
+async def test_compose_up_rebuilds_with_global_plain_progress(tmp_path):
+    """AI 改配方后必须 --build；--progress 只能挂在 compose 全局（Compose v5）。"""
     from app.contexts.agent.nodes.env_ready import docker_compose_up
 
     compose = tmp_path / "repo" / ".vuln-env"
@@ -97,7 +97,7 @@ async def test_compose_up_streams_plain_progress(tmp_path):
     (compose / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
 
     fake = MagicMock()
-    fake.stdout = StringIO("Building app\nStarted app\n")
+    fake.stdout = StringIO("Building app\nContainer app Started\n")
     fake.wait.return_value = 0
     lines: list[str] = []
     with patch("app.contexts.agent.nodes.env_ready.subprocess.Popen", return_value=fake) as popen:
@@ -110,10 +110,13 @@ async def test_compose_up_streams_plain_progress(tmp_path):
         )
     assert ok and err == ""
     cmd = popen.call_args.args[0]
-    assert "--progress" in cmd
-    assert cmd[cmd.index("--progress") + 1] == "plain"
+    assert cmd[:4] == ["docker", "compose", "--progress", "plain"]
+    assert cmd[-3:] == ["up", "-d", "--build"]
+    # 禁止再挂到 up 子命令后：Compose v5 会 unknown flag
+    up_idx = cmd.index("up")
+    assert "--progress" not in cmd[up_idx:]
     assert lines[0] == "Building app"
-    assert "Started app" in lines
+    assert "Container app Started" in lines
 
 
 @pytest.mark.asyncio

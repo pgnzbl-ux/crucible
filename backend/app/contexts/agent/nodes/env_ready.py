@@ -389,9 +389,11 @@ async def docker_compose_up(
     task_id: str | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> tuple[bool, str]:
-    """在 host 执行 docker compose up -d --build,返回 (ok, error)。
+    """在 host 执行 docker compose up -d --build，返回 (ok, error)。
 
-    无 TTY 时必须 --progress plain，否则 BuildKit 只刷 \\r，前端看起来像卡死。
+    - 保留 --build：AI 改完 Dockerfile 后若不重建会复用坏镜像，回喂轮次无效。
+    - --progress plain 必须是 compose 全局旗标；挂在 up 后 Compose v5 会 unknown flag。
+    - 同时设 BUILDKIT_PROGRESS=plain，无 TTY 时按行输出构建日志。
     """
     abs_path = resolve_compose_host_path(compose_path, host_workdir, repo_dirname)
     abs_path = abs_path.replace("\\", "/")
@@ -405,8 +407,10 @@ async def docker_compose_up(
     except ComposePolicyError as exc:
         return False, f"docker compose 安全策略拒绝: {exc}"
     cmd = [
-        "docker", "compose", *_compose_project_args(_compose_ident(lab_id=lab_id, task_id=task_id)),
-        "-f", abs_path, "up", "-d", "--build", "--progress", "plain",
+        "docker", "compose",
+        "--progress", "plain",
+        *_compose_project_args(_compose_ident(lab_id=lab_id, task_id=task_id)),
+        "-f", abs_path, "up", "-d", "--build",
     ]
 
     def _run() -> tuple[int, str, bool]:
@@ -731,7 +735,7 @@ async def _try_cached_recipe(
     if not web_ports:
         return None, "缓存配方 compose 未把 Web 端口映射到宿主机。"
 
-    _emit(ctx, "命中已缓存配方，平台启动靶场（docker compose up --build）")
+    _emit(ctx, "命中已缓存配方，平台启动靶场（docker compose up -d --build）")
     ok, err = await docker_compose_up(
         lab_compose,
         result.workdir,
@@ -907,7 +911,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
 
             sync_recipe_to_lab(src_repo, result.workdir)
             lab_compose = lab_recipe_compose_path(compose_path)
-            _emit(ctx, f"第 {attempt}/{MAX_ATTEMPTS} 轮：平台启动靶场（docker compose up --build）")
+            _emit(ctx, f"第 {attempt}/{MAX_ATTEMPTS} 轮：平台启动靶场（docker compose up -d --build）")
             ok, err = await docker_compose_up(
                 lab_compose,
                 result.workdir,
