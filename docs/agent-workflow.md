@@ -65,7 +65,7 @@
 - **非 web 结束**：节点 1 `is_web is not True` → skip 2–5。
 - **误报 Quick-Stop**：audit `gate_verdict=fail` → skip reproduce，仍跑 report。
 - **待复核**：audit `uncertain` → skip reproduce 和 report，`task=needs_review`。
-- **回退环**：reproduce 容器内最多 5 次变体，不是平台节点循环。
+- **回退环**：reproduce 容器内自行深挖同一 `core_claim`，判定即停（不是平台节点循环）。
 
 ---
 

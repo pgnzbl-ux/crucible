@@ -179,7 +179,7 @@ Task 加 project_id(FK→projects) + verdict(6 档);Report 加 report_data 等�
 
 | # | 任务 | 现状 | 目标 | 涉及 |
 |---|------|------|------|------|
-| 0 | **平台 6 节点编排** ✅ | orchestrator 驱动 6 节点；AI 节点注入 `node-skills/` 蒸馏 skill（不加载桌面插件）。reproduce 一次 AI、拒 docker、成功路径报告同会话；节点 5 成功路径只落库 | orchestrator.py + nodes/ + node-skills/ |
+| 0 | **平台 6 节点编排** ✅ | orchestrator 驱动 6 节点；AI 节点注入 `node-skills/` 蒸馏 skill（不加载桌面插件）。reproduce 第一枪打 audit 模板、容器内判定即停、拒 docker；confirmed/partial 的 PoC 正本入 reports 四列；节点 5 用 reproduce.poc 覆盖 poc_commands | orchestrator.py + nodes/ + node-skills/ |
 | 1 | **SSE 实时事件推送** ✅ | `GET /api/v1/tasks/{id}/events/stream` 已就绪，前端 `useTaskEvents` 替换 3s 轮询 | （已完成） | shared/sse.py + task/api.py + frontend shared/hooks/useTaskEvents.ts |
 | 2 | **取消任务真正生效** ✅ | 提交 cancelled 后立刻返回；后台只拆 agent-runner；靶场由 TTL 1h 静默销毁，并在 `/labs` 管理；编排器遇取消停跑 | （已完成） | task/service.py + agent/runtime_cleanup.py + orchestrator.py |
 | 3 | **JWT 登录闭环** ✅ | `shared/deps.py::CurrentUserId` 注入 owner_id（去硬编码 "system"）；前端路由守卫 + 401 跳登录 + SSE `?token=` 鉴权 | （已完成） | shared/deps.py + task/report api.py + App.tsx + LoginPage + layout.tsx |

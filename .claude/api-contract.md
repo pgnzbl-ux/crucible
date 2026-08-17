@@ -148,11 +148,11 @@
 
 ### GET `/api/v1/reports/{id}`
 
-含正文、状态、结构化字段(verdict/cvss_score/severity/vulnerable_file/report_data/md_artifact_key/docx_artifact_key)。
+含正文、状态、结构化字段(verdict/cvss_score/severity/vulnerable_file/report_data/poc_language/poc_filename/poc_code/poc_usage/md_artifact_key/docx_artifact_key)。
 
 `report_data.document_kind` 区分两类文档（`completed` 只表示工作流结束，漏洞是否成立看 `verdict`）：
 
-- `vulnerability_report`（仅 `confirmed|partial`）：8 节 `product_intro` / `vulnerability` / `impact` / `details` / `reproduction` / `poc_commands` / `fix_suggestions` / `reporting_decision`。`poc_commands` 只含能证明危害的可复制请求。索引列必有 CVSS。
+- `vulnerability_report`（仅 `confirmed|partial`）：8 节 `product_intro` / `vulnerability` / `impact` / `details` / `reproduction` / `poc_commands` / `fix_suggestions` / `reporting_decision`。PoC 正本在 `poc_language`/`poc_filename`/`poc_code`/`poc_usage` 四列；`poc_commands` 是平台从正本生成的 Markdown 围栏。索引列必有 CVSS。
 - `verification_record`（`not_reproduced` / `false_positive` / `code_reachable` / `code_smell`）：8 节 `product_intro` / `claimed_issue` / `whitebox_analysis` / `test_record` / `blocker` / `observed_facts` / `remaining_conditions` / `reporting_decision`。无 PoC、无 CVSS（`cvss_score`/`severity` 为 null）。`test_record` 保留失败请求与响应。
 
 缺 `document_kind` 的旧数据按漏洞报告 8 节渲染，不自动重写。

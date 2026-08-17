@@ -3,6 +3,7 @@
 > 版本: v1.2 · 2026-08-17
 > 状态: 部分被覆盖
 > **v1.2（2026-08-17）**：节点 5 恢复为唯一文档作者。reproduce **禁止**交 `report_data`；confirmed/partial 由 report 写漏洞报告，其余写验证记录（无 PoC / 无 CVSS）。权威条文以 `2026-08-12-platform-node-orchestration-design.md` §1.3 / §4 为准。下文「成功路径拷贝 report_data / 零第二轮 token」作废。
+> **覆盖声明**：变体上限 5 次与 `poc_commands` 由 report 撰写，已被 `2026-08-17-audit-reproduce-poc-handoff-design.md` 覆盖。
 > 定位: 把 reproduce 收成「Agent 对已就绪靶场发 HTTP、平台只校形状并拒 docker」。一次 `run_ai_node`（reproduce）只交测试事实；不机械证伪危害；无 Chromium。
 > 覆盖并修正：`2026-08-12-platform-node-orchestration-design.md` §1.1 节点 5 类型、§1.3 reproduce/report 产出、§4.1 `report_data` 嵌套 JSON；`run_one.py` 对 reproduce 仍允许 `docker`；`reproducer.md` 未声明平台无浏览器、禁止改靶场容器；`reporter.md` 假定成功路径再开一轮撰稿。
 > v1.1：吸收平台化评审——用户交付物是同一份「报告」资源，不是第二个撰稿 Agent；8 节改为 Markdown 字符串；成功路径零第二轮 token；audit `fail` 仍走节点 5 出同构误报报告。
