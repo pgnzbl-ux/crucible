@@ -1,7 +1,7 @@
 """add report poc columns
 
 Revision ID: f1a8c3d04e25
-Revises: e4b7c2d91a03
+Revises: 9f2d6c8a4b17
 Create Date: 2026-08-17
 """
 from typing import Sequence, Union
@@ -10,7 +10,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision: str = "f1a8c3d04e25"
-down_revision: Union[str, None] = "e4b7c2d91a03"
+down_revision: Union[str, None] = "9f2d6c8a4b17"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
