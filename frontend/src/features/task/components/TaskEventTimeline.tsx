@@ -93,6 +93,14 @@ function typeColor(eventType: string): string {
   return 'var(--crucible-text-secondary)'
 }
 
+export function isEventDetailsDefaultOpen(
+  eventType: string,
+  payload: Record<string, unknown>,
+): boolean {
+  if (eventType === 'tool.call.denied') return true
+  return eventType === 'tool.call.completed' && payload.is_error === true
+}
+
 interface TaskEventTimelineProps {
   events: AgentEvent[] | undefined
   running: boolean
@@ -272,41 +280,102 @@ function renderBody(ev: AgentEvent, p: Record<string, unknown>) {
   }
 
   if (ev.event_type === 'tool.call.started') {
+    const input = asText(p.input)
     return (
-      <div>
-        <Text>
-          <ToolOutlined style={{ marginRight: 6 }} />
-          调用 <Text code>{asText(p.tool) || 'unknown'}</Text>
-        </Text>
-        {p.input != null && p.input !== '' && (
-          <Paragraph
-            type="secondary"
-            style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', fontSize: 11 }}
-          >
-            {truncate(asText(p.input), 800)}
-          </Paragraph>
-        )}
-      </div>
+      <Collapse
+        ghost
+        size="small"
+        items={[
+          {
+            key: 'details',
+            label: (
+              <Text>
+                <ToolOutlined style={{ marginRight: 6 }} />
+                调用 <Text code>{asText(p.tool) || 'unknown'}</Text>
+              </Text>
+            ),
+            children: input ? (
+              <Paragraph
+                type="secondary"
+                style={{ marginBottom: 0, whiteSpace: 'pre-wrap', fontSize: 11 }}
+              >
+                {truncate(input, 800)}
+              </Paragraph>
+            ) : (
+              <Text type="secondary" style={{ fontSize: 11 }}>无输入参数</Text>
+            ),
+          },
+        ]}
+      />
     )
   }
 
   if (ev.event_type === 'tool.call.completed') {
     const isError = p.is_error === true
+    const output = asText(p.output)
     return (
-      <div>
-        <Text type={isError ? 'danger' : undefined}>
-          <ToolOutlined style={{ marginRight: 6 }} />
-          {isError ? '工具返回错误' : '工具完成'}
-        </Text>
-        {p.output != null && p.output !== '' && (
-          <Paragraph
-            type={isError ? 'danger' : 'secondary'}
-            style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', fontSize: 11 }}
-          >
-            {truncate(asText(p.output), 1200)}
-          </Paragraph>
-        )}
-      </div>
+      <Collapse
+        ghost
+        size="small"
+        defaultActiveKey={isEventDetailsDefaultOpen(ev.event_type, p) ? ['details'] : []}
+        items={[
+          {
+            key: 'details',
+            label: (
+              <Text type={isError ? 'danger' : undefined}>
+                <ToolOutlined style={{ marginRight: 6 }} />
+                {isError ? '工具返回错误' : '工具完成'}
+              </Text>
+            ),
+            children: output ? (
+              <Paragraph
+                type={isError ? 'danger' : 'secondary'}
+                style={{ marginBottom: 0, whiteSpace: 'pre-wrap', fontSize: 11 }}
+              >
+                {truncate(output, 1200)}
+              </Paragraph>
+            ) : (
+              <Text type="secondary" style={{ fontSize: 11 }}>无输出内容</Text>
+            ),
+          },
+        ]}
+      />
+    )
+  }
+
+  if (ev.event_type === 'tool.call.denied') {
+    const reason = asText(p.reason || p.error) || '该工具调用不符合安全策略'
+    const input = asText(p.input)
+    return (
+      <Collapse
+        ghost
+        size="small"
+        defaultActiveKey={isEventDetailsDefaultOpen(ev.event_type, p) ? ['details'] : []}
+        items={[
+          {
+            key: 'details',
+            label: (
+              <Text type="danger">
+                <ToolOutlined style={{ marginRight: 6 }} />
+                已拒绝 <Text code>{asText(p.tool) || 'unknown'}</Text>
+              </Text>
+            ),
+            children: (
+              <div>
+                <Text type="danger">{reason}</Text>
+                {input && (
+                  <Paragraph
+                    type="secondary"
+                    style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', fontSize: 11 }}
+                  >
+                    {truncate(input, 800)}
+                  </Paragraph>
+                )}
+              </div>
+            ),
+          },
+        ]}
+      />
     )
   }
 
