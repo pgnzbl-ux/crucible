@@ -337,6 +337,25 @@ def test_validate_reproduce_shape_rejects(output, needle):
 
 
 @pytest.mark.parametrize(
+    "output,needle",
+    [
+        (
+            _confirmed_ok(poc=_poc_ok(filename="x" * 256)),
+            "poc.filename 长度不能超过 255",
+        ),
+        (
+            _confirmed_ok(poc=_poc_ok(usage="y" * 1025)),
+            "poc.usage 长度不能超过 1024",
+        ),
+    ],
+)
+def test_validate_reproduce_rejects_overlong_poc_metadata(output, needle):
+    ok, err = validate_output("reproduce", output)
+    assert not ok
+    assert needle in (err or "")
+
+
+@pytest.mark.parametrize(
     "output",
     [
         _confirmed_ok(),

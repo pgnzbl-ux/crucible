@@ -105,7 +105,7 @@
 | `code_reachable` | 仅代码可达,未 live 复现 | 代码可达 |
 | `code_smell` | 最佳实践缺口无安全影响 | CODE SMELL |
 | `false_positive` | Gate 推演不通/bypass 全失败 | 误报 |
-| `not_reproduced` | 5 轮后运行时条件未解决 | 未复现 |
+| `not_reproduced` | 判定即停 / 运行时条件未解决 | 未复现 |
 
 ---
 

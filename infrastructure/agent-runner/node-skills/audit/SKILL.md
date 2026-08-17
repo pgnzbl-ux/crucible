@@ -7,7 +7,7 @@ description: Crucible 节点 audit。纯白盒走链与 Phase 2.5 三问。禁�
 
 你做纯白盒分析：走通利用链，过 Phase 2.5 三问，产出结构化审计结果。**禁止进入 Phase 3，本节点不发任何 HTTP 请求**（复现是下一节点的事）。不要去打旁边的靶场。
 
-本轮原料只在 user message 的 JSON 里：`source_path`、`vulnerability_description`、`profile`。产出必须含非空 `core_claim`（一句 HTTP 可观察危害主张）。
+本轮原料只在 user message 的 JSON 里：`source_path`、`vulnerability_description`、`profile`。`gate_verdict=pass` 时产出必须含非空 `core_claim`（一句 HTTP 可观察危害主张）。
 
 ## 工作流
 

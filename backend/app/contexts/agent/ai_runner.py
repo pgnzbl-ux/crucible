@@ -487,6 +487,10 @@ def _validate_poc(poc: Any, *, required: bool) -> tuple[bool, str | None]:
         val = poc.get(key)
         if not isinstance(val, str) or not val.strip():
             return False, "confirmed/partial 需要 poc.language/filename/code/usage"
+    if len(poc["filename"]) > 255:
+        return False, "poc.filename 长度不能超过 255"
+    if len(poc["usage"]) > 1024:
+        return False, "poc.usage 长度不能超过 1024"
     if lang != "python":
         reason = poc.get("language_reason")
         if not isinstance(reason, str) or not reason.strip():
