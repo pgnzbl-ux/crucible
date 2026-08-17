@@ -28,6 +28,13 @@ description: Crucible 节点 reproduce。对注入的 target_url 发 HTTP，同�
 6. SSRF 必须 preflight 验证回调通道可达。
 7. 首测未复现 → 回走调用链 → 试变体（上限 5 次）→ 仍不行判误报 / 未复现。
 
+`evidence[]` 只记录支撑 `confirmed` / `partial` 的已确认危害。每条必须同时提交：
+
+- `type`：非空证据类型，例如 `http_response`
+- `detail`：非空证据详情，写明请求、响应与可观察危害
+
+不要提交空字符串或只有字段名的占位条目；未确认危害时提交空数组。
+
 ### Phase 4 — 清理
 
 仅发过写请求才清理（HTTP 删测试账号 / 清注入数据）。禁止 docker。

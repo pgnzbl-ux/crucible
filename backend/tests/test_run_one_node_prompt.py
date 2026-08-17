@@ -19,6 +19,7 @@ sys.modules.setdefault("claude_agent_sdk", MagicMock())
 
 from runner.run_one import (  # noqa: E402
     NODE_AI_KEYS,
+    NODE_INPUT_SCHEMAS,
     _build_node_prompt,
     _build_options,
     _container_source_dir,
@@ -78,6 +79,16 @@ def test_reproduce_prompt_includes_target_url_in_json():
     assert "靶场就绪" not in text
 
 
+def test_reproduce_submit_schema_rejects_empty_evidence_fields():
+    evidence = NODE_INPUT_SCHEMAS["reproduce"]["properties"]["evidence"]
+    item = evidence["items"]
+
+    assert item["type"] == "object"
+    assert item["required"] == ["type", "detail"]
+    assert item["properties"]["type"]["minLength"] == 1
+    assert item["properties"]["detail"]["minLength"] == 1
+
+
 def test_node_skills_exist_and_are_sliced():
     assert NODE_AI_KEYS == frozenset(
         {"profile", "env_ready", "audit", "reproduce", "report"}
@@ -96,6 +107,8 @@ def test_node_skills_exist_and_are_sliced():
             assert "不要执行" in body or "禁止" in body
         if key == "reproduce":
             assert "host.docker.internal" in body
+            assert "`type`" in body
+            assert "`detail`" in body
             assert "report_data" in body
         if key == "report":
             assert "false_positive" in body

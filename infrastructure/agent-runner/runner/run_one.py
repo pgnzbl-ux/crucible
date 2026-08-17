@@ -638,7 +638,17 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
         "type": "object",
         "properties": {
             "reproduced": {"type": "boolean"},
-            "evidence": {"type": "array"},
+            "evidence": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string", "minLength": 1},
+                        "detail": {"type": "string", "minLength": 1},
+                    },
+                    "required": ["type", "detail"],
+                },
+            },
             "screenshots": {"type": "array"},
             "verdict": {"type": "string", "enum": ["confirmed", "partial", "code_reachable", "code_smell", "false_positive", "not_reproduced"]},
             "report_data": {"type": "object", "description": "8 节 Markdown 字符串"},
