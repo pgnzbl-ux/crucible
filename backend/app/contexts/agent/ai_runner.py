@@ -63,7 +63,7 @@ NODE_OUTPUT_SCHEMAS: dict[str, dict] = {
     },
     "reproduce": {
         "required": ["verdict", "reproduced", "attempts"],
-        "optional": ["evidence", "screenshots", "cvss", "vulnerable_file"],
+        "optional": ["evidence", "screenshots", "cvss", "vulnerable_file", "poc"],
     },
     "report": {
         "required": ["report_data", "final_verdict"],
@@ -166,6 +166,17 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
             },
             "cvss": {"type": "object", "description": "仅 confirmed/partial 的 CVSS"},
             "vulnerable_file": {"type": "string", "description": "漏洞文件定位"},
+            "poc": {
+                "type": "object",
+                "description": "仅 confirmed/partial 的完整 PoC",
+                "properties": {
+                    "language": {"type": "string", "enum": ["python", "bash", "other"]},
+                    "filename": {"type": "string"},
+                    "code": {"type": "string"},
+                    "usage": {"type": "string"},
+                    "language_reason": {"type": "string"},
+                },
+            },
         },
         "required": ["verdict", "reproduced", "attempts"],
     },
@@ -246,6 +257,19 @@ def _mock_output(node_key: str, input_json: dict[str, Any]) -> dict[str, Any]:
                 "severity": "Critical",
             },
             "vulnerable_file": "app/mock.py",
+            "poc": {
+                "language": "python",
+                "filename": "poc.py",
+                "code": (
+                    "import argparse\n"
+                    "parser = argparse.ArgumentParser()\n"
+                    "parser.add_argument('--url', required=True)\n"
+                    "args = parser.parse_args()\n"
+                    "print('[Mock]', args.url)\n"
+                    "raise SystemExit(0)\n"
+                ),
+                "usage": "python poc.py --url http://host.docker.internal:8080",
+            },
         }
     if node_key == "report":
         expected = input_json.get("expected_verdict")
@@ -439,6 +463,36 @@ def _validate_screenshots(shots: list[str], host_workdir: str | None) -> tuple[b
     return True, None
 
 
+_POC_LANGS = ("python", "bash", "other")
+
+
+def _poc_has_code(poc: Any) -> bool:
+    return isinstance(poc, dict) and isinstance(poc.get("code"), str) and bool(str(poc.get("code")).strip())
+
+
+def _validate_poc(poc: Any, *, required: bool) -> tuple[bool, str | None]:
+    if not required:
+        if poc in (None, {}) or poc is False:
+            return True, None
+        if _poc_has_code(poc):
+            return False, "未确认判定不得交 poc"
+        return True, None
+    if not isinstance(poc, dict):
+        return False, "confirmed/partial 需要 poc.language/filename/code/usage"
+    lang = poc.get("language")
+    if lang not in _POC_LANGS:
+        return False, "poc.language 必须是 python|bash|other"
+    for key in ("filename", "code", "usage"):
+        val = poc.get(key)
+        if not isinstance(val, str) or not val.strip():
+            return False, "confirmed/partial 需要 poc.language/filename/code/usage"
+    if lang != "python":
+        reason = poc.get("language_reason")
+        if not isinstance(reason, str) or not reason.strip():
+            return False, "非 python 的 poc 需要 language_reason"
+    return True, None
+
+
 def _validate_reproduce_output(
     output: dict, *, host_workdir: str | None = None,
 ) -> tuple[bool, str | None]:
@@ -492,6 +546,10 @@ def _validate_reproduce_output(
         output["vulnerable_file"] = ""
     elif not isinstance(vf, str):
         return False, "vulnerable_file 必须是字符串"
+    need_poc = verdict in _CONFIRMED_VERDICTS
+    ok, err = _validate_poc(output.get("poc"), required=need_poc)
+    if not ok:
+        return False, err
     return True, None
 
 

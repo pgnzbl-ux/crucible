@@ -219,6 +219,24 @@ def _attempt(**over):
     return base
 
 
+def _poc_ok(**over):
+    base = {
+        "language": "python",
+        "filename": "poc.py",
+        "code": (
+            "import argparse\n"
+            "parser = argparse.ArgumentParser()\n"
+            "parser.add_argument('--url', required=True)\n"
+            "args = parser.parse_args()\n"
+            "print(args.url)\n"
+            "raise SystemExit(0)\n"
+        ),
+        "usage": "python poc.py --url http://host.docker.internal:8080",
+    }
+    base.update(over)
+    return base
+
+
 def _confirmed_ok(**over):
     base = {
         "verdict": "confirmed",
@@ -232,6 +250,7 @@ def _confirmed_ok(**over):
             "severity": "Critical",
         },
         "vulnerable_file": "app/login.py",
+        "poc": _poc_ok(),
     }
     base.update(over)
     return base
@@ -275,6 +294,10 @@ def _not_reproduced_ok(**over):
             "severity": "Critical",
         }), "未确认判定不得交 cvss"),
         (_confirmed_ok(screenshots=["img/evidence.txt"]), "真实图片"),
+        ({**_confirmed_ok(), "poc": None}, "confirmed/partial 需要 poc.language/filename/code/usage"),
+        (_confirmed_ok(poc=_poc_ok(language="perl", language_reason="")), "poc.language 必须是 python|bash|other"),
+        (_confirmed_ok(poc=_poc_ok(language="bash")), "非 python 的 poc 需要 language_reason"),
+        (_not_reproduced_ok(poc=_poc_ok()), "未确认判定不得交 poc"),
     ],
 )
 def test_validate_reproduce_shape_rejects(output, needle):
@@ -288,6 +311,7 @@ def test_validate_reproduce_shape_rejects(output, needle):
     [
         _confirmed_ok(),
         _confirmed_ok(verdict="partial"),
+        _confirmed_ok(poc=_poc_ok(language="bash", language_reason="需 openssl s_client 握手")),
         _not_reproduced_ok(),
         {
             "verdict": "code_smell",

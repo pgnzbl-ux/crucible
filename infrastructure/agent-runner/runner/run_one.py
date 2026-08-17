@@ -690,6 +690,17 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
             "verdict": {"type": "string", "enum": ["confirmed", "partial", "code_reachable", "code_smell", "false_positive", "not_reproduced"]},
             "cvss": {"type": "object", "description": "仅 confirmed/partial 的 CVSS"},
             "vulnerable_file": {"type": "string", "description": "漏洞文件定位"},
+            "poc": {
+                "type": "object",
+                "description": "仅 confirmed/partial 的完整 PoC",
+                "properties": {
+                    "language": {"type": "string", "enum": ["python", "bash", "other"]},
+                    "filename": {"type": "string"},
+                    "code": {"type": "string"},
+                    "usage": {"type": "string"},
+                    "language_reason": {"type": "string"},
+                },
+            },
         },
         "required": ["verdict", "reproduced", "attempts"],
     },
