@@ -244,6 +244,10 @@ P0 全部完成。每个 P1 完成后跑一遍全链路冒烟（任务创建 →
 - agent-runner 容器必须：非 root + 只读 rootfs + cap_drop ALL + 资源限制 + 超时回收（`AgentRunnerSpec` 默认值）
 - 凭据零落盘：`ANTHROPIC_*` 等 8 个变量通过 `docker run --env` 注入 agent-runner 容器，容器销毁 env 消失
 - API Key 当前**明文落库**(`settings/service.py` 存 `api_key_encrypted` 字段),列表接口走 `mask_secret` 掩码。`core/crypto.py` 的 Fernet 工具遗留未用
+- LLM Provider 管理接口必须 JWT；`base_url` 仅允许解析到公网的 HTTPS 域名，禁止 IP 字面量和重定向
+- Task/Report/Evidence 查询与写操作必须绑定 owner；非 owner 与不存在统一 404
+- AI 生成 Compose 在宿主执行前走 `lab/compose_policy.py` 高危字段拒绝
+- 创建/重试任务必须先 commit 再投递 Celery；投递失败把 Task/Run 标 failed 并返回 503
 - 生产环境（`ENVIRONMENT=production`）强制校验：必须 AUTH_SECRET + 禁止 SQLite（config validator）
 
 ### 5.4 踩坑记录（务必先读）
@@ -257,14 +261,15 @@ P0 全部完成。每个 P1 完成后跑一遍全链路冒烟（任务创建 →
 | Celery worker 复用 async engine 报 "attached to a different loop" | worker 用独立 NullPool engine（`tasks.py::_worker_engine`） |
 | 沙箱 internal 网络断外联导致 git clone 失败 | 默认 `sandbox_network_internal=False`（可外联），专用网络只隔离平台 |
 | agent-runner 网络断外联 / DNS 失败 | 网必须 `internal=False`（旧 internal 网会重建）；容器 `dns=223.5.5.5,8.8.8.8,1.1.1.1`（Docker Desktop 自定义网的 127.0.0.11 经常失效） |
-| agent-runner / 靶场容器残留堆积 | `teardown_task_runtime` 只拆任务 runner；靶场静默满 TTL 1h 且无 live 任务才销毁，管理入口为 `/labs`；worker 每 5 分钟巡检。历史 task-id 靶场只作升级孤儿清理 |
+| agent-runner / 靶场容器残留堆积 | `teardown_task_runtime` 只拆任务 runner；配方上传失败必须补偿 `compose down`；终态 Lab 由巡检 `cleanup_terminal_runtimes` 兜底。靶场静默满 TTL 1h 且无 live 任务才销毁，管理入口为 `/labs` |
+| 删除 Runner `host.docker.internal` 会打断 reproduce | reproduce 通过宿主映射端口访问 Lab，本阶段保留 host-gateway；彻底隔离需 Runner 加入 Lab 网络或出站代理 |
 | container.logs(stream=True) 按字节 chunk 切分破坏 JSONL 行边界 | `LineBufferedJsonParser` 按 `\n` 累积字节再 json.loads；EOF 时调 `flush()` 处理最后一行 |
 | 宿主机端口冲突（5432/6379 已被占用） | Crucible 用 5433/6380 |
 | Windows 下 Celery 用 solo pool | `run_worker.py` 已固定 `--pool=solo` |
 | **chromium headless 在 read_only rootfs 下崩溃** | 需额外挂 `/tmp` + `/dev/shm` tmpfs + 容器 env `HOME=/workspace`（crashpad / ProcessSingleton 依赖可写 HOME），且 `/workspace` 不能挂 `noexec`（chromium + 搭靶场二进制都需可执行） |
 | **nginx/反代默认缓冲 SSE** | 响应头加 `X-Accel-Buffering: no` + `Cache-Control: no-cache, no-transform`（sse.py 端点已加） |
 | **Redis Pub/Sub 离线即丢消息** | SSE 连接先回放 DB 历史（`_replay_history`）再订阅 Pub/Sub，保证"刚发生的事件"不丢 |
-| **EventSource 无法注入 Authorization header** | token 走 query 参数 `?token=xxx`（前端 useTaskEvents 已实现；后端鉴权待 P0-3 接入） |
+| **EventSource 无法注入 Authorization header** | token 走 query 参数 `?token=xxx`（前端 useTaskEvents + 后端 SSE owner 校验已接入） |
 | **SSE 客户端断开不清理 → Redis 连接泄漏** | `stream_task_events` finally 块强制 `unsubscribe + pubsub.close + r.close`；并发规范见 concurrency.md §5 |
 
 ---

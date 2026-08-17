@@ -180,6 +180,30 @@ async def test_creating_without_live_task_is_failed_and_cleaned(session):
 
 
 @pytest.mark.asyncio
+async def test_failed_lab_runtime_is_cleaned_by_sweeper(session):
+    from app.contexts.lab.service import LabService
+    from app.contexts.task.models import Task
+
+    await seed(session)
+    svc = LabService(session)
+    result = await svc.acquire(
+        owner_id="u1", project_id="p1", commit_sha=SHA, task_id="t1"
+    )
+    await svc.mark_failed(result.lab_id, "upload failed")
+    (await session.get(Task, "t1")).status = "failed"
+    await session.commit()
+
+    with patch(
+        "app.contexts.lab.docker_ops.compose_down",
+        new_callable=AsyncMock,
+    ) as down:
+        cleaned = await svc.cleanup_terminal_runtimes()
+
+    assert cleaned == [result.lab_id]
+    down.assert_awaited_once_with(result.compose_project)
+
+
+@pytest.mark.asyncio
 async def test_ttl_down_failure_does_not_block_other_labs(session):
     from app.contexts.lab.models import Lab
 

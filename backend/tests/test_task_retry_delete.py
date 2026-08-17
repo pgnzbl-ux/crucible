@@ -17,6 +17,7 @@ async def session_factory():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         from app.contexts.identity.models import User  # noqa: F401
+        from app.contexts.lab.models import Lab  # noqa: F401
         from app.contexts.project.models import Project  # noqa: F401
         from app.contexts.task.models import Task, TaskRun, NodeRun, AgentEvent  # noqa: F401
         from app.contexts.report.models import Report  # noqa: F401
@@ -64,7 +65,7 @@ async def test_retry_creates_new_run_without_reusing_nodes(session_factory):
 
         svc = TaskService(TaskRepository(session))
         with patch("app.core.celery_app.celery_app.send_task"):
-            new_run_id = await svc.retry_task(task.id)
+            new_run_id = await svc.retry_task(task.id, "u1")
 
         from sqlalchemy import select
         new_nodes = (
@@ -98,7 +99,30 @@ async def test_retry_rejects_running_task(session_factory):
         await session.flush()
         svc = TaskService(TaskRepository(session))
         with pytest.raises(ValueError, match="不能重试"):
-            await svc.retry_task(task.id)
+            await svc.retry_task(task.id, "u1")
+
+
+@pytest.mark.asyncio
+async def test_task_operations_require_owner(session_factory):
+    """已知 UUID 也不能读取或重试其他用户的任务。"""
+    from app.contexts.task.models import Task
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+
+    async with session_factory() as session:
+        task = Task(
+            project_address="x",
+            vulnerability_description="secret",
+            owner_id="u1",
+            status="failed",
+        )
+        session.add(task)
+        await session.flush()
+        svc = TaskService(TaskRepository(session))
+
+        assert await svc.get_task(task.id, "u2") is None
+        with pytest.raises(ValueError, match="任务不存在"):
+            await svc.retry_task(task.id, "u2")
 
 
 @pytest.mark.asyncio
@@ -147,7 +171,7 @@ async def test_cancel_marks_running_and_pending_nodes_cancelled(session_factory)
             "app.contexts.agent.runtime_cleanup.teardown_task_runtime",
             new_callable=AsyncMock,
         ):
-            detail = await svc.cancel_task(task.id)
+            detail = await svc.cancel_task(task.id, "u1")
             await asyncio.sleep(0)
 
         assert detail is not None
@@ -188,7 +212,7 @@ async def test_cancel_tears_down_lab_and_runner(session_factory):
             "app.contexts.agent.runtime_cleanup.teardown_task_runtime",
             new_callable=AsyncMock,
         ) as mock_teardown:
-            await svc.cancel_task(task.id)
+            await svc.cancel_task(task.id, "u1")
             await asyncio.sleep(0)
 
         mock_teardown.assert_awaited_once_with(task.id)
@@ -224,7 +248,7 @@ async def test_cancel_returns_before_teardown_finishes(session_factory):
             "app.contexts.agent.runtime_cleanup.teardown_task_runtime",
             never_finishes,
         ):
-            detail = await asyncio.wait_for(svc.cancel_task(task.id), timeout=0.5)
+            detail = await asyncio.wait_for(svc.cancel_task(task.id, "u1"), timeout=0.5)
 
         assert detail is not None
         assert detail.status == "cancelled"
@@ -254,7 +278,7 @@ async def test_delete_tears_down_lab_and_runner(session_factory):
             "app.contexts.agent.runtime_cleanup.teardown_task_runtime",
             new_callable=AsyncMock,
         ) as mock_teardown:
-            ok = await svc.delete_task(task.id)
+            ok = await svc.delete_task(task.id, "u1")
         assert ok is True
         mock_teardown.assert_awaited_once_with(task.id)
 
@@ -281,7 +305,7 @@ async def test_soft_delete_archives(session_factory):
             "app.contexts.agent.runtime_cleanup.teardown_task_runtime",
             new_callable=AsyncMock,
         ) as mock_teardown:
-            ok = await svc.delete_task(task.id)
+            ok = await svc.delete_task(task.id, "u1")
         assert ok is True
         assert task.status == "archived"
         mock_teardown.assert_awaited_once_with(task.id)
@@ -305,4 +329,4 @@ async def test_soft_delete_rejects_already_archived(session_factory):
         await session.flush()
         svc = TaskService(TaskRepository(session))
         with pytest.raises(ValueError, match="已归档"):
-            await svc.delete_task(task.id)
+            await svc.delete_task(task.id, "u1")

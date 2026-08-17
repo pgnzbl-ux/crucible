@@ -2,6 +2,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.core.url_security import normalize_https_domain_url
 
 # ── 请求 ──
 
@@ -19,9 +20,7 @@ class LlmProviderCreateRequest(BaseModel):
     @field_validator("base_url")
     @classmethod
     def _validate_url(cls, v: str) -> str:
-        if not v.startswith(("http://", "https://")):
-            raise ValueError("base_url 必须以 http:// 或 https:// 开头")
-        return v.rstrip("/")
+        return normalize_https_domain_url(v)
 
 
 class LlmProviderUpdateRequest(BaseModel):
@@ -34,12 +33,22 @@ class LlmProviderUpdateRequest(BaseModel):
     enabled: bool | None = None
     extra: dict | None = None
 
+    @field_validator("base_url")
+    @classmethod
+    def _validate_url(cls, v: str | None) -> str | None:
+        return normalize_https_domain_url(v) if v is not None else None
+
 
 class LlmProviderTestRequest(BaseModel):
     """测试连接 — 可用已有 Provider 或临时参数"""
     base_url: str | None = None
     api_key: str | None = None
     model: str | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_url(cls, v: str | None) -> str | None:
+        return normalize_https_domain_url(v) if v is not None else None
 
 
 # ── 响应 ──

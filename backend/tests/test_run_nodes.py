@@ -76,7 +76,7 @@ async def test_get_run_nodes_returns_parsed_output(session_factory):
         await session.flush()
 
         svc = TaskService(TaskRepository(session))
-        nodes = await svc.get_run_nodes(task.id, run.id)
+        nodes = await svc.get_run_nodes(task.id, run.id, "u1")
 
     assert len(nodes) == 2
     source = nodes[0]
@@ -120,7 +120,7 @@ async def test_get_run_nodes_invalid_output_json_becomes_empty_dict(session_fact
         await session.flush()
 
         svc = TaskService(TaskRepository(session))
-        nodes = await svc.get_run_nodes(task.id, run.id)
+        nodes = await svc.get_run_nodes(task.id, run.id, "u1")
 
     assert nodes[0]["output"] == {}
     assert nodes[0]["error_message"] == "源码克隆失败: 网络错误"

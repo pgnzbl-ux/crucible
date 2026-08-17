@@ -46,8 +46,9 @@ async def list_reports(
 async def get_report_by_task(
     task_id: str,
     svc: Annotated[ReportService, Depends(get_report_service)],
+    user_id: CurrentUserId,
 ) -> ReportDetail:
-    report = await svc.get_report_by_task(task_id)
+    report = await svc.get_report_by_task(task_id, user_id)
     if not report:
         raise HTTPException(404, "该任务暂无报告")
     return report
@@ -57,8 +58,9 @@ async def get_report_by_task(
 async def get_report(
     report_id: str,
     svc: Annotated[ReportService, Depends(get_report_service)],
+    user_id: CurrentUserId,
 ) -> ReportDetail:
-    report = await svc.get_report(report_id)
+    report = await svc.get_report(report_id, user_id)
     if not report:
         raise HTTPException(404, "报告不存在")
     return report
@@ -68,9 +70,10 @@ async def get_report(
 async def publish_report(
     report_id: str,
     svc: Annotated[ReportService, Depends(get_report_service)],
+    user_id: CurrentUserId,
 ) -> ReportDetail:
     try:
-        report = await svc.publish_report(report_id)
+        report = await svc.publish_report(report_id, user_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
     if not report:
@@ -112,21 +115,26 @@ async def upload_evidence(
 async def list_evidences(
     report_id: str,
     svc: Annotated[ReportService, Depends(get_report_service)],
+    user_id: CurrentUserId,
 ) -> list[EvidenceResponse]:
     """列出报告的所有证据（含预签名下载 URL）"""
-    return await svc.list_evidence(report_id)
+    evidences = await svc.list_evidence(report_id, user_id)
+    if evidences is None:
+        raise HTTPException(404, "报告不存在")
+    return evidences
 
 
 @router.get("/{report_id}/export")
 async def export_report(
     report_id: str,
     svc: Annotated[ReportService, Depends(get_report_service)],
+    user_id: CurrentUserId,
     format: str = Query("json", pattern="^(json|md)$"),
 ):
     """导出报告。format=json 返回结构化 report_data;format=md 返回渲染后的 markdown。"""
     from fastapi.responses import JSONResponse, PlainTextResponse
 
-    report = await svc.get_report(report_id)
+    report = await svc.get_report(report_id, user_id)
     if not report:
         raise HTTPException(404, "报告不存在")
 

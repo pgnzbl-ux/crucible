@@ -16,10 +16,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.contexts.settings.service import SettingsService
-from app.contexts.settings.repository import SettingsRepository
-from app.core.config import get_settings
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.contexts.settings.repository import SettingsRepository
+from app.contexts.settings.service import SettingsService
+from app.core.config import get_settings
+from app.core.url_security import validate_public_https_url
 
 settings = get_settings()
 
@@ -113,6 +115,7 @@ async def resolve_runner_env(session: AsyncSession) -> dict[str, str]:
     provider = await svc.get_default_provider()
     if provider is None:
         return adapter.build_runner_env()
+    await validate_public_https_url(provider.base_url)
     return adapter.build_runner_env(svc.build_env_from_provider(provider))
 
 

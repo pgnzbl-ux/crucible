@@ -297,6 +297,7 @@ async def test_lab_sweep_phases_continue_after_expire_failure():
     service = MagicMock()
     service.expire_silent_labs = AsyncMock(side_effect=RuntimeError("ttl failed"))
     service.fail_stale_creating = AsyncMock()
+    service.cleanup_terminal_runtimes = AsyncMock()
     service.known_lab_ids = AsyncMock(return_value={"known"})
     service.session.rollback = AsyncMock()
 
@@ -311,4 +312,5 @@ async def test_lab_sweep_phases_continue_after_expire_failure():
         await run_lab_lifecycle_phases(service)
 
     service.fail_stale_creating.assert_awaited_once()
+    service.cleanup_terminal_runtimes.assert_awaited_once()
     cleanup.assert_awaited_once_with({"crucible-lab-legacy"}, {"known"})

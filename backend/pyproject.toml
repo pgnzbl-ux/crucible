@@ -22,6 +22,7 @@ dependencies = [
     "aiosqlite>=0.20.0",
     "minio>=7.2.0",  # S3 兼容对象存储客户端（report/storage.py）
     "docker>=7.0.0",  # Docker SDK（core/agent_runner.py 拉起 agent-runner 容器）
+    "pyyaml>=6.0.3",  # AI 生成 docker-compose.yml 的宿主执行前安全解析
     # claude-agent-sdk 仅 agent-runner 容器内需要（见 infrastructure/agent-runner/requirements.txt）
     # 后端通过 docker SDK 拉起容器，不直接 import SDK，故不在此列出（省 297MB CLI 二进制）
 ]

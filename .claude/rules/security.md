@@ -28,6 +28,16 @@ paths: ["backend/app/**/*.py", "backend/tests/**/*.py"]
 
 新增字段前先讨论是否触碰红线。
 
+Runner 的 reproduce 节点通过 `host.docker.internal` 访问宿主映射的 Lab 端口，因此本阶段保留 host-gateway。通用 Agent 工具访问宿主端口属于已接受的剩余风险；彻底隔离需先改为 Runner 动态加入当前 Lab Compose 网络或引入出站代理，禁止只删别名造成生产复现链路失效。
+
+## 2.1 LLM Base URL 与 Compose 准入
+
+- Provider Base URL 必须是 HTTPS 域名，不允许 IP 字面量、userinfo 或 fragment
+- create/update/test 和注入 Runner 前均解析 DNS；任何非公网结果都拒绝
+- LLM 测试连接禁止跟随重定向；不使用域名白名单，以兼容未知公网 Provider
+- AI 生成 Compose 在宿主执行前必须经过 `lab/compose_policy.py`；拒绝 privileged、host namespace、devices、cap_add、运行时 socket、越界 bind mount/build context
+- 配方上传或 Lab ready 落库失败必须补偿 `compose down`；巡检兜底回收终态 Lab 运行时
+
 ## 3. 凭据存储(当前状态)
 
 - **当前为明文存储**:`settings/service.py` 的 build_env_from_provider/create_provider/test_connection 全程明文存取,响应层 `mask_secret` 掩码
@@ -51,6 +61,7 @@ dev 环境跳过这些校验，但提醒日志要打。
 - Agent（Claude Code CLI / 自研 Agent）输出视为**不可信**
 - Agent 写出的报告、证据、命令结果都要走 schema 校验才能落库
 - Agent 不能直接访问平台数据库 / Redis / MinIO——只能通过沙箱 + 受控 API
+- Task、Report、Evidence 的详情和状态变更必须在 Repository 查询中绑定 owner；非 owner 与不存在统一 404
 - 取消任务必须先提交 cancelled 再返回；`revoke(terminate=True)` + 后台拆 agent-runner/靶场；编排器不得把 cancelled 写回 failed(已落地,task/service.py + orchestrator.py)
 
 ## 7. 安全事件上报

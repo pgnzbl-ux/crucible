@@ -17,20 +17,22 @@ class ReportRepository:
         await self.session.refresh(report)
         return report
 
-    async def get_by_id(self, report_id: str) -> Report | None:
-        result = await self.session.execute(
-            select(Report)
-            .where(Report.id == report_id)
-            .options(selectinload(Report.evidence))
-        )
+    async def get_by_id(
+        self, report_id: str, owner_id: str | None = None
+    ) -> Report | None:
+        stmt = select(Report).where(Report.id == report_id)
+        if owner_id is not None:
+            stmt = stmt.where(Report.owner_id == owner_id)
+        result = await self.session.execute(stmt.options(selectinload(Report.evidence)))
         return result.scalar_one_or_none()
 
-    async def get_by_task(self, task_id: str) -> Report | None:
-        result = await self.session.execute(
-            select(Report)
-            .where(Report.task_id == task_id)
-            .options(selectinload(Report.evidence))
-        )
+    async def get_by_task(
+        self, task_id: str, owner_id: str | None = None
+    ) -> Report | None:
+        stmt = select(Report).where(Report.task_id == task_id)
+        if owner_id is not None:
+            stmt = stmt.where(Report.owner_id == owner_id)
+        result = await self.session.execute(stmt.options(selectinload(Report.evidence)))
         return result.scalar_one_or_none()
 
     async def list_by_owner(
@@ -75,7 +77,11 @@ class ReportRepository:
         await self.session.refresh(evidence)
         return evidence
 
-    async def list_evidence(self, report_id: str) -> list[Evidence]:
+    async def list_evidence(
+        self, report_id: str, owner_id: str
+    ) -> list[Evidence] | None:
+        if await self.get_by_id(report_id, owner_id) is None:
+            return None
         result = await self.session.execute(
             select(Evidence).where(Evidence.report_id == report_id).order_by(Evidence.created_at)
         )

@@ -18,14 +18,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from app.core.config import get_settings
-
 from . import storage
 from .models import Evidence, Report
 from .repository import ReportRepository
 from .schemas import EvidenceResponse, ReportDetail, ReportSummary
-
-settings = get_settings()
 
 # 中文结论标签
 CONCLUSION_LABELS = {
@@ -160,12 +156,16 @@ class ReportService:
 
     # ── 查询 ──
 
-    async def get_report(self, report_id: str) -> ReportDetail | None:
-        report = await self.repo.get_by_id(report_id)
+    async def get_report(
+        self, report_id: str, owner_id: str
+    ) -> ReportDetail | None:
+        report = await self.repo.get_by_id(report_id, owner_id)
         return self._to_detail(report) if report else None
 
-    async def get_report_by_task(self, task_id: str) -> ReportDetail | None:
-        report = await self.repo.get_by_task(task_id)
+    async def get_report_by_task(
+        self, task_id: str, owner_id: str
+    ) -> ReportDetail | None:
+        report = await self.repo.get_by_task(task_id, owner_id)
         return self._to_detail(report) if report else None
 
     async def list_reports(
@@ -182,8 +182,10 @@ class ReportService:
 
     # ── 发布 ──
 
-    async def publish_report(self, report_id: str) -> ReportDetail | None:
-        report = await self.repo.get_by_id(report_id)
+    async def publish_report(
+        self, report_id: str, owner_id: str
+    ) -> ReportDetail | None:
+        report = await self.repo.get_by_id(report_id, owner_id)
         if not report:
             return None
         if report.status == "draft":
@@ -209,13 +211,9 @@ class ReportService:
 
         返回 (evidence, error)。report 不存在或越权返回 (None, error)。
         """
-        report = await self.repo.get_by_id(report_id)
+        report = await self.repo.get_by_id(report_id, owner_id)
         if not report:
             return None, "报告不存在"
-        # owner 校验：开发模式宽松（owner 可能是 "system"）；生产严格
-        if get_settings().environment != "development" and report.owner_id != owner_id:
-            return None, "无权操作该报告"
-
         # kind 白名单（防任意值落库）
         if kind not in ("artifact", "log", "screenshot", "poc"):
             kind = "artifact"
@@ -239,6 +237,10 @@ class ReportService:
         evidence = await self.repo.add_evidence(evidence)
         return self._to_evidence_detail(evidence, with_url=True), None
 
-    async def list_evidence(self, report_id: str) -> list[EvidenceResponse]:
-        evidences = await self.repo.list_evidence(report_id)
+    async def list_evidence(
+        self, report_id: str, owner_id: str
+    ) -> list[EvidenceResponse] | None:
+        evidences = await self.repo.list_evidence(report_id, owner_id)
+        if evidences is None:
+            return None
         return [self._to_evidence_detail(e, with_url=True) for e in evidences]

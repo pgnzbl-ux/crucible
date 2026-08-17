@@ -10,6 +10,10 @@ from .schemas import TaskCreateRequest, TaskDetail, TaskListResponse, TaskSummar
 logger = logging.getLogger(__name__)
 
 
+class TaskDispatchError(RuntimeError):
+    """任务已落库，但无法投递给 Agent worker。"""
+
+
 def _parse_refs(refs_raw: str | None) -> list[str]:
     """credential_refs JSON 字符串 → list（容错）"""
     if not refs_raw:
@@ -115,6 +119,7 @@ class TaskService:
         # 创建首次运行记录并异步提交给 Agent worker
         run = TaskRun(task_id=task.id, status="pending")
         run = await self.repo.create_run(run)
+        await self.repo.session.commit()
 
         # 触发 Celery 任务（agent context）— 不阻塞创建响应
         # 用 run.id 作为 celery task_id，cancel 时可精确 revoke（terminate → SIGTERM → 容器销毁）
@@ -122,14 +127,18 @@ class TaskService:
 
         try:
             celery_app.send_task("agent.run_analysis", args=[task.id, run.id], task_id=run.id)
-        except Exception:
-            # broker 不可用时任务停留在 queued，前端可见
-            await self.repo.update_status(task, "queued")
+        except Exception as exc:
+            task.status = "failed"
+            run.status = "failed"
+            run.error_message = f"任务投递失败: {exc}"[:1000]
+            run.finished_at = datetime.now(timezone.utc)
+            await self.repo.session.commit()
+            raise TaskDispatchError("任务已创建，但投递 Agent worker 失败") from exc
 
         return self._to_detail(task, [run])
 
-    async def get_task(self, task_id: str) -> TaskDetail | None:
-        task = await self.repo.get_by_id_with_runs(task_id)
+    async def get_task(self, task_id: str, owner_id: str) -> TaskDetail | None:
+        task = await self.repo.get_by_id_with_runs(task_id, owner_id)
         if not task:
             return None
         return self._to_detail(task, task.runs)
@@ -147,7 +156,7 @@ class TaskService:
             total=total, limit=limit, offset=offset,
         )
 
-    async def cancel_task(self, task_id: str) -> TaskDetail | None:
+    async def cancel_task(self, task_id: str, owner_id: str) -> TaskDetail | None:
         """取消任务：状态机校验 → 标 cancelled 并提交 → revoke → 后台拆容器。
 
         HTTP 不能等 `docker compose down`（build 中可能卡住数分钟），否则前端取消按钮
@@ -155,7 +164,7 @@ class TaskService:
         revoke(terminate=True) 在 Windows solo pool 上经常杀不掉正在跑的 worker；
         后台 teardown 先拆 agent-runner 停 AI，编排器刷新到 cancelled 后停后续节点。
         """
-        task = await self.repo.get_by_id_with_runs(task_id)
+        task = await self.repo.get_by_id_with_runs(task_id, owner_id)
         if not task:
             return None
         if task.status not in ("pending", "queued", "running"):
@@ -191,8 +200,12 @@ class TaskService:
 
         return self._to_detail(task, task.runs)
 
-    async def get_task_events(self, task_id: str, limit: int = 1000) -> list[dict[str, Any]]:
+    async def get_task_events(
+        self, task_id: str, owner_id: str, limit: int = 1000
+    ) -> list[dict[str, Any]] | None:
         """当前 run 的 Agent 事件流（前端进度展示用；不含历史重试）"""
+        if await self.repo.get_by_id_with_runs(task_id, owner_id) is None:
+            return None
         events = await self.repo.get_events_for_task(task_id, limit)
         result: list[dict[str, Any]] = []
         for ev in events:
@@ -215,13 +228,13 @@ class TaskService:
             )
         return result
 
-    async def retry_task(self, task_id: str) -> str:
+    async def retry_task(self, task_id: str, owner_id: str) -> str:
         """重试任务:新建 TaskRun，从节点 0（源码获取）整条重跑。返回新 run_id。
 
         不拷贝上一 run 的 NodeRun。上一 run 的节点/事件保留作历史。
         工作区清空由 worker 在新 run 启动时处理（本 run 尚无 completed 节点）。
         """
-        task = await self.repo.get_by_id_with_runs(task_id)
+        task = await self.repo.get_by_id_with_runs(task_id, owner_id)
         if not task:
             raise ValueError("任务不存在")
         if task.status not in ("failed", "completed", "cancelled", "needs_review"):
@@ -232,6 +245,7 @@ class TaskService:
 
         task.status = "running"
         await self.repo.session.flush()
+        await self.repo.session.commit()
 
         # 投 Celery(用新 run.id 作 celery task_id,cancel 时可精确 revoke)
         from app.core.celery_app import celery_app
@@ -240,17 +254,24 @@ class TaskService:
             celery_app.send_task(
                 "agent.run_analysis", args=[task_id, new_run.id], task_id=new_run.id
             )
-        except Exception:
-            pass  # broker 不可用,run 停 pending,前端可见
+        except Exception as exc:
+            task.status = "failed"
+            new_run.status = "failed"
+            new_run.error_message = f"任务投递失败: {exc}"[:1000]
+            new_run.finished_at = datetime.now(timezone.utc)
+            await self.repo.session.commit()
+            raise TaskDispatchError("重试记录已创建，但投递 Agent worker 失败") from exc
 
         return new_run.id
 
-    async def delete_task(self, task_id: str, *, hard: bool = False) -> bool:
+    async def delete_task(
+        self, task_id: str, owner_id: str, *, hard: bool = False
+    ) -> bool:
         """删除任务。默认软删(status=archived),hard=True 物理删除。
 
         running 中的任务不能删(先 cancel)。
         """
-        task = await self.repo.get_by_id_with_runs(task_id)
+        task = await self.repo.get_by_id_with_runs(task_id, owner_id)
         if not task:
             return False
         if task.status == "running":
@@ -272,11 +293,15 @@ class TaskService:
             await self.repo.session.flush()
         return True
 
-    async def get_run_nodes(self, task_id: str, run_id: str) -> list[dict]:
+    async def get_run_nodes(
+        self, task_id: str, run_id: str, owner_id: str
+    ) -> list[dict] | None:
         """获取某 run 的 6 节点状态(前端步骤条数据源)。"""
         from app.contexts.task.models import NodeRun
         from sqlalchemy import select as sa_select
 
+        if await self.repo.get_by_id_with_runs(task_id, owner_id) is None:
+            return None
         result = await self.repo.session.execute(
             sa_select(NodeRun)
             .where(NodeRun.run_id == run_id, NodeRun.task_id == task_id)

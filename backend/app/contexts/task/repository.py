@@ -25,12 +25,13 @@ class TaskRepository:
         )
         return result.scalar_one_or_none()
 
-    async def get_by_id_with_runs(self, task_id: str) -> Task | None:
-        result = await self.session.execute(
-            select(Task)
-            .where(Task.id == task_id)
-            .options(selectinload(Task.runs))
-        )
+    async def get_by_id_with_runs(
+        self, task_id: str, owner_id: str | None = None
+    ) -> Task | None:
+        stmt = select(Task).where(Task.id == task_id)
+        if owner_id is not None:
+            stmt = stmt.where(Task.owner_id == owner_id)
+        result = await self.session.execute(stmt.options(selectinload(Task.runs)))
         return result.scalar_one_or_none()
 
     async def list_by_owner(

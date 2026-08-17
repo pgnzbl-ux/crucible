@@ -395,6 +395,15 @@ async def docker_compose_up(
     """
     abs_path = resolve_compose_host_path(compose_path, host_workdir, repo_dirname)
     abs_path = abs_path.replace("\\", "/")
+    from app.contexts.lab.compose_policy import (
+        ComposePolicyError,
+        validate_compose_file,
+    )
+
+    try:
+        validate_compose_file(abs_path, host_workdir)
+    except ComposePolicyError as exc:
+        return False, f"docker compose 安全策略拒绝: {exc}"
     cmd = [
         "docker", "compose", *_compose_project_args(_compose_ident(lab_id=lab_id, task_id=task_id)),
         "-f", abs_path, "up", "-d", "--build", "--progress", "plain",
@@ -650,23 +659,32 @@ async def _upload_then_mark_ready(
     lab_compose: str,
     output: dict[str, Any],
 ) -> None:
-    await svc.upload_recipe(
-        owner_id=ctx.owner_id,
-        project_id=ctx.project_id or "",
-        commit_sha=commit_sha,
-        lab_workdir=result.workdir,
-        compose_path=lab_compose,
-        transport_shape=output["transport_shape"],
-        initial_creds=output["initial_creds"],
-        started_containers=output.get("started_containers") or [],
-    )
-    await svc.mark_ready(
-        result.lab_id,
-        target_url=output["target_url"],
-        compose_path=lab_compose,
-        transport_shape=output["transport_shape"],
-        initial_creds=output["initial_creds"],
-    )
+    try:
+        await svc.upload_recipe(
+            owner_id=ctx.owner_id,
+            project_id=ctx.project_id or "",
+            commit_sha=commit_sha,
+            lab_workdir=result.workdir,
+            compose_path=lab_compose,
+            transport_shape=output["transport_shape"],
+            initial_creds=output["initial_creds"],
+            started_containers=output.get("started_containers") or [],
+        )
+        await svc.mark_ready(
+            result.lab_id,
+            target_url=output["target_url"],
+            compose_path=lab_compose,
+            transport_shape=output["transport_shape"],
+            initial_creds=output["initial_creds"],
+        )
+    except Exception:
+        await docker_compose_down(
+            result.workdir,
+            lab_compose,
+            None,
+            lab_id=result.lab_id,
+        )
+        raise
 
 
 async def _try_cached_recipe(

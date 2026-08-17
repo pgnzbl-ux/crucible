@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
-from app.shared.deps import CurrentUserId
+from app.shared.deps import CurrentUserId, get_current_user_id
+
 from .repository import SettingsRepository
 from .schemas import (
     CredentialCreateRequest,
@@ -20,7 +21,11 @@ from .schemas import (
 )
 from .service import SettingsService
 
-router = APIRouter(prefix="/settings", tags=["settings"])
+router = APIRouter(
+    prefix="/settings",
+    tags=["settings"],
+    dependencies=[Depends(get_current_user_id)],
+)
 
 
 async def get_settings_repo(session: Annotated[AsyncSession, Depends(get_db_session)]) -> SettingsRepository:
@@ -46,7 +51,10 @@ async def create_provider(
     request: LlmProviderCreateRequest,
     svc: Annotated[SettingsService, Depends(get_settings_service)],
 ) -> LlmProviderResponse:
-    return await svc.create_provider(request)
+    try:
+        return await svc.create_provider(request)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 @router.put("/llm/providers/{provider_id}", response_model=LlmProviderResponse)
@@ -55,7 +63,10 @@ async def update_provider(
     request: LlmProviderUpdateRequest,
     svc: Annotated[SettingsService, Depends(get_settings_service)],
 ) -> LlmProviderResponse:
-    provider = await svc.update_provider(provider_id, request)
+    try:
+        provider = await svc.update_provider(provider_id, request)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     if not provider:
         raise HTTPException(404, "Provider 不存在")
     return provider

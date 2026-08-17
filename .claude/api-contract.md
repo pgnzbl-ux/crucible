@@ -78,13 +78,17 @@
 
 ### GET `/api/v1/tasks/{id}`
 
-### POST `/api/v1/tasks/{id}/actions/cancel`
+任务只允许 owner 访问；非 owner 与不存在统一返回 404。该规则同样适用于事件、SSE、取消、重试、删除和节点记录。
+
+### POST `/api/v1/tasks/{id}/cancel`
 
 取消任务(已实现):先把任务/run/未完成节点标 `cancelled` 并 **提交后立刻返回**。`revoke(terminate=True)` 停 worker（Windows solo 经常杀不掉）；后台 `schedule_teardown_task_runtime` 只按 `crucible.task_id` 强拆该任务的 agent-runner（停 AI），不 `compose down` 可复用靶场。编排器每节点刷新库状态，已取消则停后续节点，且 execute 失败不得把 cancelled 改成 failed。靶场在静默满 TTL 1 小时且无 live 任务后由巡检销毁。
 
 ### POST `/api/v1/tasks/{id}/retry`  *(阶段 1 新增)*
 
 重试任务(202 返 `{task_id, run_id, status:retrying}`)。新建 TaskRun，**从节点 0（源码获取）整条重跑**，不复用上一 run 的 NodeRun。上一 run 的节点/事件保留作历史。同一次 run 内 worker 崩溃仍可靠 NodeRun 断点续跑，与用户点「重试」不是同一条路径。
+
+创建与重试均先提交 Task/TaskRun，再投递 Celery。Broker 投递失败时 Task/TaskRun 进入 `failed`，接口返回 503，不允许任务静默停在 queued/pending。
 
 ### DELETE `/api/v1/tasks/{id}?hard=true|false`  *(阶段 1 新增)*
 
@@ -144,6 +148,8 @@
 
 含正文、状态、结构化字段(verdict/cvss_score/severity/vulnerable_file/report_data/md_artifact_key/docx_artifact_key)。`report_data` 为 8 节 Markdown 字符串（`product_intro` / `vulnerability` / `impact` / `details` / `reproduction` / `poc_commands` / `fix_suggestions` / `reporting_decision`）。
 
+报告详情、按任务读取、发布、导出和证据列表均只允许 owner 访问；非 owner 与不存在统一返回 404。
+
 ### GET `/api/v1/reports/{id}/export?format=json|md`
 
 **已实现**。format=json 返回 8 键对象（值为 Markdown 字符串）+ 索引字段;format=md 返回平台加 `## N.` 标题后拼接的 markdown。**不生成 docx/pdf**。
@@ -156,7 +162,7 @@
 
 上传证据（multipart/form-data）。字段：`file`（文件，≤50MB）+ `kind`（`artifact|log|screenshot|poc`）。
 上传 → MinIO `crucible-evidence` bucket → 落 `evidences` 表 → 返回带预签名 URL 的 `EvidenceResponse`。
-owner 校验：生产严格（`report.owner_id` 必须匹配 token），开发宽松。
+owner 校验：所有环境均要求 `report.owner_id` 匹配当前用户。
 
 ---
 
@@ -219,23 +225,27 @@ owner 校验：生产严格（`report.owner_id` 必须匹配 token），开发�
 
 ## Settings Context（LLM Provider）
 
-### GET `/api/v1/settings/providers`
+### GET `/api/v1/settings/llm/providers`
 
-**掩码** API Key（仅 `***last4`）。
+要求 Bearer JWT。Provider 当前是平台全局配置，RBAC 落地前任意已登录用户均可管理。API Key 只返回掩码（`***last4`）。
 
-### POST `/api/v1/settings/providers`
+### POST `/api/v1/settings/llm/providers`
 
 新建。`api_key` **明文落库**(存 `api_key_encrypted` 字段),响应层 `mask_secret` 掩码。
 
-### PATCH `/api/v1/settings/providers/{id}`
+### PUT `/api/v1/settings/llm/providers/{id}`
 
-### POST `/api/v1/settings/providers/{id}/actions/activate`
+### DELETE `/api/v1/settings/llm/providers/{id}`
 
-唯一 active：事务内把别人置 false。
+### POST `/api/v1/settings/llm/providers/{id}/activate`
 
-### POST `/api/v1/settings/providers/{id}/actions/test`
+唯一默认 Provider：事务内把其他 Provider 的 `is_default` 置 false。
 
-真实打 `base_url` 验证（不 Mock）。
+### POST `/api/v1/settings/llm/providers/{id}/test`
+
+### POST `/api/v1/settings/llm/test`
+
+真实请求 `base_url` 验证。Base URL 必须是 HTTPS 域名，禁止 IP 字面量、userinfo、fragment 和非公网 DNS 结果；不跟随重定向。不使用域名白名单。
 
 ---
 
@@ -257,7 +267,7 @@ owner 校验：生产严格（`report.owner_id` 必须匹配 token），开发�
 | 409 | `CONFLICT` / `STATE_INVALID` / `LAB_IN_USE` | 状态机非法转换 / username 重名 / 靶场正被 live 任务占用 |
 | 422 | `VALIDATION_FAILED` | Pydantic 字段错误 |
 | 429 | `RATE_LIMITED` | （待补） |
-| 503 | `SERVICE_UNAVAILABLE` | Docker / Redis / MinIO 不可用 |
+| 503 | `SERVICE_UNAVAILABLE` | Docker / Redis / MinIO 不可用；Celery 投递失败 |
 
 ---
 

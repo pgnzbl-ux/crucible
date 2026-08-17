@@ -549,6 +549,29 @@ class LabService:
             failed.append(lab.id)
         return failed
 
+    async def cleanup_terminal_runtimes(self) -> list[str]:
+        """回收已终态但补偿清理未完成的 Lab Compose 资源。"""
+        from . import docker_ops
+
+        result = await self.session.execute(
+            select(Lab).where(Lab.status.in_({"failed", "destroyed", "expired"}))
+        )
+        cleaned: list[str] = []
+        for lab in result.scalars().all():
+            if await self.live_task_ids(lab.id):
+                continue
+            try:
+                await docker_ops.compose_down(lab.compose_project)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "清理终态 Lab 运行时失败(best-effort) lab=%s",
+                    lab.id,
+                    exc_info=True,
+                )
+                continue
+            cleaned.append(lab.id)
+        return cleaned
+
     async def known_lab_ids(self) -> set[str]:
         """返回现存 Lab ID，供历史 compose 孤儿识别。"""
         result = await self.session.execute(select(Lab.id))

@@ -94,3 +94,34 @@ async def test_list_reports_filters_by_verdict_and_query(session):
     items, total = await svc.list_reports("u1", verdict="confirmed", query="sql")
 
     assert total == 1
+
+
+@pytest.mark.asyncio
+async def test_report_detail_and_evidence_require_owner(session):
+    from app.contexts.report.models import Evidence, Report
+    from app.contexts.report.repository import ReportRepository
+    from app.contexts.report.service import ReportService
+
+    report = Report(
+        task_id="task-secret",
+        run_id="run-secret",
+        owner_id="u1",
+        status="generated",
+        title="secret",
+    )
+    session.add(report)
+    await session.flush()
+    session.add(
+        Evidence(
+            report_id=report.id,
+            task_id=report.task_id,
+            object_key="secret.log",
+            file_name="secret.log",
+        )
+    )
+    await session.flush()
+    svc = ReportService(ReportRepository(session))
+
+    assert await svc.get_report(report.id, "u2") is None
+    assert await svc.get_report_by_task(report.task_id, "u2") is None
+    assert await svc.list_evidence(report.id, "u2") is None

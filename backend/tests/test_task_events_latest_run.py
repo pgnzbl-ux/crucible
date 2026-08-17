@@ -71,7 +71,7 @@ async def test_get_events_defaults_to_latest_run_only(session_factory):
         await session.flush()
 
         svc = TaskService(TaskRepository(session))
-        events = await svc.get_task_events(task.id)
+        events = await svc.get_task_events(task.id, "u1")
 
         assert len(events) == 1
         assert events[0]["run_id"] == new_run.id

@@ -17,6 +17,8 @@ from typing import Any
 import httpx
 
 from app.core.crypto import mask_secret
+from app.core.url_security import validate_public_https_url
+
 from .models import Credential, LlmProvider
 from .repository import CredentialRepository, SettingsRepository
 from .schemas import (
@@ -61,10 +63,11 @@ class SettingsService:
         return [to_response(p) for p in providers], len(providers)
 
     async def create_provider(self, request: LlmProviderCreateRequest) -> LlmProviderResponse:
+        base_url = await validate_public_https_url(request.base_url)
         provider = LlmProvider(
             name=request.name,
             provider_type=request.provider_type,
-            base_url=request.base_url,
+            base_url=base_url,
             api_key_encrypted=request.api_key,
             model=request.model,
             timeout_ms=request.timeout_ms,
@@ -84,6 +87,8 @@ class SettingsService:
         if not provider:
             return None
         updates = request.model_dump(exclude_unset=True, exclude={"api_key"})
+        if request.base_url is not None:
+            updates["base_url"] = await validate_public_https_url(request.base_url)
         for field, value in updates.items():
             if field == "extra" and value is not None:
                 value = json.dumps(value, ensure_ascii=False)
@@ -140,10 +145,15 @@ class SettingsService:
         if not resolved_url or not resolved_key or not resolved_model:
             return LlmProviderTestResult(ok=False, message="缺少 base_url / api_key / model 参数")
 
+        try:
+            resolved_url = await validate_public_https_url(resolved_url)
+        except ValueError as exc:
+            return LlmProviderTestResult(ok=False, message=str(exc))
+
         endpoint = f"{resolved_url}/v1/messages"
         started = time.time()
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
                 resp = await client.post(
                     endpoint,
                     headers={
