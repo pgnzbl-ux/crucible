@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { asMarkdownSection, asRecord, asRecordArray, asStringArray, REPORT_SECTIONS } from './reportData'
+import { asMarkdownSection, asRecord, asRecordArray, asStringArray, documentKindOf, RECORD_SECTIONS, REPORT_SECTIONS, sectionsFor } from './reportData'
 
 describe('reportData guards', () => {
   it('accepts plain records and rejects arrays and primitives', () => {
@@ -22,6 +22,20 @@ describe('reportData guards', () => {
   it('has 8 report sections', () => {
     expect(REPORT_SECTIONS).toHaveLength(8)
     expect(REPORT_SECTIONS.map((s) => s.key)).toContain('product_intro')
+    expect(REPORT_SECTIONS.map((s) => s.key)).toContain('poc_commands')
+  })
+
+  it('has 8 verification record sections without poc', () => {
+    expect(RECORD_SECTIONS).toHaveLength(8)
+    expect(RECORD_SECTIONS.map((s) => s.key)).toContain('test_record')
+    expect(RECORD_SECTIONS.map((s) => s.key)).not.toContain('poc_commands')
+  })
+
+  it('selects sections by document_kind and defaults old reports to vulnerability report', () => {
+    expect(documentKindOf({ document_kind: 'verification_record' })).toBe('verification_record')
+    expect(documentKindOf({})).toBe('vulnerability_report')
+    expect(sectionsFor({ document_kind: 'verification_record' })).toBe(RECORD_SECTIONS)
+    expect(sectionsFor({ product_intro: 'old' })).toBe(REPORT_SECTIONS)
   })
 
   it('only accepts non-empty markdown strings', () => {

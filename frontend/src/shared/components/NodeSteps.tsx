@@ -16,12 +16,13 @@ import {
   applyNodeOverlay,
   compactNodeCaption,
   displayNodeStatus,
-  formatAuditDetail,
   isNodeListLoading,
   isNodeTerminal,
   overlayFromSseEvents,
   summarizeNodeOutput,
 } from '../lib/nodeOutput'
+import { AuditDetail } from './AuditDetail'
+import { EnvReadyDetail } from './EnvReadyDetail'
 
 const { Text } = Typography
 
@@ -46,8 +47,15 @@ function nodeIcon(status: NodeRun['status']) {
 
 function nodeSummary(n: Pick<NodeRun, 'node_key' | 'status' | 'output' | 'error_message'>): string {
   if (n.status === 'failed' && n.error_message) return n.error_message
-  if (n.node_key === 'audit') return formatAuditDetail(n.output, n.status)
   return summarizeNodeOutput(n.node_key, n.output, n.status)
+}
+
+/** 完成的 audit / env_ready 有结构化字段可排版，其余节点一句摘要就够。 */
+function nodeDetail(n: Pick<NodeRun, 'node_key' | 'status' | 'output'>) {
+  if (n.status !== 'completed') return null
+  if (n.node_key === 'audit') return <AuditDetail output={n.output} />
+  if (n.node_key === 'env_ready') return <EnvReadyDetail output={n.output} />
+  return null
 }
 
 export function NodeSteps({ taskId, runId, taskStatus, sseEvents = [], compact = false }: NodeStepsProps) {
@@ -147,6 +155,7 @@ export function NodeSteps({ taskId, runId, taskStatus, sseEvents = [], compact =
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
       {ordered.map((n) => {
+        const detail = nodeDetail(n)
         const summary = nodeSummary(n)
         const failed = n.status === 'failed'
         return (
@@ -173,12 +182,14 @@ export function NodeSteps({ taskId, runId, taskStatus, sseEvents = [], compact =
                 </Text>
               )}
             </Text>
-            <Text
-              type={failed ? 'danger' : 'secondary'}
-              style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}
-            >
-              {summary}
-            </Text>
+            {detail ?? (
+              <Text
+                type={failed ? 'danger' : 'secondary'}
+                style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}
+              >
+                {summary}
+              </Text>
+            )}
           </div>
         )
       })}

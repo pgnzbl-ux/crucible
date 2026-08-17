@@ -100,7 +100,7 @@ export function TaskDetailPage() {
   }
 
   return (
-    <AppLayout>
+    <AppLayout fill>
       <PageHeader
         title={title}
         subtitle={task ? `ID ${task.id.slice(0, 8)}` : undefined}
@@ -111,7 +111,7 @@ export function TaskDetailPage() {
         }
       />
 
-      <PageContainer>
+      <PageContainer fill>
         {isLoading && !task ? (
           <Skeleton active paragraph={{ rows: 6 }} />
         ) : task ? (

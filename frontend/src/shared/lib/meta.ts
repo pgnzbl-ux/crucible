@@ -38,6 +38,14 @@ export const VERDICT_META: Record<string, { label: string; color: TagProps['colo
   not_reproduced: { label: '未复现', color: 'default' },
 }
 
+// 白盒审计 Phase 2.5 Gate 三态(audit 节点 gate_verdict)
+export const GATE_VERDICT_META: Record<string, { label: string; color: TagProps['color'] }> = {
+  pass: { label: 'Gate 通过', color: 'red' },
+  fail: { label: 'Gate 失败（误报）', color: 'green' },
+  uncertain: { label: '待复核', color: 'orange' },
+  unknown: { label: '结论缺失', color: 'default' },
+}
+
 export const REPORT_STATUS_META: Record<string, { label: string; color: TagProps['color'] }> = {
   draft: { label: '草稿', color: 'default' },
   generated: { label: '已生成', color: 'blue' },
@@ -105,4 +113,8 @@ export function getVerdictMeta(verdict: string) {
 
 export function getReportStatusMeta(status: string) {
   return REPORT_STATUS_META[status] ?? { label: status, color: 'default' as const }
+}
+
+export function getGateVerdictMeta(verdict: string) {
+  return GATE_VERDICT_META[verdict] ?? GATE_VERDICT_META.unknown
 }

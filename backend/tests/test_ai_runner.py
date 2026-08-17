@@ -17,19 +17,66 @@ from app.contexts.agent.ai_runner import (
 def test_validate_env_ready_ok():
     ok, err = validate_output(
         "env_ready",
-        {"target_url": "http://x:8080", "compose_path": ".vuln-env/docker-compose.yml"},
+        {
+            "target_url": "http://x:8080",
+            "compose_path": ".vuln-env/docker-compose.yml",
+            "initial_creds": {"username": "admin", "password": "admin123"},
+        },
     )
     assert ok and err is None
 
 
-def test_validate_env_ready_only_target_required():
-    """env_ready: target_url + compose_path 都 required。"""
+def test_validate_env_ready_requires_initial_creds():
+    """env_ready 必须明确交回完整账密、免登录或凭据来源说明。"""
     ok, err = validate_output("env_ready", {"target_url": "http://x:8080"})
     assert not ok  # 缺 compose_path
     assert "compose_path" in err
-    # 补上 compose_path 才 ok
+    # 补 compose_path 仍缺 initial_creds
     ok2, _ = validate_output("env_ready", {"target_url": "http://x:8080", "compose_path": "x.yml"})
-    assert ok2
+    assert not ok2
+
+
+@pytest.mark.parametrize(
+    "initial_creds",
+    [
+        {},
+        {"username": "admin"},
+        {"password": "admin123"},
+        {"auth_required": True},
+        {"note": "  "},
+    ],
+)
+def test_validate_env_ready_rejects_ambiguous_initial_creds(initial_creds):
+    ok, err = validate_output(
+        "env_ready",
+        {
+            "target_url": "http://x:8080",
+            "compose_path": ".vuln-env/docker-compose.yml",
+            "initial_creds": initial_creds,
+        },
+    )
+    assert not ok
+    assert "initial_creds" in (err or "")
+
+
+@pytest.mark.parametrize(
+    "initial_creds",
+    [
+        {"username": "admin", "password": "admin123"},
+        {"auth_required": False, "note": "公开入口无需登录"},
+        {"note": "需要用户自行注册后登录"},
+    ],
+)
+def test_validate_env_ready_accepts_explicit_initial_creds_states(initial_creds):
+    ok, err = validate_output(
+        "env_ready",
+        {
+            "target_url": "http://x:8080",
+            "compose_path": ".vuln-env/docker-compose.yml",
+            "initial_creds": initial_creds,
+        },
+    )
+    assert ok, err
 
 
 def test_validate_env_ready_no_target():
@@ -115,10 +162,35 @@ REPORT_MD_KEYS = (
     "product_intro", "vulnerability", "impact", "details",
     "reproduction", "poc_commands", "fix_suggestions", "reporting_decision",
 )
+RECORD_MD_KEYS = (
+    "product_intro", "claimed_issue", "whitebox_analysis", "test_record",
+    "blocker", "observed_facts", "remaining_conditions", "reporting_decision",
+)
 
 
 def _md_sections(**over):
     base = {k: f"正文-{k}" for k in REPORT_MD_KEYS}
+    base["document_kind"] = "vulnerability_report"
+    base.update(over)
+    return base
+
+
+def _record_sections(**over):
+    base = {k: f"正文-{k}" for k in RECORD_MD_KEYS}
+    base["document_kind"] = "verification_record"
+    base.update(over)
+    return base
+
+
+def _attempt(**over):
+    base = {
+        "purpose": "确认核心危害",
+        "request": "curl -sS -i http://host.docker.internal:3002/login --data-raw 'q=1'",
+        "response_status": 200,
+        "response_excerpt": "marker in body",
+        "observation": "响应回显 marker",
+        "result": "observed_harm",
+    }
     base.update(over)
     return base
 
@@ -128,6 +200,7 @@ def _confirmed_ok(**over):
         "verdict": "confirmed",
         "reproduced": True,
         "evidence": [{"type": "http_response", "detail": "200 dump"}],
+        "attempts": [_attempt()],
         "screenshots": [],
         "cvss": {
             "vector": "AV:N/AC:L/PR:N/UI:N/C:H/I:H/A:H",
@@ -135,12 +208,21 @@ def _confirmed_ok(**over):
             "severity": "Critical",
         },
         "vulnerable_file": "app/login.py",
-        "report_data": _md_sections(),
     }
-    rd = over.pop("report_data", None)
     base.update(over)
-    if rd is not None:
-        base["report_data"] = rd
+    return base
+
+
+def _not_reproduced_ok(**over):
+    base = {
+        "verdict": "not_reproduced",
+        "reproduced": False,
+        "evidence": [{"type": "http_response", "detail": "CLI missing"}],
+        "attempts": [_attempt(result="blocked", observation="ENOENT", response_status=500)],
+        "screenshots": [],
+        "vulnerable_file": "app/login.py",
+    }
+    base.update(over)
     return base
 
 
@@ -160,12 +242,15 @@ def _confirmed_ok(**over):
             "evidence 条目需要非空 type 和 detail",
         ),
         (_confirmed_ok(screenshots="shot.png"), "screenshots 必须是字符串数组"),
-        (_confirmed_ok(report_data={"product_intro": "x"}), "report_data 需要 8 节"),
-        (
-            _confirmed_ok(report_data=_md_sections(vulnerability={"type": "CWE-89"})),
-            "report_data.vulnerability 必须是非空字符串",
-        ),
         (_confirmed_ok(cvss={}), "cvss 需要 vector/base_score/severity"),
+        (_confirmed_ok(attempts=[]), "attempts"),
+        (_confirmed_ok(report_data=_md_sections()), "reproduce 不得交 report_data"),
+        (_not_reproduced_ok(cvss={
+            "vector": "AV:N/AC:L/PR:N/UI:N/C:H/I:H/A:H",
+            "base_score": 8.9,
+            "severity": "Critical",
+        }), "未确认判定不得交 cvss"),
+        (_confirmed_ok(screenshots=["img/evidence.txt"]), "真实图片"),
     ],
 )
 def test_validate_reproduce_shape_rejects(output, needle):
@@ -179,17 +264,12 @@ def test_validate_reproduce_shape_rejects(output, needle):
     [
         _confirmed_ok(),
         _confirmed_ok(verdict="partial"),
-        {
-            "verdict": "not_reproduced",
-            "reproduced": False,
-            "cvss": {"vector": "AV:N/AC:L/PR:N/UI:N/C:N/I:N/A:N", "base_score": 0.0, "severity": "None"},
-            "vulnerable_file": "",
-            "report_data": _md_sections(),
-        },
+        _not_reproduced_ok(),
         {
             "verdict": "code_smell",
-            "cvss": {"vector": "AV:N/AC:L/PR:N/UI:N/C:N/I:N/A:N", "base_score": 0.0, "severity": "None"},
-            "report_data": _md_sections(),
+            "reproduced": False,
+            "attempts": [_attempt(result="diagnostic")],
+            "vulnerable_file": "",
         },
     ],
 )
@@ -198,26 +278,89 @@ def test_validate_reproduce_shape_accepts(output):
     assert ok, err
 
 
-def test_validate_report_requires_markdown_and_false_positive():
+def test_validate_report_vulnerability_and_record_kinds():
     ok, err = validate_output(
         "report",
         {"report_data": {"x": 1}, "final_verdict": "confirmed"},
     )
     assert not ok
-    assert "false_positive" in (err or "") or "8 节" in (err or "")
+    assert "document_kind" in (err or "") or "8 节" in (err or "")
 
     ok2, err2 = validate_output(
         "report",
-        {"report_data": _md_sections(), "final_verdict": "confirmed"},
+        {
+            "report_data": _md_sections(),
+            "final_verdict": "confirmed",
+            "cvss": {
+                "vector": "AV:N/AC:L/PR:N/UI:N/C:H/I:H/A:H",
+                "base_score": 9.8,
+                "severity": "Critical",
+            },
+        },
     )
-    assert not ok2
-    assert "误报路径 final_verdict 必须是 false_positive" in (err2 or "")
+    assert ok2, err2
 
     ok3, err3 = validate_output(
         "report",
-        {"report_data": _md_sections(), "final_verdict": "false_positive"},
+        {"report_data": _md_sections(), "final_verdict": "not_reproduced"},
     )
-    assert ok3, err3
+    assert not ok3
+    assert "verification_record" in (err3 or "") or "document_kind" in (err3 or "")
+
+    ok4, err4 = validate_output(
+        "report",
+        {
+            "report_data": _record_sections(),
+            "final_verdict": "not_reproduced",
+            "cvss": {
+                "vector": "AV:N/AC:L/PR:N/UI:N/C:H/I:H/A:H",
+                "base_score": 8.9,
+                "severity": "Critical",
+            },
+        },
+    )
+    assert not ok4
+    assert "不得交 cvss" in (err4 or "")
+
+    ok5, err5 = validate_output(
+        "report",
+        {"report_data": _record_sections(), "final_verdict": "not_reproduced"},
+    )
+    assert ok5, err5
+
+    ok6, err6 = validate_output(
+        "report",
+        {"report_data": _record_sections(poc_commands="curl x"), "final_verdict": "not_reproduced"},
+    )
+    assert not ok6
+    assert "poc_commands" in (err6 or "")
+
+
+def test_not_reproduced_failed_probes_must_not_become_poc():
+    """回归：CLI 缺失等失败探测不得当作漏洞 PoC。"""
+    ok, err = validate_output(
+        "report",
+        {
+            "report_data": _md_sections(
+                poc_commands="curl ... Claude Code native binary not found",
+            ),
+            "final_verdict": "not_reproduced",
+        },
+    )
+    assert not ok
+    assert err
+
+
+def test_txt_screenshot_rejected_even_if_file_exists(tmp_path):
+    shot = tmp_path / "evidence-auth.txt"
+    shot.write_text("not an image", encoding="utf-8")
+    ok, err = validate_output(
+        "reproduce",
+        _confirmed_ok(screenshots=["evidence-auth.txt"]),
+        host_workdir=str(tmp_path),
+    )
+    assert not ok
+    assert "真实图片" in (err or "")
 
 
 def test_mock_reproduce_and_report_pass_validation():

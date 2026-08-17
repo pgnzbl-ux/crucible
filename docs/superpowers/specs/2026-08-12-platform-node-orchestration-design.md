@@ -34,7 +34,7 @@
 | 2 | 靶场就绪 | `env_ready` | □AI 为主 + ■代码协作 |
 | 3 | 白盒审计 | `audit` | □AI |
 | 4 | 复现验证 | `reproduce` | □AI |
-| 5 | 报告生成 | `report` | ■代码落库；仅出口 B 为 □AI |
+| 5 | 报告生成 | `report` | □AI：唯一文档作者。confirmed/partial 写漏洞报告，其余写验证记录 |
 
 **其他关键决策(已与用户确认):**
 - 节点 2 协作模式:**AI 出配方(Dockerfile/compose)+ 代码执行 docker compose**(AI 不碰 docker.sock,守 `cap_drop ALL` 红线),排障循环 max 5 轮。
@@ -64,10 +64,12 @@
    │ {kill_chain, defense_layers[], payloads[], gate_verdict: pass|fail|uncertain, gate_reason, runtime_dependent}
    ▼
 4 复现验证 (□AI)
-   │ {reproduced, evidence[], screenshots[], verdict, report_data 8 md, cvss, vulnerable_file}
+   │ {reproduced, evidence[], attempts[], screenshots[], verdict, cvss?, vulnerable_file}
+   │  不写 report_data。仅 confirmed/partial 交 cvss
    ▼
-5 报告落库 (■代码；仅出口 B 为 □AI)
-   │ report_data(8 节 Markdown) + final_verdict + authored_by
+5 报告撰写 (□AI，唯一文档作者)
+   │ report_data.document_kind = vulnerability_report | verification_record
+   │ + final_verdict（必须等于权威 verdict）+ authored_by=reporter
    ▼
  完成(归档 + 拆 agent-runner；靶场保留复用)
 ```
@@ -87,10 +89,10 @@
 |---|---|---|
 | 0 source | `{git_url, ref}` | `{source_path, project_path, repo_dirname, project_key, commit_sha, ref_type, ref_name, object_url, origin}` |
 | 1 profile | `{source_path, hints}` | `{is_web, language, framework, port, has_dockerfile, has_compose, detected_services[], start_command, non_web_reason}`（架构事实 + web 门禁；**不含** README 长文） |
-| 2 env_ready | `{source_path, profile}` | `{target_url`=`http://{宿主机IP}:{compose 映射的 Web 端口}`（只 publish Web 入口，不映射 postgres/redis；禁止 localhost）, `transport_shape{...}, initial_creds{}, compose_path, started_containers[]}` |
+| 2 env_ready | `{source_path, profile, attempt, previous_error, failed_stage, occupied_host_ports[]}`；每轮为新会话，`attempt>1` 通过现有 `.vuln-env` + 结构化失败信息续接，不恢复历史对话。AI 根据 README、路由及鉴权配置先判断是否存在登录功能；有登录但无预设账号时，仅在项目已有安全初始化机制的前提下修改 `.vuln-env` 创建靶场专用账号。复用 Lab 缺凭据元数据时追加一次 `{credential_lookup_only:true, existing_target_url, existing_compose_path}` 只读补扫，不改配方、不重启靶场 | `{target_url`=`http://{宿主机IP}:{compose 映射的 Web 端口}`（只 publish Web 入口，不映射 postgres/redis；禁止 localhost）, `transport_shape{...}, initial_creds, compose_path, started_containers[]}`；`initial_creds` 必须为实际可用的 `{username,password,login_url?}`、确认无登录功能的 `{auth_required:false,note?}` 或说明无法自动提供凭据的非空 `{note}`，禁止 `{}` |
 | 3 audit | `{source_path, vulnerability_description, profile}` | `{gate_verdict: pass\|fail\|uncertain, gate_reason(必填), kill_chain, defense_layers[{name,bypass}], payloads[], runtime_dependent(pass 必填)}`；pass 须 payloads≥1 且 `runtime_dependent` 为 bool；uncertain 不得带非空 payloads |
-| 4 reproduce | `{source_path, target_url, initial_creds, transport_shape, compose_path, started_containers, audit, vulnerability_description}`（`target_url` 等来自节点 2 最终产出，容器内改写成 host.docker.internal） | `{reproduced, evidence[{type,detail}], screenshots[], verdict, report_data{8 节 Markdown 字符串}, cvss, vulnerable_file}`。confirmed/partial 须 reproduced=true 且 evidence≥1；false_positive/not_reproduced 须 reproduced=false。一次 AI，5 次变体在容器内。 |
-| 5 report | 成功路径吃 reproduce 的 report_data；出口 B 吃 audit | 成功路径：■代码拷贝 `{report_data, final_verdict=reproduce.verdict, cvss, vulnerable_file, authored_by:reproduce}`，不启 runner。出口 B：□AI `{report_data 8 md, final_verdict=false_positive, authored_by:reporter}` |
+| 4 reproduce | `{source_path, target_url, initial_creds, transport_shape, compose_path, started_containers, audit, vulnerability_description}`（`target_url` 等来自节点 2 最终产出，容器内改写成 host.docker.internal） | `{verdict, reproduced, evidence[{type,detail}], attempts[{purpose,request,response_status,response_excerpt,observation,result}], screenshots[], vulnerable_file, cvss?}`。**禁止 `report_data`**。confirmed/partial 须 reproduced=true、evidence≥1、attempts≥1、cvss；false_positive/not_reproduced 须 reproduced=false 且不得交 cvss。截图若有，必须是工作区内真实图片（禁止 `.txt`）。一次 AI，5 次变体在容器内。 |
+| 5 report | 吃 audit + reproduce 结构化事实 + `expected_verdict` + `document_kind` | □AI 唯一作者：`{report_data, final_verdict, authored_by:reporter, cvss?}`。`final_verdict` 必须等于权威 verdict（reproduce.verdict，或出口 B 的 `false_positive`）。confirmed/partial → `document_kind=vulnerability_report`（既有 8 节 + cvss）；其余 → `verification_record`（独立 8 节，无 poc_commands、无 cvss）。禁止直拷 reproduce 正文。 |
 
 ### 1.4 判定档位(6 档,对齐插件)
 
@@ -303,9 +305,9 @@ docker 不可用 → 节点失败（fail-fast，不进 AI）
 ```
 for attempt in 1..5:
     ■代码(worker): docker ps 收集其他容器已映射的宿主端口 occupied_host_ports
-    □AI: 分析源码+画像 → 写/改 .vuln-env/Dockerfile + docker-compose.yml
+    □AI（每轮新会话）: 分析源码+画像 → 写/改 .vuln-env/Dockerfile + docker-compose.yml
          写 ports 时避开 occupied_host_ports
-         (attempt>1 时只根据上轮失败日志改一处)
+         (attempt>1 时先读上一轮 .vuln-env，再根据 failed_stage + previous_error 只改一处)
          submit_result 只交配方,不得宣称已启动
     ■代码(worker): 再 docker ps；配方宿主口已被占用 → 回喂 AI，不起 compose
                     未占用则 docker compose up -d --build
@@ -349,34 +351,43 @@ ClaudeAgentOptions(
 
 ## 4. 报告结构化
 
-### 4.1 report_data（8 节 Markdown 字符串；旧嵌套 JSON 树作废）
+### 4.1 report_data（按 document_kind 分两套 8 节）
 
-正文不含 `## N.` 标题（导出与 Collapse 由平台加）。索引字段 `verdict` / `cvss` / `vulnerable_file` 不从 Markdown 解析。
+正文不含 `## N.` 标题（导出与 Collapse 由平台加）。索引字段 `verdict` / `cvss` / `vulnerable_file` 不从 Markdown 解析。`completed` 只表示工作流跑完；漏洞是否成立只看六档 `verdict`。
+
+**漏洞报告** `document_kind=vulnerability_report`（仅 `confirmed|partial`）：
 
 ```yaml
 report_data:
-  product_intro: "Markdown 正文"
-  vulnerability: "Markdown 正文"
-  impact: "Markdown 正文"
-  details: "Markdown 正文"
-  reproduction: "Markdown 正文"
-  poc_commands: "Markdown 正文"
-  fix_suggestions: "Markdown 正文"
-  reporting_decision: "Markdown 正文"
-
-final_verdict: "confirmed|partial|code_reachable|code_smell|false_positive|not_reproduced"
-cvss: {vector, base_score, severity}
-vulnerable_file: "path/to/file 或空串"
+  document_kind: vulnerability_report
+  product_intro / vulnerability / impact / details /
+  reproduction / poc_commands / fix_suggestions / reporting_decision
+final_verdict: confirmed|partial
+cvss: {vector, base_score, severity}   # 必填
 ```
 
-详见 `2026-08-14-reproduce-live-gate-design.md` §3.2。
+`poc_commands` 只含能证明危害的可复制请求；失败探测不得写入本节。`reproduction` 须口述式覆盖前因/操作/期望/实际。
+
+**验证记录** `document_kind=verification_record`（`code_reachable|code_smell|false_positive|not_reproduced`）：
+
+```yaml
+report_data:
+  document_kind: verification_record
+  product_intro / claimed_issue / whitebox_analysis / test_record /
+  blocker / observed_facts / remaining_conditions / reporting_decision
+final_verdict: 对应未确认档
+# 禁止 cvss、禁止 poc_commands
+```
+
+`test_record` 粘贴 reproduce.attempts 的 raw 请求与响应。旧报告缺 `document_kind` 时按漏洞报告 8 节渲染（不自动重写）。
 
 ### 4.2 报告生成与导出
 
-- **成功路径**：reproduce 同一会话交 8 节 Markdown；节点 5 **不默认开 Agent**，只校验拷贝。
-- **出口 B（audit fail）**：节点 5 短 AI reporter，同构 8 节误报稿，`final_verdict=false_positive`。
-- **校验**：8 键齐全且值为非空字符串；不扫 transport-shape 关键字、不核对截图落盘。
-- **渲染 md**：每节加 `## N. 标题` 后拼接正文。
+- **节点 5 是唯一文档作者**：对所有可终结 Web 路径跑 AI；禁止拷贝 reproduce 正文。
+- **权威 verdict**：reproduce.verdict；出口 B 无 reproduce 时为 `false_positive`。`final_verdict` 漂移 → 节点失败。
+- **CVSS**：仅 confirmed/partial；未确认档索引列 `cvss_score/severity` 为 null。
+- **截图**：reproduce.screenshots 若非空，路径须落在任务工作区且扩展名为真实图片（`.png/.jpg/.jpeg/.webp/.gif`）；`.txt` fail-fast。
+- **渲染 md**：按 `document_kind` 选标题后拼接。验证记录标题为「漏洞验证记录」。
 - **存储**：report_data 落 `reports.report_data`；索引列写 `verdict` / `cvss_score` / `severity` / `vulnerable_file`。
 - **导出**：`GET /reports/{id}/export?format=json|md`（不生成 docx）。
 

@@ -112,11 +112,13 @@
 }]
 ```
 
-`output` 为解析后的节点产出（坏 JSON 为空对象）。源码节点含 origin/repo_dirname/commit_sha；画像含 language/framework/is_web/port/detected_services（不含 AI 长文）；靶场含 target_url（`http://{宿主机IP}:{compose 映射的 Web 端口}`，不是 localhost / 容器端口）与 initial_creds（登录账号密码，若有）。
+`output` 为解析后的节点产出（坏 JSON 为空对象）。源码节点含 origin/repo_dirname/commit_sha；画像含 language/framework/is_web/port/detected_services（不含 AI 长文）；靶场含 target_url（`http://{宿主机IP}:{compose 映射的 Web 端口}`，不是 localhost / 容器端口）与 initial_creds。AI 先根据 README、路由和鉴权配置判断是否存在登录功能：实际存在并可提供账密时为 `{username,password,login_url?}`（可由 `.vuln-env` 通过项目已有初始化机制创建靶场专用账号），确认无登录功能时为 `{auth_required:false,note?}`，存在登录但无法安全初始化时为 `{note}`，说明需自行注册、API Key 或其他前置条件。不要交空对象，也不要把“未找到凭据”冒充“无需登录”。
 
 ### GET `/api/v1/tasks/{id}/events`
 
 历史事件（默认当前/最新一次 run，最近 1000 条，`limit` 1–1000）。重试会新建 run，历史 run 的 `phase.updated` 不混进本接口。含 `agent.thinking` / `agent.message` / `tool.call.*` / `agent.failed`（`title`+`hint`）/ `node.updated`。
+
+事件时间：`created_at` 一律带 UTC 偏移（开发 SQLite 读回 naive datetime 也按 UTC 输出）；每条事件的 `payload.timestamp` 必有 epoch 秒 —— SDK 事件用 SDK 自带值，平台事件（`phase.updated` 等）落库时补齐，SSE 回放才不会显示成浏览器收到的时刻。
 
 ### GET `/api/v1/tasks/{id}/events/stream`
 
@@ -146,13 +148,20 @@
 
 ### GET `/api/v1/reports/{id}`
 
-含正文、状态、结构化字段(verdict/cvss_score/severity/vulnerable_file/report_data/md_artifact_key/docx_artifact_key)。`report_data` 为 8 节 Markdown 字符串（`product_intro` / `vulnerability` / `impact` / `details` / `reproduction` / `poc_commands` / `fix_suggestions` / `reporting_decision`）。
+含正文、状态、结构化字段(verdict/cvss_score/severity/vulnerable_file/report_data/md_artifact_key/docx_artifact_key)。
+
+`report_data.document_kind` 区分两类文档（`completed` 只表示工作流结束，漏洞是否成立看 `verdict`）：
+
+- `vulnerability_report`（仅 `confirmed|partial`）：8 节 `product_intro` / `vulnerability` / `impact` / `details` / `reproduction` / `poc_commands` / `fix_suggestions` / `reporting_decision`。`poc_commands` 只含能证明危害的可复制请求。索引列必有 CVSS。
+- `verification_record`（`not_reproduced` / `false_positive` / `code_reachable` / `code_smell`）：8 节 `product_intro` / `claimed_issue` / `whitebox_analysis` / `test_record` / `blocker` / `observed_facts` / `remaining_conditions` / `reporting_decision`。无 PoC、无 CVSS（`cvss_score`/`severity` 为 null）。`test_record` 保留失败请求与响应。
+
+缺 `document_kind` 的旧数据按漏洞报告 8 节渲染，不自动重写。
 
 报告详情、按任务读取、发布、导出和证据列表均只允许 owner 访问；非 owner 与不存在统一返回 404。
 
 ### GET `/api/v1/reports/{id}/export?format=json|md`
 
-**已实现**。format=json 返回 8 键对象（值为 Markdown 字符串）+ 索引字段;format=md 返回平台加 `## N.` 标题后拼接的 markdown。**不生成 docx/pdf**。
+**已实现**。format=json 返回 `document_kind` + 对应 8 键对象（值为 Markdown 字符串）+ 索引字段;format=md 按文档类型加 `## N.` 标题后拼接。验证记录标题为「漏洞验证记录」。**不生成 docx/pdf**。
 
 ### GET `/api/v1/reports/{id}/evidences`
 

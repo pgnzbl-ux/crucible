@@ -161,8 +161,8 @@ Crucible 是一个 **Web 平台 + Agent 执行引擎** 的组合：
    │                     └─ 分支:5 轮失败 → task failed(可 retry)
    ├─ 节点 3 audit      □AI:白盒审计 + Phase 2.5 Gate 三问
    │                     └─ 分支:gate_fail → skip 4,判 false_positive(不发请求)
-   ├─ 节点 4 reproduce  □AI:一次 HTTP 复现 + 6 档判定(已确认/部分/代码可达/...)
-   └─ 节点 5 report     □AI:生成 8 节 report_data JSON → 落 Report 表
+   ├─ 节点 4 reproduce  □AI:一次 HTTP 复现 + 6 档判定（只交 attempts/evidence，不写报告）
+   └─ 节点 5 report     □AI:唯一文档作者 → 漏洞报告或验证记录 → 落 Report 表
         │
 4. 每 AI 节点:写 .node.json → 起 agent-runner 容器(NODE_KEY 选 agent)
    → 容器内调 submit_result MCP 工具回传结构化 output
@@ -170,7 +170,7 @@ Crucible 是一个 **Web 平台 + Agent 执行引擎** 的组合：
         │
 5. 节点状态与 Agent 事件落库，经 Redis 推到前端任务详情
         │
-6. 节点 5 产出 report_data → Report 表(verdict/cvss/report_data)
+6. 节点 5 产出 report_data → Report 表(verdict；confirmed/partial 才有 cvss)
    → GET /reports/{id}/export?format=json|md 导出
         │
 7. 任务结束：拆靶场、回收容器、清理临时目录（重试复用已完成节点）

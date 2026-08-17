@@ -36,13 +36,20 @@ interface UseTaskEventsOptions {
   maxReconnectDelay?: number
   /** 客户端最多保留的事件数，默认 1000 */
   maxEvents?: number
+  /** 攒批落状态的间隔（毫秒），默认 200 */
+  flushIntervalMs?: number
 }
 
 export function useTaskEvents<T = unknown>(
   taskId: string | null,
   options: UseTaskEventsOptions = {},
 ) {
-  const { enabled = true, maxReconnectDelay = 10_000, maxEvents = 1_000 } = options
+  const {
+    enabled = true,
+    maxReconnectDelay = 10_000,
+    maxEvents = 1_000,
+    flushIntervalMs = 200,
+  } = options
   const [events, setEvents] = useState<SSEEvent<T>[]>([])
   const [status, setStatus] = useState<SSEStatus>('idle')
   const [error, setError] = useState<string | null>(null)
@@ -52,9 +59,15 @@ export function useTaskEvents<T = unknown>(
   const reconnectTimerRef = useRef<number | null>(null)
   const closedByUnmountRef = useRef(false)
   const seenEventKeysRef = useRef(new Set<string>())
+  // Agent 输出是突发的，逐帧 setState 会把整条渲染链按帧数放大
+  const pendingRef = useRef<SSEEvent<T>[]>([])
+  const flushTimerRef = useRef<number | null>(null)
+  const errorRef = useRef<string | null>(null)
 
   const reset = useCallback(() => {
+    pendingRef.current = []
     setEvents([])
+    errorRef.current = null
     setError(null)
     seenEventKeysRef.current.clear()
   }, [])
@@ -67,6 +80,7 @@ export function useTaskEvents<T = unknown>(
 
     closedByUnmountRef.current = false
     seenEventKeysRef.current.clear()
+    pendingRef.current = []
     setEvents([])
     setStatus('connecting')
 
@@ -86,6 +100,33 @@ export function useTaskEvents<T = unknown>(
         window.clearTimeout(reconnectTimerRef.current)
         reconnectTimerRef.current = null
       }
+      if (flushTimerRef.current != null) {
+        window.clearTimeout(flushTimerRef.current)
+        flushTimerRef.current = null
+      }
+    }
+
+    const flush = () => {
+      flushTimerRef.current = null
+      const batch = pendingRef.current
+      if (batch.length === 0) return
+      pendingRef.current = []
+      setEvents((prev) => {
+        const next = prev.concat(batch)
+        if (next.length <= maxEvents) return next
+        const removed = next.slice(0, next.length - maxEvents)
+        for (const event of removed) {
+          if (event.sequence != null) {
+            seenEventKeysRef.current.delete(`${event.run_id ?? ''}:${event.sequence}`)
+          }
+        }
+        return next.slice(-maxEvents)
+      })
+    }
+
+    const scheduleFlush = () => {
+      if (flushTimerRef.current != null) return
+      flushTimerRef.current = window.setTimeout(flush, flushIntervalMs)
     }
 
     const connect = () => {
@@ -103,26 +144,18 @@ export function useTaskEvents<T = unknown>(
             reconnectAttemptsRef.current = 0
             return
           }
+          // 去重：同一 run 的 sequence 不重复（历史回放 + 实时推送短暂重叠）
           const eventKey = parsed.sequence == null
             ? null
             : `${parsed.run_id ?? ''}:${parsed.sequence}`
           if (eventKey && seenEventKeysRef.current.has(eventKey)) return
-          setEvents((prev) => {
-            // 去重：同一 run 的 sequence 不重复（历史回放 + 实时推送短暂重叠）
-            if (eventKey && seenEventKeysRef.current.has(eventKey)) return prev
-            if (eventKey) seenEventKeysRef.current.add(eventKey)
-            const next = [...prev, parsed]
-            if (next.length <= maxEvents) return next
-
-            const removed = next.slice(0, next.length - maxEvents)
-            for (const event of removed) {
-              if (event.sequence != null) {
-                seenEventKeysRef.current.delete(`${event.run_id ?? ''}:${event.sequence}`)
-              }
-            }
-            return next.slice(-maxEvents)
-          })
-          setError(null)
+          if (eventKey) seenEventKeysRef.current.add(eventKey)
+          pendingRef.current.push(parsed)
+          scheduleFlush()
+          if (errorRef.current !== null) {
+            errorRef.current = null
+            setError(null)
+          }
         } catch (err) {
           console.warn('[useTaskEvents] 解析 SSE 帧失败:', err, e.data)
         }
@@ -135,7 +168,8 @@ export function useTaskEvents<T = unknown>(
           reconnectAttemptsRef.current = attempt
           const delay = Math.min(1000 * 2 ** (attempt - 1), maxReconnectDelay)
           setStatus('reconnecting')
-          setError(`连接中断，${Math.round(delay / 1000)}s 后重连...`)
+          errorRef.current = `连接中断，${Math.round(delay / 1000)}s 后重连...`
+          setError(errorRef.current)
           reconnectTimerRef.current = window.setTimeout(() => {
             cleanup()
             connect()
@@ -152,7 +186,7 @@ export function useTaskEvents<T = unknown>(
       eventSourceRef.current = null
       setStatus('closed')
     }
-  }, [taskId, enabled, maxEvents, maxReconnectDelay])
+  }, [taskId, enabled, maxEvents, maxReconnectDelay, flushIntervalMs])
 
   return { events, status, error, reset }
 }

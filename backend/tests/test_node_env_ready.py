@@ -11,6 +11,17 @@ from types import SimpleNamespace
 
 from app.contexts.agent.nodes.base import NodeContext
 
+_VALID_INITIAL_CREDS = {"username": "admin", "password": "secret"}
+
+
+def _recipe(compose_path: str, target_url: str, **extra) -> dict:
+    return {
+        "compose_path": compose_path,
+        "target_url": target_url,
+        "initial_creds": _VALID_INITIAL_CREDS,
+        **extra,
+    }
+
 
 def _write_compose(tmp_path, filename="docker-compose.yml", mapping="8000:8000", repo="project"):
     d = tmp_path / repo / ".vuln-env"
@@ -93,10 +104,10 @@ async def test_env_ready_first_attempt_success(tmp_path):
          patch.object(mod, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
          patch.object(mod, "health_check", new_callable=AsyncMock) as mock_hc, \
          patch.object(mod, "host_advertise_ip", return_value="192.168.1.8"):
-        mock_ai.return_value = {
-            "compose_path": ".vuln-env/docker-compose.yml",
-            "target_url": "http://localhost:8000",
-        }
+        mock_ai.return_value = _recipe(
+            ".vuln-env/docker-compose.yml",
+            "http://localhost:8000",
+        )
         mock_up.return_value = (True, "")
         mock_hc.return_value = (True, 8000)
 
@@ -104,6 +115,7 @@ async def test_env_ready_first_attempt_success(tmp_path):
         out = await node.execute(ctx)
 
     assert out["target_url"] == "http://192.168.1.8:8000"
+    assert out["initial_creds"] == _VALID_INITIAL_CREDS
     assert mock_ai.call_count == 1
     mock_hc.assert_awaited()
 
@@ -125,9 +137,9 @@ async def test_env_ready_retry_until_success(tmp_path):
          patch.object(mod, "docker_compose_down", new_callable=AsyncMock), \
          patch.object(mod, "host_advertise_ip", return_value="192.168.1.8"):
         mock_ai.side_effect = [
-            {"compose_path": ".vuln-env/1.yml", "target_url": "http://localhost:8000"},
-            {"compose_path": ".vuln-env/2.yml", "target_url": "http://localhost:8000"},
-            {"compose_path": ".vuln-env/3.yml", "target_url": "http://localhost:8000"},
+            _recipe(".vuln-env/1.yml", "http://localhost:8000"),
+            _recipe(".vuln-env/2.yml", "http://localhost:8000"),
+            _recipe(".vuln-env/3.yml", "http://localhost:8000"),
         ]
         mock_up.side_effect = [
             (False, "port in use"),
@@ -155,7 +167,7 @@ async def test_env_ready_5_fails_then_node_fails(tmp_path):
          patch.object(mod, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
          patch.object(mod, "collect_compose_logs", new_callable=AsyncMock) as mock_logs, \
          patch.object(mod, "docker_compose_down", new_callable=AsyncMock):
-        mock_ai.return_value = {"compose_path": ".vuln-env/x.yml", "target_url": "http://localhost:8000"}
+        mock_ai.return_value = _recipe(".vuln-env/x.yml", "http://localhost:8000")
         mock_up.return_value = (False, "persistent fail")
         mock_logs.return_value = ""
 
@@ -181,8 +193,8 @@ async def test_env_ready_health_fail_retries_ai_with_logs(tmp_path):
          patch.object(mod, "docker_compose_down", new_callable=AsyncMock) as mock_down, \
          patch.object(mod, "host_advertise_ip", return_value="192.168.1.8"):
         mock_ai.side_effect = [
-            {"compose_path": ".vuln-env/docker-compose.yml", "target_url": "http://localhost:3001"},
-            {"compose_path": ".vuln-env/docker-compose.yml", "target_url": "http://127.0.0.1:3001"},
+            _recipe(".vuln-env/docker-compose.yml", "http://localhost:3001"),
+            _recipe(".vuln-env/docker-compose.yml", "http://127.0.0.1:3001"),
         ]
         mock_up.return_value = (True, "")
         mock_logs.return_value = "app exited 1"
@@ -192,6 +204,7 @@ async def test_env_ready_health_fail_retries_ai_with_logs(tmp_path):
 
     assert mock_ai.call_count == 2
     assert mock_down.await_count == 1
+    assert mock_ai.call_args_list[1].kwargs["failed_stage"] == "health_check"
     assert "健康检查不过" in mock_ai.call_args_list[1].args[2]
     assert "app exited 1" in mock_ai.call_args_list[1].args[2]
     assert out["target_url"] == "http://192.168.1.8:3001"
@@ -258,10 +271,10 @@ async def test_env_ready_url_uses_mapped_host_port_not_container_port(tmp_path):
          patch.object(mod, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
          patch.object(mod, "health_check", new_callable=AsyncMock) as mock_hc, \
          patch.object(mod, "host_advertise_ip", return_value="10.0.0.8"):
-        mock_ai.return_value = {
-            "compose_path": ".vuln-env/docker-compose.yml",
-            "target_url": "http://localhost:3000",
-        }
+        mock_ai.return_value = _recipe(
+            ".vuln-env/docker-compose.yml",
+            "http://localhost:3000",
+        )
         mock_up.return_value = (True, "")
         mock_hc.return_value = (True, 3001)
         out = await mod.EnvReadyNode().execute(ctx)
@@ -279,10 +292,10 @@ async def test_env_ready_rejects_db_only_port_mapping(tmp_path):
          patch.object(mod, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
          patch.object(mod, "collect_compose_logs", new_callable=AsyncMock, return_value=""), \
          patch.object(mod, "docker_compose_down", new_callable=AsyncMock) as mock_down:
-        mock_ai.return_value = {
-            "compose_path": ".vuln-env/docker-compose.yml",
-            "target_url": "http://localhost:5432",
-        }
+        mock_ai.return_value = _recipe(
+            ".vuln-env/docker-compose.yml",
+            "http://localhost:5432",
+        )
         mock_up.return_value = (True, "")
         with pytest.raises(RuntimeError, match="5"):
             await mod.EnvReadyNode().execute(ctx)
@@ -308,8 +321,8 @@ def test_parse_docker_ps_published_ports_and_exclude_own_lab():
 
 
 @pytest.mark.asyncio
-async def test_run_ai_turn_passes_occupied_host_ports():
-    """AI 写配方前就能看到 docker 已占用的宿主端口，避开再映射。"""
+async def test_run_ai_turn_passes_structured_retry_context():
+    """下一轮只接收平台错误、失败阶段和端口状态，不依赖历史会话。"""
     from app.contexts.agent.nodes.env_ready import run_ai_turn
 
     ctx = NodeContext(
@@ -323,8 +336,74 @@ async def test_run_ai_turn_passes_occupied_host_ports():
             "compose_path": ".vuln-env/docker-compose.yml",
             "target_url": "http://127.0.0.1:3001",
         }
-        await run_ai_turn(ctx, 1, None, occupied_host_ports=[3001, 8080])
-    assert mock_run.await_args.kwargs["input_json"]["occupied_host_ports"] == [3001, 8080]
+        await run_ai_turn(
+            ctx,
+            2,
+            "connection refused",
+            failed_stage="health_check",
+            occupied_host_ports=[3001, 8080],
+        )
+    node_input = mock_run.await_args.kwargs["input_json"]
+    assert node_input["previous_error"] == "connection refused"
+    assert node_input["failed_stage"] == "health_check"
+    assert node_input["occupied_host_ports"] == [3001, 8080]
+
+
+@pytest.mark.asyncio
+async def test_run_ai_turn_passes_credential_lookup_context():
+    from app.contexts.agent.nodes.env_ready import run_ai_turn
+
+    ctx = NodeContext(
+        task_id="t1", run_id="r1", host_workdir="/tmp",
+        source_path="/tmp", vulnerability_description="d",
+        project_address="x", project_ref=None,
+        previous_outputs={"source": {"repo_dirname": "demo", "workspace_path": "/workspace/demo"}},
+    )
+    with patch("app.contexts.agent.ai_runner.run_ai_node", new_callable=AsyncMock) as mock_run:
+        mock_run.return_value = {
+            "compose_path": ".vuln-env/docker-compose.yml",
+            "target_url": "http://198.18.0.1:3001",
+            "initial_creds": {"note": "需自行注册"},
+        }
+        await run_ai_turn(
+            ctx,
+            1,
+            None,
+            credential_lookup_only=True,
+            existing_target_url="http://198.18.0.1:3001",
+            existing_compose_path=".vuln-env/docker-compose.yml",
+        )
+
+    node_input = mock_run.await_args.kwargs["input_json"]
+    assert node_input["credential_lookup_only"] is True
+    assert node_input["existing_target_url"] == "http://198.18.0.1:3001"
+    assert node_input["existing_compose_path"] == ".vuln-env/docker-compose.yml"
+
+
+@pytest.mark.asyncio
+async def test_env_ready_rejects_empty_initial_creds_before_compose_up(tmp_path):
+    """AI 交空 initial_creds → 不起 compose，回喂补查。"""
+    from app.contexts.agent.nodes import env_ready as mod
+
+    ctx = _exec_ctx(tmp_path, {"is_web": True, "port": 8000})
+    _write_compose(tmp_path)
+
+    with patch.object(mod, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
+         patch.object(mod, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
+         patch.object(mod, "health_check", new_callable=AsyncMock) as mock_hc:
+        mock_ai.return_value = {
+            "compose_path": ".vuln-env/docker-compose.yml",
+            "target_url": "http://localhost:8000",
+            "initial_creds": {},
+        }
+
+        with pytest.raises(RuntimeError, match="5"):
+            await mod.EnvReadyNode().execute(ctx)
+
+    assert mock_up.await_count == 0
+    assert mock_hc.await_count == 0
+    assert mock_ai.call_count == 5
+    assert "initial_creds" in mock_ai.call_args_list[-1].args[2]
 
 
 @pytest.mark.asyncio
@@ -338,10 +417,10 @@ async def test_env_ready_occupied_host_port_skips_compose_up(tmp_path):
          patch.object(mod, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
          patch.object(mod, "health_check", new_callable=AsyncMock) as mock_hc, \
          patch.object(mod, "list_docker_occupied_host_ports", return_value={3001}):
-        mock_ai.return_value = {
-            "compose_path": ".vuln-env/docker-compose.yml",
-            "target_url": "http://localhost:3001",
-        }
+        mock_ai.return_value = _recipe(
+            ".vuln-env/docker-compose.yml",
+            "http://localhost:3001",
+        )
         mock_up.return_value = (True, "")
         with pytest.raises(RuntimeError, match="5"):
             await mod.EnvReadyNode().execute(ctx)

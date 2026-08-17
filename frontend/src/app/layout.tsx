@@ -14,6 +14,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useLocation } from 'wouter'
 
 import { BreadcrumbNav } from '../shared/components/BreadcrumbNav'
+import { SIDER_COLLAPSED_WIDTH, SIDER_WIDTH } from '../styles/theme'
 
 const { Header, Content, Sider } = Layout
 const { Text } = Typography
@@ -59,7 +60,13 @@ function getCurrentUser(): CurrentUser | null {
   }
 }
 
-export function AppLayout({ children }: { children: ReactNode }) {
+interface AppLayoutProps {
+  children: ReactNode
+  /** 页面自行占满可视高度并管理内部滚动（详情页用），外层不再产生页面级滚动条 */
+  fill?: boolean
+}
+
+export function AppLayout({ children, fill = false }: AppLayoutProps) {
   const [location, navigate] = useLocation()
   const { message } = App.useApp()
   const qc = useQueryClient()
@@ -89,17 +96,17 @@ export function AppLayout({ children }: { children: ReactNode }) {
   const avatarText = userName.slice(0, 1).toUpperCase()
 
   return (
-    <Layout style={{ minHeight: '100vh', width: '100%' }}>
+    <Layout className="crucible-shell" style={{ width: '100%' }}>
       <Sider
         theme="light"
-        width={224}
+        width={SIDER_WIDTH}
         breakpoint="lg"
         collapsible
-        collapsedWidth={64}
+        collapsedWidth={SIDER_COLLAPSED_WIDTH}
         className="crucible-sider"
-        style={{ position: 'sticky', top: 0, height: '100vh' }}
+        style={{ height: '100%' }}
       >
-        <div className="crucible-brand">
+        <button type="button" className="crucible-brand" onClick={() => navigate('/')} title="返回工作台">
           <span className="crucible-brand-mark">
             <SafetyCertificateOutlined />
           </span>
@@ -107,7 +114,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
             <span className="crucible-brand-name">Crucible</span>
             <span className="crucible-brand-tagline">AI 漏洞验证平台</span>
           </span>
-        </div>
+        </button>
         <Menu
           mode="inline"
           selectedKeys={[selectedKey]}
@@ -118,7 +125,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
           }}
         />
       </Sider>
-      <Layout style={{ flex: 1, minWidth: 0 }}>
+      <Layout style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
         <Header className="crucible-header">
           <div className="crucible-header-left">
             <BreadcrumbNav />
@@ -154,7 +161,10 @@ export function AppLayout({ children }: { children: ReactNode }) {
             </Space>
           </Dropdown>
         </Header>
-        <Content className="crucible-content crucible-page-enter" style={{ width: '100%' }}>
+        <Content
+          className={`crucible-content crucible-page-enter${fill ? ' crucible-content--fill' : ''}`}
+          style={{ width: '100%' }}
+        >
           <div className="crucible-content-inner">{children}</div>
         </Content>
       </Layout>

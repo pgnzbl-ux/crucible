@@ -57,18 +57,24 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+_CONFIRMED_VERDICTS = ("confirmed", "partial")
+
+
 def report_columns_from_orch_result(orch_result: dict) -> dict:
-    """从编排收尾 dict 抽出 Report 索引列。"""
+    """从编排收尾 dict 抽出 Report 索引列。未确认判定强制无 CVSS。"""
     rd = orch_result.get("report_data") or {}
     cvss = orch_result.get("cvss") or {}
     intro = rd.get("product_intro") if isinstance(rd, dict) else ""
-    score = cvss.get("base_score") if isinstance(cvss, dict) else None
+    verdict = orch_result.get("verdict")
+    confirmed = verdict in _CONFIRMED_VERDICTS
+    score = cvss.get("base_score") if isinstance(cvss, dict) and confirmed else None
     return {
-        "verdict": orch_result.get("verdict"),
+        "verdict": verdict,
         "cvss_score": float(score) if isinstance(score, (int, float)) and not isinstance(score, bool) else None,
-        "severity": cvss.get("severity") if isinstance(cvss, dict) else None,
+        "severity": (cvss.get("severity") if isinstance(cvss, dict) and confirmed else None),
         "vulnerable_file": orch_result.get("vulnerable_file") or None,
         "summary": str(intro or "")[:500],
+        "title": "漏洞验证报告" if confirmed else "漏洞验证记录",
     }
 
 
@@ -112,6 +118,17 @@ def should_persist_agent_event(event: dict) -> bool:
     return str(event.get("message") or "") not in _SKIP_PHASE_MESSAGES
 
 
+def ensure_event_timestamp(event: dict) -> dict:
+    """平台自己发的事件补 timestamp。
+
+    SDK 事件自带 epoch timestamp；平台事件（phase.updated 等）没有的话，
+    前端只能退回 created_at，SSE 回放时会被打上「浏览器收到的时刻」。
+    """
+    if isinstance(event.get("timestamp"), (int, float)):
+        return event
+    return {**event, "timestamp": datetime.now(timezone.utc).timestamp()}
+
+
 async def _append_events(session: AsyncSession, run: TaskRun, events: list[dict]) -> None:
     """将执行器事件流持久化为 AgentEvent 行，sequence 从运行内已有事件后递增"""
     base = 0
@@ -125,6 +142,7 @@ async def _append_events(session: AsyncSession, run: TaskRun, events: list[dict]
     for i, ev in enumerate(events, start=base + 1):
         if not should_persist_agent_event(ev):
             continue
+        ev = ensure_event_timestamp(ev)
         session.add(
             AgentEvent(
                 run_id=run.id,
@@ -142,6 +160,7 @@ async def _persist_single_event(session: AsyncSession, run: TaskRun, event: dict
     """实时落单条事件（流式回调使用），并发布到 Redis Pub/Sub 以驱动 SSE 推送"""
     if not should_persist_agent_event(event):
         return
+    event = ensure_event_timestamp(event)
     # 取本 run 当前最大 sequence
     result = await session.execute(
         select(AgentEvent.sequence).where(AgentEvent.run_id == run.id).order_by(AgentEvent.sequence.desc()).limit(1)
@@ -469,7 +488,7 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
                                 severity=cols["severity"],
                                 vulnerable_file=cols["vulnerable_file"],
                                 report_data=json.dumps(report_data, ensure_ascii=False, default=str),
-                                title=f"漏洞验证报告 — {task_id[:8]}",
+                                title=f"{cols['title']} — {task_id[:8]}",
                                 summary=cols["summary"],
                             )
                             session.add(report)

@@ -36,6 +36,13 @@ def _parse_node_output(raw: str | None) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _iso_utc(value: datetime) -> str:
+    """SQLite 读回的 naive datetime 一律按 UTC 输出，前端才不会当成本地时间。"""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc).isoformat()
+    return value.isoformat()
+
+
 def _serialize_node_run(nr: Any) -> dict[str, Any]:
     return {
         "id": nr.id,
@@ -223,7 +230,7 @@ class TaskService:
                     "event_type": ev.event_type,
                     "payload": payload,
                     "source": ev.source,
-                    "created_at": ev.created_at.isoformat(),
+                    "created_at": _iso_utc(ev.created_at),
                 }
             )
         return result

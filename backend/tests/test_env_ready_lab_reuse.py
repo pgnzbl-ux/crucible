@@ -12,6 +12,16 @@ from app.contexts.agent.nodes.base import NodeContext
 from app.contexts.agent.nodes.env_ready import EnvReadyNode
 
 SHA = "a" * 40
+_VALID_INITIAL_CREDS = {"username": "admin", "password": "secret"}
+
+
+def _ai_recipe(compose_path: str = ".vuln-env/docker-compose.yml", target_url: str = "http://localhost:3001", **extra) -> dict:
+    return {
+        "compose_path": compose_path,
+        "target_url": target_url,
+        "initial_creds": extra.pop("initial_creds", _VALID_INITIAL_CREDS),
+        **extra,
+    }
 
 
 def _ctx(tmp_path, **kwargs):
@@ -35,7 +45,7 @@ def _ctx(tmp_path, **kwargs):
 
 
 @pytest.mark.asyncio
-async def test_env_ready_reuses_ready_lab_without_compose_up(tmp_path):
+async def test_env_ready_backfills_missing_creds_without_compose_up(tmp_path):
     from app.contexts.agent.nodes.env_ready import EnvReadyNode
     from app.contexts.agent.nodes.base import NodeContext
 
@@ -60,9 +70,41 @@ async def test_env_ready_reuses_ready_lab_without_compose_up(tmp_path):
         gs.return_value.claude_agent_sdk_enabled = True
         LS.return_value.acquire = AsyncMock(return_value=lab)
         LS.return_value.touch = AsyncMock()
+        LS.return_value.mark_ready = AsyncMock()
+        ai.return_value = {
+            "target_url": lab.target_url,
+            "compose_path": lab.compose_path,
+            "initial_creds": {"username": "admin", "password": "admin123"},
+        }
         out = await EnvReadyNode().execute(ctx)
     assert out["target_url"] == "http://10.0.0.8:3001"
+    assert out["initial_creds"] == {"username": "admin", "password": "admin123"}
     assert out["reused"] is True
+    ai.assert_awaited_once()
+    assert ai.await_args.kwargs["credential_lookup_only"] is True
+    LS.return_value.mark_ready.assert_awaited_once()
+    up.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_env_ready_reuses_existing_creds_without_ai_or_compose_up(tmp_path):
+    lab = SimpleNamespace(
+        lab_id="lab1", role="reuse", status="ready", reused=True,
+        workdir=str(tmp_path), compose_project="crucible-lab-lab1",
+        target_url="http://10.0.0.8:3001", compose_path=".vuln-env/docker-compose.yml",
+        transport_shape={"protocol": "http"},
+        initial_creds={"auth_required": False, "note": "公开入口"},
+    )
+    ctx = _ctx(tmp_path)
+    with patch("app.core.config.get_settings") as gs, \
+         patch("app.contexts.lab.service.LabService") as LS, \
+         patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
+         patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up:
+        gs.return_value.claude_agent_sdk_enabled = True
+        LS.return_value.acquire = AsyncMock(return_value=lab)
+        out = await EnvReadyNode().execute(ctx)
+
+    assert out["initial_creds"] == {"auth_required": False, "note": "公开入口"}
     ai.assert_not_awaited()
     up.assert_not_awaited()
 
@@ -79,7 +121,7 @@ async def test_env_ready_waits_then_reuses(tmp_path):
         lab_id="lab1", role="reuse", status="ready", reused=True,
         workdir=str(tmp_path), compose_project="crucible-lab-lab1",
         target_url="http://10.0.0.8:3001", compose_path=".vuln-env/docker-compose.yml",
-        transport_shape={"protocol": "http"}, initial_creds={},
+        transport_shape={"protocol": "http"}, initial_creds={"note": "需自行注册"},
     )
     ctx = _ctx(tmp_path)
     with patch("app.core.config.get_settings") as gs, \
@@ -129,10 +171,7 @@ async def test_env_ready_create_compose_up_uses_lab_id(tmp_path):
         LS.return_value.upload_recipe = AsyncMock()
         LS.return_value.mark_ready = AsyncMock()
         LS.return_value.mark_failed = AsyncMock()
-        ai.return_value = {
-            "compose_path": ".vuln-env/docker-compose.yml",
-            "target_url": "http://localhost:3001",
-        }
+        ai.return_value = _ai_recipe()
         up.return_value = (True, "")
         hc.return_value = (True, 3001)
         out = await EnvReadyNode().execute(ctx)
@@ -183,10 +222,7 @@ async def test_env_ready_upload_failure_cleans_started_compose(tmp_path):
         LS.return_value.upload_recipe = AsyncMock(side_effect=RuntimeError("minio down"))
         LS.return_value.mark_ready = AsyncMock()
         LS.return_value.mark_failed = AsyncMock()
-        ai.return_value = {
-            "compose_path": ".vuln-env/docker-compose.yml",
-            "target_url": "http://localhost:3001",
-        }
+        ai.return_value = _ai_recipe()
         up.return_value = (True, "")
         hc.return_value = (True, 3001)
 
@@ -233,10 +269,9 @@ async def test_env_ready_create_strips_workspace_compose_path(tmp_path):
         LS.return_value.upload_recipe = AsyncMock()
         LS.return_value.mark_ready = AsyncMock()
         LS.return_value.mark_failed = AsyncMock()
-        ai.return_value = {
-            "compose_path": "/workspace/b/.vuln-env/docker-compose.yml",
-            "target_url": "http://localhost:3001",
-        }
+        ai.return_value = _ai_recipe(
+            compose_path="/workspace/b/.vuln-env/docker-compose.yml",
+        )
         up.return_value = (True, "")
         hc.return_value = (True, 3001)
         await EnvReadyNode().execute(ctx)
@@ -256,7 +291,7 @@ async def test_env_ready_start_stopped_lab_without_ai(tmp_path):
         lab_id="lab1", role="start", status="stopped", reused=True,
         workdir=str(tmp_path), compose_project="crucible-lab-lab1",
         target_url="http://10.0.0.8:3001", compose_path=".vuln-env/docker-compose.yml",
-        transport_shape={"protocol": "http"}, initial_creds={},
+        transport_shape={"protocol": "http"}, initial_creds={"note": "需自行注册"},
     )
     ctx = _ctx(tmp_path)
     with patch("app.core.config.get_settings") as gs, \
@@ -312,10 +347,7 @@ async def test_env_ready_start_gone_runtime_falls_back_to_create(tmp_path):
         LS.return_value.mark_ready = AsyncMock()
         LS.return_value.mark_failed = AsyncMock()
         start.return_value = False
-        ai.return_value = {
-            "compose_path": ".vuln-env/docker-compose.yml",
-            "target_url": "http://localhost:3001",
-        }
+        ai.return_value = _ai_recipe()
         up.return_value = (True, "")
         hc.return_value = (True, 3001)
         out = await EnvReadyNode().execute(ctx)
@@ -337,6 +369,7 @@ async def test_mock_sdk_skips_lab_acquire(tmp_path):
         out = await EnvReadyNode().execute(ctx)
     LS.assert_not_called()
     assert out["started_containers"] == ["mock-app"]
+    assert out["initial_creds"]["note"]
     assert "target_url" in out
 
 
@@ -365,7 +398,7 @@ async def test_reproduce_touches_lab_when_lab_id_present():
 
 
 @pytest.mark.asyncio
-async def test_create_recipe_hit_skips_ai(tmp_path):
+async def test_create_recipe_hit_backfills_creds_without_rebuilding(tmp_path):
     lab_dir = tmp_path / "lab"
     (lab_dir / ".vuln-env").mkdir(parents=True)
     (lab_dir / ".vuln-env" / "docker-compose.yml").write_text(
@@ -397,13 +430,21 @@ async def test_create_recipe_hit_skips_ai(tmp_path):
         LS.return_value.download_recipe = AsyncMock(return_value=hit)
         LS.return_value.upload_recipe = AsyncMock()
         LS.return_value.mark_ready = AsyncMock()
+        LS.return_value.mark_failed = AsyncMock()
+        ai.return_value = {
+            "target_url": "http://10.0.0.8:3001",
+            "compose_path": ".vuln-env/docker-compose.yml",
+            "initial_creds": {"username": "admin", "password": "admin123"},
+        }
         up.return_value = (True, "")
         hc.return_value = (True, 3001)
         out = await EnvReadyNode().execute(ctx)
-    ai.assert_not_awaited()
+    ai.assert_awaited_once()
+    assert ai.await_args.kwargs["credential_lookup_only"] is True
     up.assert_awaited_once()
     assert out["reused"] is True
     assert out["target_url"] == "http://10.0.0.8:3001"
+    assert out["initial_creds"] == {"username": "admin", "password": "admin123"}
     LS.return_value.upload_recipe.assert_awaited()
 
 
@@ -451,10 +492,7 @@ async def test_create_recipe_hit_up_fail_goes_ai_once(tmp_path):
         LS.return_value.mark_failed = AsyncMock()
         up.side_effect = [(False, "build failed"), (True, "")]
         hc.return_value = (True, 3001)
-        ai.return_value = {
-            "compose_path": ".vuln-env/docker-compose.yml",
-            "target_url": "http://localhost:3001",
-        }
+        ai.return_value = _ai_recipe()
         await EnvReadyNode().execute(ctx)
     assert up.await_count == 2
     assert ai.await_count == 1

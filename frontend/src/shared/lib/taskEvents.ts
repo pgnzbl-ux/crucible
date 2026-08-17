@@ -13,8 +13,22 @@ function unixToIso(ts: unknown): string | null {
   return new Date(ms).toISOString()
 }
 
+/**
+ * 转换结果按输入对象缓存。事件流每来一帧都会重跑一次合并，
+ * 若每次都产出新对象，下游 memo 全部失效、整屏重渲染；
+ * 缺 timestamp 的帧还会每次拿到新的 created_at，排序位置跟着抖。
+ */
+const mappedCache = new WeakMap<StreamEvent, AgentEvent | null>()
+
 export function sseToAgentEvent(ev: StreamEvent): AgentEvent | null {
-  if (ev.type === 'ready' || ev.type === 'error') return null
+  const cached = mappedCache.get(ev)
+  if (cached !== undefined) return cached
+  const mapped = ev.type === 'ready' || ev.type === 'error' ? null : buildAgentEvent(ev)
+  mappedCache.set(ev, mapped)
+  return mapped
+}
+
+function buildAgentEvent(ev: StreamEvent): AgentEvent {
   const inner = (ev.event && typeof ev.event === 'object' ? ev.event : {}) as Record<string, unknown>
   return {
     id: `sse-${ev.run_id ?? ''}-${ev.sequence ?? 'x'}`,
@@ -27,6 +41,21 @@ export function sseToAgentEvent(ev: StreamEvent): AgentEvent | null {
   }
 }
 
+/** 同一对 (REST, SSE) 事件只合成一次，保持下游 memo 命中。 */
+const overlayCache = new WeakMap<AgentEvent, { sse: AgentEvent; merged: AgentEvent }>()
+
+function overlay(rest: AgentEvent, sse: AgentEvent): AgentEvent {
+  const cached = overlayCache.get(rest)
+  if (cached && cached.sse === sse) return cached.merged
+  const merged: AgentEvent = {
+    ...rest,
+    event_type: sse.event_type || rest.event_type,
+    payload: Object.keys(sse.payload).length ? sse.payload : rest.payload,
+  }
+  overlayCache.set(rest, { sse, merged })
+  return merged
+}
+
 export function mergeTaskEvents(rest: AgentEvent[] | undefined, sse: StreamEvent[]): AgentEvent[] {
   const map = new Map<string, AgentEvent>()
   for (const ev of rest ?? []) {
@@ -37,19 +66,11 @@ export function mergeTaskEvents(rest: AgentEvent[] | undefined, sse: StreamEvent
     if (!mapped) continue
     const key = `${mapped.run_id}:${mapped.sequence}`
     const existing = map.get(key)
-    if (existing) {
-      map.set(key, {
-        ...existing,
-        event_type: mapped.event_type || existing.event_type,
-        payload: Object.keys(mapped.payload).length ? mapped.payload : existing.payload,
-      })
-    } else {
-      map.set(key, mapped)
-    }
+    map.set(key, existing ? overlay(existing, mapped) : mapped)
   }
+  // created_at 是 ISO 串，字典序即时间序；localeCompare 走 Intl 排序，在千条量级上明显更贵
   return [...map.values()].sort((a, b) => {
-    const byTime = a.created_at.localeCompare(b.created_at)
-    if (byTime !== 0) return byTime
+    if (a.created_at !== b.created_at) return a.created_at < b.created_at ? -1 : 1
     return a.sequence - b.sequence
   })
 }

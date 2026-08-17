@@ -105,19 +105,45 @@ def test_node_skills_exist_and_are_sliced():
             assert "docker compose up" not in body.lower()
         if key == "env_ready":
             assert "不要执行" in body or "禁止" in body
+            assert "没有 Docker CLI" in body
+            assert "不要寻找历史会话" in body
+            assert "上一轮产物" in body
+            assert "failed_stage" in body
         if key == "reproduce":
             assert "host.docker.internal" in body
+            assert "attempts" in body
             assert "`type`" in body
             assert "`detail`" in body
             assert "report_data" in body
+            assert "禁止" in body
         if key == "report":
-            assert "false_positive" in body
+            assert "verification_record" in body
+            assert "vulnerability_report" in body
+            assert "expected_verdict" in body
 
 
 def test_load_node_skill_reads_distilled_file():
     text = _load_node_skill("profile")
     assert "画像" in text
     assert "submit_result" in text
+
+
+def test_env_ready_skill_requires_creds_lookup():
+    text = _load_node_skill("env_ready")
+    assert "auth_required" in text
+    assert "不要交空对象" in text
+    assert "先判断是否存在登录功能" in text
+    assert "公开 dashboard" in text
+    assert "仅修改 `.vuln-env`" in text
+    assert "初始化靶场专用账号" in text
+    assert "禁止修改项目业务源码" in text
+    schema = NODE_INPUT_SCHEMAS["env_ready"]
+    desc = schema["properties"]["initial_creds"]["description"]
+    assert "auth_required" in desc
+    assert "无登录功能" in desc
+    assert "initial_creds" in schema["required"]
+    assert len(schema["properties"]["initial_creds"]["anyOf"]) == 3
+    assert "credential_lookup_only=true" in text
 
 
 def test_build_options_appends_skill_without_desktop_plugin():

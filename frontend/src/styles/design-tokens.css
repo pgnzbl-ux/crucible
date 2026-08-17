@@ -48,4 +48,15 @@
   /* 阴影 */
   --crucible-shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.03), 0 1px 6px -1px rgba(0, 0, 0, 0.02);
   --crucible-shadow-md: 0 6px 16px 0 rgba(0, 0, 0, 0.08), 0 3px 6px -4px rgba(0, 0, 0, 0.12);
+  --crucible-shadow-pop: 0 8px 20px -6px rgba(15, 23, 42, 0.24);
+
+  /* 外壳骨架：品牌区与顶栏共用同一高度，两者底边必须对齐 */
+  --crucible-header-height: 56px;
+  --crucible-sider-width: 224px;
+  --crucible-sider-collapsed-width: 64px;
+
+  /* 圆角 */
+  --crucible-radius-sm: 6px;
+  --crucible-radius: 8px;
+  --crucible-radius-lg: 12px;
 }

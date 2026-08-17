@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { summarizeNodeOutput, applyNodeOverlay, displayNodeStatus, compactNodeCaption, isNodeListLoading, overlayFromSseEvents, formatAuditDetail } from './nodeOutput'
+import { summarizeNodeOutput, applyNodeOverlay, displayNodeStatus, compactNodeCaption, isNodeListLoading, overlayFromSseEvents, parseInitialCreds } from './nodeOutput'
 
 describe('summarizeNodeOutput', () => {
   it('source: MinIO 命中时写出仓库与 commit', () => {
@@ -49,10 +49,11 @@ describe('summarizeNodeOutput', () => {
     ).toBe('http://192.168.1.8:3001 · 账号 admin / 密码 admin123')
   })
 
-  it('audit gate fail', () => {
+  it('audit gate fail 只留短标签，长 gate_reason 留给详情区', () => {
+    const longReason = 'Q1 核心主张：'.padEnd(120, '长')
     expect(
-      summarizeNodeOutput('audit', { gate_verdict: 'fail', gate_reason: '链路不通' }, 'completed'),
-    ).toBe('Gate 失败 · 链路不通')
+      summarizeNodeOutput('audit', { gate_verdict: 'fail', gate_reason: longReason }, 'completed'),
+    ).toBe('Gate 失败（误报）')
   })
 
   it('audit gate pass', () => {
@@ -71,10 +72,10 @@ describe('summarizeNodeOutput', () => {
     ).toBe('Gate 通过 · 运行时依赖')
   })
 
-  it('audit uncertain', () => {
+  it('audit uncertain 只留短标签', () => {
     expect(
       summarizeNodeOutput('audit', { gate_verdict: 'uncertain', gate_reason: '对不上 sink' }, 'completed'),
-    ).toBe('待复核 · 对不上 sink')
+    ).toBe('待复核')
   })
 
   it('failed 优先用 error', () => {
@@ -104,14 +105,60 @@ describe('summarizeNodeOutput', () => {
   })
 })
 
-describe('formatAuditDetail', () => {
-  it('appends kill_chain under the summary', () => {
+describe('parseInitialCreds', () => {
+  it('有账号密码时给出 creds 态', () => {
+    expect(parseInitialCreds({ username: 'admin', password: 'admin123', login_url: '/login' })).toEqual({
+      state: 'creds',
+      username: 'admin',
+      password: 'admin123',
+      loginUrl: '/login',
+      note: '',
+    })
+  })
+
+  it('兼容 user / email / pass 别名', () => {
+    const view = parseInitialCreds({ email: 'root@a.com', pass: 'x' })
+    expect(view.state).toBe('creds')
+    expect(view.username).toBe('root@a.com')
+    expect(view.password).toBe('x')
+  })
+
+  it('Agent 明确 auth_required=false 时是免登录，不是缺数据', () => {
+    expect(parseInitialCreds({ auth_required: false, note: '平台模式跳过认证' })).toMatchObject({
+      state: 'no_auth',
+      note: '平台模式跳过认证',
+    })
+  })
+
+  it('空对象 / null 是未知态，不冒充免登录', () => {
+    expect(parseInitialCreds({}).state).toBe('unknown')
+    expect(parseInitialCreds(null).state).toBe('unknown')
+    expect(parseInitialCreds('admin/admin').state).toBe('unknown')
+  })
+
+  it('只给 note 时保留说明但仍是未知态', () => {
+    expect(parseInitialCreds({ note: '需自行注册' })).toMatchObject({
+      state: 'unknown',
+      note: '需自行注册',
+    })
+  })
+})
+
+describe('env_ready 凭据摘要', () => {
+  it('免登录写成免登录，而不是留白', () => {
     expect(
-      formatAuditDetail(
-        { gate_verdict: 'uncertain', gate_reason: '对不上', kill_chain: '只找到 /login' },
+      summarizeNodeOutput(
+        'env_ready',
+        { target_url: 'http://127.0.0.1:3002', initial_creds: { auth_required: false } },
         'completed',
       ),
-    ).toBe('待复核 · 对不上\n只找到 /login')
+    ).toBe('http://127.0.0.1:3002 · 免登录')
+  })
+
+  it('凭据缺失时点明未提供，避免误以为界面丢了数据', () => {
+    expect(
+      summarizeNodeOutput('env_ready', { target_url: 'http://127.0.0.1:3002', initial_creds: {} }, 'completed'),
+    ).toBe('http://127.0.0.1:3002 · 无预设凭据')
   })
 })
 
@@ -139,6 +186,13 @@ describe('compactNodeCaption', () => {
         'completed',
       ),
     ).toBe('Git · claudecodeui')
+  })
+
+  it('audit compact 不截断长 gate_reason', () => {
+    const longReason = 'Q1 核心主张：'.padEnd(80, '长')
+    expect(
+      compactNodeCaption('audit', { gate_verdict: 'fail', gate_reason: longReason }, 'completed'),
+    ).toBe('Gate 失败')
   })
 
   it('running is 执行中, pending is empty', () => {

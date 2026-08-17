@@ -1,6 +1,14 @@
+import { App } from 'antd'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
-import { isEventDetailsDefaultOpen } from './TaskEventTimeline'
+import type { AgentEvent } from '../../../shared/lib/api'
+import {
+  isEventDetailsDefaultOpen,
+  streamRenderWindow,
+  STREAM_RENDER_WINDOW,
+  TaskEventTimeline,
+} from './TaskEventTimeline'
 
 describe('isEventDetailsDefaultOpen', () => {
   it('keeps thinking and successful tool details collapsed', () => {
@@ -12,5 +20,87 @@ describe('isEventDetailsDefaultOpen', () => {
   it('keeps failed and denied tool details expanded', () => {
     expect(isEventDetailsDefaultOpen('tool.call.completed', { is_error: true })).toBe(true)
     expect(isEventDetailsDefaultOpen('tool.call.denied', {})).toBe(true)
+  })
+})
+
+describe('streamRenderWindow', () => {
+  const events = Array.from({ length: STREAM_RENDER_WINDOW + 40 }, (_, i) => i)
+
+  it('renders everything while under the window size', () => {
+    const short = events.slice(0, 10)
+    expect(streamRenderWindow(short, false)).toEqual({ rows: short, hidden: 0 })
+  })
+
+  it('keeps only the newest events mounted and reports the rest', () => {
+    const { rows, hidden } = streamRenderWindow(events, false)
+    expect(rows).toHaveLength(STREAM_RENDER_WINDOW)
+    expect(rows[rows.length - 1]).toBe(events[events.length - 1])
+    expect(hidden).toBe(40)
+  })
+
+  it('mounts everything once the user asks for earlier events', () => {
+    expect(streamRenderWindow(events, true)).toEqual({ rows: events, hidden: 0 })
+  })
+})
+
+function event(sequence: number, over: Partial<AgentEvent> = {}): AgentEvent {
+  return {
+    id: `e${sequence}`,
+    run_id: 'r1',
+    sequence,
+    event_type: 'agent.message',
+    payload: { text: `消息 ${sequence}` },
+    source: 'sse',
+    created_at: '2026-08-17T06:00:00Z',
+    ...over,
+  }
+}
+
+function render(events: AgentEvent[], running: boolean) {
+  return renderToStaticMarkup(
+    <App>
+      <TaskEventTimeline
+        events={events}
+        running={running}
+        sseEnabled={running}
+        sseStatus={running ? 'open' : 'idle'}
+        sseError={null}
+      />
+    </App>,
+  )
+}
+
+describe('TaskEventTimeline 事件流窗口', () => {
+  it('运行中渲染可滚动窗口与实时提示', () => {
+    const html = render([event(1), event(2)], true)
+    expect(html).toContain('crucible-stream-scroller')
+    expect(html).toContain('crucible-stream-row')
+    expect(html).toContain('crucible-stream-footer')
+    expect(html).toContain('消息 2')
+  })
+
+  it('默认贴底，不显示回到最新按钮', () => {
+    const html = render([event(1)], true)
+    expect(html).not.toContain('crucible-stream-jump')
+  })
+
+  it('任务结束后不再显示进行中脚注', () => {
+    const html = render([event(1, { event_type: 'agent.completed', payload: {} })], false)
+    expect(html).toContain('crucible-stream-scroller')
+    expect(html).not.toContain('crucible-stream-footer')
+  })
+
+  it('无事件时给出空态', () => {
+    const html = render([], true)
+    expect(html).not.toContain('crucible-stream-scroller')
+    expect(html).toContain('暂无执行事件')
+  })
+
+  it('超出渲染窗口时只挂最近的行并给出展开入口', () => {
+    const many = Array.from({ length: STREAM_RENDER_WINDOW + 5 }, (_, i) => event(i + 1))
+    const html = render(many, true)
+    expect(html).toContain('展开更早的 5 条')
+    expect(html).not.toContain('消息 1<')
+    expect(html).toContain(`消息 ${STREAM_RENDER_WINDOW + 5}`)
   })
 })

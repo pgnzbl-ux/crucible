@@ -42,3 +42,27 @@ def test_render_handles_missing_optional_fields():
     md = render_report_md({"product_intro": "x"})
     assert "## 1." in md and "## 8." in md
     assert "—" in md
+    assert "# 漏洞验证报告" in md
+
+
+def test_render_verification_record_uses_record_sections():
+    from app.contexts.report.renderer import render_report_md
+
+    md = render_report_md({
+        "document_kind": "verification_record",
+        "product_intro": "产品Z",
+        "claimed_issue": "声称 SQL 注入",
+        "whitebox_analysis": "入口到 sink 可达",
+        "test_record": "curl 返回 CLI missing",
+        "blocker": "宿主机没有 Claude Code 二进制",
+        "observed_facts": "HTTP 未打到可观察危害",
+        "remaining_conditions": "需要可用 CLI",
+        "reporting_decision": "不报送",
+        "poc_commands": "curl should not appear as PoC heading",
+    })
+    assert "# 漏洞验证记录" in md
+    assert "## 2. 声称问题" in md
+    assert "## 4. 测试记录" in md
+    assert "CLI missing" in md
+    assert "## 6. POC" not in md
+    assert "poc_commands" not in md

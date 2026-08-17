@@ -20,17 +20,46 @@ function sha7(v: unknown): string {
   return s.length >= 7 ? s.slice(0, 7) : s
 }
 
-function formatInitialCreds(raw: unknown): string {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return ''
+/**
+ * 靶场凭据三态：拿到账密、Agent 确认免登录、以及"没给"。
+ * 空对象不能当成免登录——那会把 Agent 漏挖说成靶场不需要登录。
+ */
+export type InitialCredsState = 'creds' | 'no_auth' | 'unknown'
+
+export interface InitialCredsView {
+  state: InitialCredsState
+  username: string
+  password: string
+  loginUrl: string
+  note: string
+}
+
+export function parseInitialCreds(raw: unknown): InitialCredsView {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { state: 'unknown', username: '', password: '', loginUrl: '', note: '' }
+  }
   const c = raw as Record<string, unknown>
-  const user = str(c.username) || str(c.user) || str(c.email)
-  const pass = str(c.password) || str(c.pass)
-  const parts: string[] = []
-  if (user) parts.push(`账号 ${user}`)
-  if (pass) parts.push(`密码 ${pass}`)
-  if (parts.length) return parts.join(' / ')
+  const username = str(c.username) || str(c.user) || str(c.email)
+  const password = str(c.password) || str(c.pass)
+  const loginUrl = str(c.login_url) || str(c.loginUrl)
   const note = str(c.note) || str(c.hint)
-  return note
+
+  if (username || password) return { state: 'creds', username, password, loginUrl, note }
+  if (c.auth_required === false) {
+    return { state: 'no_auth', username: '', password: '', loginUrl, note }
+  }
+  return { state: 'unknown', username: '', password: '', loginUrl, note }
+}
+
+/** 摘要行只要短句，note 之类的长说明留给详情区。 */
+function formatInitialCreds(raw: unknown): string {
+  const creds = parseInitialCreds(raw)
+  if (creds.state === 'creds') {
+    return [creds.username && `账号 ${creds.username}`, creds.password && `密码 ${creds.password}`]
+      .filter(Boolean)
+      .join(' / ')
+  }
+  return creds.state === 'no_auth' ? '免登录' : '无预设凭据'
 }
 
 export function summarizeNodeOutput(
@@ -70,17 +99,17 @@ export function summarizeNodeOutput(
     }
     case 'env_ready': {
       const url = str(o.target_url)
-      const creds = formatInitialCreds(o.initial_creds)
-      return [url, creds].filter(Boolean).join(' · ') || '靶场已就绪'
+      if (!url) return '靶场已就绪'
+      return `${url} · ${formatInitialCreds(o.initial_creds)}`
     }
     case 'audit': {
       const gate = str(o.gate_verdict)
-      if (gate === 'fail') return str(o.gate_reason) ? `Gate 失败 · ${str(o.gate_reason)}` : 'Gate 失败（误报）'
+      if (gate === 'fail') return 'Gate 失败（误报）'
       if (gate === 'pass') {
         return o.runtime_dependent === true ? 'Gate 通过 · 运行时依赖' : 'Gate 通过'
       }
-      if (gate === 'uncertain') return str(o.gate_reason) ? `待复核 · ${str(o.gate_reason)}` : '待复核'
-      return str(o.kill_chain) || '审计完成'
+      if (gate === 'uncertain') return '待复核'
+      return '审计完成'
     }
     case 'reproduce': {
       const v = str(o.verdict)
@@ -93,19 +122,6 @@ export function summarizeNodeOutput(
     default:
       return status === 'completed' ? '完成' : ''
   }
-}
-
-/** 非 compact 的 audit 行：摘要 + 尚未出现在摘要里的 kill_chain。 */
-export function formatAuditDetail(
-  output: Record<string, unknown> | null | undefined,
-  status?: string,
-): string {
-  const summary = summarizeNodeOutput('audit', output, status)
-  const chain = str(output?.kill_chain)
-  if ((status === 'completed' || !status) && chain && !summary.includes(chain)) {
-    return `${summary}\n${chain}`
-  }
-  return summary
 }
 
 const COMPACT_CAPTION_MAX = 22
@@ -143,6 +159,13 @@ export function compactNodeCaption(
   }
   if (nodeKey === 'env_ready') {
     return str(o.target_url) || '靶场已就绪'
+  }
+  if (nodeKey === 'audit') {
+    const gate = str(o.gate_verdict)
+    if (gate === 'fail') return 'Gate 失败'
+    if (gate === 'pass') return o.runtime_dependent === true ? '运行时依赖' : 'Gate 通过'
+    if (gate === 'uncertain') return '待复核'
+    return '审计'
   }
   return ellipsize(summarizeNodeOutput(nodeKey, output, status))
 }

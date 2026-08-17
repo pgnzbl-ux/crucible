@@ -195,7 +195,7 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
   ]
 
   return (
-    <>
+    <div className="crucible-detail-body">
       {pinNodes && (
         <div className="crucible-detail-nodes-pin">
           <NodeSteps
@@ -208,12 +208,13 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
         </div>
       )}
       <Tabs
+        className="crucible-fill-tabs"
         activeKey={activeTab}
         onChange={(key) => onTabChange(key as TaskDetailTab)}
         items={tabItems}
         type="card"
       />
-    </>
+    </div>
   )
 }
 

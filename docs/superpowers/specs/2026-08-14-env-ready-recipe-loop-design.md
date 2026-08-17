@@ -118,8 +118,10 @@ AI 循环里「配方宿主口已被占用 → 不起 compose、回喂 AI」保�
 
 ### 4.1 职责（env-builder）
 
-- 做：读 README / 依赖清单 / 已有 Dockerfile；按语言把 **Node/JDK/Python/中间件** 写进配方；`submit_result` 只交路径与占位 URL。  
-- 不做：`npm`/`pip`/`apt`/`docker`；宣称已启动；web 门禁（节点 1）；git clone（节点 0）。  
+- 做：读 README / 依赖清单 / 路由与鉴权配置 / 已有 Dockerfile，先判断项目是否存在登录功能，再按语言把 **Node/JDK/Python/中间件** 写进配方。无登录功能（如公开 dashboard）明确交 `{auth_required:false,note}`；有登录功能则优先复用已有预设账号。若没有预设账号，但项目已有环境变量、seed/init 脚本等安全初始化机制，可仅修改 `.vuln-env` 来创建靶场专用账号并交回实际账密；无法安全初始化则用非空 `note` 说明需自行注册、API Key 或其他前置条件。  
+- `submit_result` 交 `compose_path`、占位 `target_url`，以及 **必填** `initial_creds`（三态之一：实际可用账密 / 确认无登录功能的 `auth_required=false` / 非空 `note` 说明无法自动提供凭据）。  
+- 不做：`npm`/`pip`/`apt`/`docker`；宣称已启动；web 门禁（节点 1）；git clone（节点 0）；修改项目业务源码；编造未被配方真正初始化的账号；交空对象 `{}` 冒充「无需登录」。  
+- `credential_lookup_only=true` 时靶场已运行，只允许只读判断和查找，不得为补凭据修改配方或重启靶场。  
 - `attempt>1`：只根据 `previous_error` 改一处。
 
 插件 `run-project-env/SKILL.md` 增加「Crucible 平台」专章：在 env-builder 下 **第 5–7 步（启动、排障循环驱动、对人写 RUN_ENV）由平台执行**；agent 只执行分析与写/改配方。本地 Claude 单独使用 skill 时仍可走全文。`isolation.md` 在平台语境下明确：**agent-runner ≠ 靶场容器**，往 runner 里装依赖视为违规。

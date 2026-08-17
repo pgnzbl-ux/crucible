@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { AgentEvent } from './api'
-import { eventsForRun, mergeTaskEvents, dropNoisyEvents } from './taskEvents'
+import { eventsForRun, mergeTaskEvents, dropNoisyEvents, sseToAgentEvent } from './taskEvents'
 
 function ev(partial: Partial<AgentEvent> & Pick<AgentEvent, 'id' | 'run_id' | 'sequence'>): AgentEvent {
   return {
@@ -55,5 +55,36 @@ describe('mergeTaskEvents', () => {
     ]
     const merged = mergeTaskEvents(rest, [])
     expect(merged.map((e) => e.id)).toEqual(['b', 'a'])
+  })
+
+  // 事件流每来一帧都重跑合并，对象身份必须稳定，否则下游 memo 全部失效
+  it('reuses converted objects for the same SSE frame', () => {
+    const frame = { type: 'agent.message', run_id: 'r1', sequence: 1, event: { text: 'hi' } }
+    expect(sseToAgentEvent(frame)).toBe(sseToAgentEvent(frame))
+  })
+
+  it('keeps identity of untouched events across repeated merges', () => {
+    const rest = [ev({ id: 'a', run_id: 'r1', sequence: 1 })]
+    const frames = [{ type: 'agent.message', run_id: 'r1', sequence: 2, event: { text: 'hi' } }]
+    const first = mergeTaskEvents(rest, frames)
+    const second = mergeTaskEvents(rest, frames)
+    expect(second[0]).toBe(first[0])
+    expect(second[1]).toBe(first[1])
+  })
+
+  it('keeps identity when an SSE frame overlays a REST event', () => {
+    const rest = [ev({ id: 'a', run_id: 'r1', sequence: 1, payload: {} })]
+    const frames = [{ type: 'agent.message', run_id: 'r1', sequence: 1, event: { text: 'hi' } }]
+    const first = mergeTaskEvents(rest, frames)
+    const second = mergeTaskEvents(rest, frames)
+    expect(first).toHaveLength(1)
+    expect(first[0].payload).toEqual({ text: 'hi' })
+    expect(second[0]).toBe(first[0])
+  })
+
+  it('gives frames without timestamp a stable created_at', () => {
+    const frame = { type: 'agent.message', run_id: 'r1', sequence: 9, event: { text: 'hi' } }
+    const first = sseToAgentEvent(frame)?.created_at
+    expect(sseToAgentEvent(frame)?.created_at).toBe(first)
   })
 })

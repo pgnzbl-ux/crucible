@@ -44,7 +44,7 @@
 └────────────────────────────────────────────────────────────────┘
 ```
 
-分支出口、节点 schema 见编排设计 spec §1。成功路径报告由 reproduce 交 8 节 Markdown，节点 5 只落库；误报路径才起 report skill。
+分支出口、节点 schema 见编排设计 spec §1。reproduce 只交结构化测试事实（verdict / attempts / evidence），**不写报告**；report 节点是唯一文档作者：confirmed/partial 出漏洞报告，其余出验证记录（无 PoC、无 CVSS）。
 
 ---
 
@@ -57,8 +57,8 @@
 | profile | run-project-env 第 1–2 步 | `node-skills/profile/SKILL.md` |
 | env_ready | 写配方（不含 compose up） | `node-skills/env_ready/SKILL.md` |
 | audit | vuln-verify Phase 1/2/2.5 | `node-skills/audit/SKILL.md` |
-| reproduce | Phase 3/4/5 + 8 节报告 | `node-skills/reproduce/SKILL.md` |
-| report | 仅误报 8 节 | `node-skills/report/SKILL.md` |
+| reproduce | Phase 3/4（HTTP 事实，不写报告） | `node-skills/reproduce/SKILL.md` |
+| report | Phase 5：漏洞报告或验证记录 | `node-skills/report/SKILL.md` |
 
 **分支出口**（非 happy path）：
 

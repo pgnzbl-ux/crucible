@@ -30,10 +30,19 @@ REPORT_SECTION_KEYS = (
     "product_intro", "vulnerability", "impact", "details",
     "reproduction", "poc_commands", "fix_suggestions", "reporting_decision",
 )
+RECORD_SECTION_KEYS = (
+    "product_intro", "claimed_issue", "whitebox_analysis", "test_record",
+    "blocker", "observed_facts", "remaining_conditions", "reporting_decision",
+)
 _VERDICTS = (
     "confirmed", "partial", "code_reachable", "code_smell",
     "false_positive", "not_reproduced",
 )
+_CONFIRMED_VERDICTS = ("confirmed", "partial")
+_ATTEMPT_KEYS = (
+    "purpose", "request", "response_status", "response_excerpt", "observation", "result",
+)
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 # 各 AI 节点的 output schema(校验最小必需字段,spec §1.3)
 NODE_OUTPUT_SCHEMAS: dict[str, dict] = {
@@ -45,23 +54,20 @@ NODE_OUTPUT_SCHEMAS: dict[str, dict] = {
         ],
     },
     "env_ready": {
-        "required": ["target_url", "compose_path"],
-        "optional": ["transport_shape", "initial_creds", "started_containers"],
+        "required": ["target_url", "compose_path", "initial_creds"],
+        "optional": ["transport_shape", "started_containers"],
     },
     "audit": {
         "required": ["gate_verdict", "gate_reason"],
         "optional": ["kill_chain", "defense_layers", "payloads", "runtime_dependent"],
     },
     "reproduce": {
-        "required": ["verdict"],
-        "optional": [
-            "reproduced", "evidence", "screenshots",
-            "report_data", "cvss", "vulnerable_file",
-        ],
+        "required": ["verdict", "reproduced", "attempts"],
+        "optional": ["evidence", "screenshots", "cvss", "vulnerable_file"],
     },
     "report": {
         "required": ["report_data", "final_verdict"],
-        "optional": ["cvss"],
+        "optional": ["cvss", "vulnerable_file"],
     },
 }
 
@@ -89,10 +95,25 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
             "target_url": {"type": "string", "description": "靶场访问地址"},
             "compose_path": {"type": "string", "description": ".vuln-env/docker-compose.yml 路径"},
             "transport_shape": {"type": "object", "description": "协议/端口/TLS 等"},
-            "initial_creds": {"type": "object", "description": "初始账号密码"},
+            "initial_creds": {
+                "type": "object",
+                "description": "实际可用的已有/靶场初始化账号；确认无登录功能写 {auth_required: false}；有登录但无法自动提供凭据写 {note: ...}",
+                "properties": {
+                    "username": {"type": "string", "minLength": 1},
+                    "password": {"type": "string", "minLength": 1},
+                    "login_url": {"type": "string"},
+                    "auth_required": {"type": "boolean", "enum": [False]},
+                    "note": {"type": "string", "minLength": 1},
+                },
+                "anyOf": [
+                    {"required": ["username", "password"]},
+                    {"required": ["auth_required"]},
+                    {"required": ["note"]},
+                ],
+            },
             "started_containers": {"type": "array", "description": "启动的容器名列表"},
         },
-        "required": ["target_url", "compose_path"],
+        "required": ["target_url", "compose_path", "initial_creds"],
     },
     "audit": {
         "type": "object",
@@ -115,27 +136,28 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
         "properties": {
             "reproduced": {"type": "boolean", "description": "是否真实复现"},
             "evidence": {"type": "array", "description": "证据列表"},
-            "screenshots": {"type": "array", "description": "截图文件名列表"},
+            "attempts": {"type": "array", "description": "每次 HTTP 尝试的结构化记录"},
+            "screenshots": {"type": "array", "description": "工作区内真实截图路径"},
             "verdict": {
                 "type": "string",
                 "enum": ["confirmed", "partial", "code_reachable", "code_smell", "false_positive", "not_reproduced"],
                 "description": "6 档判定",
             },
-            "report_data": {"type": "object", "description": "8 节 Markdown 字符串"},
-            "cvss": {"type": "object", "description": "CVSS 向量/分数/等级"},
+            "cvss": {"type": "object", "description": "仅 confirmed/partial 的 CVSS"},
             "vulnerable_file": {"type": "string", "description": "漏洞文件定位"},
         },
-        "required": ["verdict"],
+        "required": ["verdict", "reproduced", "attempts"],
     },
     "report": {
         "type": "object",
         "properties": {
-            "report_data": {"type": "object", "description": "8 节 Markdown 字符串"},
+            "report_data": {"type": "object", "description": "document_kind + 8 节 Markdown"},
             "final_verdict": {
                 "type": "string",
                 "enum": ["confirmed", "partial", "code_reachable", "code_smell", "false_positive", "not_reproduced"],
             },
-            "cvss": {"type": "object", "description": "CVSS 向量/分数/等级"},
+            "cvss": {"type": "object", "description": "仅漏洞报告的 CVSS"},
+            "vulnerable_file": {"type": "string"},
         },
         "required": ["report_data", "final_verdict"],
     },
@@ -166,7 +188,7 @@ def _mock_output(node_key: str, input_json: dict[str, Any]) -> dict[str, Any]:
             "target_url": "http://localhost:8080",
             "compose_path": ".vuln-env/docker-compose.yml",
             "transport_shape": {"protocol": "http", "listener": "0.0.0.0:8080", "tls_termination": "无"},
-            "initial_creds": {},
+            "initial_creds": {"note": "[Mock] 未配置预设账号"},
             "started_containers": ["mock-app"],
         }
     if node_key == "audit":
@@ -182,6 +204,14 @@ def _mock_output(node_key: str, input_json: dict[str, Any]) -> dict[str, Any]:
         return {
             "reproduced": True,
             "evidence": [{"type": "http_response", "detail": "[Mock] 200 OK, payload reflected"}],
+            "attempts": [{
+                "purpose": "[Mock] 确认核心危害",
+                "request": "curl -sS -i http://host.docker.internal:8080/login",
+                "response_status": 200,
+                "response_excerpt": "[Mock] payload reflected",
+                "observation": "[Mock] HTTP 可观察危害",
+                "result": "observed_harm",
+            }],
             "screenshots": [],
             "verdict": "confirmed",
             "cvss": {
@@ -190,19 +220,31 @@ def _mock_output(node_key: str, input_json: dict[str, Any]) -> dict[str, Any]:
                 "severity": "Critical",
             },
             "vulnerable_file": "app/mock.py",
-            "report_data": {k: f"[Mock] {k}" for k in REPORT_SECTION_KEYS},
         }
     if node_key == "report":
-        return {
-            "report_data": {k: f"[Mock] {k}" for k in REPORT_SECTION_KEYS},
-            "final_verdict": "false_positive",
-            "cvss": {
-                "vector": "AV:N/AC:L/PR:N/UI:N/C:N/I:N/A:N",
-                "base_score": 0.0,
-                "severity": "None",
-            },
+        expected = input_json.get("expected_verdict")
+        if expected not in _VERDICTS:
+            repro = input_json.get("reproduce") or {}
+            expected = repro.get("verdict") if repro.get("verdict") in _VERDICTS else None
+        if expected not in _VERDICTS:
+            audit = input_json.get("audit") or {}
+            expected = "false_positive" if audit.get("gate_verdict") == "fail" else "confirmed"
+        kind = document_kind_for_verdict(expected)
+        keys = REPORT_SECTION_KEYS if kind == "vulnerability_report" else RECORD_SECTION_KEYS
+        report_data = {k: f"[Mock] {k}" for k in keys}
+        report_data["document_kind"] = kind
+        output = {
+            "report_data": report_data,
+            "final_verdict": expected,
             "vulnerable_file": "",
         }
+        if expected in _CONFIRMED_VERDICTS:
+            output["cvss"] = {
+                "vector": "AV:N/AC:L/PR:N/UI:N/C:H/I:H/A:H",
+                "base_score": 9.8,
+                "severity": "Critical",
+            }
+        return output
     return {}
 
 
@@ -242,11 +284,27 @@ def _validate_audit_output(output: dict) -> tuple[bool, str | None]:
     return True, None
 
 
-def _validate_report_data_markdown(report_data: Any) -> tuple[bool, str | None]:
-    """8 节必须都是非空 Markdown 字符串；嵌套 object/array 不合格。"""
-    if not isinstance(report_data, dict) or any(k not in report_data for k in REPORT_SECTION_KEYS):
+def document_kind_for_verdict(verdict: str | None) -> str:
+    if verdict in _CONFIRMED_VERDICTS:
+        return "vulnerability_report"
+    return "verification_record"
+
+
+def authoritative_verdict(repro: dict[str, Any] | None, audit: dict[str, Any] | None) -> str | None:
+    repro = repro or {}
+    audit = audit or {}
+    if repro.get("verdict") in _VERDICTS:
+        return str(repro["verdict"])
+    if audit.get("gate_verdict") == "fail":
+        return "false_positive"
+    return None
+
+
+def _validate_report_data_markdown(report_data: Any, keys: tuple[str, ...]) -> tuple[bool, str | None]:
+    """指定 8 节必须都是非空 Markdown 字符串；嵌套 object/array 不合格。"""
+    if not isinstance(report_data, dict) or any(k not in report_data for k in keys):
         return False, "report_data 需要 8 节 Markdown 字符串"
-    for key in REPORT_SECTION_KEYS:
+    for key in keys:
         value = report_data.get(key)
         if not isinstance(value, str) or not value.strip():
             return False, f"report_data.{key} 必须是非空字符串"
@@ -285,54 +343,165 @@ def _validate_evidence(evidence: Any) -> tuple[bool, str | None]:
     return True, None
 
 
-def _validate_reproduce_output(output: dict) -> tuple[bool, str | None]:
-    """reproduce 闸门 + 8 节 Markdown + 索引字段。平台只校形状，不判 HTTP 真伪。"""
+def _has_cvss_payload(output: dict) -> bool:
+    cvss = output.get("cvss")
+    return cvss is not None and cvss != {}
+
+
+def _validate_attempts(attempts: Any) -> tuple[bool, str | None]:
+    if not isinstance(attempts, list) or len(attempts) < 1:
+        return False, "attempts 需要至少 1 条"
+    for item in attempts:
+        if not isinstance(item, dict):
+            return False, "attempts 条目必须是对象"
+        for key in _ATTEMPT_KEYS:
+            val = item.get(key)
+            if key == "response_status":
+                if isinstance(val, bool) or not isinstance(val, (int, str)):
+                    return False, "attempts 需要 purpose/request/response_status/response_excerpt/observation/result"
+                if isinstance(val, str) and not val.strip():
+                    return False, "attempts 需要 purpose/request/response_status/response_excerpt/observation/result"
+            elif not isinstance(val, str) or not val.strip():
+                return False, "attempts 需要 purpose/request/response_status/response_excerpt/observation/result"
+    return True, None
+
+
+def _validate_screenshots(shots: list[str], host_workdir: str | None) -> tuple[bool, str | None]:
+    root = Path(host_workdir).resolve() if host_workdir else None
+    for raw in shots:
+        suffix = Path(raw).suffix.lower()
+        if suffix not in _IMAGE_EXTS:
+            return False, "screenshots 必须是工作区内真实图片（禁止 .txt）"
+        if root is None:
+            continue
+        candidate = Path(raw)
+        path = candidate if candidate.is_absolute() else (root / candidate)
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(root)
+        except ValueError:
+            return False, "screenshots 必须位于任务工作区"
+        if not resolved.is_file():
+            return False, "screenshots 文件不存在"
+    return True, None
+
+
+def _validate_reproduce_output(
+    output: dict, *, host_workdir: str | None = None,
+) -> tuple[bool, str | None]:
+    """reproduce 只交测试事实。平台只校形状，不判 HTTP 真伪。"""
+    if "report_data" in output:
+        return False, "reproduce 不得交 report_data，报告由 report 节点撰写"
     verdict = output.get("verdict")
     if verdict not in _VERDICTS:
         return False, (
             "verdict 必须是 confirmed|partial|code_reachable|code_smell|"
             "false_positive|not_reproduced"
         )
-    if verdict in ("confirmed", "partial"):
+    if verdict in _CONFIRMED_VERDICTS:
         if output.get("reproduced") is not True:
             return False, "confirmed/partial 需要 reproduced=true"
         ok, err = _validate_evidence(output.get("evidence"))
         if not ok:
             return False, err
-    elif verdict in ("false_positive", "not_reproduced"):
-        if output.get("reproduced") is not False:
+        ok, err = _validate_cvss(output.get("cvss"))
+        if not ok:
+            return False, err
+    else:
+        if verdict in ("false_positive", "not_reproduced") and output.get("reproduced") is not False:
             return False, "false_positive/not_reproduced 需要 reproduced=false"
+        if _has_cvss_payload(output):
+            return False, "未确认判定不得交 cvss"
 
     evidence = output.get("evidence")
-    if evidence is not None and not isinstance(evidence, list):
-        return False, "confirmed/partial 需要 evidence 至少 1 条"
+    if evidence is not None:
+        ok, err = _validate_evidence(evidence)
+        if not ok:
+            return False, err
+
+    ok, err = _validate_attempts(output.get("attempts"))
+    if not ok:
+        return False, err
 
     shots = output.get("screenshots")
     if shots is None:
         output["screenshots"] = []
     elif not isinstance(shots, list) or any(not isinstance(s, str) for s in shots):
         return False, "screenshots 必须是字符串数组"
+    else:
+        ok, err = _validate_screenshots(shots, host_workdir)
+        if not ok:
+            return False, err
 
     vf = output.get("vulnerable_file")
     if vf is None:
         output["vulnerable_file"] = ""
     elif not isinstance(vf, str):
         return False, "vulnerable_file 必须是字符串"
-
-    ok, err = _validate_cvss(output.get("cvss"))
-    if not ok:
-        return False, err
-    return _validate_report_data_markdown(output.get("report_data"))
+    return True, None
 
 
 def _validate_report_output(output: dict) -> tuple[bool, str | None]:
-    """仅误报 AI 路径：8 节 Markdown + final_verdict=false_positive。"""
-    if output.get("final_verdict") != "false_positive":
-        return False, "误报路径 final_verdict 必须是 false_positive"
-    return _validate_report_data_markdown(output.get("report_data"))
+    """report 按权威 verdict 选择漏洞报告或验证记录。"""
+    verdict = output.get("final_verdict")
+    if verdict not in _VERDICTS:
+        return False, (
+            "final_verdict 必须是 confirmed|partial|code_reachable|code_smell|"
+            "false_positive|not_reproduced"
+        )
+    rd = output.get("report_data")
+    if not isinstance(rd, dict):
+        return False, "report_data 需要 8 节 Markdown 字符串"
+    kind = rd.get("document_kind")
+    if kind not in ("vulnerability_report", "verification_record"):
+        return False, "report_data.document_kind 必须是 vulnerability_report 或 verification_record"
+    expected_kind = document_kind_for_verdict(verdict)
+    if kind != expected_kind:
+        return False, f"{verdict} 需要 document_kind={expected_kind}"
+    if kind == "vulnerability_report":
+        ok, err = _validate_report_data_markdown(rd, REPORT_SECTION_KEYS)
+        if not ok:
+            return False, err
+        return _validate_cvss(output.get("cvss"))
+    if rd.get("poc_commands"):
+        return False, "验证记录不得含 poc_commands"
+    ok, err = _validate_report_data_markdown(rd, RECORD_SECTION_KEYS)
+    if not ok:
+        return False, err
+    if _has_cvss_payload(output):
+        return False, "未确认判定不得交 cvss"
+    return True, None
 
 
-def validate_output(node_key: str, output: dict) -> tuple[bool, str | None]:
+def validate_initial_creds(value: Any) -> tuple[bool, str | None]:
+    if not isinstance(value, dict) or not value:
+        return False, "initial_creds 必须明确提供账密、免登录或凭据来源说明"
+
+    username = value.get("username")
+    password = value.get("password")
+    has_username = isinstance(username, str) and bool(username.strip())
+    has_password = isinstance(password, str) and bool(password.strip())
+    if has_username or has_password:
+        if has_username and has_password:
+            return True, None
+        return False, "initial_creds 的 username/password 必须同时为非空字符串"
+
+    if value.get("auth_required") is False:
+        return True, None
+
+    note = value.get("note")
+    if isinstance(note, str) and note.strip():
+        return True, None
+
+    return False, "initial_creds 必须明确提供账密、auth_required=false 或非空 note"
+
+
+def validate_output(
+    node_key: str,
+    output: dict,
+    *,
+    host_workdir: str | None = None,
+) -> tuple[bool, str | None]:
     """校验 AI 节点 output 是否满足最小 schema。"""
     schema = NODE_OUTPUT_SCHEMAS.get(node_key)
     if not schema:
@@ -340,10 +509,12 @@ def validate_output(node_key: str, output: dict) -> tuple[bool, str | None]:
     for field_name in schema["required"]:
         if field_name not in output:
             return False, f"缺必需字段: {field_name}"
+    if node_key == "env_ready":
+        return validate_initial_creds(output.get("initial_creds"))
     if node_key == "audit":
         return _validate_audit_output(output)
     if node_key == "reproduce":
-        return _validate_reproduce_output(output)
+        return _validate_reproduce_output(output, host_workdir=host_workdir)
     if node_key == "report":
         return _validate_report_output(output)
     return True, None
@@ -434,7 +605,7 @@ async def run_ai_node(
         raise AgentRunnerError(f"AI 节点 {node_key} output JSON 解析失败: {e}") from e
 
     # 4. schema 校验
-    ok, err = validate_output(node_key, output)
+    ok, err = validate_output(node_key, output, host_workdir=host_workdir)
     if not ok:
         raise AgentRunnerError(f"AI 节点 {node_key} output 校验失败: {err}")
 

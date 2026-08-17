@@ -1,4 +1,4 @@
-"""节点 5 报告落库 — 成功路径拷贝 reproduce 的 8 节 Markdown；仅误报路径跑 AI。"""
+"""节点 5 报告落库 — 唯一文档作者：始终跑 AI，按权威 verdict 写漏洞报告或验证记录。"""
 from __future__ import annotations
 
 from typing import Any
@@ -15,29 +15,29 @@ class ReportNode:
         return True
 
     async def execute(self, ctx: NodeContext) -> dict[str, Any]:
-        from app.contexts.agent.ai_runner import _validate_report_data_markdown, run_ai_node
+        from app.contexts.agent.ai_runner import (
+            authoritative_verdict,
+            document_kind_for_verdict,
+            run_ai_node,
+        )
 
-        repro = ctx.previous_outputs.get("reproduce") or {}
-        rd = repro.get("report_data")
-        if rd:
-            ok, err = _validate_report_data_markdown(rd)
-            if not ok:
-                raise RuntimeError(err)
-            return {
-                "report_data": rd,
-                "final_verdict": repro.get("verdict"),
-                "cvss": repro.get("cvss"),
-                "vulnerable_file": repro.get("vulnerable_file") or "",
-                "authored_by": "reproduce",
-            }
+        repro = dict(ctx.previous_outputs.get("reproduce") or {})
+        repro.pop("report_data", None)
+        audit = ctx.previous_outputs.get("audit") or {}
+        expected = authoritative_verdict(repro, audit)
+        if expected is None:
+            raise RuntimeError("report 节点缺少权威 verdict")
+        kind = document_kind_for_verdict(expected)
 
         input_json = {
             "profile": ctx.previous_outputs.get("profile", {}),
             "env_ready": ctx.previous_outputs.get("env_ready", {}),
-            "audit": ctx.previous_outputs.get("audit", {}),
+            "audit": audit,
             "reproduce": repro,
             "vulnerability_description": ctx.vulnerability_description,
             "project_address": ctx.project_address,
+            "expected_verdict": expected,
+            "document_kind": kind,
         }
         output = await run_ai_node(
             node_key="report",
@@ -47,5 +47,8 @@ class ReportNode:
             on_event=ctx.on_event,
             task_id=ctx.task_id,
         )
+        final = output.get("final_verdict")
+        if final != expected:
+            raise RuntimeError(f"verdict 漂移: expected={expected} got={final}")
         output["authored_by"] = "reporter"
         return output

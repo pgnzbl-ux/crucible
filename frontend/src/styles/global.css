@@ -21,18 +21,25 @@ body,
 
 /* ── 滚动条 ── */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.15);
-  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.14);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: 999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.25);
+  background: rgba(0, 0, 0, 0.28);
+  background-clip: padding-box;
+}
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.18) transparent;
 }
 
 /* ── 焦点可见性 ── */
@@ -77,15 +84,27 @@ body,
   box-shadow: var(--crucible-shadow-md);
 }
 
-/* ── 布局：品牌区 ── */
+/* ── 布局：品牌区（高度与顶栏严格一致，两侧底边对齐） ── */
 .crucible-brand {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 16px 20px;
+  width: 100%;
+  height: var(--crucible-header-height);
+  flex: 0 0 var(--crucible-header-height);
+  padding: 0 16px;
   color: var(--crucible-text);
   overflow: hidden;
+  border: none;
   border-bottom: 1px solid var(--crucible-border);
+  background: transparent;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+.crucible-brand:hover {
+  background: rgba(0, 0, 0, 0.02);
 }
 .crucible-brand-mark {
   display: inline-flex;
@@ -93,26 +112,31 @@ body,
   justify-content: center;
   width: 32px;
   height: 32px;
-  border-radius: 8px;
+  border-radius: 9px;
   background: linear-gradient(135deg, var(--crucible-primary), #0958d9);
   color: #fff;
   font-size: 16px;
   flex-shrink: 0;
+  box-shadow: 0 2px 8px -2px rgba(22, 119, 255, 0.55);
+}
+.crucible-brand-text {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
 }
 .crucible-brand-name {
-  font-size: 16px;
-  font-weight: 700;
+  font-size: 15px;
+  font-weight: 650;
   letter-spacing: 0.2px;
-  line-height: 1.2;
-  display: block;
+  line-height: 1.25;
   white-space: nowrap;
   color: var(--crucible-text);
 }
 .crucible-brand-tagline {
   font-size: 11px;
-  color: var(--crucible-text-secondary);
-  line-height: 1.2;
-  display: block;
+  color: var(--crucible-text-disabled);
+  line-height: 1.25;
   white-space: nowrap;
 }
 .ant-layout-sider-collapsed .crucible-brand-text {
@@ -120,17 +144,78 @@ body,
 }
 .ant-layout-sider-collapsed .crucible-brand {
   justify-content: center;
-  padding: 16px 0;
+  padding: 0;
+}
+
+/* ── 布局：外壳 ── */
+.crucible-shell {
+  height: 100vh;
+  /* 移动端浏览器工具栏会吃掉 vh，dvh 才是真正的可视高度 */
+  height: 100dvh;
+  overflow: hidden;
 }
 
 /* ── 布局：侧边栏 ── */
 .crucible-sider {
   border-right: 1px solid var(--crucible-border) !important;
-  box-shadow: var(--crucible-shadow-sm);
+  display: flex;
+  flex-direction: column;
+}
+.crucible-sider .ant-layout-sider-children {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* 折叠按钮绝对定位在底部，留出高度避免长菜单滚到它下面 */
+  padding-bottom: 48px;
+}
+.crucible-sider .ant-menu {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+.crucible-sider .ant-menu-item {
+  position: relative;
+  font-weight: 500;
+}
+.crucible-sider .ant-menu-item-group-title {
+  padding: 12px 20px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--crucible-text-disabled);
 }
 .crucible-sider .ant-menu-item-selected {
-  border-left: 3px solid var(--crucible-primary) !important;
-  border-radius: 0 8px 8px 0 !important;
+  font-weight: 600;
+}
+.crucible-sider .ant-menu-item-selected::before {
+  content: '';
+  position: absolute;
+  left: -8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 18px;
+  border-radius: 0 3px 3px 0;
+  background: var(--crucible-primary);
+}
+.crucible-sider.ant-layout-sider-collapsed .ant-menu-item-selected::before {
+  display: none;
+}
+/* 折叠态放不下分组名，省略号比不显示更难读，改用分隔线 */
+.crucible-sider.ant-layout-sider-collapsed .ant-menu-item-group-title {
+  display: none;
+}
+.crucible-sider.ant-layout-sider-collapsed .ant-menu-item-group + .ant-menu-item-group {
+  display: block;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--crucible-border);
+}
+.crucible-sider .ant-layout-sider-trigger {
+  border-top: 1px solid var(--crucible-border);
+  color: var(--crucible-text-secondary);
 }
 
 /* ── 布局：顶栏 ── */
@@ -138,12 +223,14 @@ body,
   display: flex;
   align-items: center;
   justify-content: space-between;
+  height: var(--crucible-header-height);
+  line-height: var(--crucible-header-height);
   border-bottom: 1px solid var(--crucible-border);
   position: sticky;
   top: 0;
   z-index: 10;
-  background: var(--crucible-surface) !important;
-  box-shadow: var(--crucible-shadow-sm);
+  background: rgba(255, 255, 255, 0.86) !important;
+  backdrop-filter: saturate(180%) blur(12px);
 }
 .crucible-header-left {
   display: flex;
@@ -170,25 +257,51 @@ body,
   color: var(--crucible-text-secondary);
 }
 
-/* ── 布局：内容容器 ── */
+/* ── 布局：内容容器 ──
+   滚动交给内容区而不是 body：顶栏天然固定，页面也只会出现一条滚动条 */
 .crucible-content {
   padding: 16px 20px 24px;
   background: var(--crucible-bg);
   flex: 1;
   min-width: 0;
+  min-height: 0;
+  overflow: auto;
 }
 .crucible-content-inner {
   width: 100%;
   max-width: none;
 }
+/* fill 模式：页面自己占满可视高度，滚动条只出现在内部的流式窗口里 */
+.crucible-content--fill {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.crucible-content--fill .crucible-content-inner {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* 高度是稀缺资源，页头收紧让给内容 */
+.crucible-content--fill .crucible-page-header {
+  margin-bottom: 12px;
+}
 
 /* ── 页面容器 ── */
 .crucible-page-container {
   background: var(--crucible-surface);
-  border-radius: 8px;
+  border-radius: var(--crucible-radius-lg);
   padding: 16px 20px;
   box-shadow: var(--crucible-shadow-sm);
   border: 1px solid var(--crucible-border);
+}
+.crucible-page-container--fill {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 /* ── 统一页头 ── */
@@ -350,12 +463,10 @@ body,
 
 /* ── 任务详情页 ── */
 .crucible-detail-sticky-bar {
-  position: sticky;
-  top: 0;
-  z-index: 5;
+  flex: 0 0 auto;
   background: var(--crucible-surface);
-  padding: 16px 0;
-  margin-bottom: 16px;
+  padding: 4px 0 12px;
+  margin-bottom: 12px;
   border-bottom: 1px solid var(--crucible-border);
   display: flex;
   align-items: center;
@@ -363,8 +474,143 @@ body,
   gap: 16px;
 }
 
+/* 详情主体：操作条与节点条按内容高，Tab 内容吃掉剩余高度 */
+.crucible-detail-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.crucible-fill-tabs {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* 类名对齐 antd 6 的 Tabs 结构：body-holder > body > content */
+.crucible-fill-tabs > .ant-tabs-body-holder {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+.crucible-fill-tabs .ant-tabs-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+/* 概览、报告这类长内容在这里滚；事件流自带滚动窗口，正好占满不再多一条滚动条 */
+.crucible-fill-tabs .ant-tabs-content {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  overflow: auto;
+}
+
+/* ── Agent 过程流：贴底跟随的实时窗口 ── */
+.crucible-stream-panel {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.crucible-stream-toolbar {
+  flex: 0 0 auto;
+  width: 100%;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.crucible-stream {
+  position: relative;
+  flex: 1;
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+}
+.crucible-stream-earlier {
+  text-align: center;
+  padding: 2px 0 6px;
+  border-bottom: 1px dashed var(--crucible-border-strong);
+  margin-bottom: 4px;
+}
+.crucible-stream-scroller {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scroll-behavior: auto;
+  background: var(--crucible-bg);
+  border: 1px solid var(--crucible-border);
+  border-radius: var(--crucible-radius-lg);
+  padding: 6px 0;
+  font-family: var(--crucible-font-mono);
+}
+.crucible-stream-row {
+  display: grid;
+  grid-template-columns: 60px 76px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 5px 16px 5px 13px;
+  border-left: 3px solid var(--stream-accent, transparent);
+  transition: background-color 0.15s ease;
+}
+.crucible-stream-row:hover {
+  background: rgba(0, 0, 0, 0.025);
+}
+.crucible-stream-time {
+  font-size: 11px;
+  line-height: 22px;
+  font-variant-numeric: tabular-nums;
+}
+.crucible-stream-tag {
+  margin-inline-end: 0;
+  font-size: 11px;
+  justify-self: start;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.crucible-stream-body {
+  min-width: 0;
+}
+.crucible-stream-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  color: var(--crucible-text-secondary);
+  font-size: 12px;
+}
+.crucible-stream-pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--crucible-primary);
+  animation: crucible-pulse 1.2s ease-in-out infinite;
+}
+@keyframes crucible-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.crucible-stream-jump {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  box-shadow: var(--crucible-shadow-pop);
+}
+
 /* ── 任务详情：运行中钉住节点条 ── */
 .crucible-detail-nodes-pin {
+  flex: 0 0 auto;
   overflow-x: auto;
   padding: 8px 4px 16px;
   margin-bottom: 8px;
@@ -379,10 +625,97 @@ body,
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* ── 白盒审计结论：分区排版，替代一坨 pre-wrap 长文 ── */
+.crucible-audit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.crucible-audit__questions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.crucible-audit__question {
+  padding-left: 10px;
+  border-left: 2px solid var(--crucible-border-strong);
+}
+.crucible-audit__question-label {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 12px;
+  color: var(--crucible-text-secondary);
+}
+.crucible-audit__panels.ant-collapse-ghost > .ant-collapse-item > .ant-collapse-header {
+  padding: 4px 0;
+  font-size: 13px;
+  font-weight: 500;
+}
+.crucible-audit__panels.ant-collapse-ghost
+  > .ant-collapse-item
+  > .ant-collapse-content
+  > .ant-collapse-content-box {
+  padding: 4px 0 8px;
+}
+.crucible-audit__chain {
+  margin: 0;
+  padding-left: 20px;
+  font-family: var(--crucible-font-mono);
+  font-size: 12px;
+  line-height: 1.65;
+  word-break: break-word;
+}
+.crucible-audit__chain li + li {
+  margin-top: 6px;
+}
+.crucible-audit__layers {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.crucible-audit__layer {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--crucible-border);
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.crucible-audit__payload {
+  padding: 8px 10px;
+  border: 1px solid var(--crucible-border);
+  border-radius: 6px;
+  font-size: 13px;
+}
+.crucible-audit__code {
+  background: var(--crucible-bg);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: var(--crucible-font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ── 靶场就绪：地址 + 登录凭据 ── */
+.crucible-env-ready {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+}
+
 .crucible-filter-bar {
   background: var(--crucible-surface);
   border: 1px solid var(--crucible-border);
-  border-radius: 8px;
+  border-radius: var(--crucible-radius-lg);
   padding: 16px;
   margin-bottom: 16px;
 }
@@ -497,6 +830,14 @@ body,
   }
   .crucible-header-username {
     display: none;
+  }
+  .crucible-stream-row {
+    grid-template-columns: 52px minmax(0, 1fr);
+    row-gap: 2px;
+    padding: 6px 12px 6px 9px;
+  }
+  .crucible-stream-body {
+    grid-column: 1 / -1;
   }
   .crucible-page-header {
     align-items: stretch;

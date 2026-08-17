@@ -585,7 +585,12 @@ async def run_ai_turn(
     ctx: NodeContext,
     attempt: int,
     prev_error: str | None,
+    *,
+    failed_stage: str | None = None,
     occupied_host_ports: list[int] | None = None,
+    credential_lookup_only: bool = False,
+    existing_target_url: str | None = None,
+    existing_compose_path: str | None = None,
 ) -> dict[str, Any]:
     """调 AI(经 ai_runner)产出/修正 Dockerfile/compose。
 
@@ -600,7 +605,11 @@ async def run_ai_turn(
         "profile": ctx.previous_outputs.get("profile", {}),
         "attempt": attempt,
         "previous_error": prev_error,
+        "failed_stage": failed_stage,
         "occupied_host_ports": list(occupied_host_ports or []),
+        "credential_lookup_only": credential_lookup_only,
+        "existing_target_url": existing_target_url,
+        "existing_compose_path": existing_compose_path,
     }
     return await run_ai_node(
         node_key="env_ready",
@@ -612,15 +621,69 @@ async def run_ai_turn(
     )
 
 
-def _reused_output(result: Any) -> dict[str, Any]:
+def _reused_output(
+    result: Any,
+    *,
+    initial_creds: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return {
         "target_url": result.target_url,
         "compose_path": result.compose_path or ".vuln-env/docker-compose.yml",
         "transport_shape": result.transport_shape or {"protocol": "http"},
-        "initial_creds": result.initial_creds or {},
+        "initial_creds": initial_creds or result.initial_creds or {},
         "started_containers": [],
         "reused": True,
     }
+
+
+async def _lookup_initial_creds(
+    ctx: NodeContext,
+    *,
+    target_url: str,
+    compose_path: str,
+) -> dict[str, Any]:
+    _emit(ctx, "复用靶场缺少凭据元数据，AI 只读源码补查登录方式")
+    output = await run_ai_turn(
+        ctx,
+        1,
+        None,
+        credential_lookup_only=True,
+        existing_target_url=target_url,
+        existing_compose_path=compose_path,
+    )
+    creds = output.get("initial_creds")
+    from app.contexts.agent.ai_runner import validate_initial_creds
+
+    ok, err = validate_initial_creds(creds)
+    if not ok:
+        raise RuntimeError(f"靶场凭据补查失败: {err}")
+    return creds
+
+
+async def _backfill_reused_initial_creds(
+    ctx: NodeContext,
+    svc: Any,
+    result: Any,
+) -> dict[str, Any]:
+    current = result.initial_creds or {}
+    if current:
+        return current
+
+    target_url = str(result.target_url or "")
+    compose_path = result.compose_path or ".vuln-env/docker-compose.yml"
+    creds = await _lookup_initial_creds(
+        ctx,
+        target_url=target_url,
+        compose_path=compose_path,
+    )
+    await svc.mark_ready(
+        result.lab_id,
+        target_url=target_url,
+        compose_path=compose_path,
+        transport_shape=result.transport_shape or {"protocol": "http"},
+        initial_creds=creds,
+    )
+    return creds
 
 
 async def _resolve_project_id(ctx: NodeContext) -> str:
@@ -788,6 +851,12 @@ async def _try_cached_recipe(
         or [],
         "reused": True,
     }
+    if not output["initial_creds"]:
+        output["initial_creds"] = await _lookup_initial_creds(
+            ctx,
+            target_url=target_url,
+            compose_path=lab_compose,
+        )
     await _upload_then_mark_ready(
         ctx,
         svc,
@@ -842,14 +911,16 @@ async def _start_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
         _emit(ctx, "靶场容器已不存在，改为重新创建")
         await svc.reclaim_gone_runtime(result.lab_id, ctx.task_id)
         return await _create_lab(ctx, result)
-    await svc.mark_ready(
-        result.lab_id,
-        target_url=result.target_url or "",
-        compose_path=result.compose_path or ".vuln-env/docker-compose.yml",
-        transport_shape=result.transport_shape or {"protocol": "http"},
-        initial_creds=result.initial_creds or {},
-    )
-    return _reused_output(result)
+    creds = await _backfill_reused_initial_creds(ctx, svc, result)
+    if result.initial_creds:
+        await svc.mark_ready(
+            result.lab_id,
+            target_url=result.target_url or "",
+            compose_path=result.compose_path or ".vuln-env/docker-compose.yml",
+            transport_shape=result.transport_shape or {"protocol": "http"},
+            initial_creds=creds,
+        )
+    return _reused_output(result, initial_creds=creds)
 
 
 async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
@@ -859,6 +930,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
 
     svc = LabService(ctx.db_session)
     last_error: str | None = None
+    failed_stage: str | None = None
     repo = repo_dirname_from_outputs(ctx.previous_outputs)
     exclude_project = _exclude_compose_project(result.lab_id)
     src_repo = str(Path(ctx.host_workdir) / (repo or "project"))
@@ -874,13 +946,31 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
         )
         if cached is not None:
             return cached
+        if last_error:
+            failed_stage = "cached_recipe"
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
             occupied = list_docker_occupied_host_ports(exclude_project=exclude_project)
             _emit(ctx, f"第 {attempt}/{MAX_ATTEMPTS} 轮：AI 分析并写 Dockerfile/compose")
             recipe = await run_ai_turn(
-                ctx, attempt, last_error, occupied_host_ports=sorted(occupied)
+                ctx,
+                attempt,
+                last_error,
+                failed_stage=failed_stage,
+                occupied_host_ports=sorted(occupied),
             )
+
+            from app.contexts.agent.ai_runner import validate_initial_creds
+
+            creds_ok, creds_err = validate_initial_creds(recipe.get("initial_creds"))
+            if not creds_ok:
+                last_error = f"attempt {attempt} {creds_err}"
+                failed_stage = "recipe_validation"
+                _emit(
+                    ctx,
+                    f"initial_creds 无效，回喂 AI 补查（{attempt}/{MAX_ATTEMPTS}）",
+                )
+                continue
 
             compose_path = recipe.get("compose_path", ".vuln-env/docker-compose.yml")
             abs_compose = resolve_compose_host_path(compose_path, ctx.host_workdir, repo)
@@ -891,6 +981,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                     "只映射浏览器访问的入口（host:container），"
                     "postgres/redis/mysql 不要写 ports 到宿主。"
                 )
+                failed_stage = "recipe_validation"
                 _emit(ctx, f"缺少 Web 端口映射，回喂 AI 回溯（{attempt}/{MAX_ATTEMPTS}）")
                 continue
 
@@ -903,6 +994,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                     "只改 compose 的 host 侧映射口（例如 3001:3000 改成 3011:3000），"
                     "不要改容器内监听口，不要映射已占用端口。"
                 )
+                failed_stage = "port_conflict"
                 _emit(
                     ctx,
                     f"端口 {conflicts} 已被占用，回喂 AI 改映射（{attempt}/{MAX_ATTEMPTS}）",
@@ -924,6 +1016,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                     result.workdir, lab_compose, None, lab_id=result.lab_id
                 )
                 last_error = f"attempt {attempt} compose up 失败: {err}\n--- logs ---\n{logs}"
+                failed_stage = "compose_up"
                 logger.warning(f"节点 2 attempt {attempt} 失败: {err[:200]}")
                 _emit(ctx, f"启动失败，回喂 AI 回溯（{attempt}/{MAX_ATTEMPTS}）")
                 await docker_compose_down(
@@ -942,6 +1035,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 last_error = (
                     f"attempt {attempt} 健康检查不过(mapped_ports={web_ports})\n--- logs ---\n{logs}"
                 )
+                failed_stage = "health_check"
                 _emit(ctx, f"探活失败，回喂 AI 回溯（{attempt}/{MAX_ATTEMPTS}）")
                 await docker_compose_down(
                     result.workdir, lab_compose, None, lab_id=result.lab_id
@@ -966,7 +1060,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 "target_url": target_url,
                 "compose_path": lab_compose,
                 "transport_shape": recipe.get("transport_shape", {"protocol": "http"}),
-                "initial_creds": recipe.get("initial_creds", {}),
+                "initial_creds": recipe["initial_creds"],
                 "started_containers": recipe.get("started_containers", []),
             }
             await _upload_then_mark_ready(
@@ -1003,7 +1097,7 @@ class EnvReadyNode:
                 "target_url": publish_target_url(8080, advertise),
                 "compose_path": ".vuln-env/docker-compose.yml",
                 "transport_shape": {"protocol": "http", "listener": "0.0.0.0:8080", "tls_termination": "无"},
-                "initial_creds": {},
+                "initial_creds": {"note": "[Mock] 未配置预设账号"},
                 "started_containers": ["mock-app"],
             }
 
@@ -1032,7 +1126,9 @@ class EnvReadyNode:
             )
         if result.role == "reuse":
             _emit(ctx, f"复用靶场：{result.target_url}")
-            return _reused_output(result)
+            svc = LabService(ctx.db_session)
+            creds = await _backfill_reused_initial_creds(ctx, svc, result)
+            return _reused_output(result, initial_creds=creds)
         if result.role == "start":
             return await _start_lab(ctx, result)
         return await _create_lab(ctx, result)

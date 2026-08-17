@@ -9,6 +9,28 @@ export const REPORT_SECTIONS = [
   { key: 'reporting_decision', label: '§8 报送判定' },
 ] as const
 
+export const RECORD_SECTIONS = [
+  { key: 'product_intro', label: '§1 产品介绍' },
+  { key: 'claimed_issue', label: '§2 声称问题' },
+  { key: 'whitebox_analysis', label: '§3 白盒分析' },
+  { key: 'test_record', label: '§4 测试记录' },
+  { key: 'blocker', label: '§5 阻断原因' },
+  { key: 'observed_facts', label: '§6 已观察事实' },
+  { key: 'remaining_conditions', label: '§7 未满足条件' },
+  { key: 'reporting_decision', label: '§8 报送判定' },
+] as const
+
+export type DocumentKind = 'vulnerability_report' | 'verification_record'
+
+export function documentKindOf(rd: Record<string, unknown> | null | undefined): DocumentKind {
+  if (rd?.document_kind === 'verification_record') return 'verification_record'
+  return 'vulnerability_report'
+}
+
+export function sectionsFor(rd: Record<string, unknown> | null | undefined) {
+  return documentKindOf(rd) === 'verification_record' ? RECORD_SECTIONS : REPORT_SECTIONS
+}
+
 export function asMarkdownSection(value: unknown): string | null {
   if (typeof value !== 'string') return null
   const trimmed = value.trim()

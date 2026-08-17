@@ -6,6 +6,12 @@ import type { ThemeConfig } from 'antd'
  * 白底表面 + 标准蓝主色 + 绿色成功 / 红色告警
  * 与 styles/design-tokens.css 保持同源（实现以本文件为准）
  */
+
+/** 顶栏高度。侧栏品牌区共用同一数值，CSS 侧见 --crucible-header-height。 */
+export const HEADER_HEIGHT = 56
+export const SIDER_WIDTH = 224
+export const SIDER_COLLAPSED_WIDTH = 64
+
 export const crucibleTheme: ThemeConfig = {
   algorithm: theme.defaultAlgorithm,
   token: {
@@ -45,8 +51,8 @@ export const crucibleTheme: ThemeConfig = {
       siderBg: '#ffffff',
       headerBg: '#ffffff',
       headerColor: 'rgba(0, 0, 0, 0.88)',
-      headerHeight: 56,
-      headerPadding: '0 24px',
+      headerHeight: HEADER_HEIGHT,
+      headerPadding: '0 20px',
       bodyBg: '#f0f2f5',
     },
     Menu: {
@@ -57,6 +63,8 @@ export const crucibleTheme: ThemeConfig = {
       itemColor: 'rgba(0, 0, 0, 0.65)',
       itemBorderRadius: 8,
       itemMarginInline: 8,
+      itemMarginBlock: 2,
+      itemHeight: 38,
       subMenuItemBg: 'transparent',
       activeBarBorderWidth: 0,
     },

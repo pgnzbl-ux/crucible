@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Badge, Collapse, Empty, Segmented, Space, Tag, Typography } from 'antd'
+import { memo, useEffect, useMemo, useState } from 'react'
+import type { CSSProperties } from 'react'
+import { Alert, Badge, Button, Collapse, Empty, Segmented, Space, Tag, Typography } from 'antd'
 import {
+  ArrowDownOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
   ExperimentOutlined,
@@ -15,6 +17,7 @@ import { EVENT_PHASE_LABELS, EVENT_TYPE_LABELS, NODE_LABELS, NODE_STATUS_META } 
 import { summarizeNodeOutput } from '../../../shared/lib/nodeOutput'
 import { humanizeAgentError } from '../../../shared/lib/humanizeAgentError'
 import type { SSEStatus } from '../../../shared/hooks/useTaskEvents'
+import { useStickToBottom } from '../../../shared/hooks/useStickToBottom'
 
 const { Text, Paragraph } = Typography
 
@@ -101,6 +104,18 @@ export function isEventDetailsDefaultOpen(
   return eventType === 'tool.call.completed' && payload.is_error === true
 }
 
+/** 默认只挂最近这么多条到 DOM，长任务动辄上千条，全量挂载既费内存又拖慢每次更新。 */
+export const STREAM_RENDER_WINDOW = 150
+
+export function streamRenderWindow<T>(
+  events: T[],
+  showAll: boolean,
+  size = STREAM_RENDER_WINDOW,
+): { rows: T[]; hidden: number } {
+  if (showAll || events.length <= size) return { rows: events, hidden: 0 }
+  return { rows: events.slice(-size), hidden: events.length - size }
+}
+
 interface TaskEventTimelineProps {
   events: AgentEvent[] | undefined
   running: boolean
@@ -117,23 +132,30 @@ export function TaskEventTimeline({
   sseError,
 }: TaskEventTimelineProps) {
   const [filter, setFilter] = useState<StreamFilter>('all')
-  const scrollerRef = useRef<HTMLDivElement>(null)
+  const [showAll, setShowAll] = useState(false)
 
   const filtered = useMemo(
     () => (events ?? []).filter((ev) => matchesFilter(ev, filter)),
     [events, filter],
   )
+  const { rows, hidden } = useMemo(() => streamRenderWindow(filtered, showAll), [filtered, showAll])
+  const last = filtered[filtered.length - 1]
+  const streamKey = `${filter}:${filtered.length}:${last?.run_id ?? ''}:${last?.sequence ?? ''}`
 
+  const { scrollRef, contentRef, handlers, pinned, scrollToBottom } = useStickToBottom(streamKey, {
+    enabled: running,
+  })
+
+  // 用户上翻后统计错过的条数，回到底部时清零
+  const [anchorCount, setAnchorCount] = useState<number | null>(null)
   useEffect(() => {
-    if (!running) return
-    const el = scrollerRef.current
-    if (!el) return
-    el.scrollTop = el.scrollHeight
-  }, [filtered.length, running])
+    setAnchorCount((prev) => (pinned ? null : (prev ?? filtered.length)))
+  }, [pinned, filtered.length])
+  const behindCount = anchorCount === null ? 0 : Math.max(0, filtered.length - anchorCount)
 
   return (
-    <div>
-      <Space style={{ marginBottom: 12, width: '100%', justifyContent: 'space-between' }} wrap>
+    <div className="crucible-stream-panel">
+      <Space className="crucible-stream-toolbar" wrap>
         <Space>
           <Text strong>Agent 过程流</Text>
           {sseEnabled && (
@@ -181,25 +203,45 @@ export function TaskEventTimeline({
         <Alert type="warning" showIcon title={sseError} style={{ marginBottom: 12 }} />
       )}
       {filtered.length > 0 ? (
-        <div
-          ref={scrollerRef}
-          style={{
-            maxHeight: 560,
-            overflow: 'auto',
-            background: 'var(--crucible-bg)',
-            border: '1px solid var(--crucible-border)',
-            borderRadius: 8,
-            padding: '8px 0',
-            fontFamily: 'var(--crucible-font-mono)',
-          }}
-        >
-          {filtered.map((ev) => (
-            <StreamRow key={`${ev.run_id}-${ev.sequence}-${ev.event_type}`} ev={ev} />
-          ))}
-          {running && (
-            <div style={{ padding: '8px 16px', color: 'var(--crucible-text-secondary)', fontSize: 12 }}>
-              {streamFooterHint(events)}
+        <div className="crucible-stream">
+          <div
+            className="crucible-stream-scroller"
+            ref={scrollRef}
+            tabIndex={0}
+            role="log"
+            aria-label="Agent 过程流"
+            {...handlers}
+          >
+            <div ref={contentRef}>
+              {hidden > 0 && (
+                <div className="crucible-stream-earlier">
+                  <Button size="small" type="link" onClick={() => setShowAll(true)}>
+                    展开更早的 {hidden} 条
+                  </Button>
+                </div>
+              )}
+              {rows.map((ev) => (
+                <StreamRow key={`${ev.run_id}-${ev.sequence}-${ev.event_type}`} ev={ev} />
+              ))}
+              {running && (
+                <div className="crucible-stream-footer">
+                  <span className="crucible-stream-pulse" />
+                  {streamFooterHint(events)}
+                </div>
+              )}
             </div>
+          </div>
+          {running && !pinned && (
+            <Button
+              className="crucible-stream-jump"
+              size="small"
+              type="primary"
+              shape="round"
+              icon={<ArrowDownOutlined />}
+              onClick={scrollToBottom}
+            >
+              {behindCount > 0 ? `${behindCount} 条新事件` : '回到最新'}
+            </Button>
           )}
         </div>
       ) : (
@@ -209,32 +251,24 @@ export function TaskEventTimeline({
   )
 }
 
-function StreamRow({ ev }: { ev: AgentEvent }) {
+/** 行内容只由事件本身决定，memo 让新事件到达时只挂新行，不重渲染既有行。 */
+const StreamRow = memo(function StreamRow({ ev }: { ev: AgentEvent }) {
   const p = payloadOf(ev)
   const label = EVENT_TYPE_LABELS[ev.event_type] ?? ev.event_type
   const color = typeColor(ev.event_type)
 
   return (
-    <div
-      style={{
-        display: 'grid',
-        gridTemplateColumns: '64px 72px 1fr',
-        gap: 8,
-        padding: '6px 16px',
-        borderLeft: `3px solid ${color}`,
-        alignItems: 'start',
-      }}
-    >
-      <Text type="secondary" style={{ fontSize: 11, lineHeight: '22px' }}>
+    <div className="crucible-stream-row" style={{ '--stream-accent': color } as CSSProperties}>
+      <Text type="secondary" className="crucible-stream-time">
         {eventTime(ev)}
       </Text>
-      <Tag style={{ marginInlineEnd: 0, fontSize: 11 }} variant="filled">
+      <Tag className="crucible-stream-tag" variant="filled">
         {label}
       </Tag>
-      <div style={{ minWidth: 0 }}>{renderBody(ev, p)}</div>
+      <div className="crucible-stream-body">{renderBody(ev, p)}</div>
     </div>
   )
-}
+})
 
 function renderBody(ev: AgentEvent, p: Record<string, unknown>) {
   if (ev.event_type === 'agent.thinking') {

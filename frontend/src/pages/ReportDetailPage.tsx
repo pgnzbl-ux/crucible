@@ -12,6 +12,7 @@ import { PageContainer } from '../shared/components/PageContainer'
 import { ReportContent } from '../shared/components/ReportContent'
 import { MarkdownBody } from '../shared/components/MarkdownBody'
 import { EvidenceList } from '../features/task/components/EvidenceList'
+import { asRecord, documentKindOf } from '../shared/lib/reportData'
 
 const { Text, Paragraph } = Typography
 
@@ -59,7 +60,7 @@ export function ReportDetailPage() {
   return (
     <AppLayout>
       <PageHeader
-        title={report?.title ?? '验证报告'}
+        title={report?.title ?? '报告详情'}
         subtitle={report ? `任务 ${report.task_id.slice(0, 8)}` : undefined}
         extra={
           <Space>
@@ -92,7 +93,9 @@ export function ReportDetailPage() {
                 onClick={() => exportFile('md')}
                 disabled={!report.report_data}
               >
-                导出 Markdown
+                {documentKindOf(asRecord(report.report_data)) === 'verification_record'
+                  ? '导出验证记录'
+                  : '导出 Markdown'}
               </Button>
               {report.status !== 'published' && (
                 <Button
