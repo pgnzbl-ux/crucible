@@ -210,3 +210,25 @@ def test_sdk_cwd_never_uses_missing_project_dir(tmp_path):
     )
     assert got == "/workspace"
     assert not got.endswith("/project")
+
+
+def test_audit_skill_requires_payload_template():
+    text = _load_node_skill("audit")
+    assert "core_claim" in text
+    assert "expected_observable" in text
+    assert "method" in text
+
+
+def test_reproduce_skill_drops_attempt_cap_and_requires_first_shot():
+    text = _load_node_skill("reproduce")
+    assert "上限 5 次" not in text
+    assert "payloads[0]" in text
+    assert "判定即停" in text
+    assert "poc" in text
+    assert "python" in text.lower()
+
+
+def test_report_skill_poc_is_platform_owned():
+    text = _load_node_skill("report")
+    assert "覆盖" in text or "正本" in text
+    assert "禁止改写" in text

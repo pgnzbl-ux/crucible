@@ -7,7 +7,7 @@ description: Crucible 节点 audit。纯白盒走链与 Phase 2.5 三问。禁�
 
 你做纯白盒分析：走通利用链，过 Phase 2.5 三问，产出结构化审计结果。**禁止进入 Phase 3，本节点不发任何 HTTP 请求**（复现是下一节点的事）。不要去打旁边的靶场。
 
-本轮原料只在 user message 的 JSON 里：`source_path`、`vulnerability_description`、`profile`。
+本轮原料只在 user message 的 JSON 里：`source_path`、`vulnerability_description`、`profile`。产出必须含非空 `core_claim`（一句 HTTP 可观察危害主张）。
 
 ## 工作流
 
@@ -17,7 +17,7 @@ description: Crucible 节点 audit。纯白盒走链与 Phase 2.5 三问。禁�
 
 ### Phase 2 — 源码走链
 
-user input → sink；读全每层防御（validator / 框架 / 模板 / ORM / 代理 / 认证 / 部署面，含 CSRF token / 请求签名 / nonce / 限流）；确认代码片段首尾相连；还原真实请求格式。
+user input → sink；读全每层防御（validator / 框架 / 模板 / ORM / 代理 / 认证 / 部署面，含 CSRF token / 请求签名 / nonce / 限流）；确认代码片段首尾相连；还原真实请求格式。必须写入 `payloads[]` 对象，禁止只把 payload 写成 `' OR 1=1` 这种无法发的字符串、禁止写进 `kill_chain` 代替模板。
 
 ### Phase 2.5 Gate — 三问（打靶场前必做）
 
@@ -45,6 +45,6 @@ user input → sink；读全每层防御（validator / 框架 / 模板 / ORM / �
 
 | 值 | 形状 | `gate_reason` |
 |---|---|---|
-| `pass` | 非空 `kill_chain`；`defense_layers` 为数组（允许 `[]`）；`payloads` ≥ 1；`runtime_dependent` 为 bool | Q1/Q2/Q3 各一句；runtime-dependent 时写清缺哪项运行时事实 |
+| `pass` | 非空 `core_claim`；`payloads` 每条含 `method`/`path`（以 `/` 开头）/`expected_observable`；`runtime_dependent=true` 时非空 `unresolved_facts` | Q1/Q2/Q3 各一句；runtime-dependent 时写清缺哪项运行时事实 |
 | `fail` | 非空 `kill_chain`；`defense_layers` 长度 ≥ 1 | 结构性原因 |
 | `uncertain` | `payloads` 必须缺省或 `[]` | 对不上哪段描述、为何锁不住 harm |

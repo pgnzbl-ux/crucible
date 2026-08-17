@@ -15,7 +15,7 @@ description: Crucible 节点 reproduce。对注入的 target_url 发 HTTP，只�
 
 - 禁止 docker / compose。靶场已由平台拉起。
 - 无真实浏览器：XSS/DOM 若只有 curl，不得 `confirmed`（用 `code_reachable` 或 `partial`）。
-- 5 次变体在本容器内完成，不要等平台重开一轮。
+- 不设验证次数上限。能诚实判定 6 档之一就 submit_result（判定即停）。不要等平台重开一轮。
 - 截图若有，必须是工作区内真实图片（`.png` / `.jpg` / `.jpeg` / `.webp` / `.gif`）。禁止把 `.txt` 或日志当作截图。
 
 ## 工作流
@@ -23,12 +23,13 @@ description: Crucible 节点 reproduce。对注入的 target_url 发 HTTP，只�
 ### Phase 3 — 靶场确认
 
 1. 截图放到 `{source_path}/VULN-<NNN>-<title>/img/`，且必须是真实图片文件。
-2. 若 `audit.runtime_dependent === true`，不要把 `payloads` 当成已证明可打通，按 `gate_reason` 补运行时事实再发 HTTP。
-3. 一次 HTTP 请求测审计给出的核心主张（不是黑盒盲试）。
-4. 接受合理变体（审计的 PoC 当假设，不照抄）。
-5. 诊断证据（HTTP 500 / 报错 / 日志 / sink 命中）不能作为已确认；确认证据必须是 HTTP 可观察危害。
-6. SSRF 必须 preflight 验证回调通道可达。
-7. 首测未复现 → 回走调用链 → 试变体（上限 5 次）→ 仍不行判误报 / 未复现。
+2. 第一枪强制执行 `audit.payloads[0]`：`url = target_url.rstrip('/') + path`，带上 `initial_creds`。禁止第一枪另选端点。其余 payloads 是后续候选。
+3. 必须仍测 `audit.core_claim`，禁止换题、禁止黑盒扫。
+4. 若 `audit.runtime_dependent === true`，先按 `unresolved_facts` / `gate_reason` 补运行时事实再发攻击请求。
+5. 未打出危害：允许重读源码、修正同一主张的利用链/编码/鉴权，然后继续 HTTP。判定即停。
+6. 诊断证据不能作为已确认；确认证据必须是 HTTP 可观察危害。
+7. SSRF 必须 preflight 验证回调通道可达。
+8. `confirmed` / `partial` 必须交完整 `poc`（Python 脚本优先，bash 次之，其它须 `language_reason`）。`code` 必须是已打通请求的完整可运行源码，不是 demo。其余 verdict 不得交 poc。
 
 每次 HTTP（含失败探测、环境探测、CLI 缺失）都写入 `attempts[]`，字段：
 
@@ -56,12 +57,12 @@ description: Crucible 节点 reproduce。对注入的 target_url 发 HTTP，只�
 
 | 最强证据 | verdict | 额外要求 |
 |---|---|---|
-| HTTP 可观察危害 | `confirmed` | `reproduced=true`，`evidence`≥1，必须交 `cvss` |
-| 仅支撑弱点 / 更窄影响 | `partial` | 同上 |
+| HTTP 可观察危害 | `confirmed` | `reproduced=true`，`evidence`≥1，必须交 `cvss`，必须交 `poc` |
+| 仅支撑弱点 / 更窄影响 | `partial` | 同上，必须交 `poc` |
 | 仅代码可达 / 配置 / 日志 | `code_reachable` | **不得交 `cvss`** |
 | 最佳实践缺口无安全影响 | `code_smell` | **不得交 `cvss`** |
 | bypass 全试完无 payload | `false_positive` | `reproduced=false`，不得交 `cvss` |
-| 5 轮后运行时条件未解决 | `not_reproduced` | `reproduced=false`，不得交 `cvss` |
+| 运行时条件未解决 | `not_reproduced` | `reproduced=false`，不得交 `cvss` |
 
 `cvss` 仅 `confirmed` / `partial`：`vector` / `base_score` / `severity`。`vulnerable_file` 无定位则 `""`。
 

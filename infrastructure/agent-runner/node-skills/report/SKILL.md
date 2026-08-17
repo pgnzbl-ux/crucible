@@ -25,7 +25,7 @@ description: Crucible 节点 report。唯一文档作者：按权威 verdict 写
 同时交 `cvss`（`vector` / `base_score` / `severity`）和 `vulnerable_file`。
 
 - `reproduction`：口述式覆盖前因 / 操作 / 期望 / 实际，来自 `reproduce.attempts` 里真正打出危害的请求。
-- `poc_commands`：**只允许确认性请求**（能证明危害、可复制执行）。失败探测、环境探测、CLI 缺失、占位符请求不得写入本节。
+- `poc_commands`：平台会用 reproduce 的 `poc` 正本覆盖本节。禁止改写 `poc.code`。你仍须交非空占位字符串以满足 8 节形状。
 - 截图只引用 reproduce 给出的真实图片路径。
 
 ## 验证记录（`document_kind=verification_record`）
