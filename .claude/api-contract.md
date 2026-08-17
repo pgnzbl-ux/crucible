@@ -142,11 +142,11 @@
 
 ### GET `/api/v1/reports/{id}`
 
-含正文、状态、结构化字段(verdict/cvss_score/severity/vulnerable_file/report_data/md_artifact_key/docx_artifact_key)。
+含正文、状态、结构化字段(verdict/cvss_score/severity/vulnerable_file/report_data/md_artifact_key/docx_artifact_key)。`report_data` 为 8 节 Markdown 字符串（`product_intro` / `vulnerability` / `impact` / `details` / `reproduction` / `poc_commands` / `fix_suggestions` / `reporting_decision`）。
 
 ### GET `/api/v1/reports/{id}/export?format=json|md`
 
-**已实现**。format=json 返回结构化 report_data;format=md 返回 renderer.py 渲染的 markdown。**不生成 docx/pdf**。
+**已实现**。format=json 返回 8 键对象（值为 Markdown 字符串）+ 索引字段;format=md 返回平台加 `## N.` 标题后拼接的 markdown。**不生成 docx/pdf**。
 
 ### GET `/api/v1/reports/{id}/evidences`
 
@@ -196,7 +196,7 @@ owner 校验：生产严格（`report.owner_id` 必须匹配 token），开发�
 | GET | `/api/v1/labs/{id}` | 返回 lab 详情及所属 compose 项目的容器列表（name、status、ports、image），并刷新 TTL |
 | POST | `/api/v1/labs/{id}/actions/stop` | `compose stop`，状态变为 `stopped` |
 | POST | `/api/v1/labs/{id}/actions/start` | `compose start`，状态变为 `ready` 并刷新 TTL |
-| POST | `/api/v1/labs/{id}/actions/rebuild` | 状态变为 `creating`，执行 `compose up -d --build`，成功为 `ready`、失败为 `failed` |
+| POST | `/api/v1/labs/{id}/actions/rebuild` | 状态变为 `creating`，执行 `compose up -d --build`，成功为 `ready`、失败为 `failed`。本地缺 compose 时先从 MinIO 拉配方，仍无则 400。 |
 | DELETE | `/api/v1/labs/{id}` | `compose down -v`，状态变为 `destroyed` |
 | POST | `/api/v1/labs/{id}/containers/{name}/actions/stop` | `docker stop` |
 | POST | `/api/v1/labs/{id}/containers/{name}/actions/start` | `docker start` |

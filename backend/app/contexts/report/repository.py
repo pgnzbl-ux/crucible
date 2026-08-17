@@ -1,8 +1,8 @@
-from sqlalchemy import select, func
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from .models import Report, Evidence
+from .models import Evidence, Report
 
 
 class ReportRepository:
@@ -37,6 +37,8 @@ class ReportRepository:
         self,
         owner_id: str,
         status: str | None = None,
+        verdict: str | None = None,
+        query: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[Report], int]:
@@ -45,6 +47,18 @@ class ReportRepository:
         if status:
             stmt = stmt.where(Report.status == status)
             count_stmt = count_stmt.where(Report.status == status)
+        if verdict:
+            stmt = stmt.where(Report.verdict == verdict)
+            count_stmt = count_stmt.where(Report.verdict == verdict)
+        if query:
+            pattern = f"%{query.strip()}%"
+            search_filter = or_(
+                Report.title.ilike(pattern),
+                Report.task_id.ilike(pattern),
+                Report.summary.ilike(pattern),
+            )
+            stmt = stmt.where(search_filter)
+            count_stmt = count_stmt.where(search_filter)
         stmt = stmt.order_by(Report.created_at.desc()).limit(limit).offset(offset)
         result = await self.session.execute(stmt)
         count_result = await self.session.execute(count_stmt)

@@ -32,7 +32,7 @@ async def test_reproduce_rewrites_localhost_target():
                 "compose_path": ".vuln-env/docker-compose.yml",
                 "started_containers": ["app"],
             },
-            "audit": {"gate_verdict": "pass"},
+            "audit": {"gate_verdict": "pass", "runtime_dependent": True},
         },
     )
     with patch("app.contexts.agent.ai_runner.run_ai_node", fake_run_ai_node):
@@ -45,7 +45,10 @@ async def test_reproduce_rewrites_localhost_target():
     assert inp["started_containers"] == ["app"]
     assert inp["source_path"] == "/workspace/claudecodeui"
     assert inp["audit"]["gate_verdict"] == "pass"
+    assert inp["audit"]["runtime_dependent"] is True
     assert "on_event" in captured
+    assert captured["node_key"] == "reproduce"
+    assert "attempt" not in captured
 
 
 @pytest.mark.asyncio
@@ -54,7 +57,7 @@ async def test_reproduce_fails_without_env_ready_target_url():
         task_id="t1", run_id="r1", host_workdir="/tmp/w",
         source_path="/tmp/w", vulnerability_description="d",
         project_address="x", project_ref=None,
-        previous_outputs={"env_ready": {}, "audit": {"gate_verdict": "pass"}},
+        previous_outputs={"env_ready": {}, "audit": {"gate_verdict": "pass", "runtime_dependent": False}},
     )
     with pytest.raises(RuntimeError, match="target_url"):
         await ReproduceNode().execute(ctx)

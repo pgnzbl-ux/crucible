@@ -26,6 +26,15 @@ from app.core.agent_runner import (
 
 logger = logging.getLogger(__name__)
 
+REPORT_SECTION_KEYS = (
+    "product_intro", "vulnerability", "impact", "details",
+    "reproduction", "poc_commands", "fix_suggestions", "reporting_decision",
+)
+_VERDICTS = (
+    "confirmed", "partial", "code_reachable", "code_smell",
+    "false_positive", "not_reproduced",
+)
+
 # 各 AI 节点的 output schema(校验最小必需字段,spec §1.3)
 NODE_OUTPUT_SCHEMAS: dict[str, dict] = {
     "profile": {
@@ -40,12 +49,15 @@ NODE_OUTPUT_SCHEMAS: dict[str, dict] = {
         "optional": ["transport_shape", "initial_creds", "started_containers"],
     },
     "audit": {
-        "required": ["gate_verdict"],
-        "optional": ["kill_chain", "defense_layers", "payloads", "gate_reason"],
+        "required": ["gate_verdict", "gate_reason"],
+        "optional": ["kill_chain", "defense_layers", "payloads", "runtime_dependent"],
     },
     "reproduce": {
         "required": ["verdict"],
-        "optional": ["reproduced", "evidence", "screenshots"],
+        "optional": [
+            "reproduced", "evidence", "screenshots",
+            "report_data", "cvss", "vulnerable_file",
+        ],
     },
     "report": {
         "required": ["report_data", "final_verdict"],
@@ -88,10 +100,15 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
             "kill_chain": {"type": "string", "description": "entry→sink 完整调用链"},
             "defense_layers": {"type": "array", "description": "每层防御 + 是否 bypass"},
             "payloads": {"type": "array", "description": "构造的 payload 候选"},
-            "gate_verdict": {"type": "string", "enum": ["pass", "fail"], "description": "Phase 2.5 三问结论"},
-            "gate_reason": {"type": "string", "description": "pass/fail 的理由"},
+            "gate_verdict": {
+                "type": "string",
+                "enum": ["pass", "fail", "uncertain"],
+                "description": "Phase 2.5 三问结论:纸上通/runtime-dependent=pass;结构性阻断=fail;描述对不上/锁不住 harm=uncertain",
+            },
+            "gate_reason": {"type": "string", "description": "三问各一句或阻断/待复核原因"},
+            "runtime_dependent": {"type": "boolean"},
         },
-        "required": ["gate_verdict"],
+        "required": ["gate_verdict", "gate_reason"],
     },
     "reproduce": {
         "type": "object",
@@ -104,13 +121,16 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
                 "enum": ["confirmed", "partial", "code_reachable", "code_smell", "false_positive", "not_reproduced"],
                 "description": "6 档判定",
             },
+            "report_data": {"type": "object", "description": "8 节 Markdown 字符串"},
+            "cvss": {"type": "object", "description": "CVSS 向量/分数/等级"},
+            "vulnerable_file": {"type": "string", "description": "漏洞文件定位"},
         },
         "required": ["verdict"],
     },
     "report": {
         "type": "object",
         "properties": {
-            "report_data": {"type": "object", "description": "8 节报告结构化 JSON"},
+            "report_data": {"type": "object", "description": "8 节 Markdown 字符串"},
             "final_verdict": {
                 "type": "string",
                 "enum": ["confirmed", "partial", "code_reachable", "code_smell", "false_positive", "not_reproduced"],
@@ -156,6 +176,7 @@ def _mock_output(node_key: str, input_json: dict[str, Any]) -> dict[str, Any]:
             "payloads": ["mock-payload"],
             "gate_verdict": "pass",
             "gate_reason": "[Mock] 三问通过",
+            "runtime_dependent": False,
         }
     if node_key == "reproduce":
         return {
@@ -163,33 +184,152 @@ def _mock_output(node_key: str, input_json: dict[str, Any]) -> dict[str, Any]:
             "evidence": [{"type": "http_response", "detail": "[Mock] 200 OK, payload reflected"}],
             "screenshots": [],
             "verdict": "confirmed",
+            "cvss": {
+                "vector": "AV:N/AC:L/PR:N/UI:N/C:H/I:H/A:H",
+                "base_score": 9.8,
+                "severity": "Critical",
+            },
+            "vulnerable_file": "app/mock.py",
+            "report_data": {k: f"[Mock] {k}" for k in REPORT_SECTION_KEYS},
         }
     if node_key == "report":
         return {
-            "report_data": {
-                "product_intro": "[Mock] 产品介绍",
-                "vulnerability": {
-                    "type": "CWE-89: SQL 注入(Mock)",
-                    "cvss": {"vector": "AV:N/AC:L/PR:N/UI:N/C:H/I:H/A:H", "base_score": 9.8, "severity": "Critical"},
-                    "vulnerable_file": "app/mock.py",
-                    "vulnerable_lines": "1-10",
-                    "preconditions": "无",
-                    "entry_point": "POST /login",
-                    "core_harm": "[Mock] 数据泄露",
-                    "environment_constraint": "默认配置",
-                    "trigger_default": "是",
-                },
-                "impact": {"affected_versions": "all", "unaffected_versions": "—", "trigger_condition_defaults": "默认即满足"},
-                "details": {"audit_analysis": [], "poc_construction": {"exploitation_chain": "[Mock]"}},
-                "reproduction": {"transport_shape": {"protocol": "HTTP"}, "steps": [], "attack_chain_diagram": "[Mock]"},
-                "poc_commands": ["curl -X POST http://localhost:8080/login"],
-                "fix_suggestions": [{"priority": "P0", "suggestion": "[Mock] 参数化查询"}],
-                "reporting_decision": {"recommendation": "📤 建议报送", "actual_harm": "高", "fix_priority": "P0", "reason": "[Mock]", "risk_description": "[Mock]"},
+            "report_data": {k: f"[Mock] {k}" for k in REPORT_SECTION_KEYS},
+            "final_verdict": "false_positive",
+            "cvss": {
+                "vector": "AV:N/AC:L/PR:N/UI:N/C:N/I:N/A:N",
+                "base_score": 0.0,
+                "severity": "None",
             },
-            "final_verdict": "confirmed",
-            "cvss": {"vector": "AV:N/AC:L/PR:N/UI:N/C:H/I:H/A:H", "base_score": 9.8, "severity": "Critical"},
+            "vulnerable_file": "",
         }
     return {}
+
+
+def _validate_audit_output(output: dict) -> tuple[bool, str | None]:
+    """audit 三值形状表(spec §3):平台只校验形状并路由,不判 kill_chain 真伪。"""
+    gate = output.get("gate_verdict")
+    if gate not in ("pass", "fail", "uncertain"):
+        return False, "gate_verdict 必须是 pass|fail|uncertain"
+    reason = output.get("gate_reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return False, "gate_reason 不能为空"
+    if gate == "pass":
+        chain = output.get("kill_chain")
+        if not isinstance(chain, str) or not chain.strip():
+            return False, "pass 需要非空 kill_chain"
+        payloads = output.get("payloads")
+        if not isinstance(payloads, list) or len(payloads) < 1:
+            return False, "pass 需要 payloads 至少 1 条"
+        if not isinstance(output.get("runtime_dependent"), bool):
+            return False, "pass 需要 runtime_dependent 为 bool"
+        layers = output.get("defense_layers")
+        if layers is None:
+            output["defense_layers"] = []
+        elif not isinstance(layers, list):
+            return False, "pass 需要 defense_layers 为数组"
+    elif gate == "fail":
+        chain = output.get("kill_chain")
+        if not isinstance(chain, str) or not chain.strip():
+            return False, "fail 需要非空 kill_chain"
+        layers = output.get("defense_layers")
+        if not isinstance(layers, list) or len(layers) < 1:
+            return False, "fail 需要 defense_layers 为长度≥1 的数组"
+    else:
+        payloads = output.get("payloads")
+        if isinstance(payloads, list) and len(payloads) > 0:
+            return False, "uncertain 不得带非空 payloads"
+    return True, None
+
+
+def _validate_report_data_markdown(report_data: Any) -> tuple[bool, str | None]:
+    """8 节必须都是非空 Markdown 字符串；嵌套 object/array 不合格。"""
+    if not isinstance(report_data, dict) or any(k not in report_data for k in REPORT_SECTION_KEYS):
+        return False, "report_data 需要 8 节 Markdown 字符串"
+    for key in REPORT_SECTION_KEYS:
+        value = report_data.get(key)
+        if not isinstance(value, str) or not value.strip():
+            return False, f"report_data.{key} 必须是非空字符串"
+    return True, None
+
+
+def _validate_cvss(cvss: Any) -> tuple[bool, str | None]:
+    if not isinstance(cvss, dict):
+        return False, "cvss 需要 vector/base_score/severity"
+    vector = cvss.get("vector")
+    severity = cvss.get("severity")
+    score = cvss.get("base_score")
+    if not isinstance(vector, str) or not vector.strip():
+        return False, "cvss 需要 vector/base_score/severity"
+    if not isinstance(severity, str) or not severity.strip():
+        return False, "cvss 需要 vector/base_score/severity"
+    if not isinstance(score, (int, float)) or isinstance(score, bool):
+        return False, "cvss 需要 vector/base_score/severity"
+    return True, None
+
+
+def _validate_evidence(evidence: Any) -> tuple[bool, str | None]:
+    if not isinstance(evidence, list):
+        return False, "confirmed/partial 需要 evidence 至少 1 条"
+    if len(evidence) < 1:
+        return False, "confirmed/partial 需要 evidence 至少 1 条"
+    for item in evidence:
+        if not isinstance(item, dict):
+            return False, "evidence 条目需要非空 type 和 detail"
+        typ = item.get("type")
+        detail = item.get("detail")
+        if not isinstance(typ, str) or not typ.strip():
+            return False, "evidence 条目需要非空 type 和 detail"
+        if not isinstance(detail, str) or not detail.strip():
+            return False, "evidence 条目需要非空 type 和 detail"
+    return True, None
+
+
+def _validate_reproduce_output(output: dict) -> tuple[bool, str | None]:
+    """reproduce 闸门 + 8 节 Markdown + 索引字段。平台只校形状，不判 HTTP 真伪。"""
+    verdict = output.get("verdict")
+    if verdict not in _VERDICTS:
+        return False, (
+            "verdict 必须是 confirmed|partial|code_reachable|code_smell|"
+            "false_positive|not_reproduced"
+        )
+    if verdict in ("confirmed", "partial"):
+        if output.get("reproduced") is not True:
+            return False, "confirmed/partial 需要 reproduced=true"
+        ok, err = _validate_evidence(output.get("evidence"))
+        if not ok:
+            return False, err
+    elif verdict in ("false_positive", "not_reproduced"):
+        if output.get("reproduced") is not False:
+            return False, "false_positive/not_reproduced 需要 reproduced=false"
+
+    evidence = output.get("evidence")
+    if evidence is not None and not isinstance(evidence, list):
+        return False, "confirmed/partial 需要 evidence 至少 1 条"
+
+    shots = output.get("screenshots")
+    if shots is None:
+        output["screenshots"] = []
+    elif not isinstance(shots, list) or any(not isinstance(s, str) for s in shots):
+        return False, "screenshots 必须是字符串数组"
+
+    vf = output.get("vulnerable_file")
+    if vf is None:
+        output["vulnerable_file"] = ""
+    elif not isinstance(vf, str):
+        return False, "vulnerable_file 必须是字符串"
+
+    ok, err = _validate_cvss(output.get("cvss"))
+    if not ok:
+        return False, err
+    return _validate_report_data_markdown(output.get("report_data"))
+
+
+def _validate_report_output(output: dict) -> tuple[bool, str | None]:
+    """仅误报 AI 路径：8 节 Markdown + final_verdict=false_positive。"""
+    if output.get("final_verdict") != "false_positive":
+        return False, "误报路径 final_verdict 必须是 false_positive"
+    return _validate_report_data_markdown(output.get("report_data"))
 
 
 def validate_output(node_key: str, output: dict) -> tuple[bool, str | None]:
@@ -200,6 +340,12 @@ def validate_output(node_key: str, output: dict) -> tuple[bool, str | None]:
     for field_name in schema["required"]:
         if field_name not in output:
             return False, f"缺必需字段: {field_name}"
+    if node_key == "audit":
+        return _validate_audit_output(output)
+    if node_key == "reproduce":
+        return _validate_reproduce_output(output)
+    if node_key == "report":
+        return _validate_report_output(output)
     return True, None
 
 

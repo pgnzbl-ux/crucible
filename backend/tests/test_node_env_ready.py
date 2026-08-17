@@ -62,6 +62,8 @@ def _mock_lab_acquire(tmp_path):
     )
     with patch("app.contexts.lab.service.LabService") as LS:
         LS.return_value.acquire = AsyncMock(return_value=lab)
+        LS.return_value.download_recipe = AsyncMock(return_value=None)
+        LS.return_value.upload_recipe = AsyncMock()
         LS.return_value.mark_ready = AsyncMock()
         LS.return_value.mark_failed = AsyncMock()
         LS.return_value.touch = AsyncMock()

@@ -98,6 +98,29 @@ async def _skip_reproduce_if_gate_fail(
     return "false_positive"
 
 
+async def _skip_after_uncertain_audit(
+    session: AsyncSession,
+    run_id: str,
+    task_id: str,
+    previous_outputs: dict[str, dict],
+    on_node_event,
+) -> bool:
+    """audit uncertain → 出口 D:跳过 reproduce 和 report(已 completed 的不改)。"""
+    gate = previous_outputs.get("audit", {}).get("gate_verdict")
+    if gate != "uncertain":
+        return False
+    for idx in (4, 5):
+        nr = await _get_or_create_node_run(
+            session, run_id, task_id, NODE_ORDER[idx].node_index, NODE_ORDER[idx].node_key
+        )
+        if nr.status != "completed":
+            nr.status = "skipped"
+            await session.commit()
+        if on_node_event:
+            await on_node_event(NODE_ORDER[idx].node_key, "skipped", None)
+    return True
+
+
 async def run_orchestration(
     *,
     task_id: str,
@@ -169,6 +192,9 @@ async def run_orchestration(
                     )
                     if verdict:
                         final_verdict = verdict
+                    await _skip_after_uncertain_audit(
+                        session, run_id, task_id, previous_outputs, on_node_event
+                    )
                 continue
 
         # 已被分支出口标 skipped(如 gate_fail 后的 reproduce)→ 不执行
@@ -247,12 +273,16 @@ async def run_orchestration(
             }
 
         # 分支出口 B:节点 3 audit gate_fail → 跳过节点 4,判误报
+        # 分支出口 D:节点 3 audit uncertain → 跳过节点 4+5,收尾转 needs_review
         if node.node_key == "audit":
             verdict = await _skip_reproduce_if_gate_fail(
                 session, run_id, task_id, previous_outputs, on_node_event
             )
             if verdict:
                 final_verdict = verdict
+            await _skip_after_uncertain_audit(
+                session, run_id, task_id, previous_outputs, on_node_event
+            )
 
     # 节点 5 报告产出 final_verdict
     # 注意:若 audit 已判 false_positive(gate_fail),report 节点仍会执行(产出误报报告),
@@ -260,6 +290,25 @@ async def run_orchestration(
     report_out = previous_outputs.get("report", {})
     if final_verdict != "false_positive" and report_out.get("final_verdict"):
         final_verdict = report_out["final_verdict"]
+
+    # 分支出口 D 收尾:audit uncertain → 待复核,不再写成 completed
+    audit_gate = previous_outputs.get("audit", {}).get("gate_verdict")
+    if audit_gate == "uncertain":
+        if await _is_cancelled(session, task, run):
+            return _cancelled_result()
+        task.verdict = None
+        run.status = "completed"
+        task.status = "needs_review"
+        run.finished_at = datetime.now(timezone.utc)
+        await session.commit()
+        return {
+            "status": "needs_review",
+            "verdict": None,
+            "report_data": None,
+            "non_web": skipped_due_to_non_web,
+            "repo_dirname": repo_dirname_from_outputs(previous_outputs),
+            "project_path": previous_outputs.get("source", {}).get("project_path"),
+        }
 
     # 收尾(非 web 与正常路径统一 completed;非 web 的 verdict 已为 None)
     if await _is_cancelled(session, task, run):
@@ -274,6 +323,8 @@ async def run_orchestration(
         "status": "completed",
         "verdict": final_verdict,
         "report_data": report_out.get("report_data") if report_out else None,
+        "cvss": report_out.get("cvss") if report_out else None,
+        "vulnerable_file": report_out.get("vulnerable_file") if report_out else None,
         "non_web": skipped_due_to_non_web,
         "repo_dirname": repo_dirname_from_outputs(previous_outputs),
         "project_path": previous_outputs.get("source", {}).get("project_path"),

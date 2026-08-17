@@ -1,6 +1,6 @@
-import { App, Button, Space } from 'antd'
+import { Alert, App, Button, Space } from 'antd'
 import { PlusOutlined, ReloadOutlined } from '@ant-design/icons'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api } from '../shared/lib/api'
 import { buildTaskListApiParams, DEFAULT_PAGE_SIZE } from '../shared/lib/taskListQuery'
@@ -31,9 +31,10 @@ export function TasksPage() {
     pageSize,
   })
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, error, isError, isLoading, isFetching, refetch } = useQuery({
     queryKey: ['tasks', apiParams],
     queryFn: () => api.listTasks(apiParams),
+    placeholderData: keepPreviousData,
     refetchInterval: 5000,
   })
 
@@ -77,7 +78,7 @@ export function TasksPage() {
         subtitle="提交漏洞验证任务，Agent 将在隔离沙箱中自动分析"
         extra={
           <Space>
-            <Button icon={<ReloadOutlined />} onClick={() => refetch()}>
+            <Button icon={<ReloadOutlined />} loading={isFetching} onClick={() => refetch()}>
               刷新
             </Button>
             <Button type="primary" icon={<PlusOutlined />} onClick={() => setParams({ create: true })}>
@@ -90,9 +91,18 @@ export function TasksPage() {
       <TaskFilterBar params={params} onChange={setParams} onClear={clearParams} />
 
       <PageContainer>
+        {isError && (
+          <Alert
+            type="error"
+            showIcon
+            title="任务列表加载失败"
+            description={error.message}
+            style={{ marginBottom: 16 }}
+          />
+        )}
         <TaskTable
           data={data?.items ?? []}
-          loading={isLoading}
+          loading={isLoading || isFetching}
           total={data?.total ?? 0}
           page={page}
           pageSize={pageSize}

@@ -214,7 +214,6 @@ function ProviderPanel() {
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['llm-providers'],
     queryFn: () => api.listLlmProviders(),
-    refetchInterval: 8000,
   })
 
   const activateMutation = useMutation({

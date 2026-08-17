@@ -34,13 +34,15 @@ interface UseTaskEventsOptions {
   enabled?: boolean
   /** 重连最大延迟（毫秒），默认 10000 */
   maxReconnectDelay?: number
+  /** 客户端最多保留的事件数，默认 1000 */
+  maxEvents?: number
 }
 
 export function useTaskEvents<T = unknown>(
   taskId: string | null,
   options: UseTaskEventsOptions = {},
 ) {
-  const { enabled = true, maxReconnectDelay = 10_000 } = options
+  const { enabled = true, maxReconnectDelay = 10_000, maxEvents = 1_000 } = options
   const [events, setEvents] = useState<SSEEvent<T>[]>([])
   const [status, setStatus] = useState<SSEStatus>('idle')
   const [error, setError] = useState<string | null>(null)
@@ -49,10 +51,12 @@ export function useTaskEvents<T = unknown>(
   const reconnectAttemptsRef = useRef(0)
   const reconnectTimerRef = useRef<number | null>(null)
   const closedByUnmountRef = useRef(false)
+  const seenEventKeysRef = useRef(new Set<string>())
 
   const reset = useCallback(() => {
     setEvents([])
     setError(null)
+    seenEventKeysRef.current.clear()
   }, [])
 
   useEffect(() => {
@@ -62,6 +66,7 @@ export function useTaskEvents<T = unknown>(
     }
 
     closedByUnmountRef.current = false
+    seenEventKeysRef.current.clear()
     setEvents([])
     setStatus('connecting')
 
@@ -98,15 +103,24 @@ export function useTaskEvents<T = unknown>(
             reconnectAttemptsRef.current = 0
             return
           }
+          const eventKey = parsed.sequence == null
+            ? null
+            : `${parsed.run_id ?? ''}:${parsed.sequence}`
+          if (eventKey && seenEventKeysRef.current.has(eventKey)) return
           setEvents((prev) => {
             // 去重：同一 run 的 sequence 不重复（历史回放 + 实时推送短暂重叠）
-            if (parsed.sequence != null) {
-              const exists = prev.some(
-                (x) => x.sequence === parsed.sequence && (x.run_id ?? '') === (parsed.run_id ?? ''),
-              )
-              if (exists) return prev
+            if (eventKey && seenEventKeysRef.current.has(eventKey)) return prev
+            if (eventKey) seenEventKeysRef.current.add(eventKey)
+            const next = [...prev, parsed]
+            if (next.length <= maxEvents) return next
+
+            const removed = next.slice(0, next.length - maxEvents)
+            for (const event of removed) {
+              if (event.sequence != null) {
+                seenEventKeysRef.current.delete(`${event.run_id ?? ''}:${event.sequence}`)
+              }
             }
-            return [...prev, parsed]
+            return next.slice(-maxEvents)
           })
           setError(null)
         } catch (err) {
@@ -138,8 +152,7 @@ export function useTaskEvents<T = unknown>(
       eventSourceRef.current = null
       setStatus('closed')
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [taskId, enabled])
+  }, [taskId, enabled, maxEvents, maxReconnectDelay])
 
   return { events, status, error, reset }
 }

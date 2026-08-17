@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { summarizeNodeOutput, applyNodeOverlay, displayNodeStatus, compactNodeCaption, isNodeListLoading, overlayFromSseEvents } from './nodeOutput'
+import { summarizeNodeOutput, applyNodeOverlay, displayNodeStatus, compactNodeCaption, isNodeListLoading, overlayFromSseEvents, formatAuditDetail } from './nodeOutput'
 
 describe('summarizeNodeOutput', () => {
   it('source: MinIO 命中时写出仓库与 commit', () => {
@@ -55,6 +55,28 @@ describe('summarizeNodeOutput', () => {
     ).toBe('Gate 失败 · 链路不通')
   })
 
+  it('audit gate pass', () => {
+    expect(
+      summarizeNodeOutput('audit', { gate_verdict: 'pass', runtime_dependent: false }, 'completed'),
+    ).toBe('Gate 通过')
+  })
+
+  it('audit runtime_dependent pass', () => {
+    expect(
+      summarizeNodeOutput(
+        'audit',
+        { gate_verdict: 'pass', runtime_dependent: true, gate_reason: '需登录态' },
+        'completed',
+      ),
+    ).toBe('Gate 通过 · 运行时依赖')
+  })
+
+  it('audit uncertain', () => {
+    expect(
+      summarizeNodeOutput('audit', { gate_verdict: 'uncertain', gate_reason: '对不上 sink' }, 'completed'),
+    ).toBe('待复核 · 对不上 sink')
+  })
+
   it('failed 优先用 error', () => {
     expect(summarizeNodeOutput('source', { error: '网络错误' }, 'failed')).toBe('网络错误')
   })
@@ -79,6 +101,17 @@ describe('summarizeNodeOutput', () => {
     expect(applyNodeOverlay({ status: 'cancelled' }, { status: 'running' })).toBe('cancelled')
     expect(applyNodeOverlay({ status: 'running' }, { status: 'running' })).toBe('running')
     expect(applyNodeOverlay({ status: 'pending' }, { status: 'running' })).toBe('running')
+  })
+})
+
+describe('formatAuditDetail', () => {
+  it('appends kill_chain under the summary', () => {
+    expect(
+      formatAuditDetail(
+        { gate_verdict: 'uncertain', gate_reason: '对不上', kill_chain: '只找到 /login' },
+        'completed',
+      ),
+    ).toBe('待复核 · 对不上\n只找到 /login')
   })
 })
 

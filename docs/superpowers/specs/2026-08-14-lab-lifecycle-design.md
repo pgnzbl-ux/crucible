@@ -94,7 +94,7 @@ expired / destroyed / failed ── rebuild 或再次 acquire──► creating
    - 已是 `stopped`：本任务负责 `compose start`，成功则 `ready` 并复用。
 
 2. **创建者**  
-   现有 AI 配方 + 端口占用检查 + `compose up` 循环（max 5）。compose `-p crucible-lab-{lab_id}`，文件在 lab workdir。成功：`status=ready`，写入 `target_url` / creds / compose_path，`touch()`。失败：`status=failed`，`error_message` 记下。NodeRun 产出与现在相同。
+   先 `download_recipe`。命中则落到 lab 目录，平台改宿主口（若占用）+ **一次** `compose up`；成功则跳过 AI，`upload_recipe`。未命中或该次 up/探活失败再进入现有 AI 配方 + 端口占用检查 + `compose up` 循环（max 5）；构建/探活失败立即回喂，不二次同一稿。compose `-p crucible-lab-{lab_id}`，文件在 lab workdir。成功：`status=ready`，写入 `target_url` / creds / compose_path，`touch()`，`upload_recipe`。失败：`status=failed`，`error_message` 记下。NodeRun 产出与现在相同。
 
 3. **等待者**  
    轮询 lab 状态（建议 2s）。`ready` → 把库里的 `target_url` 等写入本节点产出并 `touch()`，**不**调用 AI、**不** `compose up`。`failed` 或创建者取消导致 `failed` → 等待者再 `acquire` 抢创建（同一轮 env_ready 内允许一次转创建，避免死等）。等待上限 = `agent_runner_timeout_seconds`（当前 1800s）；超时则本节点 failed（分支出口 C，可 retry）。
@@ -210,7 +210,7 @@ expired / destroyed / failed ── rebuild 或再次 acquire──► creating
 | 有 live 任务时管理操作 | 409，不改 Docker |
 | 等待创建超时 | 本任务 env_ready failed，lab 不由等待者标 failed |
 | 库 `ready` 但 docker 已无该项目 | acquire/start/rebuild 视为过期：标 `expired` 后允许重新创建 |
-| lab 目录或 compose 文件缺失 | 不能只 `start`/`rebuild`；按无配方处理，走创建者 AI 路径 |
+| lab 目录或 compose 文件缺失 | rebuild 先从 MinIO 拉配方再 `compose up`；仍无则 400。start 不能只靠缺失文件硬起。创建者路径仍先 MinIO 再决定是否 AI |
 | 端口占用 | 仍只发生在**创建者**写配方时；复用不改端口 |
 | 无 project_id | 按 git_url 确保 Project，失败则 env_ready fail-fast |
 | Mock（SDK 关闭） | 不写 `labs` 行、不碰 Docker；管理页不出现 mock 靶场。节点 2 仍返回占位 `target_url`（现有行为） |

@@ -18,7 +18,7 @@ const OCCUPIED_TIP = '有验证任务占用，请先取消任务'
 function statusColor(status: string) {
   if (status === 'running') return 'green'
   if (status === 'failed' || status === 'error') return 'red'
-  if (status === 'starting' || status === 'rebuilding') return 'processing'
+  if (status === 'creating' || status === 'starting' || status === 'rebuilding') return 'processing'
   return 'default'
 }
 
@@ -81,6 +81,11 @@ export function LabStacks() {
   const { data, error, isError, isLoading } = useQuery({
     queryKey: ['labs'],
     queryFn: () => api.listLabs(),
+    refetchInterval: (query) => {
+      const groups = query.state.data?.items ?? []
+      const hasCreatingLab = groups.some((group) => group.labs.some((lab) => lab.status === 'creating'))
+      return hasCreatingLab ? 3000 : false
+    },
   })
 
   const mutation = useMutation({

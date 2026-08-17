@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.core.config import get_settings
+
 from . import storage
 from .models import Evidence, Report
 from .repository import ReportRepository
@@ -46,7 +47,11 @@ class ReportService:
         report_data_dict: dict[str, Any] | None = None
         if report.report_data:
             try:
-                report_data_dict = json.loads(report.report_data) if isinstance(report.report_data, str) else report.report_data
+                report_data_dict = (
+                    json.loads(report.report_data)
+                    if isinstance(report.report_data, str)
+                    else report.report_data
+                )
             except (json.JSONDecodeError, TypeError):
                 report_data_dict = None
         return ReportDetail(
@@ -102,7 +107,8 @@ class ReportService:
 
     # ── 生成 ──
 
-    async def generate_from_agent(  # noqa: DEPRECATED — 6 节点编排后在 tasks.py 内联建 Report,此方法遗留无调用方
+    # 6 节点编排后在 tasks.py 内联建 Report，此方法遗留无调用方。
+    async def generate_from_agent(
         self,
         *,
         task_id: str,
@@ -163,9 +169,15 @@ class ReportService:
         return self._to_detail(report) if report else None
 
     async def list_reports(
-        self, owner_id: str, status: str | None = None, limit: int = 50, offset: int = 0
+        self,
+        owner_id: str,
+        status: str | None = None,
+        verdict: str | None = None,
+        query: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> tuple[list[ReportSummary], int]:
-        rows, total = await self.repo.list_by_owner(owner_id, status, limit, offset)
+        rows, total = await self.repo.list_by_owner(owner_id, status, verdict, query, limit, offset)
         return [self._to_summary(r) for r in rows], total
 
     # ── 发布 ──

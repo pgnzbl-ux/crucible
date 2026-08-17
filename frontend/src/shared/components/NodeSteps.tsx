@@ -16,6 +16,7 @@ import {
   applyNodeOverlay,
   compactNodeCaption,
   displayNodeStatus,
+  formatAuditDetail,
   isNodeListLoading,
   isNodeTerminal,
   overlayFromSseEvents,
@@ -45,6 +46,7 @@ function nodeIcon(status: NodeRun['status']) {
 
 function nodeSummary(n: Pick<NodeRun, 'node_key' | 'status' | 'output' | 'error_message'>): string {
   if (n.status === 'failed' && n.error_message) return n.error_message
+  if (n.node_key === 'audit') return formatAuditDetail(n.output, n.status)
   return summarizeNodeOutput(n.node_key, n.output, n.status)
 }
 

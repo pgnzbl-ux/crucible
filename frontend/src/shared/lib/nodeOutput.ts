@@ -76,7 +76,10 @@ export function summarizeNodeOutput(
     case 'audit': {
       const gate = str(o.gate_verdict)
       if (gate === 'fail') return str(o.gate_reason) ? `Gate 失败 · ${str(o.gate_reason)}` : 'Gate 失败（误报）'
-      if (gate === 'pass') return 'Gate 通过'
+      if (gate === 'pass') {
+        return o.runtime_dependent === true ? 'Gate 通过 · 运行时依赖' : 'Gate 通过'
+      }
+      if (gate === 'uncertain') return str(o.gate_reason) ? `待复核 · ${str(o.gate_reason)}` : '待复核'
       return str(o.kill_chain) || '审计完成'
     }
     case 'reproduce': {
@@ -90,6 +93,19 @@ export function summarizeNodeOutput(
     default:
       return status === 'completed' ? '完成' : ''
   }
+}
+
+/** 非 compact 的 audit 行：摘要 + 尚未出现在摘要里的 kill_chain。 */
+export function formatAuditDetail(
+  output: Record<string, unknown> | null | undefined,
+  status?: string,
+): string {
+  const summary = summarizeNodeOutput('audit', output, status)
+  const chain = str(output?.kill_chain)
+  if ((status === 'completed' || !status) && chain && !summary.includes(chain)) {
+    return `${summary}\n${chain}`
+  }
+  return summary
 }
 
 const COMPACT_CAPTION_MAX = 22

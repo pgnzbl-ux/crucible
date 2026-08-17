@@ -2,6 +2,7 @@
 import os
 import sys
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -10,6 +11,18 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.shared.base import Base
+
+_PRESENT = [{"name": "web", "status": "Up", "ports": "", "image": "x"}]
+
+
+@pytest.fixture(autouse=True)
+def assume_compose_project_present():
+    with patch(
+        "app.contexts.lab.docker_ops.list_containers",
+        new_callable=AsyncMock,
+        return_value=_PRESENT,
+    ):
+        yield
 
 SHA = "a" * 40
 
@@ -235,3 +248,103 @@ async def test_bad_stored_json_becomes_empty_dict(session):
     )
     assert reused.transport_shape == {}
     assert reused.initial_creds == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["ready", "stopped"])
+async def test_lab_without_docker_is_expired_then_reclaimed(session, status):
+    from app.contexts.lab.models import Lab
+    from app.contexts.lab.service import LabService
+
+    await seed(session, task_id="t1")
+    await seed(session, task_id="t2")
+    svc = LabService(session)
+    first = await svc.acquire(
+        owner_id="u1", project_id="p1", commit_sha=SHA, task_id="t1"
+    )
+    await svc.mark_ready(
+        first.lab_id,
+        target_url="http://10.0.0.8:3001",
+        compose_path=".vuln-env/docker-compose.yml",
+        transport_shape={"protocol": "http"},
+        initial_creds={},
+    )
+    lab = await session.get(Lab, first.lab_id)
+    lab.status = status
+    await session.commit()
+
+    with patch(
+        "app.contexts.lab.docker_ops.list_containers",
+        new_callable=AsyncMock,
+        return_value=[],
+    ):
+        second = await svc.acquire(
+            owner_id="u1", project_id="p1", commit_sha=SHA, task_id="t2"
+        )
+
+    assert second.role == "create"
+    assert second.reused is False
+    assert second.lab_id == first.lab_id
+    await session.refresh(lab)
+    assert lab.status == "creating"
+    assert lab.creator_task_id == "t2"
+
+
+@pytest.mark.asyncio
+async def test_cas_reclaim_second_session_loses(tmp_path):
+    from app.contexts.identity.models import User
+    from app.contexts.lab.models import Lab
+    from app.contexts.lab.repository import LabRepository
+    from app.contexts.project.models import Project
+
+    db = tmp_path / "cas.sqlite"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db.as_posix()}")
+    async with engine.begin() as conn:
+        from app.contexts.report.models import Report  # noqa: F401
+        from app.contexts.settings.models import LlmProvider  # noqa: F401
+        from app.contexts.task.models import AgentEvent, NodeRun, Task, TaskRun  # noqa: F401
+
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as setup:
+        setup.add(
+            User(id="u1", email="u1@x.test", password_hash="x", display_name="u1")
+        )
+        setup.add(
+            Project(
+                id="p1",
+                name="demo",
+                git_url="https://github.com/a/b",
+                owner_id="u1",
+            )
+        )
+        setup.add(
+            Lab(
+                id="lab1",
+                owner_id="u1",
+                project_id="p1",
+                commit_sha=SHA,
+                status="expired",
+                compose_project="crucible-lab-lab1",
+                workdir="/tmp/labs/lab1",
+            )
+        )
+        await setup.commit()
+
+    async with factory() as first, factory() as second:
+        won_first = await LabRepository(first).cas_reclaim(
+            "lab1", {"failed", "expired", "destroyed"}, "t1"
+        )
+        await first.commit()
+        won_second = await LabRepository(second).cas_reclaim(
+            "lab1", {"failed", "expired", "destroyed"}, "t2"
+        )
+        await second.commit()
+
+    assert won_first is True
+    assert won_second is False
+    async with factory() as check:
+        lab = await check.get(Lab, "lab1")
+        assert lab.status == "creating"
+        assert lab.creator_task_id == "t1"
+    await engine.dispose()

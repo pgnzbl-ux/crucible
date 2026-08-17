@@ -1,5 +1,5 @@
 import { useQueries, useQuery } from '@tanstack/react-query'
-import { Button, Card, Col, Empty, Row, Skeleton, Table, Tag, Typography } from 'antd'
+import { Alert, Button, Card, Col, Empty, Row, Skeleton, Table, Tag, Typography } from 'antd'
 import {
   BugOutlined,
   CheckCircleOutlined,
@@ -31,6 +31,8 @@ const COUNT_QUERIES = [
   { key: 'total', title: '任务总数', status: undefined, icon: <FileProtectOutlined />, tone: 'default' as const, filter: undefined },
 ]
 
+const DASHBOARD_REFRESH_MS = 15_000
+
 export function DashboardPage() {
   const [, navigate] = useLocation()
 
@@ -38,17 +40,19 @@ export function DashboardPage() {
     queries: COUNT_QUERIES.map((card) => ({
       queryKey: ['tasks-count', card.key],
       queryFn: () => api.listTasks(card.status ? { limit: '1', status: card.status } : { limit: '1' }),
-      refetchInterval: 5000,
+      refetchInterval: DASHBOARD_REFRESH_MS,
     })),
   })
 
-  const { data, isLoading } = useQuery({
+  const { data, error: recentError, isError: isRecentError, isLoading } = useQuery({
     queryKey: ['tasks', 'dashboard-recent'],
     queryFn: () => api.listTasks({ limit: '200' }),
-    refetchInterval: 5000,
+    refetchInterval: DASHBOARD_REFRESH_MS,
   })
 
   const tasks = data?.items ?? []
+  const countError = countQueries.find((query) => query.isError)?.error
+  const queryError = isRecentError ? recentError : countError
 
   const recentColumns: ColumnsType<TaskSummary> = [
     {
@@ -92,6 +96,15 @@ export function DashboardPage() {
         }
       />
 
+      {queryError && (
+        <Alert
+          type="error"
+          showIcon
+          title="工作台数据加载失败"
+          description={queryError.message}
+          style={{ marginBottom: 16 }}
+        />
+      )}
       <Row gutter={[16, 16]} className="crucible-stagger">
         {COUNT_QUERIES.map((card, i) => (
           <Col xs={24} sm={12} lg={8} key={card.key}>

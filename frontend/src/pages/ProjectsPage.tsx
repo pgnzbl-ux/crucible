@@ -1,7 +1,8 @@
-import { Button, Empty, Space, Table, Tag, Typography } from 'antd'
+import { useState } from 'react'
+import { Alert, Button, Empty, Space, Table, Tag, Typography } from 'antd'
 import { CodeOutlined, ReloadOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
-import { useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 import { useLocation } from 'wouter'
 
@@ -20,10 +21,14 @@ function webTag(isWeb: boolean | null) {
 
 export function ProjectsPage() {
   const [, navigate] = useLocation()
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(20)
 
-  const { data, isLoading, refetch } = useQuery({
-    queryKey: ['projects'],
-    queryFn: () => api.listProjects({ limit: '100' }),
+  const { data, error, isError, isLoading, isFetching, refetch } = useQuery({
+    queryKey: ['projects', { page, pageSize }],
+    queryFn: () =>
+      api.listProjects({ limit: String(pageSize), offset: String((page - 1) * pageSize) }),
+    placeholderData: keepPreviousData,
   })
 
   const columns: ColumnsType<Project> = [
@@ -72,18 +77,38 @@ export function ProjectsPage() {
         title="源码管理"
         subtitle="同一 Git 仓库只登记一次，后续任务优先从 MinIO 缓存取源码"
         extra={
-          <Button icon={<ReloadOutlined />} onClick={() => refetch()}>
+          <Button icon={<ReloadOutlined />} loading={isFetching} onClick={() => refetch()}>
             刷新
           </Button>
         }
       />
       <PageContainer>
+        {isError && (
+          <Alert
+            type="error"
+            showIcon
+            title="项目列表加载失败"
+            description={error.message}
+            style={{ marginBottom: 16 }}
+          />
+        )}
         <Table
           rowKey="id"
-          loading={isLoading}
+          loading={isLoading || isFetching}
           dataSource={data?.items ?? []}
           columns={columns}
-          pagination={false}
+          pagination={{
+            current: page,
+            pageSize,
+            total: data?.total ?? 0,
+            showSizeChanger: true,
+            pageSizeOptions: [10, 20, 50],
+            showTotal: (total) => `共 ${total} 条`,
+            onChange: (nextPage, nextPageSize) => {
+              setPage(nextPageSize === pageSize ? nextPage : 1)
+              setPageSize(nextPageSize)
+            },
+          }}
           onRow={(row) => ({
             onClick: () => navigate(`/projects/${row.id}`),
             style: { cursor: 'pointer' },

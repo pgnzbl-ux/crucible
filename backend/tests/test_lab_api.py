@@ -285,6 +285,10 @@ async def test_management_writes_update_state_and_touch(session, tmp_path):
     with patch(
         "app.contexts.lab.docker_ops.compose_stop", new_callable=AsyncMock
     ) as stop, patch(
+        "app.contexts.lab.docker_ops.list_containers",
+        new_callable=AsyncMock,
+        return_value=[{"name": "web", "status": "Exited", "ports": "", "image": "x"}],
+    ), patch(
         "app.contexts.lab.docker_ops.compose_start",
         new_callable=AsyncMock,
         return_value=True,
@@ -314,13 +318,65 @@ async def test_management_writes_update_state_and_touch(session, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_start_lab_without_containers_marks_expired(session):
+    from app.contexts.lab.models import Lab
+
+    svc, result, task = await ready_lab(session)
+    task.status = "completed"
+    lab = await session.get(Lab, result.lab_id)
+    lab.status = "stopped"
+    await session.commit()
+
+    with patch(
+        "app.contexts.lab.docker_ops.list_containers",
+        new_callable=AsyncMock,
+        return_value=[],
+    ) as listed, patch(
+        "app.contexts.lab.docker_ops.compose_start",
+        new_callable=AsyncMock,
+        return_value=False,
+    ) as start:
+        with pytest.raises(ValueError, match="靶场容器已不存在，请重建"):
+            await svc.start_lab(result.lab_id, owner_id="u1")
+
+    listed.assert_awaited_once_with(result.compose_project)
+    start.assert_not_awaited()
+    await session.refresh(lab)
+    assert lab.status == "expired"
+
+
+@pytest.mark.asyncio
 async def test_rebuild_without_recipe_has_exact_message(session):
     svc, result, task = await ready_lab(session)
     task.status = "completed"
     await session.commit()
+    svc.download_recipe = AsyncMock(return_value=None)
 
     with pytest.raises(ValueError, match="^缺少配方，请从验证任务重新创建$"):
         await svc.rebuild_lab(result.lab_id, owner_id="u1")
+
+
+@pytest.mark.asyncio
+async def test_rebuild_downloads_recipe_when_file_missing(session, tmp_path):
+    svc, result, task = await ready_lab(session)
+    task.status = "completed"
+    lab = await session.get(__import__("app.contexts.lab.models", fromlist=["Lab"]).Lab, result.lab_id)
+    lab.workdir = str(tmp_path).replace("\\", "/")
+    await session.commit()
+
+    async def fake_download(**kwargs):
+        dest = kwargs["dest_workdir"]
+        os.makedirs(os.path.join(dest, ".vuln-env"), exist_ok=True)
+        path = os.path.join(dest, ".vuln-env", "docker-compose.yml")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("services: {}\n")
+        return {"compose_path": ".vuln-env/docker-compose.yml"}
+
+    svc.download_recipe = fake_download
+    with patch("app.contexts.lab.docker_ops.compose_up_build", new_callable=AsyncMock) as up:
+        status = await svc.rebuild_lab(result.lab_id, owner_id="u1")
+    assert status == "ready"
+    up.assert_awaited()
 
 
 @pytest.mark.asyncio

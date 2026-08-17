@@ -46,8 +46,8 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
     queryFn: () => api.getTask(taskId),
   })
 
-  const running = task ? ['queued', 'running'].includes(task.status) : false
-  const sseEnabled = !!taskId
+  const running = task ? canCancel(task.status) : false
+  const sseEnabled = running
   const { events: sseEvents, status: sseStatus, error: sseError } = useTaskEvents(taskId, {
     enabled: sseEnabled,
   })
@@ -61,10 +61,11 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
   useEffect(() => {
     const last = sseEvents[sseEvents.length - 1]
     if (!last) return
-    if (last.type === 'agent.completed' || last.type === 'agent.failed' || last.type === 'node.updated') {
+    if (last.type === 'agent.completed' || last.type === 'agent.failed') {
       qc.invalidateQueries({ queryKey: ['task', taskId] })
       qc.invalidateQueries({ queryKey: ['task-report', taskId] })
       qc.invalidateQueries({ queryKey: ['task-events', taskId] })
+      qc.invalidateQueries({ queryKey: ['run-nodes', taskId] })
       qc.invalidateQueries({ queryKey: ['tasks'] })
     }
   }, [sseEvents, qc, taskId])
@@ -83,7 +84,12 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
 
   const publishMutation = useMutation({
     mutationFn: (rid: string) => api.publishReport(rid),
-    onSuccess: () => message.success('报告已发布'),
+    onSuccess: (published) => {
+      message.success('报告已发布')
+      qc.setQueryData(['task-report', taskId], published)
+      qc.setQueryData(['report', published.id], published)
+      qc.invalidateQueries({ queryKey: ['reports'] })
+    },
     onError: (e: Error) => message.error(e.message),
   })
 

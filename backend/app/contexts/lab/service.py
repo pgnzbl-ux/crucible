@@ -1,21 +1,23 @@
 import json
 import logging
 import os
+import shutil
+import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.contexts.project.repository import ProjectRepository
-from app.contexts.project.service import ProjectService
 from app.contexts.task.models import Task
 from app.core.config import get_settings
 
 from .errors import LabBusyError, LabNotFoundError
 from .models import Lab
+from .recipe_store import default_recipe_store, extract_recipe, pack_recipe, recipe_object_key
 from .repository import LabRepository
 
 logger = logging.getLogger(__name__)
@@ -38,10 +40,121 @@ class AcquireResult:
     reused: bool
 
 
+_DEFAULT_COMPOSE_PATH = ".vuln-env/docker-compose.yml"
+
+
 class LabService:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, *, recipe_store=None) -> None:
         self.session = session
         self.repository = LabRepository(session)
+        self.recipe_store = recipe_store or default_recipe_store()
+
+    async def download_recipe(
+        self,
+        *,
+        owner_id: str,
+        project_id: str,
+        commit_sha: str,
+        dest_workdir: str,
+    ) -> dict | None:
+        object_key = recipe_object_key(owner_id, project_id, commit_sha)
+        fd, archive_path = tempfile.mkstemp(suffix=".tar.gz")
+        os.close(fd)
+        extract_dir = tempfile.mkdtemp(prefix="lab-recipe-")
+        try:
+            try:
+                self.recipe_store.download(object_key, archive_path)
+                meta = extract_recipe(archive_path, extract_dir)
+            except FileNotFoundError:
+                logger.warning("配方未命中 key=%s", object_key)
+                return None
+            except Exception:
+                logger.warning("配方下载或解压失败 key=%s", object_key, exc_info=True)
+                return None
+
+            hit = self._recipe_meta_with_defaults(meta)
+            compose_rel = hit["compose_path"].lstrip("/").replace("\\", "/")
+            compose_file = Path(extract_dir) / compose_rel
+            if not compose_file.is_file():
+                logger.warning(
+                    "配方缺少 compose 文件 dest=%s path=%s",
+                    dest_workdir,
+                    hit["compose_path"],
+                )
+                return None
+            self._commit_extracted_recipe(extract_dir, dest_workdir)
+            return hit
+        finally:
+            Path(archive_path).unlink(missing_ok=True)
+            shutil.rmtree(extract_dir, ignore_errors=True)
+
+    async def upload_recipe(
+        self,
+        *,
+        owner_id: str,
+        project_id: str,
+        commit_sha: str,
+        lab_workdir: str,
+        compose_path: str,
+        transport_shape: dict,
+        initial_creds: dict,
+        started_containers: list | None = None,
+    ) -> None:
+        vuln_env = Path(lab_workdir) / ".vuln-env"
+        if not vuln_env.is_dir():
+            logger.warning("上传配方跳过：缺少 .vuln-env 目录 workdir=%s", lab_workdir)
+            return
+        object_key = recipe_object_key(owner_id, project_id, commit_sha)
+        meta = {
+            "compose_path": compose_path,
+            "transport_shape": transport_shape,
+            "initial_creds": initial_creds,
+            "started_containers": list(started_containers or []),
+        }
+        fd, archive_path = tempfile.mkstemp(suffix=".tar.gz")
+        os.close(fd)
+        try:
+            pack_recipe(lab_workdir, archive_path, meta)
+            self.recipe_store.upload(object_key, archive_path)
+        except Exception:
+            logger.error("上传配方失败 key=%s", object_key, exc_info=True)
+        finally:
+            Path(archive_path).unlink(missing_ok=True)
+
+    @staticmethod
+    def _commit_extracted_recipe(extract_dir: str, dest_workdir: str) -> None:
+        dest = Path(dest_workdir)
+        dest.mkdir(parents=True, exist_ok=True)
+        src_env = Path(extract_dir) / ".vuln-env"
+        dst_env = dest / ".vuln-env"
+        if src_env.is_dir():
+            if dst_env.exists():
+                shutil.rmtree(dst_env)
+            shutil.move(str(src_env), str(dst_env))
+        src_meta = Path(extract_dir) / "recipe-meta.json"
+        if src_meta.is_file():
+            shutil.move(str(src_meta), str(dest / "recipe-meta.json"))
+
+    @staticmethod
+    def _recipe_meta_with_defaults(meta: dict) -> dict:
+        compose_path = meta.get("compose_path")
+        if not isinstance(compose_path, str) or not compose_path.strip():
+            compose_path = _DEFAULT_COMPOSE_PATH
+        transport_shape = meta.get("transport_shape")
+        if not isinstance(transport_shape, dict):
+            transport_shape = {}
+        initial_creds = meta.get("initial_creds")
+        if not isinstance(initial_creds, dict):
+            initial_creds = {}
+        started_containers = meta.get("started_containers")
+        if not isinstance(started_containers, list):
+            started_containers = []
+        return {
+            "compose_path": compose_path,
+            "transport_shape": transport_shape,
+            "initial_creds": initial_creds,
+            "started_containers": started_containers,
+        }
 
     async def acquire(
         self,
@@ -104,13 +217,37 @@ class LabService:
                 lab.last_seen_at = self._now()
                 return "create"
             return "wait"
-        if lab.status == "ready":
+        if lab.status in {"ready", "stopped"}:
+            if not await self._compose_project_present(lab.compose_project):
+                await self.reclaim_gone_runtime(lab.id, task_id)
+                await self.session.refresh(lab)
+                return "create"
             lab.last_seen_at = self._now()
-            return "reuse"
-        if lab.status == "stopped":
-            lab.last_seen_at = self._now()
-            return "start"
+            return "reuse" if lab.status == "ready" else "start"
         raise ValueError(f"不支持 acquire Lab 状态: {lab.status}")
+
+    async def reclaim_gone_runtime(self, lab_id: str, task_id: str) -> None:
+        """ready/stopped 但 Docker 已无该项目时，标 expired 再 CAS 收回为 creating。"""
+        lab = await self._require_lab(lab_id)
+        claimed = await self.repository.cas_status(
+            lab.id, {"ready", "stopped"}, "expired"
+        )
+        if claimed:
+            await self.session.commit()
+        reclaimed = await self.repository.cas_reclaim(
+            lab.id, RECLAIMABLE_LAB_STATUSES, task_id
+        )
+        if not reclaimed:
+            await self.session.refresh(lab)
+            if lab.status == "creating" and lab.creator_task_id == task_id:
+                lab.last_seen_at = self._now()
+                await self.session.commit()
+                return
+            raise RuntimeError("靶场容器已不存在，且无法重新创建")
+        await self.session.refresh(lab)
+        lab.last_seen_at = self._now()
+        lab.error_message = None
+        await self.session.commit()
 
     async def touch(self, lab_id: str) -> None:
         lab = await self._require_lab(lab_id)
@@ -176,6 +313,9 @@ class LabService:
         return list(result.scalars().all())
 
     async def list_grouped(self, owner_id: str) -> list[dict]:
+        from app.contexts.project.repository import ProjectRepository
+        from app.contexts.project.service import ProjectService
+
         from . import docker_ops
 
         labs = await self.repository.list_by_owner(owner_id)
@@ -233,6 +373,12 @@ class LabService:
         lab = await self._require_writable_lab(lab_id, owner_id)
         self._require_status(lab, {"stopped"}, "start")
         await self._confirm_not_busy(lab.id)
+        if not await docker_ops.list_containers(lab.compose_project):
+            claimed = await self.repository.cas_status(lab.id, {"stopped"}, "expired")
+            if claimed:
+                lab.status = "expired"
+                await self._touch_and_commit(lab)
+            raise ValueError("靶场容器已不存在，请重建")
         if not await docker_ops.compose_start(lab.compose_project):
             raise RuntimeError("靶场 compose start 失败")
         lab.status = "ready"
@@ -255,7 +401,14 @@ class LabService:
             .replace("\\", "/")
         )
         if not os.path.isfile(compose_file):
-            raise ValueError("缺少配方，请从验证任务重新创建")
+            await self.download_recipe(
+                owner_id=lab.owner_id,
+                project_id=lab.project_id,
+                commit_sha=lab.commit_sha,
+                dest_workdir=lab.workdir,
+            )
+            if not os.path.isfile(compose_file):
+                raise ValueError("缺少配方，请从验证任务重新创建")
 
         await self._confirm_not_busy(lab.id)
         previous_status = lab.status
@@ -458,6 +611,12 @@ class LabService:
         if lab is None:
             raise LookupError(f"Lab 不存在: {lab_id}")
         return lab
+
+    @staticmethod
+    async def _compose_project_present(compose_project: str) -> bool:
+        from . import docker_ops
+
+        return bool(await docker_ops.list_containers(compose_project))
 
     @staticmethod
     def _result(lab: Lab, role: str) -> AcquireResult:

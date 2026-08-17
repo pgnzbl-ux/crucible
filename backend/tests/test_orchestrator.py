@@ -18,6 +18,7 @@ async def session_factory():
     async with engine.begin() as conn:
         from app.contexts.identity.models import User  # noqa: F401
         from app.contexts.project.models import Project  # noqa: F401
+        from app.contexts.lab.models import Lab  # noqa: F401
         from app.contexts.task.models import Task, TaskRun, NodeRun, AgentEvent  # noqa: F401
         from app.contexts.report.models import Report  # noqa: F401
         from app.contexts.settings.models import LlmProvider  # noqa: F401
@@ -420,3 +421,105 @@ async def test_orchestration_killed_node_does_not_overwrite_cancelled(session_fa
         await session.refresh(run)
         assert task.status == "cancelled"
         assert run.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_gate_uncertain_skips_reproduce_and_report(session_factory):
+    """uncertain → 出口 D：skip 4+5，task=needs_review，verdict 空。"""
+    from app.contexts.agent import orchestrator as orch
+    from app.contexts.task.models import NodeRun, Task
+    from sqlalchemy import select
+
+    async with session_factory() as session:
+        task, run = await _seed_task_run(session)
+
+        async def fake_source(ctx):
+            return {"source_path": ctx.source_path}
+
+        async def fake_profile(ctx):
+            return {"is_web": True, "language": "python"}
+
+        async def fake_env(ctx):
+            return {"target_url": "http://localhost:5000", "compose_path": "x.yml"}
+
+        async def fake_audit(ctx):
+            return {"gate_verdict": "uncertain", "gate_reason": "描述对不上"}
+
+        real_nodes = orch.NODE_ORDER
+        patches = [
+            patch.object(real_nodes[0], "execute", fake_source),
+            patch.object(real_nodes[1], "execute", fake_profile),
+            patch.object(real_nodes[2], "execute", fake_env),
+            patch.object(real_nodes[3], "execute", fake_audit),
+            patch.object(real_nodes[4], "execute", AsyncMock(side_effect=AssertionError("uncertain 不该 reproduce"))),
+            patch.object(real_nodes[5], "execute", AsyncMock(side_effect=AssertionError("uncertain 不该 report"))),
+        ]
+        for p in patches:
+            p.__enter__()
+
+        result = await orch.run_orchestration(
+            task_id=task.id, run_id=run.id, session=session,
+            host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
+        )
+
+        assert result["status"] == "needs_review"
+        assert result["verdict"] is None
+        refreshed = await session.get(Task, task.id)
+        assert refreshed.status == "needs_review"
+        assert refreshed.verdict is None
+
+        nodes = (await session.execute(
+            select(NodeRun).where(NodeRun.run_id == run.id).order_by(NodeRun.node_index)
+        )).scalars().all()
+        by_key = {n.node_key: n for n in nodes}
+        assert by_key["audit"].status == "completed"
+        assert "描述对不上" in (by_key["audit"].output_json or "")
+        assert by_key["reproduce"].status == "skipped"
+        assert by_key["report"].status == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_resume_reuses_audit_uncertain_skips_reproduce_and_report(session_factory):
+    """续跑：已 completed 的 uncertain 不得进 reproduce/report。"""
+    from app.contexts.agent import orchestrator as orch
+    from app.contexts.task.models import NodeRun, Task
+    from sqlalchemy import select
+
+    async with session_factory() as session:
+        task, run = await _seed_task_run(session)
+        session.add(NodeRun(
+            run_id=run.id, task_id=task.id, node_index=0, node_key="source",
+            status="completed", output_json='{"source_path": "/p"}',
+        ))
+        session.add(NodeRun(
+            run_id=run.id, task_id=task.id, node_index=1, node_key="profile",
+            status="completed", output_json='{"is_web": true}',
+        ))
+        session.add(NodeRun(
+            run_id=run.id, task_id=task.id, node_index=2, node_key="env_ready",
+            status="completed",
+            output_json='{"target_url": "http://localhost:5000", "compose_path": "x.yml"}',
+        ))
+        session.add(NodeRun(
+            run_id=run.id, task_id=task.id, node_index=3, node_key="audit",
+            status="completed",
+            output_json='{"gate_verdict": "uncertain", "gate_reason": "对不上"}',
+        ))
+        await session.flush()
+
+        real_nodes = orch.NODE_ORDER
+        with patch.object(real_nodes[4], "execute", AsyncMock(side_effect=AssertionError("续跑不得 reproduce"))), \
+             patch.object(real_nodes[5], "execute", AsyncMock(side_effect=AssertionError("续跑不得 report"))):
+            result = await orch.run_orchestration(
+                task_id=task.id, run_id=run.id, session=session,
+                host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
+            )
+
+        assert result["status"] == "needs_review"
+        refreshed = await session.get(Task, task.id)
+        assert refreshed.status == "needs_review"
+        statuses = {n.node_key: n.status for n in (await session.execute(
+            select(NodeRun).where(NodeRun.run_id == run.id)
+        )).scalars().all()}
+        assert statuses["reproduce"] == "skipped"
+        assert statuses["report"] == "skipped"

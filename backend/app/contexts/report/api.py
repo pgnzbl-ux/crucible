@@ -5,8 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
 from app.shared.deps import CurrentUserId
+
 from .repository import ReportRepository
-from .schemas import EvidenceResponse, ReportDetail, ReportListResponse, ReportUpdateRequest
+from .schemas import EvidenceResponse, ReportDetail, ReportListResponse
 from .service import ReportService
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -25,10 +26,19 @@ async def list_reports(
     svc: Annotated[ReportService, Depends(get_report_service)],
     user_id: CurrentUserId,
     status: str | None = Query(None),
+    verdict: str | None = Query(None, max_length=64),
+    query: str | None = Query(None, alias="q", max_length=200),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> ReportListResponse:
-    reports, total = await svc.list_reports(user_id, status, limit, offset)
+    reports, total = await svc.list_reports(
+        user_id,
+        status=status,
+        verdict=verdict,
+        query=query,
+        limit=limit,
+        offset=offset,
+    )
     return ReportListResponse(items=reports, total=total, limit=limit, offset=offset)
 
 
@@ -114,7 +124,7 @@ async def export_report(
     format: str = Query("json", pattern="^(json|md)$"),
 ):
     """导出报告。format=json 返回结构化 report_data;format=md 返回渲染后的 markdown。"""
-    from fastapi.responses import PlainTextResponse, JSONResponse
+    from fastapi.responses import JSONResponse, PlainTextResponse
 
     report = await svc.get_report(report_id)
     if not report:

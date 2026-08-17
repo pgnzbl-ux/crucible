@@ -69,6 +69,16 @@ async def test_teardown_task_runtime_only_removes_agent_runner():
     mock_mgr.remove_for_task.assert_called_once_with("abc", r"D:\tmp\crucible\audit-abc")
 
 
+def test_new_run_does_not_compose_down_shared_lab():
+    """重试清空任务 workspace 时不得按旧 task_id 去 down 共享靶场。"""
+    import inspect
+
+    from app.contexts.agent import tasks as tasks_mod
+
+    source = inspect.getsource(tasks_mod._run_analysis)
+    assert "docker_compose_down" not in source
+
+
 @pytest.mark.asyncio
 async def test_teardown_only_kills_runner():
     """取消时 AI 还在跑：强拆 agent-runner，但不拆共享 compose。"""

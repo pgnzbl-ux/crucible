@@ -57,6 +57,21 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+def report_columns_from_orch_result(orch_result: dict) -> dict:
+    """从编排收尾 dict 抽出 Report 索引列。"""
+    rd = orch_result.get("report_data") or {}
+    cvss = orch_result.get("cvss") or {}
+    intro = rd.get("product_intro") if isinstance(rd, dict) else ""
+    score = cvss.get("base_score") if isinstance(cvss, dict) else None
+    return {
+        "verdict": orch_result.get("verdict"),
+        "cvss_score": float(score) if isinstance(score, (int, float)) and not isinstance(score, bool) else None,
+        "severity": cvss.get("severity") if isinstance(cvss, dict) else None,
+        "vulnerable_file": orch_result.get("vulnerable_file") or None,
+        "summary": str(intro or "")[:500],
+    }
+
+
 # ── Celery worker 专用 DB 会话（独立 NullPool 引擎） ──
 
 
@@ -308,11 +323,6 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
             if await _run_has_completed_nodes(session, run.id):
                 os.makedirs(host_workdir, exist_ok=True)
             else:
-                try:
-                    from app.contexts.agent.nodes.env_ready import docker_compose_down
-                    await docker_compose_down(host_workdir, task_id=task_id)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("重试前拆靶场失败（继续清空工作区）: %s", e)
                 reset_host_workdir(host_workdir)
             await _append_events(
                 session, run,
@@ -450,13 +460,17 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
                         )
                         report = existing.scalar_one_or_none()
                         if report is None:
+                            cols = report_columns_from_orch_result(orch_result)
                             report = Report(
                                 task_id=task_id, run_id=run_id, owner_id=task.owner_id,
                                 status="generated",
-                                verdict=orch_result.get("verdict"),
+                                verdict=cols["verdict"],
+                                cvss_score=cols["cvss_score"],
+                                severity=cols["severity"],
+                                vulnerable_file=cols["vulnerable_file"],
                                 report_data=json.dumps(report_data, ensure_ascii=False, default=str),
                                 title=f"漏洞验证报告 — {task_id[:8]}",
-                                summary=str(report_data.get("product_intro") or "")[:500],
+                                summary=cols["summary"],
                             )
                             session.add(report)
                         await session.commit()
@@ -541,8 +555,8 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
 
 
 def should_retain_hostdir(status: str | None) -> bool:
-    """失败/取消时保留工作目录，便于对照源码与节点产物。"""
-    return status in ("failed", "cancelled")
+    """失败/取消/待复核时保留工作目录，便于对照源码与节点产物。"""
+    return status in ("failed", "cancelled", "needs_review")
 
 
 def _cleanup_hostdir(path: str) -> None:

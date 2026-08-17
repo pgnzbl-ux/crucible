@@ -186,6 +186,104 @@ def web_host_ports(mappings: list[tuple[int, int]]) -> list[int]:
     return ports
 
 
+_SHORT_HOST_IN_LINE = re.compile(
+    r"(?:(?:\d{1,3}\.){3}\d{1,3}:)?(?P<host>\d+):\d+(?:/(?:tcp|udp))?",
+    re.I,
+)
+_PUBLISHED_HOST_IN_LINE = re.compile(
+    r"(published:\s*[\"']?)(\d+)",
+    re.I,
+)
+
+
+def _pick_free_host_port(start: int, taken: set[int]) -> int | None:
+    candidate = start
+    while candidate in taken:
+        candidate += 1
+        if candidate > 65535:
+            return None
+    return candidate
+
+
+def _apply_host_port_replacements(text: str, replacements: dict[int, int]) -> str:
+    """只改 ports 段里短语法 HOST:CONTAINER 的宿主侧，以及 published: 行。"""
+    lines: list[str] = []
+    in_ports = False
+    ports_indent = 0
+    for raw in (text or "").splitlines(keepends=True):
+        body = raw[:-2] if raw.endswith("\r\n") else (raw[:-1] if raw.endswith("\n") else raw)
+        nl = raw[len(body):]
+        stripped = body.strip()
+        indent = len(body) - len(body.lstrip(" "))
+        if stripped.startswith("ports:"):
+            in_ports = True
+            ports_indent = indent
+            lines.append(raw)
+            continue
+        if in_ports and stripped and indent <= ports_indent and not stripped.startswith("-"):
+            in_ports = False
+        if not in_ports or not stripped or stripped.startswith("#"):
+            lines.append(raw)
+            continue
+        if "published:" in stripped:
+            pub = _PUBLISHED_HOST_IN_LINE.search(body)
+            if pub:
+                port = int(pub.group(2))
+                if port in replacements:
+                    body = (
+                        body[: pub.start(2)]
+                        + str(replacements[port])
+                        + body[pub.end(2) :]
+                    )
+                    lines.append(body + nl)
+                    continue
+        else:
+            short = _SHORT_HOST_IN_LINE.search(body)
+            if short:
+                host = int(short.group("host"))
+                if host in replacements:
+                    body = (
+                        body[: short.start("host")]
+                        + str(replacements[host])
+                        + body[short.end("host") :]
+                    )
+                    lines.append(body + nl)
+                    continue
+        lines.append(raw)
+    return "".join(lines)
+
+
+def rewrite_compose_host_ports(text: str, occupied: set[int]) -> str | None:
+    """冲突的 Web 宿主口改为空闲口；只改 host 侧。无 Web 映射返回 None。"""
+    mappings = parse_compose_port_mappings(text)
+    web_ports = web_host_ports(mappings)
+    if not web_ports:
+        return None
+    occupied_set = set(occupied)
+    conflicts = [p for p in web_ports if p in occupied_set]
+    if not conflicts:
+        return text
+
+    taken = set(occupied_set)
+    taken.update(p for p in web_ports if p not in occupied_set)
+    replacements: dict[int, int] = {}
+    for host in conflicts:
+        picked = _pick_free_host_port(host + 1, taken)
+        if picked is None:
+            return None
+        replacements[host] = picked
+        taken.add(picked)
+    return _apply_host_port_replacements(text, replacements)
+
+
+def is_docker_unavailable(err: str) -> bool:
+    """docker 守护进程连不上或 docker 命令根本不存在，与配方构建失败区分。"""
+    text = err or ""
+    if "Cannot connect to the Docker daemon" in text:
+        return True
+    return "docker compose 异常:" in text
+
+
 def load_web_host_ports(compose_abs: str) -> list[int]:
     from pathlib import Path
 
@@ -435,7 +533,7 @@ async def docker_compose_down(
     lab_id: str | None = None,
     task_id: str | None = None,
 ) -> None:
-    """任务结束或排障重试前拆掉靶场(best-effort)。优先按项目名，不依赖 yaml 还在。"""
+    """创建失败回滚时拆本 Lab 的 compose（best-effort）。优先按项目名，不依赖 yaml 还在。"""
     from pathlib import Path
 
     cmds: list[list[str]] = []
@@ -528,7 +626,156 @@ async def _resolve_project_id(ctx: NodeContext) -> str:
     project_id = getattr(project, "id", None)
     if not project_id:
         raise RuntimeError("env_ready 无法确保 project_id，不能 acquire 靶场")
+    ctx.project_id = project_id
     return project_id
+
+
+def _commit_sha_from(ctx: NodeContext) -> str:
+    return str((ctx.previous_outputs.get("source") or {}).get("commit_sha") or "")
+
+
+def _exclude_compose_project(lab_id: str | None) -> str | None:
+    """与 lab_project_name 同形，避免 import runtime_cleanup 拉起 Docker client。"""
+    if not lab_id:
+        return None
+    return f"crucible-lab-{str(lab_id).lower()}"
+
+
+async def _upload_then_mark_ready(
+    ctx: NodeContext,
+    svc: Any,
+    result: Any,
+    *,
+    commit_sha: str,
+    lab_compose: str,
+    output: dict[str, Any],
+) -> None:
+    await svc.upload_recipe(
+        owner_id=ctx.owner_id,
+        project_id=ctx.project_id or "",
+        commit_sha=commit_sha,
+        lab_workdir=result.workdir,
+        compose_path=lab_compose,
+        transport_shape=output["transport_shape"],
+        initial_creds=output["initial_creds"],
+        started_containers=output.get("started_containers") or [],
+    )
+    await svc.mark_ready(
+        result.lab_id,
+        target_url=output["target_url"],
+        compose_path=lab_compose,
+        transport_shape=output["transport_shape"],
+        initial_creds=output["initial_creds"],
+    )
+
+
+async def _try_cached_recipe(
+    ctx: NodeContext,
+    svc: Any,
+    result: Any,
+    *,
+    commit_sha: str,
+    exclude_project: str | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """MinIO 命中后改口、up、探活。成功产出含 reused；docker 不可用则抛；失败 (None, last_error)。"""
+    from pathlib import Path
+
+    hit = await svc.download_recipe(
+        owner_id=ctx.owner_id or "",
+        project_id=ctx.project_id or "",
+        commit_sha=commit_sha,
+        dest_workdir=result.workdir,
+    )
+    if not hit:
+        return None, None
+
+    lab_compose = lab_recipe_compose_path(hit.get("compose_path") if isinstance(hit, dict) else None)
+    compose_file = Path(result.workdir) / lab_compose
+    if not compose_file.is_file():
+        return None, f"缓存配方缺少 compose 文件: {lab_compose}"
+
+    occupied = list_docker_occupied_host_ports(exclude_project=exclude_project)
+    text = compose_file.read_text(encoding="utf-8", errors="replace")
+    rewritten = rewrite_compose_host_ports(text, occupied)
+    if rewritten is None:
+        web_ports = web_host_ports(parse_compose_port_mappings(text))
+        if not web_ports:
+            return None, "缓存配方 compose 未把 Web 端口映射到宿主机。"
+        conflicts = [p for p in web_ports if p in occupied]
+        return None, (
+            f"缓存配方宿主端口无法改写: {conflicts}。"
+            f"docker 当前已占用: {sorted(occupied)}。"
+        )
+    if rewritten != text:
+        compose_file.write_text(rewritten, encoding="utf-8")
+
+    web_ports = load_web_host_ports(str(compose_file))
+    if not web_ports:
+        return None, "缓存配方 compose 未把 Web 端口映射到宿主机。"
+
+    _emit(ctx, "命中已缓存配方，平台启动靶场（docker compose up --build）")
+    ok, err = await docker_compose_up(
+        lab_compose,
+        result.workdir,
+        None,
+        lab_id=result.lab_id,
+        on_progress=lambda line: _emit(ctx, line),
+    )
+    if not ok:
+        if is_docker_unavailable(err):
+            raise RuntimeError(err)
+        logs = await collect_compose_logs(
+            result.workdir, lab_compose, None, lab_id=result.lab_id
+        )
+        last_error = f"compose up 失败: {err}\n--- logs ---\n{logs}"
+        logger.warning("缓存配方 compose up 失败: %s", (err or "")[:200])
+        _emit(ctx, "缓存配方启动失败，回喂 AI")
+        await docker_compose_down(
+            result.workdir, lab_compose, None, lab_id=result.lab_id
+        )
+        return None, last_error
+
+    _emit(
+        ctx,
+        f"正在探活 127.0.0.1:{web_ports[0]}"
+        + (f" 等 {len(web_ports)} 个映射口" if len(web_ports) > 1 else ""),
+    )
+    ok, live_port = await health_check(web_ports)
+    if not ok or live_port is None:
+        logs = await collect_compose_logs(
+            result.workdir, lab_compose, None, lab_id=result.lab_id
+        )
+        last_error = (
+            f"健康检查不过(mapped_ports={web_ports})\n--- logs ---\n{logs}"
+        )
+        _emit(ctx, "缓存配方探活失败，回喂 AI")
+        await docker_compose_down(
+            result.workdir, lab_compose, None, lab_id=result.lab_id
+        )
+        return None, last_error
+
+    advertise = host_advertise_ip()
+    target_url = publish_target_url(live_port, advertise)
+    output = {
+        "target_url": target_url,
+        "compose_path": lab_compose,
+        "transport_shape": (hit.get("transport_shape") if isinstance(hit, dict) else None)
+        or {"protocol": "http"},
+        "initial_creds": (hit.get("initial_creds") if isinstance(hit, dict) else None) or {},
+        "started_containers": (hit.get("started_containers") if isinstance(hit, dict) else None)
+        or [],
+        "reused": True,
+    }
+    await _upload_then_mark_ready(
+        ctx,
+        svc,
+        result,
+        commit_sha=commit_sha,
+        lab_compose=lab_compose,
+        output=output,
+    )
+    _emit(ctx, f"靶场就绪：{target_url}")
+    return output, None
 
 
 async def _wait_for_lab(
@@ -560,15 +807,19 @@ async def _wait_for_lab(
 
 
 async def _start_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
-    from app.contexts.lab.docker_ops import compose_start
+    from app.contexts.lab.docker_ops import compose_start, list_containers
     from app.contexts.lab.service import LabService
 
     svc = LabService(ctx.db_session)
     _emit(ctx, f"启动已停止的靶场 {result.compose_project}")
     ok = await compose_start(result.compose_project)
     if not ok:
-        await svc.mark_failed(result.lab_id, "compose start 失败")
-        raise RuntimeError("靶场 compose start 失败")
+        if await list_containers(result.compose_project):
+            await svc.mark_failed(result.lab_id, "compose start 失败")
+            raise RuntimeError("靶场 compose start 失败")
+        _emit(ctx, "靶场容器已不存在，改为重新创建")
+        await svc.reclaim_gone_runtime(result.lab_id, ctx.task_id)
+        return await _create_lab(ctx, result)
     await svc.mark_ready(
         result.lab_id,
         target_url=result.target_url or "",
@@ -582,16 +833,26 @@ async def _start_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
 async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
     from pathlib import Path
 
-    from app.contexts.agent.runtime_cleanup import lab_project_name
     from app.contexts.lab.service import LabService
 
     svc = LabService(ctx.db_session)
     last_error: str | None = None
     repo = repo_dirname_from_outputs(ctx.previous_outputs)
-    exclude_project = lab_project_name(result.lab_id) if result.lab_id else None
+    exclude_project = _exclude_compose_project(result.lab_id)
     src_repo = str(Path(ctx.host_workdir) / (repo or "project"))
+    commit_sha = _commit_sha_from(ctx)
 
     try:
+        cached, last_error = await _try_cached_recipe(
+            ctx,
+            svc,
+            result,
+            commit_sha=commit_sha,
+            exclude_project=exclude_project,
+        )
+        if cached is not None:
+            return cached
+
         for attempt in range(1, MAX_ATTEMPTS + 1):
             occupied = list_docker_occupied_host_ports(exclude_project=exclude_project)
             _emit(ctx, f"第 {attempt}/{MAX_ATTEMPTS} 轮：AI 分析并写 Dockerfile/compose")
@@ -686,18 +947,19 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 "initial_creds": recipe.get("initial_creds", {}),
                 "started_containers": recipe.get("started_containers", []),
             }
-            await svc.mark_ready(
-                result.lab_id,
-                target_url=target_url,
-                compose_path=lab_compose,
-                transport_shape=output["transport_shape"],
-                initial_creds=output["initial_creds"],
+            await _upload_then_mark_ready(
+                ctx,
+                svc,
+                result,
+                commit_sha=commit_sha,
+                lab_compose=lab_compose,
+                output=output,
             )
             return output
 
         raise RuntimeError(f"靶场搭建 {MAX_ATTEMPTS} 轮全失败: {(last_error or 'unknown')[:500]}")
-    except Exception:
-        await svc.mark_failed(result.lab_id, (last_error or "unknown")[:500])
+    except Exception as e:
+        await svc.mark_failed(result.lab_id, (last_error or str(e))[:500])
         raise
 
 
@@ -727,6 +989,7 @@ class EnvReadyNode:
         if not sha:
             raise RuntimeError("env_ready 缺少 source.commit_sha，不能 acquire 靶场")
         project_id = await _resolve_project_id(ctx)
+        ctx.project_id = project_id
         if not ctx.owner_id:
             raise RuntimeError("env_ready 缺少 owner_id，不能 acquire 靶场")
 

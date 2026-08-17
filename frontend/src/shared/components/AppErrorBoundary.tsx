@@ -26,7 +26,7 @@ export class AppErrorBoundary extends Component<Props, State> {
   }
 
   handleReset = () => {
-    this.setState({ hasError: false })
+    window.location.reload()
   }
 
   render() {

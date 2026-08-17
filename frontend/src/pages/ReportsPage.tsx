@@ -1,8 +1,8 @@
-import { useMemo, useState } from 'react'
-import { Button, Empty, Input, Select, Table, Tag, Typography } from 'antd'
+import { useEffect, useState } from 'react'
+import { Alert, Button, Empty, Input, Select, Table, Tag, Typography } from 'antd'
 import { FileProtectOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
-import { useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 import { useLocation } from 'wouter'
 
@@ -18,28 +18,29 @@ export function ReportsPage() {
   const [, navigate] = useLocation()
   const [verdictFilter, setVerdictFilter] = useState<string | undefined>()
   const [keyword, setKeyword] = useState('')
+  const [debouncedKeyword, setDebouncedKeyword] = useState('')
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(20)
 
-  const { data, isLoading, refetch } = useQuery({
-    queryKey: ['reports'],
-    queryFn: () => api.listReports({ limit: '100' }),
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedKeyword(keyword.trim())
+      setPage(1)
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [keyword])
+
+  const { data, error, isError, isLoading, isFetching, refetch } = useQuery({
+    queryKey: ['reports', { verdictFilter, debouncedKeyword, page, pageSize }],
+    queryFn: () =>
+      api.listReports({
+        limit: String(pageSize),
+        offset: String((page - 1) * pageSize),
+        ...(verdictFilter ? { verdict: verdictFilter } : {}),
+        ...(debouncedKeyword ? { q: debouncedKeyword } : {}),
+      }),
+    placeholderData: keepPreviousData,
   })
-
-  const filtered = useMemo(() => {
-    let result = data?.items ?? []
-    if (verdictFilter) {
-      result = result.filter((r) => r.verdict === verdictFilter)
-    }
-    if (keyword) {
-      const q = keyword.toLowerCase()
-      result = result.filter(
-        (r) =>
-          r.title.toLowerCase().includes(q) ||
-          r.task_id.toLowerCase().includes(q) ||
-          (r.summary ?? '').toLowerCase().includes(q),
-      )
-    }
-    return result
-  }, [data, verdictFilter, keyword])
 
   const columns: ColumnsType<ReportSummary> = [
     {
@@ -83,7 +84,7 @@ export function ReportsPage() {
         title="验证报告"
         subtitle="任务跑完后在这里阅读全文，和本地打开 report.md 一样"
         extra={
-          <Button icon={<ReloadOutlined />} onClick={() => refetch()}>
+          <Button icon={<ReloadOutlined />} loading={isFetching} onClick={() => refetch()}>
             刷新
           </Button>
         }
@@ -95,7 +96,10 @@ export function ReportsPage() {
           placeholder="判定结果"
           style={{ width: 160 }}
           value={verdictFilter}
-          onChange={setVerdictFilter}
+          onChange={(value) => {
+            setVerdictFilter(value)
+            setPage(1)
+          }}
           options={Object.entries(VERDICT_META).map(([v, m]) => ({ value: v, label: m.label }))}
         />
         <Input
@@ -109,11 +113,20 @@ export function ReportsPage() {
       </div>
 
       <PageContainer>
+        {isError && (
+          <Alert
+            type="error"
+            showIcon
+            title="报告列表加载失败"
+            description={error.message}
+            style={{ marginBottom: 16 }}
+          />
+        )}
         <Table<ReportSummary>
           rowKey="id"
-          loading={isLoading}
+          loading={isLoading || isFetching}
           columns={columns}
-          dataSource={filtered}
+          dataSource={data?.items ?? []}
           locale={{
             emptyText: (
               <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无报告">
@@ -123,7 +136,18 @@ export function ReportsPage() {
               </Empty>
             ),
           }}
-          pagination={{ pageSize: 10, showTotal: (t) => `共 ${t} 条` }}
+          pagination={{
+            current: page,
+            pageSize,
+            total: data?.total ?? 0,
+            showSizeChanger: true,
+            pageSizeOptions: [10, 20, 50],
+            showTotal: (total) => `共 ${total} 条`,
+            onChange: (nextPage, nextPageSize) => {
+              setPage(nextPageSize === pageSize ? nextPage : 1)
+              setPageSize(nextPageSize)
+            },
+          }}
           onRow={(row) => ({
             onClick: () => navigate(`/reports/${row.id}`),
             style: { cursor: 'pointer' },
