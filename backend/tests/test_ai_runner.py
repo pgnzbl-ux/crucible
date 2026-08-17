@@ -3,11 +3,20 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(
+    0,
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "infrastructure",
+        "agent-runner",
+    ),
+)
 
 import pytest
 
+from runner.node_schemas import NODE_INPUT_SCHEMAS
+
 from app.contexts.agent.ai_runner import (
-    NODE_INPUT_SCHEMAS,
     _mock_output,
     apply_poc_to_report_output,
     render_poc_markdown,

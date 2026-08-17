@@ -89,6 +89,19 @@ def test_reproduce_submit_schema_rejects_empty_evidence_fields():
     assert item["properties"]["detail"]["minLength"] == 1
 
 
+def test_submit_schema_is_single_source_shared_across_boundary():
+    """run_one 只从 runner.node_schemas 复用同一对象，禁止再各自维护副本。
+
+    历史上后端 ai_runner 与容器 run_one 各存一份手工同步的 NODE_INPUT_SCHEMAS，
+    已多次漂移（evidence.items 约束、字段 description 不一致）。此后单一真相在
+    runner.node_schemas，两侧 import 同一对象，物理上杜绝漂移。
+    """
+    from runner import node_schemas
+
+    assert NODE_INPUT_SCHEMAS is node_schemas.NODE_INPUT_SCHEMAS
+    assert set(NODE_INPUT_SCHEMAS) == set(NODE_AI_KEYS)
+
+
 def test_node_skills_exist_and_are_sliced():
     assert NODE_AI_KEYS == frozenset(
         {"profile", "env_ready", "audit", "reproduce", "report"}
