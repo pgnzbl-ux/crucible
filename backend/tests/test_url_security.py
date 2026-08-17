@@ -50,6 +50,21 @@ async def test_validate_public_https_url_accepts_unknown_public_domain():
 
 
 @pytest.mark.asyncio
+async def test_validate_public_https_url_accepts_tun_fake_ip():
+    """Clash/Surge TUN fake-ip（198.18.0.0/15）不是真实内网，放行以免误杀本地代理。"""
+    from app.core.url_security import validate_public_https_url
+
+    infos = [
+        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("198.18.0.12", 443)),
+    ]
+    with patch("app.core.url_security.socket.getaddrinfo", return_value=infos):
+        assert (
+            await validate_public_https_url("https://api.deepseek.com/anthropic")
+            == "https://api.deepseek.com/anthropic"
+        )
+
+
+@pytest.mark.asyncio
 async def test_validate_public_https_url_rejects_unresolvable_domain():
     from app.core.url_security import validate_public_https_url
 

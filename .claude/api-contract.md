@@ -245,7 +245,7 @@ owner 校验：所有环境均要求 `report.owner_id` 匹配当前用户。
 
 ### POST `/api/v1/settings/llm/test`
 
-真实请求 `base_url` 验证。Base URL 必须是 HTTPS 域名，禁止 IP 字面量、userinfo、fragment 和非公网 DNS 结果；不跟随重定向。不使用域名白名单。
+真实请求 `base_url` 验证。Base URL 必须是 HTTPS 域名，禁止 IP 字面量、userinfo、fragment；DNS 须为公网或 TUN fake-ip（`198.18.0.0/15`），仍拒绝真实私网/回环/元数据；不跟随重定向。不使用域名白名单。
 
 ---
 

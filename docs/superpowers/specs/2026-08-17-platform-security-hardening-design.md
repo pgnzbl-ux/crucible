@@ -39,7 +39,7 @@
 2. 必须存在 hostname，且 hostname 不能是 IP 字面量。
 3. 禁止 userinfo、fragment 和非法端口。
 4. 使用系统 DNS 解析 hostname；解析失败即拒绝。
-5. 所有解析地址都必须满足 `ipaddress.ip_address(address).is_global`。
+5. 所有解析地址都必须是公网（`ip.is_global`），或属于 TUN fake-ip 网段 `198.18.0.0/15`（Clash/Surge 等本地代理常用；该段不路由到真实内网主机，放行以免误杀开发机 TUN）。仍拒绝 RFC1918、回环、链路本地、链路元数据与 CGNAT。
 6. create、update、临时 test、已保存 Provider test，以及构造 Runner 环境前都调用同一校验。
 7. `httpx.AsyncClient` 显式设置 `follow_redirects=False`。
 

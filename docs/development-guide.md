@@ -244,7 +244,7 @@ P0 全部完成。每个 P1 完成后跑一遍全链路冒烟（任务创建 →
 - agent-runner 容器必须：非 root + 只读 rootfs + cap_drop ALL + 资源限制 + 超时回收（`AgentRunnerSpec` 默认值）
 - 凭据零落盘：`ANTHROPIC_*` 等 8 个变量通过 `docker run --env` 注入 agent-runner 容器，容器销毁 env 消失
 - API Key 当前**明文落库**(`settings/service.py` 存 `api_key_encrypted` 字段),列表接口走 `mask_secret` 掩码。`core/crypto.py` 的 Fernet 工具遗留未用
-- LLM Provider 管理接口必须 JWT；`base_url` 仅允许解析到公网的 HTTPS 域名，禁止 IP 字面量和重定向
+- LLM Provider 管理接口必须 JWT；`base_url` 须为 HTTPS 域名，解析到公网或 TUN fake-ip（`198.18.0.0/15`），禁止 IP 字面量和重定向；仍拒绝真实私网/回环/元数据地址
 - Task/Report/Evidence 查询与写操作必须绑定 owner；非 owner 与不存在统一 404
 - AI 生成 Compose 在宿主执行前走 `lab/compose_policy.py` 高危字段拒绝
 - 创建/重试任务必须先 commit 再投递 Celery；投递失败把 Task/Run 标 failed 并返回 503

@@ -33,7 +33,8 @@ Runner 的 reproduce 节点通过 `host.docker.internal` 访问宿主映射的 L
 ## 2.1 LLM Base URL 与 Compose 准入
 
 - Provider Base URL 必须是 HTTPS 域名，不允许 IP 字面量、userinfo 或 fragment
-- create/update/test 和注入 Runner 前均解析 DNS；任何非公网结果都拒绝
+- create/update/test 和注入 Runner 前均解析 DNS；结果须为公网地址，或 TUN fake-ip 网段 `198.18.0.0/15`（Clash/Surge 等，不路由到真实内网）
+- 仍拒绝 RFC1918、回环、链路本地、元数据地址（如 `169.254.169.254`）与 CGNAT `100.64.0.0/10`
 - LLM 测试连接禁止跟随重定向；不使用域名白名单，以兼容未知公网 Provider
 - AI 生成 Compose 在宿主执行前必须经过 `lab/compose_policy.py`；拒绝 privileged、host namespace、devices、cap_add、运行时 socket、越界 bind mount/build context
 - 配方上传或 Lab ready 落库失败必须补偿 `compose down`；巡检兜底回收终态 Lab 运行时
