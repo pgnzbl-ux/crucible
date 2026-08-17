@@ -99,6 +99,23 @@ async def test_report_node_runs_ai_when_reproduce_skipped():
     assert out["final_verdict"] == "false_positive"
 
 
+@pytest.mark.asyncio
+async def test_report_node_runs_ai_for_uncertain_audit():
+    """audit uncertain 无 reproduce → report 仍撰写 needs_review 验证记录。"""
+    fake = AsyncMock(return_value={
+        "report_data": _record_sections(),
+        "final_verdict": "needs_review",
+    })
+    with patch("app.contexts.agent.ai_runner.run_ai_node", fake):
+        out = await ReportNode().execute(_ctx(reproduce={}, audit={"gate_verdict": "uncertain"}))
+    fake.assert_awaited_once()
+    node_input = fake.await_args.kwargs["input_json"]
+    assert node_input["expected_verdict"] == "needs_review"
+    assert node_input["document_kind"] == "verification_record"
+    assert out["final_verdict"] == "needs_review"
+    assert "poc" not in out
+
+
 def test_report_columns_from_orch_result_confirmed():
     cols = report_columns_from_orch_result({
         "verdict": "confirmed",

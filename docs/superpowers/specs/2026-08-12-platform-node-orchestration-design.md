@@ -60,7 +60,7 @@
    │ {target_url, transport_shape, initial_creds, compose_path}
    ▼
 3 白盒审计 (□AI)  ── gate_verdict=fail ──► 分支出口 B(误报,跳过节点 4)
-                   ── gate_verdict=uncertain ──► 分支出口 D(待复核,跳过节点 4 和 5)
+                   ── gate_verdict=uncertain ──► 分支出口 D(待复核,跳过节点 4;节点 5 出 needs_review 验证记录)
    │ {kill_chain, defense_layers[], payloads[], gate_verdict: pass|fail|uncertain, gate_reason, runtime_dependent}
    ▼
 4 复现验证 (□AI)
@@ -81,7 +81,7 @@
 | A 非 web | 节点 1 | node 2-5 标 `skipped` | `completed`,verdict 空(非 web 不下结论) |
 | B 误报 | 节点 3 `gate_verdict=fail` | node 4 标 `skipped` | `completed`,verdict=`false_positive` |
 | C 基础设施失败 | 节点 2 排障 5 轮失败 | run 标 `failed` | `failed`(可 retry) |
-| D 待复核 | 节点 3 `gate_verdict=uncertain` | node 4 和 5 标 skipped | `needs_review`，verdict 空 |
+| D 待复核 | 节点 3 `gate_verdict=uncertain` | node 4 标 skipped；node 5 跑 AI 产 `needs_review` 验证记录 | `needs_review`，task.verdict 空（report.verdict=`needs_review`） |
 
 ### 1.3 节点 input/output schema(结构化交接契约)
 
@@ -92,9 +92,9 @@
 | 2 env_ready | `{source_path, profile, attempt, previous_error, failed_stage, occupied_host_ports[]}`；每轮为新会话，`attempt>1` 通过现有 `.vuln-env` + 结构化失败信息续接，不恢复历史对话。AI 根据 README、路由及鉴权配置先判断是否存在登录功能；有登录但无预设账号时，仅在项目已有安全初始化机制的前提下修改 `.vuln-env` 创建靶场专用账号。复用 Lab 缺凭据元数据时追加一次 `{credential_lookup_only:true, existing_target_url, existing_compose_path}` 只读补扫，不改配方、不重启靶场 | `{target_url`=`http://{宿主机IP}:{compose 映射的 Web 端口}`（只 publish Web 入口，不映射 postgres/redis；禁止 localhost）, `transport_shape{...}, initial_creds, compose_path, started_containers[]}`；`initial_creds` 必须为实际可用的 `{username,password,login_url?}`、确认无登录功能的 `{auth_required:false,note?}` 或说明无法自动提供凭据的非空 `{note}`，禁止 `{}` |
 | 3 audit | `{source_path, vulnerability_description, profile}` | `{gate_verdict: pass\|fail\|uncertain, gate_reason(必填), kill_chain, defense_layers[{name,bypass}], core_claim, payloads[{method,path,expected_observable,...}], runtime_dependent(pass 必填), unresolved_facts?}`；pass 须非空 `core_claim`、`payloads` 为对象数组（每条含 `method`/`path`/`expected_observable`）、`runtime_dependent` 为 bool；`runtime_dependent=true` 时须非空 `unresolved_facts[]`；uncertain 不得带非空 payloads |
 | 4 reproduce | `{source_path, target_url, initial_creds, transport_shape, compose_path, started_containers, audit, vulnerability_description}`（`target_url` 等来自节点 2 最终产出，容器内改写成 host.docker.internal） | `{verdict, reproduced, evidence[{type,detail}], attempts[{purpose,request,response_status,response_excerpt,observation,result}], screenshots[], vulnerable_file, cvss?, poc?}`。**禁止 `report_data`**。confirmed/partial 须 reproduced=true、evidence≥1、attempts≥1、cvss、合法 `poc`；false_positive/not_reproduced 须 reproduced=false 且不得交 cvss/poc。截图若有，必须是工作区内真实图片（禁止 `.txt`）。第一枪执行 `payloads[0]`；容器内深挖同一 `core_claim`，判定即停；confirmed/partial 交 `poc`。 |
-| 5 report | 吃 audit + reproduce 结构化事实 + `expected_verdict` + `document_kind` | □AI 唯一作者：`{report_data, final_verdict, authored_by:reporter, cvss?, poc?}`。`final_verdict` 必须等于权威 verdict（reproduce.verdict，或出口 B 的 `false_positive`）。confirmed/partial → `document_kind=vulnerability_report`（既有 8 节 + cvss）；平台用 reproduce.poc 覆盖 `report_data.poc_commands`。其余 → `verification_record`（独立 8 节，无 poc_commands、无 cvss）。禁止直拷 reproduce 正文。 |
+| 5 report | 吃 audit + reproduce 结构化事实 + `expected_verdict` + `document_kind` | □AI 唯一作者：`{report_data, final_verdict, authored_by:reporter, cvss?, poc?}`。`final_verdict` 必须等于权威 verdict（reproduce.verdict，或出口 B 的 `false_positive`，或出口 D uncertain 的 `needs_review`）。confirmed/partial → `document_kind=vulnerability_report`（既有 8 节 + cvss）；平台用 reproduce.poc 覆盖 `report_data.poc_commands`。其余（含 `needs_review`）→ `verification_record`（独立 8 节，无 poc_commands、无 cvss）。禁止直拷 reproduce 正文。 |
 
-### 1.4 判定档位(6 档,对齐插件)
+### 1.4 判定档位(reproduce 6 档 + report 专用 needs_review)
 
 废弃现有 `exists / not_exists / unconfirmed`,改为:
 
@@ -106,6 +106,9 @@
 | `code_smell` | 最佳实践缺口无安全影响 | CODE SMELL |
 | `false_positive` | Gate 推演不通/bypass 全失败 | 误报 |
 | `not_reproduced` | 判定即停 / 运行时条件未解决 | 未复现 |
+| `needs_review`（report 专用） | audit `uncertain` 且未跑 reproduce（锁不住危害/描述对不上），报告为验证记录待人工复核 | 待复核 |
+
+上 6 档由 reproduce 产出；`needs_review` 仅 report 在出口 D 产出，reproduce 不得使用。`needs_review` 记录 task.verdict 仍留空（未确认漏洞），report.verdict 为 `needs_review`。
 
 ---
 
@@ -368,7 +371,7 @@ cvss: {vector, base_score, severity}   # 必填
 
 `poc_commands` 只含能证明危害的可复制请求；失败探测不得写入本节。`reproduction` 须口述式覆盖前因/操作/期望/实际。
 
-**验证记录** `document_kind=verification_record`（`code_reachable|code_smell|false_positive|not_reproduced`）：
+**验证记录** `document_kind=verification_record`（`code_reachable|code_smell|false_positive|not_reproduced|needs_review`）：
 
 ```yaml
 report_data:

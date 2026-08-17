@@ -39,6 +39,9 @@ _VERDICTS = (
     "false_positive", "not_reproduced",
 )
 _CONFIRMED_VERDICTS = ("confirmed", "partial")
+# report 节点独有：audit uncertain（无 reproduce）也要出一份验证记录，
+# 挂 needs_review 判定与任务 needs_review 状态对齐。reproduce 不产此值。
+_REPORT_VERDICTS = _VERDICTS + ("needs_review",)
 _ATTEMPT_KEYS = (
     "purpose", "request", "response_status", "response_excerpt", "observation", "result",
 )
@@ -148,12 +151,18 @@ def _mock_output(node_key: str, input_json: dict[str, Any]) -> dict[str, Any]:
         }
     if node_key == "report":
         expected = input_json.get("expected_verdict")
-        if expected not in _VERDICTS:
+        if expected not in _REPORT_VERDICTS:
             repro = input_json.get("reproduce") or {}
             expected = repro.get("verdict") if repro.get("verdict") in _VERDICTS else None
-        if expected not in _VERDICTS:
+        if expected not in _REPORT_VERDICTS:
             audit = input_json.get("audit") or {}
-            expected = "false_positive" if audit.get("gate_verdict") == "fail" else "confirmed"
+            gate = audit.get("gate_verdict")
+            if gate == "fail":
+                expected = "false_positive"
+            elif gate == "uncertain":
+                expected = "needs_review"
+            else:
+                expected = "confirmed"
         kind = document_kind_for_verdict(expected)
         keys = REPORT_SECTION_KEYS if kind == "vulnerability_report" else RECORD_SECTION_KEYS
         report_data = {k: f"[Mock] {k}" for k in keys}
@@ -245,8 +254,11 @@ def authoritative_verdict(repro: dict[str, Any] | None, audit: dict[str, Any] | 
     audit = audit or {}
     if repro.get("verdict") in _VERDICTS:
         return str(repro["verdict"])
-    if audit.get("gate_verdict") == "fail":
+    gate = audit.get("gate_verdict")
+    if gate == "fail":
         return "false_positive"
+    if gate == "uncertain":
+        return "needs_review"
     return None
 
 
@@ -465,10 +477,10 @@ def _validate_reproduce_output(
 def _validate_report_output(output: dict) -> tuple[bool, str | None]:
     """report 按权威 verdict 选择漏洞报告或验证记录。"""
     verdict = output.get("final_verdict")
-    if verdict not in _VERDICTS:
+    if verdict not in _REPORT_VERDICTS:
         return False, (
             "final_verdict 必须是 confirmed|partial|code_reachable|code_smell|"
-            "false_positive|not_reproduced"
+            "false_positive|not_reproduced|needs_review"
         )
     rd = output.get("report_data")
     if not isinstance(rd, dict):

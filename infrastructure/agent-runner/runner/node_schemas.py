@@ -134,7 +134,8 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
             "report_data": {"type": "object", "description": "document_kind + 8 节 Markdown"},
             "final_verdict": {
                 "type": "string",
-                "enum": ["confirmed", "partial", "code_reachable", "code_smell", "false_positive", "not_reproduced"],
+                "enum": ["confirmed", "partial", "code_reachable", "code_smell", "false_positive", "not_reproduced", "needs_review"],
+                "description": "6 档判定；audit uncertain 无 reproduce 时为 needs_review（验证记录）",
             },
             "cvss": {"type": "object", "description": "仅漏洞报告的 CVSS"},
             "vulnerable_file": {"type": "string"},

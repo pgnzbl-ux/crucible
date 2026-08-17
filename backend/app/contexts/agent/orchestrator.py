@@ -98,26 +98,26 @@ async def _skip_reproduce_if_gate_fail(
     return "false_positive"
 
 
-async def _skip_after_uncertain_audit(
+async def _skip_reproduce_after_uncertain_audit(
     session: AsyncSession,
     run_id: str,
     task_id: str,
     previous_outputs: dict[str, dict],
     on_node_event,
 ) -> bool:
-    """audit uncertain → 出口 D:跳过 reproduce 和 report(已 completed 的不改)。"""
+    """audit uncertain → 跳过 reproduce(锁不住危害不打活靶),但 report 仍跑,
+    产出 needs_review 验证记录说明为何待复核(已 completed 的 reproduce 不改)。"""
     gate = previous_outputs.get("audit", {}).get("gate_verdict")
     if gate != "uncertain":
         return False
-    for idx in (4, 5):
-        nr = await _get_or_create_node_run(
-            session, run_id, task_id, NODE_ORDER[idx].node_index, NODE_ORDER[idx].node_key
-        )
-        if nr.status != "completed":
-            nr.status = "skipped"
-            await session.commit()
-        if on_node_event:
-            await on_node_event(NODE_ORDER[idx].node_key, "skipped", None)
+    nr = await _get_or_create_node_run(
+        session, run_id, task_id, NODE_ORDER[4].node_index, NODE_ORDER[4].node_key
+    )
+    if nr.status != "completed":
+        nr.status = "skipped"
+        await session.commit()
+    if on_node_event:
+        await on_node_event(NODE_ORDER[4].node_key, "skipped", None)
     return True
 
 
@@ -192,7 +192,7 @@ async def run_orchestration(
                     )
                     if verdict:
                         final_verdict = verdict
-                    await _skip_after_uncertain_audit(
+                    await _skip_reproduce_after_uncertain_audit(
                         session, run_id, task_id, previous_outputs, on_node_event
                     )
                 continue
@@ -273,14 +273,14 @@ async def run_orchestration(
             }
 
         # 分支出口 B:节点 3 audit gate_fail → 跳过节点 4,判误报
-        # 分支出口 D:节点 3 audit uncertain → 跳过节点 4+5,收尾转 needs_review
+        # 分支出口 D:节点 3 audit uncertain → 跳过节点 4,report 仍产 needs_review 验证记录
         if node.node_key == "audit":
             verdict = await _skip_reproduce_if_gate_fail(
                 session, run_id, task_id, previous_outputs, on_node_event
             )
             if verdict:
                 final_verdict = verdict
-            await _skip_after_uncertain_audit(
+            await _skip_reproduce_after_uncertain_audit(
                 session, run_id, task_id, previous_outputs, on_node_event
             )
 
@@ -291,7 +291,8 @@ async def run_orchestration(
     if final_verdict != "false_positive" and report_out.get("final_verdict"):
         final_verdict = report_out["final_verdict"]
 
-    # 分支出口 D 收尾:audit uncertain → 待复核,不再写成 completed
+    # 分支出口 D 收尾:audit uncertain → 待复核。report 已产出 needs_review 验证记录,
+    # 任务级 verdict 仍留空(未确认漏洞),但 report_data 落库让用户看到"为何待复核"。
     audit_gate = previous_outputs.get("audit", {}).get("gate_verdict")
     if audit_gate == "uncertain":
         if await _is_cancelled(session, task, run):
@@ -303,8 +304,9 @@ async def run_orchestration(
         await session.commit()
         return {
             "status": "needs_review",
-            "verdict": None,
-            "report_data": None,
+            "verdict": report_out.get("final_verdict") if report_out else None,
+            "report_data": report_out.get("report_data") if report_out else None,
+            "vulnerable_file": report_out.get("vulnerable_file") if report_out else None,
             "non_web": skipped_due_to_non_web,
             "repo_dirname": repo_dirname_from_outputs(previous_outputs),
             "project_path": previous_outputs.get("source", {}).get("project_path"),

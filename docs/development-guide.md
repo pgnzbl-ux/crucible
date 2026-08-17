@@ -145,7 +145,7 @@ Task 加 project_id(FK→projects) + verdict(6 档);Report 加 report_data 等�
 | Repository 现代化 | ✅ | 每 Context repository.py（类型化 + select） |
 | Agent Adapter 抽象 | ✅ | executor.py（Protocol + 双实现 + 工厂） |
 | Agent Runner 编排 | ✅ | core/agent_runner.py（容器编排 + 流式消费 + 行缓冲 + 凭据零落盘） |
-| **平台 6 节点编排** | ✅ | orchestrator 驱动 6 节点 + 蒸馏 skill 注入 runner；audit uncertain→needs_review |
+| **平台 6 节点编排** | ✅ | orchestrator 驱动 6 节点 + 蒸馏 skill 注入 runner；audit uncertain→跳 reproduce、report 产 needs_review 验证记录 |
 | Event Bus（Redis Pub/Sub） | ✅ | shared/events.py（统一事件结构） |
 | 事件持久化 + 查询 | ✅ | agent_events 表 + GET /tasks/{id}/events |
 | **SSE 实时事件推送（P0-1）** | ✅ | shared/sse.py（StreamingResponse + 历史回放 + 15s 心跳 + 断开清理）+ GET /tasks/{id}/events/stream + 前端 useTaskEvents hook |

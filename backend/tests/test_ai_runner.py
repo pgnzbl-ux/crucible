@@ -19,6 +19,7 @@ from runner.node_schemas import NODE_INPUT_SCHEMAS
 from app.contexts.agent.ai_runner import (
     _mock_output,
     apply_poc_to_report_output,
+    authoritative_verdict,
     render_poc_markdown,
     rewrite_url_for_agent_container,
     validate_output,
@@ -483,6 +484,54 @@ def test_mock_reproduce_and_report_pass_validation():
     assert ok, err
     ok2, err2 = validate_output("report", _mock_output("report", {}))
     assert ok2, err2
+
+
+def test_authoritative_verdict_uncertain_is_needs_review():
+    """audit uncertain 且无 reproduce → 权威判定为 needs_review（出验证记录）。"""
+    assert authoritative_verdict({}, {"gate_verdict": "uncertain"}) == "needs_review"
+    # gate fail 仍是误报；有 reproduce verdict 时以 reproduce 为准
+    assert authoritative_verdict({}, {"gate_verdict": "fail"}) == "false_positive"
+    assert authoritative_verdict({"verdict": "confirmed"}, {"gate_verdict": "uncertain"}) == "confirmed"
+    assert authoritative_verdict({}, {"gate_verdict": "pass"}) is None
+
+
+def test_validate_report_accepts_needs_review_verification_record():
+    """needs_review 走验证记录：8 节记录字段 OK；不得带 cvss / poc_commands。"""
+    ok, err = validate_output(
+        "report",
+        {"report_data": _record_sections(), "final_verdict": "needs_review"},
+    )
+    assert ok, err
+
+    # needs_review 用漏洞报告 kind → 拒
+    ok2, err2 = validate_output(
+        "report",
+        {"report_data": _md_sections(), "final_verdict": "needs_review"},
+    )
+    assert not ok2
+    assert "verification_record" in (err2 or "") or "document_kind" in (err2 or "")
+
+    # needs_review 带 cvss → 拒
+    ok3, err3 = validate_output(
+        "report",
+        {
+            "report_data": _record_sections(),
+            "final_verdict": "needs_review",
+            "cvss": {"vector": "x", "base_score": 5.0, "severity": "Medium"},
+        },
+    )
+    assert not ok3
+    assert "不得交 cvss" in (err3 or "")
+
+
+def test_mock_report_needs_review_for_uncertain_audit():
+    """Mock 模式：uncertain audit 且无 reproduce → 产出 needs_review 验证记录。"""
+    out = _mock_output("report", {"audit": {"gate_verdict": "uncertain"}})
+    assert out["final_verdict"] == "needs_review"
+    assert out["report_data"]["document_kind"] == "verification_record"
+    assert "cvss" not in out
+    ok, err = validate_output("report", out)
+    assert ok, err
 
 
 def test_validate_profile_requires_is_web():

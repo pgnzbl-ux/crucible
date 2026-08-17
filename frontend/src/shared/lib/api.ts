@@ -102,7 +102,7 @@ export interface NodeRun {
 }
 
 // 6 档判定(对齐后端 verdict)
-export type Verdict = 'confirmed' | 'partial' | 'code_reachable' | 'code_smell' | 'false_positive' | 'not_reproduced'
+export type Verdict = 'confirmed' | 'partial' | 'code_reachable' | 'code_smell' | 'false_positive' | 'not_reproduced' | 'needs_review'
 
 export interface TaskListResponse {
   items: TaskSummary[]

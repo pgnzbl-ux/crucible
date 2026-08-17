@@ -30,7 +30,7 @@ description: Crucible 节点 report。唯一文档作者：按权威 verdict 写
 
 ## 验证记录（`document_kind=verification_record`）
 
-用于 `code_reachable` / `code_smell` / `false_positive` / `not_reproduced`。8 键：
+用于 `code_reachable` / `code_smell` / `false_positive` / `not_reproduced` / `needs_review`。8 键：
 
 `product_intro` / `claimed_issue` / `whitebox_analysis` / `test_record` / `blocker` / `observed_facts` / `remaining_conditions` / `reporting_decision`
 
@@ -38,6 +38,7 @@ description: Crucible 节点 report。唯一文档作者：按权威 verdict 写
 - `test_record` 粘贴 `reproduce.attempts` 的原始请求、响应状态/摘要、观察与结果类型（含失败探测）。
 - `blocker` 写清阻断原因（结构性防御 / 运行时条件 / 环境缺失等）。
 - 不要把「没打通」写成已复现。
+- `needs_review`（audit `uncertain` 且未跑 reproduce）：没有 `reproduce` 事实，`whitebox_analysis` 依据 `audit` 的 `kill_chain`/`gate_reason`/`unresolved_facts` 说明为何锁不住危害；`blocker` 写清待人工复核的疑点；`test_record` 写「未进入活靶复现」。
 
 ## 完成
 

@@ -28,7 +28,7 @@ export const CONCLUSION_META: Record<string, { label: string; color: TagProps['c
   failed: { label: '分析失败', color: 'default' },
 }
 
-// 6 档判定(verdict,对齐后端 spec §1.4)
+// 判定(verdict,对齐后端 spec §1.4)。needs_review 是 audit uncertain 的验证记录判定。
 export const VERDICT_META: Record<string, { label: string; color: TagProps['color'] }> = {
   confirmed: { label: '已确认', color: 'red' },
   partial: { label: '部分确认', color: 'orange' },
@@ -36,6 +36,7 @@ export const VERDICT_META: Record<string, { label: string; color: TagProps['colo
   code_smell: { label: 'CODE SMELL', color: 'blue' },
   false_positive: { label: '误报', color: 'green' },
   not_reproduced: { label: '未复现', color: 'default' },
+  needs_review: { label: '待复核', color: 'orange' },
 }
 
 // 白盒审计 Phase 2.5 Gate 三态(audit 节点 gate_verdict)

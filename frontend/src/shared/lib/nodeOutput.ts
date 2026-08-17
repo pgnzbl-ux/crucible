@@ -9,6 +9,7 @@ const VERDICT_LABEL: Record<string, string> = {
   code_smell: 'CODE SMELL',
   false_positive: '误报',
   not_reproduced: '未复现',
+  needs_review: '待复核',
 }
 
 function str(v: unknown): string {

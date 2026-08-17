@@ -424,8 +424,8 @@ async def test_orchestration_killed_node_does_not_overwrite_cancelled(session_fa
 
 
 @pytest.mark.asyncio
-async def test_gate_uncertain_skips_reproduce_and_report(session_factory):
-    """uncertain → 出口 D：skip 4+5，task=needs_review，verdict 空。"""
+async def test_gate_uncertain_skips_reproduce_but_runs_report(session_factory):
+    """uncertain → skip reproduce 但 report 仍撰写 needs_review 验证记录。"""
     from app.contexts.agent import orchestrator as orch
     from app.contexts.task.models import NodeRun, Task
     from sqlalchemy import select
@@ -445,6 +445,13 @@ async def test_gate_uncertain_skips_reproduce_and_report(session_factory):
         async def fake_audit(ctx):
             return {"gate_verdict": "uncertain", "gate_reason": "描述对不上"}
 
+        async def fake_report(ctx):
+            return {
+                "report_data": {"document_kind": "verification_record", "product_intro": "待复核说明"},
+                "final_verdict": "needs_review",
+                "authored_by": "reporter",
+            }
+
         real_nodes = orch.NODE_ORDER
         patches = [
             patch.object(real_nodes[0], "execute", fake_source),
@@ -452,7 +459,7 @@ async def test_gate_uncertain_skips_reproduce_and_report(session_factory):
             patch.object(real_nodes[2], "execute", fake_env),
             patch.object(real_nodes[3], "execute", fake_audit),
             patch.object(real_nodes[4], "execute", AsyncMock(side_effect=AssertionError("uncertain 不该 reproduce"))),
-            patch.object(real_nodes[5], "execute", AsyncMock(side_effect=AssertionError("uncertain 不该 report"))),
+            patch.object(real_nodes[5], "execute", fake_report),
         ]
         for p in patches:
             p.__enter__()
@@ -463,10 +470,12 @@ async def test_gate_uncertain_skips_reproduce_and_report(session_factory):
         )
 
         assert result["status"] == "needs_review"
-        assert result["verdict"] is None
+        # 任务级 verdict 仍为空（未确认漏洞），但补出了验证记录文档
         refreshed = await session.get(Task, task.id)
         assert refreshed.status == "needs_review"
         assert refreshed.verdict is None
+        assert result["report_data"] is not None
+        assert result["report_data"]["document_kind"] == "verification_record"
 
         nodes = (await session.execute(
             select(NodeRun).where(NodeRun.run_id == run.id).order_by(NodeRun.node_index)
@@ -475,12 +484,12 @@ async def test_gate_uncertain_skips_reproduce_and_report(session_factory):
         assert by_key["audit"].status == "completed"
         assert "描述对不上" in (by_key["audit"].output_json or "")
         assert by_key["reproduce"].status == "skipped"
-        assert by_key["report"].status == "skipped"
+        assert by_key["report"].status == "completed"
 
 
 @pytest.mark.asyncio
-async def test_resume_reuses_audit_uncertain_skips_reproduce_and_report(session_factory):
-    """续跑：已 completed 的 uncertain 不得进 reproduce/report。"""
+async def test_resume_reuses_audit_uncertain_skips_reproduce_but_runs_report(session_factory):
+    """续跑：已 completed 的 uncertain 仍跳过 reproduce，但 report 补出验证记录。"""
     from app.contexts.agent import orchestrator as orch
     from app.contexts.task.models import NodeRun, Task
     from sqlalchemy import select
@@ -507,9 +516,16 @@ async def test_resume_reuses_audit_uncertain_skips_reproduce_and_report(session_
         ))
         await session.flush()
 
+        async def fake_report(ctx):
+            return {
+                "report_data": {"document_kind": "verification_record", "product_intro": "待复核"},
+                "final_verdict": "needs_review",
+                "authored_by": "reporter",
+            }
+
         real_nodes = orch.NODE_ORDER
         with patch.object(real_nodes[4], "execute", AsyncMock(side_effect=AssertionError("续跑不得 reproduce"))), \
-             patch.object(real_nodes[5], "execute", AsyncMock(side_effect=AssertionError("续跑不得 report"))):
+             patch.object(real_nodes[5], "execute", fake_report):
             result = await orch.run_orchestration(
                 task_id=task.id, run_id=run.id, session=session,
                 host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
@@ -522,4 +538,4 @@ async def test_resume_reuses_audit_uncertain_skips_reproduce_and_report(session_
             select(NodeRun).where(NodeRun.run_id == run.id)
         )).scalars().all()}
         assert statuses["reproduce"] == "skipped"
-        assert statuses["report"] == "skipped"
+        assert statuses["report"] == "completed"
