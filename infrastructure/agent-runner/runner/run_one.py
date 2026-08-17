@@ -638,7 +638,22 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
         "properties": {
             "kill_chain": {"type": "string", "description": "entry→sink 完整调用链"},
             "defense_layers": {"type": "array", "description": "每层防御 + 是否 bypass"},
-            "payloads": {"type": "array", "description": "构造的 payload 候选"},
+            "payloads": {
+                "type": "array",
+                "description": "HTTP 请求模板候选",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "method": {"type": "string", "description": "HTTP 方法"},
+                        "path": {"type": "string", "description": "必须以 / 开头的路径"},
+                        "expected_observable": {"type": "string", "description": "预期可观察危害"},
+                        "headers": {"type": "object", "description": "可选请求头"},
+                        "body": {"type": "string", "description": "可选请求体"},
+                        "content_type": {"type": "string", "description": "可选 Content-Type"},
+                    },
+                    "required": ["method", "path", "expected_observable"],
+                },
+            },
             "gate_verdict": {
                 "type": "string",
                 "enum": ["pass", "fail", "uncertain"],
@@ -646,6 +661,12 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
             },
             "gate_reason": {"type": "string", "description": "三问各一句或阻断/待复核原因"},
             "runtime_dependent": {"type": "boolean"},
+            "core_claim": {"type": "string", "description": "一条 HTTP 可观察危害"},
+            "unresolved_facts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "runtime_dependent 时缺的运行时事实",
+            },
         },
         "required": ["gate_verdict", "gate_reason"],
     },

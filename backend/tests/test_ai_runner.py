@@ -85,14 +85,25 @@ def test_validate_env_ready_no_target():
     assert "target_url" in err
 
 
+def _payload_ok(**over):
+    base = {
+        "method": "POST",
+        "path": "/login",
+        "expected_observable": "响应回显管理员密码哈希",
+    }
+    base.update(over)
+    return base
+
+
 def _pass_ok(**over):
     base = {
         "gate_verdict": "pass",
         "gate_reason": "Q1 有危害。Q2 连通。Q3 无阻断。",
         "kill_chain": "login → sql",
         "defense_layers": [],
-        "payloads": ["' OR 1=1"],
+        "payloads": [_payload_ok()],
         "runtime_dependent": False,
+        "core_claim": "匿名攻击者可经 /login 读出管理员密码哈希",
     }
     base.update(over)
     return base
@@ -116,6 +127,11 @@ def _pass_ok(**over):
             {"gate_verdict": "uncertain", "gate_reason": "对不上", "payloads": ["x"]},
             "uncertain 不得带非空 payloads",
         ),
+        (_pass_ok(core_claim=""), "pass 需要非空 core_claim"),
+        (_pass_ok(payloads=["' OR 1=1"]), "pass 的 payloads 必须是请求模板对象"),
+        (_pass_ok(payloads=[_payload_ok(path="login")]), "payload path 必须以 / 开头"),
+        (_pass_ok(runtime_dependent=True, unresolved_facts=[]), "pass 需要 unresolved_facts 为非空字符串数组"),
+        (_pass_ok(runtime_dependent=True), "pass 需要 unresolved_facts 为非空字符串数组"),
     ],
 )
 def test_validate_audit_shape_rejects(output, needle):
@@ -128,7 +144,7 @@ def test_validate_audit_shape_rejects(output, needle):
     "output",
     [
         _pass_ok(),
-        _pass_ok(runtime_dependent=True),
+        _pass_ok(runtime_dependent=True, unresolved_facts=["需登录后的 CSRF token"]),
         {
             "gate_verdict": "fail",
             "gate_reason": "结构性阻断",
@@ -143,6 +159,14 @@ def test_validate_audit_shape_rejects(output, needle):
 def test_validate_audit_shape_accepts(output):
     ok, err = validate_output("audit", output)
     assert ok, err
+
+
+def test_audit_input_schema_has_payload_template():
+    spec = NODE_INPUT_SCHEMAS["audit"]
+    assert "core_claim" in spec["properties"]
+    items = spec["properties"]["payloads"]["items"]
+    assert items["type"] == "object"
+    assert set(items["required"]) == {"method", "path", "expected_observable"}
 
 
 def test_audit_input_schema_has_uncertain_and_runtime_dependent():

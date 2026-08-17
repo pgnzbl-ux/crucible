@@ -59,7 +59,7 @@ NODE_OUTPUT_SCHEMAS: dict[str, dict] = {
     },
     "audit": {
         "required": ["gate_verdict", "gate_reason"],
-        "optional": ["kill_chain", "defense_layers", "payloads", "runtime_dependent"],
+        "optional": ["kill_chain", "defense_layers", "payloads", "runtime_dependent", "core_claim", "unresolved_facts"],
     },
     "reproduce": {
         "required": ["verdict", "reproduced", "attempts"],
@@ -120,7 +120,22 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
         "properties": {
             "kill_chain": {"type": "string", "description": "entry→sink 完整调用链"},
             "defense_layers": {"type": "array", "description": "每层防御 + 是否 bypass"},
-            "payloads": {"type": "array", "description": "构造的 payload 候选"},
+            "payloads": {
+                "type": "array",
+                "description": "HTTP 请求模板候选",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "method": {"type": "string", "description": "HTTP 方法"},
+                        "path": {"type": "string", "description": "必须以 / 开头的路径"},
+                        "expected_observable": {"type": "string", "description": "预期可观察危害"},
+                        "headers": {"type": "object", "description": "可选请求头"},
+                        "body": {"type": "string", "description": "可选请求体"},
+                        "content_type": {"type": "string", "description": "可选 Content-Type"},
+                    },
+                    "required": ["method", "path", "expected_observable"],
+                },
+            },
             "gate_verdict": {
                 "type": "string",
                 "enum": ["pass", "fail", "uncertain"],
@@ -128,6 +143,12 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
             },
             "gate_reason": {"type": "string", "description": "三问各一句或阻断/待复核原因"},
             "runtime_dependent": {"type": "boolean"},
+            "core_claim": {"type": "string", "description": "一条 HTTP 可观察危害"},
+            "unresolved_facts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "runtime_dependent 时缺的运行时事实",
+            },
         },
         "required": ["gate_verdict", "gate_reason"],
     },
@@ -195,10 +216,15 @@ def _mock_output(node_key: str, input_json: dict[str, Any]) -> dict[str, Any]:
         return {
             "kill_chain": "[Mock] entry → sink(模拟调用链)",
             "defense_layers": [{"name": "validator", "bypass": "模拟绕过"}],
-            "payloads": ["mock-payload"],
+            "payloads": [{
+                "method": "GET",
+                "path": "/mock",
+                "expected_observable": "[Mock] 回显 marker",
+            }],
             "gate_verdict": "pass",
             "gate_reason": "[Mock] 三问通过",
             "runtime_dependent": False,
+            "core_claim": "[Mock] 匿名可读 /mock 回显",
         }
     if node_key == "reproduce":
         return {
@@ -270,6 +296,31 @@ def _validate_audit_output(output: dict) -> tuple[bool, str | None]:
             output["defense_layers"] = []
         elif not isinstance(layers, list):
             return False, "pass 需要 defense_layers 为数组"
+        claim = output.get("core_claim")
+        if not isinstance(claim, str) or not claim.strip():
+            return False, "pass 需要非空 core_claim"
+        for item in payloads:
+            if not isinstance(item, dict):
+                return False, "pass 的 payloads 必须是请求模板对象"
+            method = item.get("method")
+            path = item.get("path")
+            expected = item.get("expected_observable")
+            if not isinstance(method, str) or not method.strip():
+                return False, "pass 的 payloads 必须是请求模板对象"
+            if not isinstance(path, str) or not path.strip():
+                return False, "pass 的 payloads 必须是请求模板对象"
+            if not isinstance(path, str) or not path.startswith("/"):
+                return False, "payload path 必须以 / 开头"
+            if not isinstance(expected, str) or not expected.strip():
+                return False, "pass 的 payloads 必须是请求模板对象"
+        if output.get("runtime_dependent") is True:
+            facts = output.get("unresolved_facts")
+            if (
+                not isinstance(facts, list)
+                or len(facts) < 1
+                or any(not isinstance(f, str) or not f.strip() for f in facts)
+            ):
+                return False, "pass 需要 unresolved_facts 为非空字符串数组"
     elif gate == "fail":
         chain = output.get("kill_chain")
         if not isinstance(chain, str) or not chain.strip():
