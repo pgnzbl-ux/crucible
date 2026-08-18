@@ -146,3 +146,41 @@ async def test_get_events_serializes_created_at_as_utc(session_factory):
         events = await TaskService(TaskRepository(session)).get_task_events(task.id, "u1")
 
     assert events[0]["created_at"] == "2026-08-17T05:37:04+00:00"
+
+
+@pytest.mark.asyncio
+async def test_persist_stamps_node_run_id_from_node_key(session_factory):
+    """落库时按 node_key 填 AgentEvent.node_run_id，不能一直是 NULL。"""
+    from unittest.mock import AsyncMock, patch
+
+    from app.contexts.agent.tasks import _persist_single_event
+    from app.contexts.task.models import AgentEvent, NodeRun, Task, TaskRun
+    from sqlalchemy import select
+
+    async with session_factory() as session:
+        task = Task(
+            project_address="https://github.com/acme/x",
+            vulnerability_description="d",
+            owner_id="u1",
+            status="running",
+        )
+        session.add(task)
+        await session.flush()
+        run = TaskRun(task_id=task.id, status="running")
+        session.add(run)
+        await session.flush()
+        nr = NodeRun(
+            run_id=run.id, task_id=task.id, node_index=3, node_key="audit", status="running",
+        )
+        session.add(nr)
+        await session.flush()
+
+        with patch("app.contexts.agent.tasks.event_bus.publish", new_callable=AsyncMock):
+            await _persist_single_event(
+                session,
+                run,
+                {"type": "agent.thinking", "node_key": "audit", "text": "推演"},
+            )
+
+        ev = (await session.execute(select(AgentEvent).where(AgentEvent.run_id == run.id))).scalar_one()
+        assert ev.node_run_id == nr.id

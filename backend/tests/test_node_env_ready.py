@@ -260,6 +260,53 @@ async def test_health_check_does_not_scan_host_common_ports():
     assert seen == ["http://127.0.0.1:3001"]
 
 
+def test_health_check_budget_covers_slow_jvm():
+    from app.contexts.agent.nodes.env_ready import HEALTH_RETRIES, HEALTH_RETRY_SECONDS
+
+    assert HEALTH_RETRIES * HEALTH_RETRY_SECONDS >= 90
+
+
+@pytest.mark.parametrize(
+    ("log", "must_keep", "must_drop"),
+    [
+        (
+            "\n".join(
+                [
+                    "Image app Building",
+                    "#13 downloading 40MB / 47MB",
+                    "#20 [ERROR] Failed to execute goal on project producer",
+                    "#20 [ERROR] Could not transfer artifact org.apache.logging.log4j:log4j-to-slf4j:jar:2.24.3",
+                    "#20 [ERROR] Premature end of Content-Length delimited message body",
+                    "#20 [ERROR] To see the full stack trace of the errors, re-run Maven with the -e switch.",
+                    "#20 [ERROR] Re-run Maven using the -X switch to enable full debug logging.",
+                    "#20 [ERROR] [Help 1] http://cwiki.apache.org/confluence/display/MAVEN/DependencyResolutionException",
+                    "target producer: failed to solve: process \"/bin/sh -c mvn package\" did not complete successfully",
+                ]
+            ),
+            "Could not transfer",
+            "Re-run Maven",
+        ),
+        (
+            "------\n > [build 3/6] COPY Eureka-Server ./Eureka-Server:\n------\nfailed to solve: not found",
+            "COPY Eureka-Server",
+            "Image Building",
+        ),
+        (
+            "only progress lines\n#13 sha256:abc 30MB / 47MB",
+            "30MB / 47MB",
+            "Could not transfer",
+        ),
+    ],
+)
+def test_summarize_compose_failure_keeps_root_cause(log, must_keep, must_drop):
+    from app.contexts.agent.nodes.env_ready import summarize_compose_failure
+
+    summary = summarize_compose_failure(log)
+    assert must_keep in summary
+    if must_drop != "Could not transfer":
+        assert must_drop not in summary
+
+
 @pytest.mark.asyncio
 async def test_env_ready_url_uses_mapped_host_port_not_container_port(tmp_path):
     """AI 写了 3001:3000 却把 target_url 写成容器端口 3000 → 对外仍用宿主机映射口。"""

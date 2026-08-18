@@ -1,4 +1,4 @@
-"""配置真相源：LLM 只走后台 Provider；Redis 默认 6380；MinIO bucket 写死。"""
+"""配置真相源：连接串只进 .env；LLM 只走后台 Provider；MinIO bucket 写死。"""
 import sys
 import os
 from types import SimpleNamespace
@@ -25,11 +25,46 @@ def test_settings_has_no_llm_env_fields():
         assert name not in Settings.model_fields, f"{name} 不应再从 .env 注入"
 
 
-def test_settings_redis_defaults_use_host_mapped_ports():
-    fields = Settings.model_fields
-    assert fields["redis_url"].default == "redis://localhost:6380/0"
-    assert fields["celery_broker_url"].default == "redis://localhost:6380/1"
-    assert fields["celery_result_backend"].default == "redis://localhost:6380/2"
+def test_infra_connection_fields_have_no_code_defaults():
+    """连接串只进 .env，禁止在 Settings 里再抄一份 URL。"""
+    for name in (
+        "database_url",
+        "redis_url",
+        "celery_broker_url",
+        "celery_result_backend",
+        "s3_endpoint",
+        "s3_access_key",
+        "s3_secret_key",
+    ):
+        assert Settings.model_fields[name].is_required(), name
+
+
+def test_pytest_uses_sqlite_not_runtime_postgres():
+    """运行时 .env 是 PostgreSQL；pytest 进程必须覆盖成 sqlite，禁止打真实库。"""
+    from app.core.config import get_settings
+
+    url = get_settings().database_url
+    assert url.startswith("sqlite"), url
+    assert "postgresql" not in url
+
+
+def test_settings_require_env_for_infra_urls(monkeypatch, tmp_path):
+    from pydantic import ValidationError
+
+    for key in (
+        "DATABASE_URL",
+        "REDIS_URL",
+        "CELERY_BROKER_URL",
+        "CELERY_RESULT_BACKEND",
+        "S3_ENDPOINT",
+        "S3_ACCESS_KEY",
+        "S3_SECRET_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    empty = tmp_path / "empty.env"
+    empty.write_text("")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=empty)
 
 
 def test_settings_has_no_s3_bucket_field():
@@ -37,12 +72,12 @@ def test_settings_has_no_s3_bucket_field():
 
 
 def test_storage_buckets_are_platform_constants():
-    from app.contexts.report.storage import ARTIFACTS_BUCKET, EVIDENCE_BUCKET
-    from app.contexts.project.source_cache import SOURCE_BUCKET
+    from app.shared.object_store import KIND_REGISTRY, PHYSICAL_BUCKETS
 
-    assert ARTIFACTS_BUCKET == "crucible-artifacts"
-    assert EVIDENCE_BUCKET == "crucible-evidence"
-    assert SOURCE_BUCKET == "crucible-source"
+    assert PHYSICAL_BUCKETS == ("crucible-durable", "crucible-task", "crucible-public")
+    assert KIND_REGISTRY["source"].bucket == "crucible-durable"
+    assert KIND_REGISTRY["evidence"].bucket == "crucible-task"
+    assert KIND_REGISTRY["report"].bucket == "crucible-task"
 
 
 def test_build_runner_env_ignores_settings_llm(monkeypatch):
@@ -57,6 +92,8 @@ def test_build_runner_env_ignores_settings_llm(monkeypatch):
     assert "ANTHROPIC_AUTH_TOKEN" not in env
     assert "ANTHROPIC_BASE_URL" not in env
     assert env["CLAUDE_SDK_MAX_TURNS"] == "9"
+    assert env["HOME"] != "/workspace"
+    assert env["HOME"].startswith("/tmp")
 
 
 def test_build_runner_env_uses_provider_env(monkeypatch):
@@ -111,3 +148,24 @@ async def test_preflight_fails_without_default_provider():
     assert "默认 Provider" in msg
     assert "llm_api_key" not in msg
     assert "LLM_API_KEY" not in msg
+
+
+@pytest.mark.asyncio
+async def test_preflight_fails_on_empty_api_key():
+    from types import SimpleNamespace
+
+    from app.contexts.agent.tasks import _platform_preflight_minimal
+
+    session = MagicMock()
+    empty = SimpleNamespace(api_key_encrypted="  ")
+    with patch("app.contexts.agent.tasks.agent_runner_manager") as mgr:
+        mgr.image_exists.return_value = True
+        with patch(
+            "app.contexts.settings.service.SettingsService.get_default_provider",
+            new_callable=AsyncMock,
+            return_value=empty,
+        ):
+            ok, msg = await _platform_preflight_minimal(session)
+    assert ok is False
+    assert msg is not None
+    assert "API Key" in msg

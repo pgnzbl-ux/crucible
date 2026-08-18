@@ -7,7 +7,16 @@
 - 前缀：`/api/v1`
 - 鉴权：除 `/health`、`/metrics`、`/api/v1/auth/login`、`/api/v1/auth/register`、`/api/v1/auth/setup` 外全部需 Bearer JWT
 - 时间：ISO-8601 UTC
-- 错误响应统一格式见 `.claude/rules/error-handling.md` §3
+- 错误响应同时给契约信封与兼容字段（前端优先读 `error.message`，再回退 `detail`）：
+
+```json
+{
+  "error": { "code": "TASK_NOT_FOUND", "message": "任务不存在", "details": { "task_id": "..." } },
+  "detail": "任务不存在"
+}
+```
+
+`detail` 在历史接口（如靶场 `LAB_IN_USE`）可以是对象 `{code,message,task_ids}`；信封里 `error.details` 装除 code/message 外的附加字段。未捕获异常仍由 FastAPI 兜底 500。完整语义见 `.claude/rules/error-handling.md` §3。
 
 ---
 
@@ -50,12 +59,16 @@
 **响应 200**
 
 ```json
-{ "access_token": "eyJ...", "token_type": "bearer", "expires_in": 3600 }
+{
+  "access_token": "eyJ...",
+  "token_type": "bearer",
+  "user": { "id": "uuid", "email": "alice@example.com", "display_name": "Alice", "is_active": true, "is_admin": true, "role": "admin" }
+}
 ```
 
-### GET `/api/v1/users/me`
+### GET `/api/v1/auth/me`
 
-当前用户信息。
+当前用户信息。响应同 `UserResponse`：`id / email / display_name / is_active / is_admin / role`。身份字段是 **email + display_name**，没有 `username`。
 
 ---
 
@@ -63,19 +76,20 @@
 
 ### POST `/api/v1/tasks`
 
-创建任务。
+创建任务。Git 地址非法（非 http/https/ssh、缺 space/project）→ **400** `BAD_REQUEST`，不得用原文落库。创建时按规范化 Git 地址 upsert Project；Project 写入失败不得吞掉后继续建任务。
 
 **请求**
 
 ```json
 {
-  "repo_url": "https://github.com/owner/repo",
-  "description": "漏洞描述（10-8000 字符）",
-  "priority": "P0" | "P1" | "P2"
+  "project_address": "https://github.com/owner/repo",
+  "project_ref": "main",
+  "vulnerability_description": "漏洞描述（至少 10 字符）",
+  "priority": "low | medium | high | critical"
 }
 ```
 
-**响应 201**：`Task` 对象
+**响应 202**：`TaskDetail`（含首次 `runs[]`）。先提交 Task/TaskRun 再投 Celery；Broker 失败 → 任务/run 标 `failed`，接口 **503**。
 
 ### GET `/api/v1/tasks`
 
@@ -94,15 +108,20 @@
 
 取消任务(已实现):先把任务/run/未完成节点标 `cancelled` 并 **提交后立刻返回**。`revoke(terminate=True)` 停 worker（Windows solo 经常杀不掉）；后台 `schedule_teardown_task_runtime` 只按 `crucible.task_id` 强拆该任务的 agent-runner（停 AI），不 `compose down` 可复用靶场。编排器每节点刷新库状态，已取消则停后续节点，且 execute 失败不得把 cancelled 改成 failed。靶场在静默满 TTL 1 小时且无 live 任务后由巡检销毁。
 
-### POST `/api/v1/tasks/{id}/retry`  *(阶段 1 新增)*
+### POST `/api/v1/tasks/{id}/retry`  *(阶段 1 新增；P1.1 支持 from_node)*
 
-重试任务(202 返 `{task_id, run_id, status:retrying}`)。新建 TaskRun，**从节点 0（源码获取）整条重跑**，不复用上一 run 的 NodeRun。上一 run 的节点/事件保留作历史。同一次 run 内 worker 崩溃仍可靠 NodeRun 断点续跑，与用户点「重试」不是同一条路径。
+重试任务(202 返 `{task_id, run_id, status:retrying, from_node}`)。任务不存在或非 owner → **404** `TASK_NOT_FOUND`（不是 400）。非法状态 / 非法 `from_node` / 前置节点未完成 → **400**。
+
+- 默认：新建 TaskRun，**从节点 0（源码获取）整条重跑**，不复用上一 run 的 NodeRun。
+- 可选 query `from_node=env_ready|audit|reproduce|report`：拷贝上一 run 里该节点**之前**已 `completed`/`skipped` 的 NodeRun 进新 run，编排器断点续跑，只重跑该节点及之后。前置未完成 → 400。`source`/`profile` 不是合法起点（请整条重试）。
+- 上一 run 的节点/事件保留作历史。工作区按 `task_id` 固定路径；新 run 已有 completed 节点则保留工作区（失败任务本就会留目录），否则清空重拉。不拆可复用靶场。
+- 同一次 run 内 worker 崩溃仍可靠 NodeRun 断点续跑，与用户点「重试」不是同一条路径。
 
 创建与重试均先提交 Task/TaskRun，再投递 Celery。Broker 投递失败时 Task/TaskRun 进入 `failed`，接口返回 503，不允许任务静默停在 queued/pending。
 
 ### DELETE `/api/v1/tasks/{id}?hard=true|false`  *(阶段 1 新增)*
 
-删除任务。默认软删(`status=archived`)，已归档再软删返回 400；`hard=true` 物理删除需 `X-Confirm: true` header(级联清理 runs/nodes/events)。删除时 `teardown_task_runtime` 只拆该任务的 agent-runner，不拆可复用靶场。默认列表不返回已归档任务。
+删除任务。默认软删(`status=archived`)，已归档再软删返回 400；`hard=true` 物理删除需 `X-Confirm: true` header(级联清理 runs/nodes/events)。`pending`/`queued` 删除会先 revoke 对应 Celery 任务再归档，避免 worker 把已归档任务改回 running。删除时 `teardown_task_runtime` 只拆该任务的 agent-runner，不拆可复用靶场。默认列表不返回已归档任务。
 
 ### GET `/api/v1/tasks/{id}/runs/{run_id}/nodes`  *(阶段 1 新增)*
 
@@ -128,7 +147,7 @@
 
 历史事件（默认当前/最新一次 run，最近 1000 条，`limit` 1–1000）。重试会新建 run，历史 run 的 `phase.updated` 不混进本接口。含 `agent.thinking` / `agent.message` / `tool.call.*` / `agent.failed`（`title`+`hint`）/ `node.updated`。
 
-事件时间：`created_at` 一律带 UTC 偏移（开发 SQLite 读回 naive datetime 也按 UTC 输出）；每条事件的 `payload.timestamp` 必有 epoch 秒 —— SDK 事件用 SDK 自带值，平台事件（`phase.updated` 等）落库时补齐，SSE 回放才不会显示成浏览器收到的时刻。
+事件时间：`created_at` 一律带 UTC 偏移（开发 SQLite 读回 naive datetime 也按 UTC 输出）；每条事件的 `payload.timestamp` 必有 epoch 秒 —— SDK 事件用 SDK 自带值，平台事件（`phase.updated` 等）落库时补齐，SSE 回放才不会显示成浏览器收到的时刻。AI 事件 payload 带 `node_key` / `node_run_id`，`AgentEvent.node_run_id` 列同步写入；思考/工具事件可按节点过滤而不靠时间边界猜测。
 
 ### GET `/api/v1/tasks/{id}/events/stream`
 
@@ -167,7 +186,7 @@
 
 缺 `document_kind` 的旧数据按漏洞报告 8 节渲染，不自动重写。
 
-报告详情、按任务读取、发布、导出和证据列表均只允许 owner 访问；非 owner 与不存在统一返回 404。
+报告详情、按任务读取、发布、导出和证据列表均只允许 owner 访问；非 owner 与不存在统一返回 404。`GET /api/v1/reports/task/{task_id}` 在同一任务有多份报告时返回 **最新 run** 的那一份。
 
 ### GET `/api/v1/reports/{id}/export?format=json|md`
 
@@ -180,8 +199,8 @@
 ### POST `/api/v1/reports/{id}/evidences`
 
 上传证据（multipart/form-data）。字段：`file`（文件，≤50MB）+ `kind`（`artifact|log|screenshot|poc`）。
-上传 → MinIO `crucible-evidence` bucket → 落 `evidences` 表 → 返回带预签名 URL 的 `EvidenceResponse`。
-owner 校验：所有环境均要求 `report.owner_id` 匹配当前用户。
+上传 → MinIO `crucible-task`（kind=`evidence`，key=`evidence/{owner_id}/{task_id}/{evidence_id}/{file_name}`）→ 落 `evidences` 表 → 返回带预签名 URL 的 `EvidenceResponse`。
+owner 校验：所有环境均要求 `report.owner_id` 匹配当前用户。报告不存在/非 owner → **404**；非法 `kind` → **400**（不得静默改成 `artifact`）；MinIO 失败 → **503**。
 
 ---
 
@@ -276,7 +295,7 @@ Provider **没有独立启用/停用字段**。Agent 运行时只读取唯一的
 
 ## 健康检查 / 监控
 
-- `GET /health` → `{ "status": "ok" }`
+- `GET /health` → `{ "status": "ok", "version": "<app_version>" }`
 - `GET /metrics` → Prometheus（无需鉴权）
 
 ---
@@ -289,7 +308,7 @@ Provider **没有独立启用/停用字段**。Agent 运行时只读取唯一的
 | 401 | `UNAUTHENTICATED` | 缺 / 错 token |
 | 403 | `FORBIDDEN` | 权限不足（待 P1-9 RBAC） |
 | 404 | `NOT_FOUND` / `TASK_NOT_FOUND` / `REPORT_NOT_FOUND` | 资源不存在 |
-| 409 | `CONFLICT` / `STATE_INVALID` / `LAB_IN_USE` | 状态机非法转换 / username 重名 / 靶场正被 live 任务占用 |
+| 409 | `CONFLICT` / `STATE_INVALID` / `LAB_IN_USE` | 状态机非法转换 / email 重名 / 靶场正被 live 任务占用 |
 | 422 | `VALIDATION_FAILED` | Pydantic 字段错误 |
 | 429 | `RATE_LIMITED` | （待补） |
 | 503 | `SERVICE_UNAVAILABLE` | Docker / Redis / MinIO 不可用；Celery 投递失败 |

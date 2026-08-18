@@ -32,7 +32,7 @@ def test_minio_hit_extracts_to_repo_dirname_not_project(tmp_path):
     workdir.mkdir()
     cached = CachedSource(
         object_key=object_key,
-        object_url=f"s3://crucible-source/{object_key}",
+        object_url=f"s3://crucible-durable/{object_key}",
         repo_dirname=parsed.repo_dirname,
         commit_sha=SHA,
         ref_type="branch",
@@ -81,6 +81,7 @@ def test_cache_miss_clones_into_repo_dirname_and_uploads(tmp_path):
         store=store,
         clone_fn=fake_clone,
         local_sha_fn=lambda _p: SHA,
+        owner_id="u1",
     )
     assert result.ok is True
     assert result.origin == "git"
@@ -146,7 +147,7 @@ def _cached_and_store(tmp_path, sha: str, ref_name: str = "main", ref_type: str 
     store.upload(object_key, sha, str(archive))
     cached = CachedSource(
         object_key=object_key,
-        object_url=f"s3://crucible-source/{object_key}",
+        object_url=f"s3://crucible-durable/{object_key}",
         repo_dirname=parsed.repo_dirname,
         commit_sha=sha,
         ref_type=ref_type,

@@ -182,6 +182,11 @@ export function isNodeTerminal(status: string): boolean {
   return (NODE_TERMINAL_STATUSES as readonly string[]).includes(status)
 }
 
+/** pending 还没发生，点了只会看到空事件流。 */
+export function isNodeSelectable(status: string): boolean {
+  return status !== 'pending'
+}
+
 /** 任务已取消时，仍显示 running/pending 的节点按已取消展示。 */
 export function displayNodeStatus(nodeStatus: string, taskStatus?: string): string {
   if (taskStatus === 'cancelled' && (nodeStatus === 'running' || nodeStatus === 'pending')) {

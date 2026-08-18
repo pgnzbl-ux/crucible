@@ -352,7 +352,8 @@ async def test_env_ready_start_gone_runtime_falls_back_to_create(tmp_path):
         hc.return_value = (True, 3001)
         out = await EnvReadyNode().execute(ctx)
     start.assert_awaited_once_with("crucible-lab-lab1")
-    listed.assert_awaited_once_with("crucible-lab-lab1")
+    listed.assert_awaited_with("crucible-lab-lab1")
+    assert listed.await_count >= 1
     LS.return_value.reclaim_gone_runtime.assert_awaited_once_with("lab1", "t2")
     LS.return_value.mark_failed.assert_not_awaited()
     ai.assert_awaited()
@@ -446,6 +447,52 @@ async def test_create_recipe_hit_backfills_creds_without_rebuilding(tmp_path):
     assert out["target_url"] == "http://10.0.0.8:3001"
     assert out["initial_creds"] == {"username": "admin", "password": "admin123"}
     LS.return_value.upload_recipe.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_recipe_uses_live_container_names_not_ai_guess(tmp_path):
+    lab_dir = tmp_path / "lab"
+    (lab_dir / ".vuln-env").mkdir(parents=True)
+    (lab_dir / ".vuln-env" / "docker-compose.yml").write_text(
+        'services:\n  web:\n    image: x\n    ports:\n      - "3001:3000"\n',
+        encoding="utf-8",
+    )
+    lab = SimpleNamespace(
+        lab_id="lab1", role="create", status="creating", reused=False,
+        workdir=str(lab_dir), compose_project="crucible-lab-lab1",
+        target_url=None, compose_path=".vuln-env/docker-compose.yml",
+        transport_shape={}, initial_creds={},
+    )
+    ctx = _ctx(tmp_path)
+    hit = {
+        "compose_path": ".vuln-env/docker-compose.yml",
+        "transport_shape": {"protocol": "http"},
+        "initial_creds": {"username": "admin", "password": "admin123"},
+        "started_containers": ["ai-guessed"],
+    }
+    with patch("app.core.config.get_settings") as gs, \
+         patch("app.contexts.lab.service.LabService") as LS, \
+         patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
+         patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
+         patch("app.contexts.agent.nodes.env_ready.health_check", new_callable=AsyncMock) as hc, \
+         patch(
+             "app.contexts.lab.docker_ops.list_containers",
+             new_callable=AsyncMock,
+             return_value=[{"name": "crucible-lab-lab1-web-1", "status": "Up"}],
+         ), \
+         patch("app.contexts.agent.nodes.env_ready.host_advertise_ip", return_value="10.0.0.8"), \
+         patch("app.contexts.agent.nodes.env_ready.list_docker_occupied_host_ports", return_value=set()):
+        gs.return_value.claude_agent_sdk_enabled = True
+        LS.return_value.acquire = AsyncMock(return_value=lab)
+        LS.return_value.download_recipe = AsyncMock(return_value=hit)
+        LS.return_value.upload_recipe = AsyncMock()
+        LS.return_value.mark_ready = AsyncMock()
+        LS.return_value.mark_failed = AsyncMock()
+        up.return_value = (True, "")
+        hc.return_value = (True, 3001)
+        out = await EnvReadyNode().execute(ctx)
+    ai.assert_not_awaited()
+    assert out["started_containers"] == ["crucible-lab-lab1-web-1"]
 
 
 @pytest.mark.asyncio

@@ -117,37 +117,19 @@ def _mock_output(node_key: str, input_json: dict[str, Any]) -> dict[str, Any]:
         }
     if node_key == "reproduce":
         return {
-            "reproduced": True,
-            "evidence": [{"type": "http_response", "detail": "[Mock] 200 OK, payload reflected"}],
+            "reproduced": False,
+            "evidence": [],
             "attempts": [{
-                "purpose": "[Mock] 确认核心危害",
-                "request": "curl -sS -i http://host.docker.internal:8080/login",
-                "response_status": 200,
-                "response_excerpt": "[Mock] payload reflected",
-                "observation": "[Mock] HTTP 可观察危害",
-                "result": "observed_harm",
+                "purpose": "[Mock] SDK 未启用，不进行 live 复现",
+                "request": "n/a",
+                "response_status": 0,
+                "response_excerpt": "[Mock] 无沙箱 HTTP",
+                "observation": "[Mock] 未发起真实请求",
+                "result": "not_attempted",
             }],
             "screenshots": [],
-            "verdict": "confirmed",
-            "cvss": {
-                "vector": "AV:N/AC:L/PR:N/UI:N/C:H/I:H/A:H",
-                "base_score": 9.8,
-                "severity": "Critical",
-            },
-            "vulnerable_file": "app/mock.py",
-            "poc": {
-                "language": "python",
-                "filename": "poc.py",
-                "code": (
-                    "import argparse\n"
-                    "parser = argparse.ArgumentParser()\n"
-                    "parser.add_argument('--url', required=True)\n"
-                    "args = parser.parse_args()\n"
-                    "print('[Mock]', args.url)\n"
-                    "raise SystemExit(0)\n"
-                ),
-                "usage": "python poc.py --url http://host.docker.internal:8080",
-            },
+            "verdict": "not_reproduced",
+            "vulnerable_file": "",
         }
     if node_key == "report":
         expected = input_json.get("expected_verdict")
@@ -162,7 +144,7 @@ def _mock_output(node_key: str, input_json: dict[str, Any]) -> dict[str, Any]:
             elif gate == "uncertain":
                 expected = "needs_review"
             else:
-                expected = "confirmed"
+                expected = "not_reproduced"
         kind = document_kind_for_verdict(expected)
         keys = REPORT_SECTION_KEYS if kind == "vulnerability_report" else RECORD_SECTION_KEYS
         report_data = {k: f"[Mock] {k}" for k in keys}

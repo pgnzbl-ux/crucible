@@ -121,6 +121,179 @@ async def _skip_reproduce_after_uncertain_audit(
     return True
 
 
+def _handoff_input(task: Task, source_path: str, previous_outputs: dict[str, dict]) -> dict[str, Any]:
+    """执行前写入 NodeRun.input_json 的实际交接，不是永远的 {}。"""
+    return {
+        "project_address": task.project_address,
+        "project_ref": task.project_ref,
+        "vulnerability_description": task.vulnerability_description,
+        "source_path": source_path,
+        "previous": previous_outputs,
+    }
+
+
+def _stamp_ai_event(on_ai_event, node_key: str, node_run_id: str):
+    """给 AI 事件补 node_key / node_run_id；on_event 是同步回调。"""
+    if not on_ai_event:
+        return None
+
+    def _wrapped(event: Any) -> None:
+        stamped = dict(event) if isinstance(event, dict) else {"value": event}
+        stamped.setdefault("node_key", node_key)
+        stamped.setdefault("node_run_id", node_run_id)
+        on_ai_event(stamped)
+
+    return _wrapped
+
+
+async def _fail_corrupt_output(
+    session: AsyncSession,
+    task: Task,
+    run: TaskRun,
+    nr: NodeRun,
+    node_key: str,
+) -> dict[str, Any]:
+    msg = f"节点 {node_key} 的 output_json 损坏，无法续跑"
+    now = datetime.now(timezone.utc)
+    nr.status = "failed"
+    nr.error_message = msg[:1000]
+    nr.finished_at = now
+    run.status = "failed"
+    run.error_message = msg[:500]
+    run.finished_at = now
+    task.status = "failed"
+    await session.commit()
+    return {"status": "failed", "error": msg, "node": node_key, "verdict": None}
+
+
+async def _finish_after_report_fail(
+    session: AsyncSession,
+    task: Task,
+    run: TaskRun,
+    nr: NodeRun,
+    previous_outputs: dict[str, dict],
+    final_verdict: str | None,
+    *,
+    title: str,
+    hint: str,
+    detail: str,
+) -> dict[str, Any] | None:
+    """audit 已给出 B/D 出口时，报告失败不得把任务改成 failed。"""
+    audit_gate = previous_outputs.get("audit", {}).get("gate_verdict")
+    keep_false_positive = final_verdict == "false_positive" or audit_gate == "fail"
+    keep_review = audit_gate == "uncertain"
+    if not keep_false_positive and not keep_review:
+        return None
+    now = datetime.now(timezone.utc)
+    nr.status = "failed"
+    nr.error_message = detail[:1000]
+    nr.finished_at = now
+    run.error_message = f"报告生成失败（审计结论已保留）: {title}"[:500]
+    run.finished_at = now
+    run.status = "completed"
+    if keep_review:
+        task.verdict = None
+        task.status = "needs_review"
+        await session.commit()
+        return {
+            "status": "needs_review",
+            "verdict": None,
+            "error": title,
+            "hint": hint,
+            "node": "report",
+        }
+    task.verdict = "false_positive"
+    task.status = "completed"
+    await session.commit()
+    return {
+        "status": "completed",
+        "verdict": "false_positive",
+        "error": title,
+        "hint": hint,
+        "node": "report",
+    }
+
+
+async def _maybe_upload_node_failure(
+    session: AsyncSession,
+    task: Task,
+    run: TaskRun,
+    nr: NodeRun,
+    host_workdir: str,
+    previous_outputs: dict[str, dict],
+    detail: str,
+) -> None:
+    """节点最终 failed 后上传 node_run 包。Mock / 上传失败不改终态。"""
+    from pathlib import Path
+
+    from app.core.config import get_settings
+
+    if not get_settings().claude_agent_sdk_enabled:
+        return
+    if not getattr(task, "owner_id", None):
+        return
+    try:
+        from app.contexts.agent.node_failure import (
+            classify_node_error,
+            infer_failed_stage,
+            pack_node_run_bundle,
+            snapshot_attempt,
+        )
+        from app.contexts.task.repository import TaskRepository
+        from app.contexts.task.service import TaskService
+
+        stage = infer_failed_stage(detail)
+        error_class = classify_node_error(failed_stage=stage, error_text=detail)
+        attempts_root = Path(host_workdir) / ".node-failure" / nr.node_key / "attempts"
+        if not attempts_root.is_dir():
+            snapshot_attempt(
+                host_workdir,
+                nr.node_key,
+                max(nr.attempt or 1, 1),
+                platform_error=detail,
+                copy_vuln_env=nr.node_key == "env_ready",
+            )
+        attempt_count = 0
+        if attempts_root.is_dir():
+            attempt_count = sum(1 for p in attempts_root.iterdir() if p.is_dir())
+        attempt_count = max(attempt_count, nr.attempt or 1)
+        profile = previous_outputs.get("profile") or {}
+        language = profile.get("language") if isinstance(profile.get("language"), str) else None
+        manifest = {
+            "schema_version": 1,
+            "task_id": task.id,
+            "run_id": run.id,
+            "node_run_id": nr.id,
+            "node_key": nr.node_key,
+            "owner_id": task.owner_id,
+            "error_class": error_class,
+            "failed_stage": stage,
+            "attempt_count": attempt_count,
+            "language": language,
+        }
+        bundle = pack_node_run_bundle(host_workdir, nr.node_key, manifest)
+        await TaskService(TaskRepository(session)).record_node_run_failure(
+            owner_id=task.owner_id,
+            task_id=task.id,
+            run_id=run.id,
+            node_run_id=nr.id,
+            node_key=nr.node_key,
+            error_class=error_class,
+            failed_stage=stage,
+            language=language,
+            attempt_count=attempt_count,
+            bundle=bundle,
+        )
+        await session.commit()
+    except Exception:
+        logger.warning(
+            "node_run 包上传失败 node=%s task=%s",
+            nr.node_key,
+            task.id,
+            exc_info=True,
+        )
+
+
 async def run_orchestration(
     *,
     task_id: str,
@@ -173,7 +346,7 @@ async def run_orchestration(
             try:
                 previous_outputs[node.node_key] = json.loads(nr.output_json or "{}")
             except json.JSONDecodeError:
-                previous_outputs[node.node_key] = {}
+                return await _fail_corrupt_output(session, task, run, nr, node.node_key)
             if node.node_key == "source" and not source_tree_present(
                 host_workdir, previous_outputs.get("source")
             ):
@@ -205,6 +378,11 @@ async def run_orchestration(
             continue
 
         # 执行节点
+        nr.input_json = json.dumps(
+            _handoff_input(task, source_path, previous_outputs),
+            ensure_ascii=False,
+            default=str,
+        )
         nr.status = "running"
         nr.started_at = datetime.now(timezone.utc)
         await session.commit()
@@ -217,7 +395,7 @@ async def run_orchestration(
             vulnerability_description=task.vulnerability_description,
             project_address=task.project_address, project_ref=task.project_ref,
             previous_outputs=dict(previous_outputs), runner_env=runner_env,
-            on_event=on_ai_event,
+            on_event=_stamp_ai_event(on_ai_event, node.node_key, nr.id),
             db_session=session,
             project_id=getattr(task, "project_id", None),
             owner_id=getattr(task, "owner_id", None),
@@ -250,6 +428,22 @@ async def run_orchestration(
 
             title, hint = humanize_agent_error(str(e))
             detail = format_agent_error(str(e), node_key=node.node_key)
+            if node.node_key == "report":
+                preserved = await _finish_after_report_fail(
+                    session, task, run, nr, previous_outputs, final_verdict,
+                    title=title, hint=hint, detail=detail,
+                )
+                if preserved:
+                    await _maybe_upload_node_failure(
+                        session, task, run, nr, host_workdir, previous_outputs, detail
+                    )
+                    if on_node_event:
+                        await on_node_event(
+                            node.node_key,
+                            "failed",
+                            {"error": title, "detail": str(e)[:300], "hint": hint},
+                        )
+                    return preserved
             nr.status = "failed"
             nr.error_message = detail[:1000]
             nr.finished_at = datetime.now(timezone.utc)
@@ -258,6 +452,9 @@ async def run_orchestration(
             run.finished_at = datetime.now(timezone.utc)
             task.status = "failed"
             await session.commit()
+            await _maybe_upload_node_failure(
+                session, task, run, nr, host_workdir, previous_outputs, detail
+            )
             if on_node_event:
                 await on_node_event(
                     node.node_key,

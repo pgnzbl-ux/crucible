@@ -68,8 +68,10 @@ export function mergeTaskEvents(rest: AgentEvent[] | undefined, sse: StreamEvent
     const existing = map.get(key)
     map.set(key, existing ? overlay(existing, mapped) : mapped)
   }
-  // created_at 是 ISO 串，字典序即时间序；localeCompare 走 Intl 排序，在千条量级上明显更贵
+  // 同一 run 按 sequence：SDK created_at 经常早于 node.updated，按时间会把思考插到上一节点。
+  // 跨 run 仍按 created_at，避免用 sequence 把新旧 run 搅在一起。
   return [...map.values()].sort((a, b) => {
+    if (a.run_id === b.run_id) return a.sequence - b.sequence
     if (a.created_at !== b.created_at) return a.created_at < b.created_at ? -1 : 1
     return a.sequence - b.sequence
   })
@@ -92,4 +94,45 @@ export function dropNoisyEvents(events: AgentEvent[]): AgentEvent[] {
 export function eventsForRun(events: AgentEvent[], runId: string | undefined): AgentEvent[] {
   if (!runId) return events
   return events.filter((e) => e.run_id === runId)
+}
+
+const NODE_KEYS = new Set(['source', 'profile', 'env_ready', 'audit', 'reproduce', 'report'])
+
+function eventPayload(ev: AgentEvent): Record<string, unknown> {
+  const p = (ev.payload ?? {}) as Record<string, unknown>
+  const nested = p.event
+  if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+    return nested as Record<string, unknown>
+  }
+  return p
+}
+
+function explicitNodeKey(ev: AgentEvent): string | null {
+  const p = eventPayload(ev)
+  if (typeof p.node_key === 'string' && NODE_KEYS.has(p.node_key)) return p.node_key
+  if (ev.event_type === 'phase.updated' && typeof p.phase === 'string' && NODE_KEYS.has(p.phase)) {
+    return p.phase
+  }
+  return null
+}
+
+/**
+ * 思考 / 工具事件本身不带 node_key，按 node.updated（及 phase=节点名）边界归到当时的节点。
+ * 归属按 sequence 走，不按 created_at：SDK 时间戳经常比 running 标记更早，按时间会算到上一节点。
+ * nodeKey 为空时返回整条流。
+ */
+export function eventsForNode(events: AgentEvent[], nodeKey: string | null | undefined): AgentEvent[] {
+  if (!nodeKey) return events
+  const ordered = [...events].sort((a, b) => {
+    if (a.run_id !== b.run_id) return a.run_id < b.run_id ? -1 : 1
+    return a.sequence - b.sequence
+  })
+  let current: string | null = null
+  const out: AgentEvent[] = []
+  for (const ev of ordered) {
+    const tagged = explicitNodeKey(ev)
+    if (tagged) current = tagged
+    if ((tagged ?? current) === nodeKey) out.push(ev)
+  }
+  return out
 }

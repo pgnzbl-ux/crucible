@@ -14,6 +14,16 @@ class TaskDispatchError(RuntimeError):
     """任务已落库，但无法投递给 Agent worker。"""
 
 
+# 6 节点顺序 → 索引。单节点重试只允许从 AI 阶段起步；source/profile 便宜且确定性,
+# 想重跑它们直接整轮 retry(from_node=None)。
+_NODE_INDEX = {
+    "source": 0, "profile": 1, "env_ready": 2, "audit": 3, "reproduce": 4, "report": 5,
+}
+_RETRYABLE_FROM_NODES = ("env_ready", "audit", "reproduce", "report")
+# 前置节点视为"可续跑"的终态:completed(有产出可复用)或 skipped(分支出口跳过)。
+_RESUMABLE_STATUSES = ("completed", "skipped")
+
+
 def _parse_refs(refs_raw: str | None) -> list[str]:
     """credential_refs JSON 字符串 → list（容错）"""
     if not refs_raw:
@@ -85,33 +95,20 @@ class TaskService:
         )
 
     async def create_task(self, request: TaskCreateRequest, owner_id: str) -> TaskDetail:
-        # 自动按 git_url 建/复用 Project(用户建任务时无需先建 project)
-        project_id: str | None = None
-        try:
-            from app.contexts.project.repository import ProjectRepository
-            from app.contexts.project.service import ProjectService
+        from app.contexts.project.git_url import parse_git_url
+        from app.contexts.project.repository import ProjectRepository
+        from app.contexts.project.service import ProjectService
 
-            proj_svc = ProjectService(ProjectRepository(self.repo.session))
-            project = await proj_svc.upsert_by_git_url(
-                git_url=request.project_address,
-                owner_id=owner_id,
-                default_ref=request.project_ref,
-            )
-            project_id = project.id
-        except Exception:  # noqa: BLE001 — project 建失败不阻断建任务(回退 project_address)
-            pass
-
-        stored_address = request.project_address
-        try:
-            from app.contexts.project.git_url import parse_git_url
-
-            stored_address = parse_git_url(request.project_address).normalized
-        except ValueError:
-            pass
+        stored_address = parse_git_url(request.project_address).normalized
+        project = await ProjectService(ProjectRepository(self.repo.session)).upsert_by_git_url(
+            git_url=stored_address,
+            owner_id=owner_id,
+            default_ref=request.project_ref,
+        )
 
         task = Task(
             project_address=stored_address,
-            project_id=project_id,
+            project_id=project.id,
             project_ref=request.project_ref,
             source_type=request.source_type,
             vulnerability_description=request.vulnerability_description,
@@ -235,20 +232,32 @@ class TaskService:
             )
         return result
 
-    async def retry_task(self, task_id: str, owner_id: str) -> str:
-        """重试任务:新建 TaskRun，从节点 0（源码获取）整条重跑。返回新 run_id。
+    async def retry_task(
+        self, task_id: str, owner_id: str, from_node: str | None = None
+    ) -> str:
+        """重试任务:新建 TaskRun，返回新 run_id。
 
-        不拷贝上一 run 的 NodeRun。上一 run 的节点/事件保留作历史。
-        工作区清空由 worker 在新 run 启动时处理（本 run 尚无 completed 节点）。
+        from_node 为空:从节点 0（源码获取）整条重跑，不拷贝上一 run 的 NodeRun。
+        from_node 指定(env_ready/audit/reproduce/report):把上一 run 里该节点**之前**的
+        completed/skipped NodeRun 原样拷进新 run，编排器据此断点续跑，只重跑该节点及之后。
+        上一 run 的节点/事件保留作历史；工作区是否重置由 worker 按新 run 是否已有 completed 节点决定。
         """
         task = await self.repo.get_by_id_with_runs(task_id, owner_id)
         if not task:
-            raise ValueError("任务不存在")
+            from app.shared.exceptions import NotFoundError
+
+            raise NotFoundError("任务不存在", code="TASK_NOT_FOUND", details={"task_id": task_id})
         if task.status not in ("failed", "completed", "cancelled", "needs_review"):
             raise ValueError(f"状态为 {task.status} 的任务不能重试")
 
+        source_run = task.runs[0] if task.runs else None
         new_run = TaskRun(task_id=task_id, status="pending")
         new_run = await self.repo.create_run(new_run)
+
+        if from_node is not None:
+            await self._copy_prior_nodes_for_resume(
+                task, new_run.id, from_node, source_run=source_run
+            )
 
         # 与 create_task 一致：投递后先排队；worker 接管后再标 running
         task.status = "queued"
@@ -272,6 +281,48 @@ class TaskService:
 
         return new_run.id
 
+    async def _copy_prior_nodes_for_resume(
+        self, task: Task, new_run_id: str, from_node: str, *, source_run: TaskRun | None
+    ) -> None:
+        """把 source_run 里 from_node 之前的可续跑节点拷进新 run,供编排器断点续跑。"""
+        from .models import NodeRun
+
+        if from_node not in _RETRYABLE_FROM_NODES:
+            raise ValueError(f"不支持的重试起点: {from_node}")
+        target_index = _NODE_INDEX[from_node]
+
+        if source_run is None:
+            raise ValueError("任务尚无运行记录，无法从指定节点重试")
+
+        prior_nodes = await self.repo.get_node_runs(source_run.id)
+        by_index = {nr.node_index: nr for nr in prior_nodes}
+        for idx in range(target_index):
+            src = by_index.get(idx)
+            if src is None or src.status not in _RESUMABLE_STATUSES:
+                raise ValueError(
+                    f"前置节点未完成，无法从 {from_node} 重试（缺 index {idx}）"
+                )
+
+        for idx in range(target_index):
+            src = by_index[idx]
+            self.repo.session.add(
+                NodeRun(
+                    run_id=new_run_id,
+                    task_id=task.id,
+                    node_index=src.node_index,
+                    node_key=src.node_key,
+                    status=src.status,
+                    input_json=src.input_json,
+                    output_json=src.output_json,
+                    attempt=src.attempt,
+                    agent_session_id=src.agent_session_id,
+                    started_at=src.started_at,
+                    finished_at=src.finished_at,
+                    error_message=src.error_message,
+                )
+            )
+        await self.repo.session.flush()
+
     async def delete_task(
         self, task_id: str, owner_id: str, *, hard: bool = False
     ) -> bool:
@@ -286,6 +337,17 @@ class TaskService:
             raise ValueError("运行中的任务不能删除,请先取消")
         if task.status == "archived" and not hard:
             raise ValueError("任务已归档")
+
+        if task.status in ("pending", "queued"):
+            from app.core.celery_app import celery_app
+
+            revoked = await self.repo.cancel_active_runs(task_id)
+            await self.repo.cancel_incomplete_nodes([run.id for run in revoked])
+            for run in revoked:
+                try:
+                    celery_app.control.revoke(run.id, terminate=True, signal="SIGTERM")
+                except Exception:
+                    pass
 
         try:
             from app.contexts.agent.runtime_cleanup import teardown_task_runtime
@@ -316,3 +378,64 @@ class TaskService:
             .order_by(NodeRun.node_index)
         )
         return [_serialize_node_run(nr) for nr in result.scalars().all()]
+
+    async def record_node_run_failure(
+        self,
+        *,
+        owner_id: str,
+        task_id: str,
+        run_id: str,
+        node_run_id: str,
+        node_key: str,
+        error_class: str,
+        failed_stage: str | None,
+        language: str | None,
+        attempt_count: int,
+        bundle: bytes,
+    ) -> None:
+        """put node_run 包并写索引。上传失败只打日志，不抛给调用方。"""
+        from app.contexts.task.models import NodeRunFailure
+        from app.shared.object_store import get_object_store
+
+        try:
+            ref = get_object_store().put(
+                "node_run",
+                owner_id,
+                bundle,
+                content_type="application/gzip",
+                task_id=task_id,
+                run_id=run_id,
+                node_key=node_key,
+            )
+        except Exception:
+            logger.warning(
+                "node_run 对象上传失败 node=%s task=%s",
+                node_key,
+                task_id,
+                exc_info=True,
+            )
+            return
+        self.session.add(
+            NodeRunFailure(
+                owner_id=owner_id,
+                task_id=task_id,
+                run_id=run_id,
+                node_run_id=node_run_id,
+                node_key=node_key,
+                error_class=error_class,
+                failed_stage=failed_stage,
+                language=language,
+                attempt_count=attempt_count,
+                bundle_key=ref.key,
+                bucket=ref.bucket,
+            )
+        )
+        try:
+            await self.session.flush()
+        except Exception:
+            logger.warning(
+                "node_run_failures 索引写入失败 node=%s task=%s",
+                node_key,
+                task_id,
+                exc_info=True,
+            )

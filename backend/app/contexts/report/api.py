@@ -107,7 +107,11 @@ async def upload_evidence(
         kind=kind,
     )
     if err:
-        raise HTTPException(404 if "不存在" in err else 403, err)
+        if "不存在" in err:
+            raise HTTPException(404, err)
+        if "非法" in err:
+            raise HTTPException(400, err)
+        raise HTTPException(503, err)
     return evidence
 
 

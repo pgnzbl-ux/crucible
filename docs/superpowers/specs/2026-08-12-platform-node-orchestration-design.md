@@ -83,13 +83,15 @@
 | C 基础设施失败 | 节点 2 排障 5 轮失败 | run 标 `failed` | `failed`(可 retry) |
 | D 待复核 | 节点 3 `gate_verdict=uncertain` | node 4 标 skipped；node 5 跑 AI 产 `needs_review` 验证记录 | `needs_review`，task.verdict 空（report.verdict=`needs_review`） |
 
+节点 5 失败不得覆盖已成立的 B/D：report NodeRun 标 `failed`，任务仍 `completed`+`false_positive` 或 `needs_review`。
+
 ### 1.3 节点 input/output schema(结构化交接契约)
 
 | 节点 | input_json | output_json |
 |---|---|---|
 | 0 source | `{git_url, ref}` | `{source_path, project_path, repo_dirname, project_key, commit_sha, ref_type, ref_name, object_url, origin}` |
 | 1 profile | `{source_path, hints}` | `{is_web, language, framework, port, has_dockerfile, has_compose, detected_services[], start_command, non_web_reason}`（架构事实 + web 门禁；**不含** README 长文） |
-| 2 env_ready | `{source_path, profile, attempt, previous_error, failed_stage, occupied_host_ports[]}`；每轮为新会话，`attempt>1` 通过现有 `.vuln-env` + 结构化失败信息续接，不恢复历史对话。AI 根据 README、路由及鉴权配置先判断是否存在登录功能；有登录但无预设账号时，仅在项目已有安全初始化机制的前提下修改 `.vuln-env` 创建靶场专用账号。复用 Lab 缺凭据元数据时追加一次 `{credential_lookup_only:true, existing_target_url, existing_compose_path}` 只读补扫，不改配方、不重启靶场 | `{target_url`=`http://{宿主机IP}:{compose 映射的 Web 端口}`（只 publish Web 入口，不映射 postgres/redis；禁止 localhost）, `transport_shape{...}, initial_creds, compose_path, started_containers[]}`；`initial_creds` 必须为实际可用的 `{username,password,login_url?}`、确认无登录功能的 `{auth_required:false,note?}` 或说明无法自动提供凭据的非空 `{note}`，禁止 `{}` |
+| 2 env_ready | `{source_path, profile, attempt, previous_error, failed_stage, occupied_host_ports[]}`；每轮为新会话，`attempt>1` 通过现有 `.vuln-env` + 结构化失败信息续接，不恢复历史对话。AI 根据 README、路由及鉴权配置先判断是否存在登录功能；有登录但无预设账号时，仅在项目已有安全初始化机制的前提下修改 `.vuln-env` 创建靶场专用账号。复用 Lab 缺凭据元数据时追加一次 `{credential_lookup_only:true, existing_target_url, existing_compose_path}` 只读补扫，不改配方、不重启靶场 | `{target_url`=`http://{宿主机IP}:{compose 映射的 Web 端口}`（只 publish Web 入口，不映射 postgres/redis；禁止 localhost）, `transport_shape{...}, initial_creds, compose_path, started_containers[]}`。`started_containers` 以 `docker ps` 实际名为准，AI 提交只是兜底。`initial_creds` 必须为实际可用的 `{username,password,login_url?}`、确认无登录功能的 `{auth_required:false,note?}` 或说明无法自动提供凭据的非空 `{note}`，禁止 `{}` |
 | 3 audit | `{source_path, vulnerability_description, profile}` | `{gate_verdict: pass\|fail\|uncertain, gate_reason(必填), kill_chain, defense_layers[{name,bypass}], core_claim, payloads[{method,path,expected_observable,...}], runtime_dependent(pass 必填), unresolved_facts?}`；pass 须非空 `core_claim`、`payloads` 为对象数组（每条含 `method`/`path`/`expected_observable`）、`runtime_dependent` 为 bool；`runtime_dependent=true` 时须非空 `unresolved_facts[]`；uncertain 不得带非空 payloads |
 | 4 reproduce | `{source_path, target_url, initial_creds, transport_shape, compose_path, started_containers, audit, vulnerability_description}`（`target_url` 等来自节点 2 最终产出，容器内改写成 host.docker.internal） | `{verdict, reproduced, evidence[{type,detail}], attempts[{purpose,request,response_status,response_excerpt,observation,result}], screenshots[], vulnerable_file, cvss?, poc?}`。**禁止 `report_data`**。confirmed/partial 须 reproduced=true、evidence≥1、attempts≥1、cvss、合法 `poc`；false_positive/not_reproduced 须 reproduced=false 且不得交 cvss/poc。截图若有，必须是工作区内真实图片（禁止 `.txt`）。第一枪执行 `payloads[0]`；容器内深挖同一 `core_claim`，判定即停；confirmed/partial 交 `poc`。 |
 | 5 report | 吃 audit + reproduce 结构化事实 + `expected_verdict` + `document_kind` | □AI 唯一作者：`{report_data, final_verdict, authored_by:reporter, cvss?, poc?}`。`final_verdict` 必须等于权威 verdict（reproduce.verdict，或出口 B 的 `false_positive`，或出口 D uncertain 的 `needs_review`）。confirmed/partial → `document_kind=vulnerability_report`（既有 8 节 + cvss）；平台用 reproduce.poc 覆盖 `report_data.poc_commands`。其余（含 `needs_review`）→ `verification_record`（独立 8 节，无 poc_commands、无 cvss）。禁止直拷 reproduce 正文。 |
@@ -142,7 +144,7 @@ llm_providers(独立,后台管理)
 | is_web | Bool | 同上；`false` 时项目页禁止开验证任务 |
 | last_cloned_at | DateTime | 最近一次源码落地（clone 或 MinIO 缓存命中） |
 
-源码 tar.gz 存在 MinIO `crucible-source`（key=`source/{git_host}/{space}/{project}/{commit_sha}.tar.gz`）。`source_artifacts` 按 **owner + host + space/project + ref** 隔离；规范化 Git URL 去掉 `.git` 与 https userinfo（不把 token 写入 DB）。节点 0：tag/完整 commit 命中表则拉 MinIO；**branch/HEAD 不以分支名为准**（`main`/`master` 名字不变），必须 `git ls-remote` 对上远端 SHA 才用缓存，SHA 变了或 ls-remote 失败则 clone 并覆盖——禁止在未确认新鲜度时用 MinIO。MinIO 解开失败同样回退 clone。Git 协议只允许 `https` / `http` / `ssh` / `git@host:path`，拒绝 `file://` `git://`。节点 1 画像挂在同一条 `SourceArtifact` 上（`profile_json` 对应该 `commit_sha`）；SHA 变则清空并重检。强 Web / 强非 Web 走规则，其余必须起 profiler。编排器仅当 `is_web is True` 才进入节点 2–5（缺省 fail-closed）。
+源码 tar.gz 存在 MinIO `crucible-durable`（key=`source/{owner_id}/{git_host}/{space}/{project}/{commit_sha}.tar.gz`）。`source_artifacts` 按 **owner + host + space/project + ref** 隔离；规范化 Git URL 去掉 `.git` 与 https userinfo（不把 token 写入 DB）。节点 0：tag/完整 commit 命中表则拉 MinIO；**branch/HEAD 不以分支名为准**（`main`/`master` 名字不变），必须 `git ls-remote` 对上远端 SHA 才用缓存，SHA 变了或 ls-remote 失败则 clone 并覆盖——禁止在未确认新鲜度时用 MinIO。MinIO 解开失败同样回退 clone。Git 协议只允许 `https` / `http` / `ssh` / `git@host:path`，拒绝 `file://` `git://`。节点 1 画像挂在同一条 `SourceArtifact` 上（`profile_json` 对应该 `commit_sha`）；SHA 变则清空并重检。强 Web / 强非 Web 走规则，其余必须起 profiler。编排器仅当 `is_web is True` 才进入节点 2–5（缺省 fail-closed）。
 
 #### SourceArtifact（`source_artifacts`）
 
@@ -400,11 +402,12 @@ final_verdict: 对应未确认档
 
 ### 5.1 重试
 
-`POST /api/v1/tasks/{id}/retry` → 新建 TaskRun，**从节点 0（源码获取）整条重跑**:
+`POST /api/v1/tasks/{id}/retry` → 新建 TaskRun。
 
-- 不拷贝上一 run 的 NodeRun；新 run 从空节点开始，source / profile / env_ready 全部重算。
+- **默认**（无 `from_node`）：**从节点 0（源码获取）整条重跑**。不拷贝上一 run 的 NodeRun；source / profile / env_ready 全部重算。
+- **单节点**（`?from_node=env_ready|audit|reproduce|report`）：拷贝上一 run 里该节点之前的 `completed`/`skipped` NodeRun 进新 run，编排器复用产出、从该节点起重跑。前置缺失或非终态 → 400。`source`/`profile` 不是合法起点。
 - 上一 run 的 NodeRun / 事件保留作历史。
-- 工作区按 `task_id` 固定路径；新 run 启动时若本 run 尚无 completed 节点，只清空任务工作区并重新获取源码，不拆可复用靶场。
+- 工作区按 `task_id` 固定路径；新 run 启动时若本 run 尚无 completed 节点，只清空任务工作区并重新获取源码，不拆可复用靶场。拷贝了 completed source 后工作区仍在则直接复用；工作区已清则 source 节点强制重拉。
 - 节点 2 的 max-5 排障是**节点内** `attempt`,与 task 级 retry 不同层。
 - 同一次 run 内 worker 崩溃仍可靠 NodeRun 断点续跑（与用户点「重试」不是同一条路径）。
 
@@ -434,7 +437,7 @@ Task `status` 增加 `archived`(软删)。verdict 6 档独立于 status(见 §1.
 ## 7. 前端
 
 - **项目管理页**:project CRUD + 画像缓存展示。
-- **任务详情步骤条**:6 节点状态(`source/profile/env_ready/audit/reproduce/report`),SSE 实时推 `node.updated`;点击节点展开 AI 节点内的 tool.call/message(从 agent_events)。
+- **任务详情步骤条**:6 节点状态(`source/profile/env_ready/audit/reproduce/report`),SSE 实时推 `node.updated`。顶栏流程图与进度竖条均可点（`pending` 除外）；无 `node_key` 的思考/工具按同一 run 的 `sequence` 归属当时节点。
 - **结构化报告页**:按 report_data 8 节渲染,导出 docx/md 按钮。
 - `meta.ts::EVENT_PHASE_LABELS` 重命名为 `NODE_LABELS`,key 对齐 node_key。
 

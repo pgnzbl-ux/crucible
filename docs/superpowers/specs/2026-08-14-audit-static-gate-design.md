@@ -21,7 +21,7 @@
 | `uncertain` | **仅**描述对不上代码、或连具体 HTTP 危害都锁不住。**一次提交即出口 D**：skip reproduce **和** report，`task=needs_review`，`verdict` 空。不在 AuditNode 内重试 |
 | 硬拦截 | audit 去掉 Write/Edit/WebFetch；Bash 拒 curl/wget/httpie。节点顺序仍是 env_ready → audit（靶场此时已 live），因此硬拦截是必须项，不是可选 |
 | 校验 | 按三值收紧形状；不合格 = 节点失败，不是 `uncertain` |
-| 待复核收尾 | 保留 `host_workdir`（与 `failed` 相同）；Lab **不**因 `needs_review` 进入 live、不续 TTL；重试 = 现有 `retry_task`：**从节点 0 整条重跑** |
+| 待复核收尾 | 保留 `host_workdir`（与 `failed` 相同）；Lab **不**因 `needs_review` 进入 live、不续 TTL；默认重试从节点 0 整条重跑，也可 `from_node=audit` 只重跑审计及之后 |
 | Mock | SDK 关闭时仍交合法 `pass` 样例（含 `kill_chain` / `defense_layers` / `payloads` / `runtime_dependent=false`） |
 
 明确不做：拆 `vuln-verify` 目录、拦 `python urllib`、给 TaskRun 加 `needs_review`、独立审阅工作流、跨任务缓存审计结果、改 6 档最终 verdict、对调 audit / env_ready 节点顺序、把 uncertain 做成多轮排障循环。
@@ -109,7 +109,7 @@ Agent 禁止把「我不是 100% 确定但路径可能连得上」写成 `uncert
 
 断点续跑：audit 已 `completed` 则复用 `output_json`，按 §5 走出口，不重跑。若已完成且值为 `uncertain`，必须走出口 D，不得进 reproduce。
 
-用户从 `needs_review` 点重试：现有 `retry_task` 允许该状态，**新建 TaskRun，从节点 0 整条重跑**（不拷贝上一 run 的 NodeRun）。env_ready 可走已落地的 MinIO 配方短路。不是「只重跑 audit」。
+用户从 `needs_review` 点重试：默认仍从节点 0 整条重跑；也可 `from_node=audit` 只重跑审计及之后（拷贝 source/profile/env_ready）。env_ready 可走已落地的 MinIO 配方短路。
 
 ---
 
@@ -221,4 +221,4 @@ Agent 禁止把「我不是 100% 确定但路径可能连得上」写成 `uncert
 - `fail` 任务出误报报告、不打靶场
 - 描述与仓库无关的任务 **一轮** 静态后进入待复核；步骤条看得到 `gate_reason`；host_workdir 仍在
 - runtime-dependent 的 SQL 注入走 `pass` + `runtime_dependent=true` 进入 reproduce，不得被收成 `needs_review`
-- 待复核期间 Lab 可按 TTL 到期；点重试从 source 整条重跑
+- 待复核期间 Lab 可按 TTL 到期；默认重试从 source 整条重跑，也可从 audit 起重跑

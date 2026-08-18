@@ -28,8 +28,8 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    # 启动：开发环境自动建表
-    if settings.environment == "development" and "sqlite" in settings.database_url:
+    # 启动：开发环境按当前 ORM 建表（SQLite / PostgreSQL 均可）
+    if settings.environment == "development":
         await init_db()
     yield
     # 关闭：释放数据库连接
@@ -81,16 +81,14 @@ def create_app() -> FastAPI:
     app.include_router(project_router, prefix="/api/v1")
     app.include_router(lab_router, prefix="/api/v1")
 
+    from app.shared.exception_handlers import register_exception_handlers
+
+    register_exception_handlers(app)
+
     # ── 健康检查 ──
     @app.get("/health")
     async def health():
         return {"status": "ok", "version": settings.app_version}
-
-    # ── 全局错误处理 ──
-    @app.exception_handler(ValueError)
-    async def value_error_handler(request, exc: ValueError):
-        from fastapi.responses import JSONResponse
-        return JSONResponse(status_code=400, content={"detail": str(exc)})
 
     return app
 

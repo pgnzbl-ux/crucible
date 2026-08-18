@@ -4,7 +4,7 @@ from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from .models import Task, TaskRun, AgentEvent, NodeRun
+from .models import Task, TaskRun, AgentEvent, NodeRun, NodeRunFailure
 
 
 class TaskRepository:
@@ -150,6 +150,13 @@ class TaskRepository:
         )
         return list(result.scalars().all())
 
+    async def get_node_runs(self, run_id: str) -> list[NodeRun]:
+        """某 run 的全部 NodeRun,按 node_index 升序(单节点重试拷贝前序产出用)。"""
+        result = await self.session.execute(
+            select(NodeRun).where(NodeRun.run_id == run_id).order_by(NodeRun.node_index)
+        )
+        return list(result.scalars().all())
+
     async def get_events_for_task(self, task_id: str, limit: int = 1000) -> list[AgentEvent]:
         """当前（最新）run 的 Agent 事件。重试会新建 run，历史 run 的 phase.updated 不再混进事件流。"""
         latest_run = (
@@ -177,6 +184,7 @@ class TaskRepository:
         SQLite 默认不强制 FK pragma,用手动级联确保干净。
         """
         run_ids = [r.id for r in task.runs] if task.runs else []
+        await self.session.execute(delete(NodeRunFailure).where(NodeRunFailure.task_id == task.id))
         if run_ids:
             await self.session.execute(delete(AgentEvent).where(AgentEvent.run_id.in_(run_ids)))
             await self.session.execute(delete(NodeRun).where(NodeRun.run_id.in_(run_ids)))

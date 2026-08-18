@@ -14,7 +14,7 @@ SHA = "a" * 40
 def test_recipe_object_key_and_bucket():
     from app.contexts.lab.recipe_store import RECIPE_BUCKET, recipe_object_key
 
-    assert RECIPE_BUCKET == "crucible-lab-recipe"
+    assert RECIPE_BUCKET == "crucible-durable"
     assert recipe_object_key("u1", "p1", SHA) == f"recipe/u1/p1/{SHA}.tar.gz"
 
 

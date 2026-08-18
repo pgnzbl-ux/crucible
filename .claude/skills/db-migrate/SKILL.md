@@ -5,7 +5,7 @@ description: Alembic 迁移生成与执行
 
 # Database Migrate
 
-当前只有 **一条基线**：`alembic/versions/c18a0e9b4d21_baseline.py`，`upgrade()` = 当前 ORM `metadata.create_all`。开发 SQLite 启动时 `init_db()` 走同一套 metadata，并 stamp `alembic_version`。
+当前只有 **一条基线**：`alembic/versions/c18a0e9b4d21_baseline.py`，`upgrade()` = 当前 ORM `metadata.create_all`。开发启动时 `init_db()` 走同一套 metadata，并 stamp `alembic_version`。库地址只从 `.env` 的 `DATABASE_URL` 读（`alembic/env.py` 注入，不要把真实 URL 写进 `alembic.ini` / `config.py`）。
 
 ## 1. 空库部署
 
@@ -14,7 +14,12 @@ cd backend
 alembic upgrade head
 ```
 
-开发 SQLite 也可直接启动 API（`init_db` 建表 + stamp）。PostgreSQL 切 `DATABASE_URL` 后同样 `alembic upgrade head`。
+开发空库在 API 启动时按当前模型建表，也可：
+
+```bash
+cd backend
+alembic upgrade head
+```
 
 已有库（表已在）不要对基线再 `upgrade` 指望改列；启动开发 SQLite 会补缺失索引并 stamp 到 `c18a0e9b4d21`。从旧多版本链过来的库 stamp 即可。
 

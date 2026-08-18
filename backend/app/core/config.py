@@ -5,52 +5,51 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Crucible 全局配置 — 基础设施与运行开关通过环境变量注入；LLM Provider 走后台设置"""
+    """平台配置的类型入口，不是第二份默认值清单。
+
+    分层（禁止同一事实抄三份）：
+    - `.env`：基础设施连接与密钥（DATABASE_URL / REDIS_* / S3_* / AUTH_SECRET）。
+      这些字段在本类里**没有代码默认值**。pytest 用环境变量覆盖 DATABASE_URL 为 sqlite。
+    - 本类默认值：行为开关与限额（environment / debug / SDK / runner 资源）。
+    - 代码常量：MinIO 桶与 kind（`shared/object_store.py`）；LLM 凭据禁止进 Settings。
+    - 后台 DB：LLM Provider。
+    - `alembic.ini` 不保存真实库地址，由 `alembic/env.py` 从本类注入。
+    """
 
     app_name: str = "Crucible API"
     app_version: str = "0.3.0"
     environment: str = "development"
     debug: bool = False
 
-    # 数据库 — 开发默认 SQLite，生产必须 PostgreSQL
-    database_url: str = "sqlite+aiosqlite:///./crucible.db"
+    database_url: str
+    redis_url: str
+    celery_broker_url: str
+    celery_result_backend: str
 
-    # Redis — Celery broker + 事件总线 + 缓存（宿主机 6380，避开默认 6379）
-    redis_url: str = "redis://localhost:6380/0"
-    celery_broker_url: str = "redis://localhost:6380/1"
-    celery_result_backend: str = "redis://localhost:6380/2"
-
-    # JWT 认证
     auth_secret: str = ""
     auth_algorithm: str = "HS256"
-    auth_token_expire_minutes: int = 480  # 8 小时
+    auth_token_expire_minutes: int = 480
 
-    # 敏感配置加密（Fernet）— 用于加密落库的 API Key 等凭据
-    settings_encrypt_key: str = ""  # 生产必须设置 32 字节 base64 Fernet key
+    settings_encrypt_key: str = ""
 
-    # Claude Agent SDK — Mock / 真 Agent 开关（凭据只走后台 LLM Provider）
     claude_agent_sdk_enabled: bool = False
     claude_sdk_max_turns: int = 180
 
-    # Agent Runner 容器（专用镜像，与代码层物理隔离，凭据零落盘）
     agent_runner_image: str = "crucible-agent-runner:base"
     agent_runner_cpu_limit: float = 1.0
     agent_runner_memory_limit: str = "1g"
-    agent_runner_network: str = "crucible-sandbox-net"  # 复用现有专用网络（sandbox 拆除后仅供此用）
+    agent_runner_network: str = "crucible-sandbox-net"
     agent_runner_workdir_base: str = "/tmp/crucible/audit"
     agent_runner_concurrency_limit: int = 4
-    agent_runner_timeout_seconds: int = 1800  # Celery task_time_limit / agent-runner 容器总超时
+    agent_runner_timeout_seconds: int = 1800
 
-    # CORS
     cors_origins: str = "http://localhost:5173,http://localhost:4173,http://localhost:3000"
 
-    # 对象存储 (MinIO / S3)；bucket 名是平台常量，见 report/storage.py
-    s3_endpoint: str = "http://localhost:9000"
-    s3_access_key: str = "minioadmin"
-    s3_secret_key: str = "minioadmin"
+    s3_endpoint: str
+    s3_access_key: str
+    s3_secret_key: str
     s3_secure: bool = False
 
-    # Sentry
     sentry_dsn: str = ""
     sentry_traces_sample_rate: float = 0.1
 

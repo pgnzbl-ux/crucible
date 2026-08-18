@@ -43,6 +43,7 @@ class SourceNode:
             ctx.project_address,
             ctx.project_ref,
             cached=cached,
+            owner_id=owner_id,
         )
         if not result.ok:
             err = result.error or "源码克隆失败: 未知原因"

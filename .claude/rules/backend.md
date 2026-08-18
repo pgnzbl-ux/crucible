@@ -21,7 +21,7 @@ paths: ["backend/app/contexts/**/*.py", "backend/app/shared/**/*.py", "backend/a
 | `identity` | users | 注册、登录、JWT、bcrypt（**锁 bcrypt==4.0.1**） |
 | `task` | tasks / task_runs / node_runs / agent_events | 任务 CRUD、状态机(含 retry/delete/archived)、6 节点断点续跑、事件查询 |
 | `agent` | （无自有表，消费 settings 与 task） | Agent 执行器抽象、Celery 工作流、沙箱编排 |
-| `project` | projects / source_artifacts | 项目元数据 + 按 SHA 的画像缓存；源码 tar.gz 按 owner+host 隔离缓存在 MinIO `crucible-source`（agent 只调 `acquire_source()` / ProjectService） |
+| `project` | projects / source_artifacts | 项目元数据 + 按 SHA 的画像缓存；源码 tar.gz 按 owner+host 隔离缓存在 MinIO `crucible-durable`（agent 只调 `acquire_source()` / ProjectService） |
 | `report` | reports / evidences | 报告生成 + 状态机 + MinIO 归档 |
 | `settings` | llm_providers / credentials | LLM Provider + 凭据后台 CRUD（**明文存取 + 响应掩码 + 激活唯一性**） |
 
@@ -66,5 +66,18 @@ paths: ["backend/app/contexts/**/*.py", "backend/app/shared/**/*.py", "backend/a
 ## 7. 报告与证据（`report` context）
 
 - 报告与 Task **1:1**；同一 Task 多次重跑 → 历史版本而非覆盖
-- 证据（截图、日志）上传 MinIO (`core/storage.py`)，落库 `evidences` 表
+- 证据（截图、日志）上传 MinIO（`shared/object_store.py`），落库 `evidences` 表
 - 报告状态机：`pending → generating → completed | failed`，禁止跳过中间态
+
+## 8. 平台配置分层（禁止同一事实多处抄）
+
+| 入口 | 写什么 |
+|---|---|
+| `backend/.env`（模板 `.env.example`） | **唯一**运行时连接与密钥：`DATABASE_URL`（PostgreSQL）/ `REDIS_*` / `S3_ENDPOINT`+KEYS / `AUTH_SECRET` / SDK 开关 |
+| `tests/conftest.py` | **pytest 进程**把 `DATABASE_URL` 覆盖为 sqlite；不改 `.env`，不碰真实库 |
+| `app/core/config.py` | 类型、校验、行为默认（environment / debug / runner 限额）。**连接串无代码默认值** |
+| `shared/object_store.py` | MinIO 物理桶与 kind；禁止 `s3_bucket` 进 Settings |
+| 后台 Settings Context | LLM Provider（禁止 `LLM_*` 环境变量） |
+| `alembic/env.py` | 从 Settings 注入库地址；`alembic.ini` 不保存真实 URL |
+
+改运行时库地址只改 `.env`。pytest 不要改 `.env`，覆盖点只有 `tests/conftest.py`。

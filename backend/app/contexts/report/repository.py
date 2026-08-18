@@ -32,6 +32,7 @@ class ReportRepository:
         stmt = select(Report).where(Report.task_id == task_id)
         if owner_id is not None:
             stmt = stmt.where(Report.owner_id == owner_id)
+        stmt = stmt.order_by(Report.created_at.desc()).limit(1)
         result = await self.session.execute(stmt.options(selectinload(Report.evidence)))
         return result.scalar_one_or_none()
 

@@ -608,13 +608,33 @@ body,
   box-shadow: var(--crucible-shadow-pop);
 }
 
-/* ── 任务详情：运行中钉住节点条 ── */
+/* ── 任务详情：顶部横向节点流程条（运行中与终态均保留，点击看该节点事件） ── */
 .crucible-detail-nodes-pin {
   flex: 0 0 auto;
   overflow-x: auto;
   padding: 8px 4px 16px;
   margin-bottom: 8px;
   border-bottom: 1px solid var(--crucible-border);
+}
+.crucible-node-steps-compact.is-clickable .ant-steps-item.is-selectable {
+  cursor: pointer;
+}
+.crucible-node-steps-compact.is-clickable .ant-steps-item.is-pending {
+  cursor: default;
+}
+.crucible-node-steps-compact.is-clickable .ant-steps-item:has(.is-selected) {
+  border-radius: 8px;
+  background: var(--crucible-bg);
+}
+.crucible-node-steps-compact .ant-steps-item.is-selected .ant-steps-item-wrapper,
+.crucible-node-steps-compact .crucible-node-steps-select.is-selected {
+  font-weight: 600;
+}
+.crucible-node-steps-compact.is-clickable .ant-steps-item.is-selectable:hover .ant-steps-item-title {
+  color: var(--crucible-primary);
+}
+.crucible-node-steps-select {
+  display: inline-block;
 }
 .crucible-node-steps-compact .ant-steps-item-title,
 .crucible-node-steps-compact .ant-steps-item-content,

@@ -63,6 +63,83 @@ async def test_list_reports_includes_verdict(session):
 
 
 @pytest.mark.asyncio
+async def test_attach_evidence_rejects_unknown_kind(session):
+    """非法证据 kind 必须拒绝，不得静默改成 artifact。"""
+    from app.contexts.report.models import Report
+    from app.contexts.report.repository import ReportRepository
+    from app.contexts.report.service import ReportService
+    from app.shared.object_store import MemoryObjectStore, set_object_store_for_tests
+
+    report = Report(
+        task_id="t-ev",
+        run_id="r-ev",
+        owner_id="u1",
+        status="generated",
+        title="证据",
+    )
+    session.add(report)
+    await session.flush()
+
+    store = MemoryObjectStore()
+    set_object_store_for_tests(store)
+    try:
+        evidence, err = await ReportService(ReportRepository(session)).attach_evidence(
+            report_id=report.id,
+            owner_id="u1",
+            file_name="x.bin",
+            content_type="application/octet-stream",
+            data=b"abc",
+            kind="malware",
+        )
+    finally:
+        set_object_store_for_tests(None)
+
+    assert evidence is None
+    assert err is not None
+    assert "非法" in err
+    assert store._data == {}
+
+
+@pytest.mark.asyncio
+async def test_attach_evidence_writes_task_bucket_and_owner_key(session):
+    from app.contexts.report.models import Report
+    from app.contexts.report.repository import ReportRepository
+    from app.contexts.report.service import ReportService
+    from app.shared.object_store import MemoryObjectStore, set_object_store_for_tests
+
+    report = Report(
+        task_id="t-ev2",
+        run_id="r-ev2",
+        owner_id="u1",
+        status="generated",
+        title="证据",
+    )
+    session.add(report)
+    await session.flush()
+
+    store = MemoryObjectStore()
+    set_object_store_for_tests(store)
+    try:
+        evidence, err = await ReportService(ReportRepository(session)).attach_evidence(
+            report_id=report.id,
+            owner_id="u1",
+            file_name="shot.png",
+            content_type="image/png",
+            data=b"png",
+            kind="screenshot",
+        )
+    finally:
+        set_object_store_for_tests(None)
+
+    assert err is None
+    assert evidence is not None
+    assert evidence.bucket == "crucible-task"
+    assert evidence.object_key.startswith("evidence/u1/t-ev2/")
+    assert evidence.object_key.endswith("/shot.png")
+    assert evidence.download_url is not None
+
+
+@pytest.mark.asyncio
 async def test_list_reports_filters_by_verdict_and_query(session):
     from app.contexts.report.models import Report
     from app.contexts.report.repository import ReportRepository
@@ -125,3 +202,45 @@ async def test_report_detail_and_evidence_require_owner(session):
     assert await svc.get_report(report.id, "u2") is None
     assert await svc.get_report_by_task(report.task_id, "u2") is None
     assert await svc.list_evidence(report.id, "u2") is None
+
+
+@pytest.mark.asyncio
+async def test_get_report_by_task_returns_latest_run(session):
+    """同一任务多次 run 各有一份报告时，按 task 读取必须拿最新 run，不能 500。"""
+    from datetime import datetime, timedelta, timezone
+
+    from app.contexts.report.models import Report
+    from app.contexts.report.repository import ReportRepository
+    from app.contexts.report.service import ReportService
+
+    older = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    newer = older + timedelta(hours=2)
+    session.add_all(
+        [
+            Report(
+                task_id="t-multi",
+                run_id="run-old",
+                owner_id="u1",
+                status="generated",
+                title="第一次",
+                verdict="false_positive",
+                created_at=older,
+            ),
+            Report(
+                task_id="t-multi",
+                run_id="run-new",
+                owner_id="u1",
+                status="generated",
+                title="第二次",
+                verdict="not_reproduced",
+                created_at=newer,
+            ),
+        ]
+    )
+    await session.flush()
+
+    svc = ReportService(ReportRepository(session))
+    got = await svc.get_report_by_task("t-multi", "u1")
+    assert got is not None
+    assert got.run_id == "run-new"
+    assert got.title == "第二次"

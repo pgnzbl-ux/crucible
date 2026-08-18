@@ -14,8 +14,8 @@
 |---|---|
 | AI 职责 | 只读源码与画像，写出/修改 Dockerfile 与 compose；**禁止**在 agent-runner 内安装依赖或启动靶场 |
 | 依赖安装 | 只写进 Dockerfile / compose 服务镜像（`RUN npm ci`、`pip install`、中间件用官方 image） |
-| 启动与探活 | 宿主机 worker：`docker compose -p crucible-lab-{lab_id} up -d --build` + Web 口探活 |
-| 失败 | `compose up` 或探活失败 → **立即**把日志回喂 AI 改配方，不拿同一份配方再 up 一轮 |
+| 启动与探活 | 宿主机 worker：`docker compose -p crucible-lab-{lab_id} up -d --build` + Web 口探活（约 90s，覆盖 Spring 冷启动） |
+| 失败 | `compose up` 或探活失败 → **立即**把根因行回喂 AI 改配方（抽出 ERROR / COPY / transfer 失败，丢掉 Maven Help），不拿同一份配方再 up 一轮 |
 | 持久化 | MinIO **只存配方文件**（`.vuln-env/` + 元数据 JSON），不存构建镜像 tar |
 | 复用键 | 与 Lab 相同：`owner_id + project_id + commit_sha`；不跨用户 |
 | 配方命中 | 创建者先拉 MinIO → 落到 lab 目录 → compose up；成功则跳过 AI |
@@ -63,7 +63,7 @@ live `ready` 复用、`stopped` 的 `compose start`、等待者轮询：**不变
 
 | 项 | 值 |
 |---|---|
-| Bucket | `crucible-lab-recipe`（不存在则创建，与 `crucible-source` 并列） |
+| Bucket | `crucible-durable`（kind=`recipe`，与源码同桶不同前缀） |
 | Object key | `recipe/{owner_id}/{project_id}/{commit_sha}.tar.gz` |
 | 内容 | 目录 `.vuln-env/`（Dockerfile、compose、`.dockerignore`、init SQL、辅助脚本等）+ 根级 `recipe-meta.json` |
 | 元数据 JSON | `compose_path`、`transport_shape`、`initial_creds`、`started_containers`。**不含** `target_url`（宿主 IP / 映射口每次重算） |

@@ -47,6 +47,9 @@ async def test_create_all_schema_matches_models():
             assert ("owner_id", "git_host", "project_key", "ref_type", "ref_name") in uniques
             fks = {(tuple(f["constrained_columns"]), f["referred_table"]) for f in insp.get_foreign_keys("tasks")}
             assert (("lab_id",), "labs") in fks
+            assert "node_run_failures" in insp.get_table_names()
+            fail_cols = {c["name"] for c in insp.get_columns("node_run_failures")}
+            assert {"owner_id", "task_id", "run_id", "node_run_id", "node_key", "error_class", "bundle_key", "bucket"} <= fail_cols
 
         await conn.run_sync(_check)
     await engine.dispose()

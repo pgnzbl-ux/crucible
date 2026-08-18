@@ -122,6 +122,8 @@ interface TaskEventTimelineProps {
   sseEnabled: boolean
   sseStatus: SSEStatus
   sseError: string | null
+  nodeLabel?: string | null
+  onClearNode?: () => void
 }
 
 export function TaskEventTimeline({
@@ -130,6 +132,8 @@ export function TaskEventTimeline({
   sseEnabled,
   sseStatus,
   sseError,
+  nodeLabel,
+  onClearNode,
 }: TaskEventTimelineProps) {
   const [filter, setFilter] = useState<StreamFilter>('all')
   const [showAll, setShowAll] = useState(false)
@@ -157,7 +161,12 @@ export function TaskEventTimeline({
     <div className="crucible-stream-panel">
       <Space className="crucible-stream-toolbar" wrap>
         <Space>
-          <Text strong>Agent 过程流</Text>
+          <Text strong>{nodeLabel ? `${nodeLabel} · 事件` : 'Agent 过程流'}</Text>
+          {nodeLabel && (
+            <Button size="small" type="link" style={{ paddingInline: 0 }} onClick={onClearNode}>
+              查看全部
+            </Button>
+          )}
           {sseEnabled && (
             <Badge
               status={
@@ -209,7 +218,7 @@ export function TaskEventTimeline({
             ref={scrollRef}
             tabIndex={0}
             role="log"
-            aria-label="Agent 过程流"
+            aria-label={nodeLabel ? `${nodeLabel} 事件流` : 'Agent 过程流'}
             {...handlers}
           >
             <div ref={contentRef}>
@@ -245,7 +254,10 @@ export function TaskEventTimeline({
           )}
         </div>
       ) : (
-        <Empty description="暂无执行事件" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+        <Empty
+          description={nodeLabel ? `「${nodeLabel}」暂无事件` : '暂无执行事件'}
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+        />
       )}
     </div>
   )

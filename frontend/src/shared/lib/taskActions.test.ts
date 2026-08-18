@@ -4,6 +4,7 @@ import {
   canCancel,
   canDelete,
   canRetry,
+  canRetryFromNode,
   CONFIRM_COPY,
   defaultTaskDetailTab,
   shouldFetchTaskReport,
@@ -29,6 +30,16 @@ describe('taskActions', () => {
     ['queued', false],
   ])('canRetry(%s) → %s', (status, expected) => {
     expect(canRetry(status)).toBe(expected)
+  })
+
+  it.each([
+    ['failed', 'reproduce', 'failed', true],
+    ['failed', 'env_ready', 'failed', true],
+    ['failed', 'source', 'failed', false],
+    ['failed', 'reproduce', 'completed', false],
+    ['running', 'reproduce', 'failed', false],
+  ])('canRetryFromNode(%s, %s, %s) → %s', (taskStatus, nodeKey, nodeStatus, expected) => {
+    expect(canRetryFromNode(taskStatus, nodeKey, nodeStatus)).toBe(expected)
   })
 
   it.each([

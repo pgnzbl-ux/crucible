@@ -56,7 +56,7 @@ function event(sequence: number, over: Partial<AgentEvent> = {}): AgentEvent {
   }
 }
 
-function render(events: AgentEvent[], running: boolean) {
+function render(events: AgentEvent[], running: boolean, extra?: { nodeLabel?: string }) {
   return renderToStaticMarkup(
     <App>
       <TaskEventTimeline
@@ -65,6 +65,7 @@ function render(events: AgentEvent[], running: boolean) {
         sseEnabled={running}
         sseStatus={running ? 'open' : 'idle'}
         sseError={null}
+        nodeLabel={extra?.nodeLabel}
       />
     </App>,
   )
@@ -102,5 +103,13 @@ describe('TaskEventTimeline 事件流窗口', () => {
     expect(html).toContain('展开更早的 5 条')
     expect(html).not.toContain('消息 1<')
     expect(html).toContain(`消息 ${STREAM_RENDER_WINDOW + 5}`)
+  })
+
+  it('按节点过滤时标题带节点名，空态说明该节点没有事件', () => {
+    const filtered = render([event(1)], false, { nodeLabel: '白盒审计' })
+    expect(filtered).toContain('白盒审计')
+    expect(filtered).toContain('查看全部')
+    const empty = render([], false, { nodeLabel: '白盒审计' })
+    expect(empty).toContain('「白盒审计」暂无事件')
   })
 })

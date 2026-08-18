@@ -454,10 +454,12 @@ def test_lab_router_busy_returns_409():
         response = client.post("/api/v1/labs/lab-1/actions/stop")
 
     assert response.status_code == 409
-    assert response.json() == {
-        "detail": {
-            "code": "LAB_IN_USE",
-            "message": "靶场正被运行中的任务占用",
-            "task_ids": ["t1"],
-        }
+    body = response.json()
+    assert body["detail"] == {
+        "code": "LAB_IN_USE",
+        "message": "靶场正被运行中的任务占用",
+        "task_ids": ["t1"],
     }
+    assert body["error"]["code"] == "LAB_IN_USE"
+    assert body["error"]["message"] == "靶场正被运行中的任务占用"
+    assert body["error"]["details"]["task_ids"] == ["t1"]

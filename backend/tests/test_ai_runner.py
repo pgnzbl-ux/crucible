@@ -188,10 +188,37 @@ def test_audit_input_schema_has_uncertain_and_runtime_dependent():
     assert "gate_reason" in spec["required"]
 
 
+def test_audit_input_schema_tells_model_pass_needs_kill_chain():
+    """MCP 工具 schema 不能只要求 gate_verdict；否则模型按松形状提交、后端再拒。"""
+    spec = NODE_INPUT_SCHEMAS["audit"]
+    required_sets = [
+        set((branch.get("then") or {}).get("required") or [])
+        for branch in spec.get("allOf") or []
+    ]
+    assert any({"kill_chain", "payloads", "core_claim"} <= s for s in required_sets)
+    assert any({"kill_chain", "defense_layers"} <= s for s in required_sets)
+
+
 def test_audit_mock_output_passes_validation():
     """Mock 模式全链路自洽：_mock_output("audit") 必须能过新的三值形状校验。"""
     ok, err = validate_output("audit", _mock_output("audit", {}))
     assert ok, err
+
+
+def test_mock_reproduce_does_not_claim_confirmed():
+    """SDK 关闭时的 mock 只联调链路，不得假装沙箱已证出漏洞。"""
+    out = _mock_output("reproduce", {})
+    assert out.get("verdict") not in {"confirmed", "partial"}
+    assert out.get("reproduced") is not True
+    ok, err = validate_output("reproduce", out)
+    assert ok, err
+
+
+def test_mock_report_without_live_evidence_is_not_vulnerability_report():
+    out = _mock_output("report", {})
+    assert out.get("final_verdict") not in {"confirmed", "partial"}
+    kind = (out.get("report_data") or {}).get("document_kind")
+    assert kind == "verification_record"
 
 
 REPORT_MD_KEYS = (

@@ -18,7 +18,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from . import storage
+from app.shared.object_store import (
+    ObjectRef,
+    ObjectStoreError,
+    UnsafeKeyError,
+    get_object_store,
+)
 from .models import Evidence, Report
 from .repository import ReportRepository
 from .schemas import EvidenceResponse, ReportDetail, ReportSummary
@@ -29,6 +34,12 @@ CONCLUSION_LABELS = {
     "not_exists": "漏洞不存在（误报）",
     "unconfirmed": "无法确认，需人工复核",
 }
+
+
+def _flatten_file_name(file_name: str) -> str:
+    raw = (file_name or "file").replace("\\", "/")
+    parts = [p for p in raw.split("/") if p and p not in {".", ".."}]
+    return "_".join(parts) or "file"
 
 
 class ReportService:
@@ -89,9 +100,10 @@ class ReportService:
         download_url: str | None = None
         if with_url:
             try:
-                download_url = storage.presigned_url(ev.bucket, ev.object_key)
+                download_url = get_object_store().presign(
+                    ObjectRef(kind="evidence", bucket=ev.bucket, key=ev.object_key)
+                )
             except Exception:
-                # 预签名失败不阻塞（MinIO 不可用时仍返回元数据）
                 download_url = None
         return EvidenceResponse(
             id=ev.id,
@@ -145,13 +157,16 @@ class ReportService:
                 "reasoning": reasoning,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
             }
-            key = f"reports/{task_id}/{report.id}.json"
-            storage.upload_artifact(
-                key,
-                json.dumps(artifact, ensure_ascii=False).encode("utf-8"),
+            payload = json.dumps(artifact, ensure_ascii=False).encode("utf-8")
+            ref = get_object_store().put(
+                "report",
+                owner_id,
+                payload,
                 content_type="application/json",
+                task_id=task_id,
+                report_id=report.id,
             )
-            report.artifact_key = key
+            report.artifact_key = ref.key
             await self.repo.session.flush()
         except Exception:
             pass  # 归档失败不影响报告生成
@@ -220,20 +235,30 @@ class ReportService:
             return None, "报告不存在"
         # kind 白名单（防任意值落库）
         if kind not in ("artifact", "log", "screenshot", "poc"):
-            kind = "artifact"
+            return None, "非法证据类型"
 
-        key = f"{report.task_id}/{uuid.uuid4().hex}/{file_name}"
+        safe_name = _flatten_file_name(file_name)
+        evidence_id = str(uuid.uuid4())
         try:
-            storage.upload_evidence(key, data, content_type, task_id=report.task_id)
-        except storage.StorageError as e:
+            ref = get_object_store().put(
+                "evidence",
+                owner_id,
+                data,
+                content_type=content_type,
+                task_id=report.task_id,
+                evidence_id=evidence_id,
+                file_name=safe_name,
+            )
+        except (ObjectStoreError, UnsafeKeyError) as e:
             return None, str(e)
 
         evidence = Evidence(
+            id=evidence_id,
             report_id=report_id,
             task_id=report.task_id,
-            object_key=key,
-            bucket=storage.EVIDENCE_BUCKET,
-            file_name=file_name[:255],
+            object_key=ref.key,
+            bucket=ref.bucket,
+            file_name=safe_name[:255],
             content_type=content_type[:128],
             size_bytes=len(data),
             kind=kind,

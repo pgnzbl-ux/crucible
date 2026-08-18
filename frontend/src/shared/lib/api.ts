@@ -9,6 +9,23 @@ function handleUnauthorized() {
   }
 }
 
+function _apiErrorMessage(body: unknown, status: number): string {
+  if (!body || typeof body !== 'object') return `HTTP ${status}`
+  const rec = body as Record<string, unknown>
+  const envelope = rec.error
+  if (envelope && typeof envelope === 'object') {
+    const msg = (envelope as { message?: unknown }).message
+    if (typeof msg === 'string' && msg) return msg
+  }
+  const detail = rec.detail
+  if (typeof detail === 'object' && detail) {
+    const msg = (detail as { message?: unknown }).message
+    if (typeof msg === 'string' && msg) return msg
+  }
+  if (typeof detail === 'string' && detail) return detail
+  return `HTTP ${status}`
+}
+
 async function request<T>(path: string, options?: RequestInit & { allow404?: boolean }): Promise<T> {
   const { allow404, ...fetchOpts } = options ?? {}
   const token = localStorage.getItem('crucible_token')
@@ -29,9 +46,7 @@ async function request<T>(path: string, options?: RequestInit & { allow404?: boo
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: '请求失败' }))
-    throw new Error(
-      (typeof err.detail === 'object' ? err.detail?.message : err.detail) || `HTTP ${res.status}`,
-    )
+    throw new Error(_apiErrorMessage(err, res.status))
   }
   if (res.status === 204) {
     return undefined as T
@@ -411,8 +426,11 @@ export const api = {
     request<void>(`/settings/credentials/${id}`, { method: 'DELETE' }),
 
   // Tasks — 阶段 1 新增(retry / delete / nodes)
-  retryTask: (id: string) =>
-    request<{ task_id: string; run_id: string; status: string }>(`/tasks/${id}/retry`, { method: 'POST' }),
+  retryTask: (id: string, fromNode?: string) =>
+    request<{ task_id: string; run_id: string; status: string; from_node: string | null }>(
+      `/tasks/${id}/retry${fromNode ? `?from_node=${encodeURIComponent(fromNode)}` : ''}`,
+      { method: 'POST' },
+    ),
 
   deleteTask: (id: string, hard = false) =>
     request<void>(`/tasks/${id}${hard ? '?hard=true' : ''}`, {

@@ -27,11 +27,23 @@ logger = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 5
 COMPOSE_UP_TIMEOUT = 600
-HEALTH_RETRIES = 8
-HEALTH_RETRY_SECONDS = 2
+HEALTH_RETRIES = 30
+HEALTH_RETRY_SECONDS = 3
 COMPOSE_PROGRESS_INTERVAL = 2.0
 COMPOSE_PROGRESS_MAX = 220
 _COMPOSE_URGENT = re.compile(r"error|failed|fatal|exception", re.I)
+_COMPOSE_DIAG = re.compile(
+    r"(?i)(\[error\]|error:|failed to solve|could not transfer|"
+    r"dependencyresolution|npm err!|no such file|copy |"
+    r"failed to execute|premature end|etimedout|econnreset|"
+    r"address already in use|permission denied|security policy|"
+    r"failed to)"
+)
+_COMPOSE_DIAG_NOISE = re.compile(
+    r"(?i)to see the full stack trace|re-run maven|"
+    r"for more information about the errors|"
+    r"\[help 1\]|enable full debug logging"
+)
 _SIDECAR_CONTAINER_PORTS = {3306, 5432, 6379, 27017, 5672, 1433, 9200, 11211}
 _SHORT_PORT = re.compile(
     r"^(?:(?:\d{1,3}\.){3}\d{1,3}:)?(\d+):(\d+)(?:/(?:tcp|udp))?$", re.I
@@ -44,6 +56,26 @@ def compose_progress_text(line: str, limit: int = COMPOSE_PROGRESS_MAX) -> str |
     if not text:
         return None
     return text[:limit]
+
+
+def summarize_compose_failure(text: str, *, limit: int = 1600) -> str:
+    """抽出 COPY / Maven 传输失败等根因行，丢掉 Maven Help 与拉层进度。"""
+    raw = text or ""
+    if not raw.strip():
+        return ""
+    hits: list[str] = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped or _COMPOSE_DIAG_NOISE.search(stripped):
+            continue
+        if _COMPOSE_DIAG.search(stripped):
+            clipped = stripped[:300]
+            if not hits or hits[-1] != clipped:
+                hits.append(clipped)
+    if hits:
+        joined = "\n".join(hits)
+        return joined[:limit]
+    return raw[-limit:]
 
 
 class ComposeProgressThrottle:
@@ -461,7 +493,7 @@ async def docker_compose_up(
             return False, f"docker compose up 超时(>{COMPOSE_UP_TIMEOUT}s)"
         if rc == 0:
             return True, ""
-        return False, out[-1000:]
+        return False, summarize_compose_failure(out)
     except Exception as e:  # noqa: BLE001
         return False, f"docker compose 异常: {e}"
 
@@ -509,6 +541,29 @@ async def health_check(ports: list[int] | None, extra_ports: list[int] | None = 
 def _emit(ctx: NodeContext, message: str) -> None:
     if ctx.on_event:
         ctx.on_event({"type": "phase.updated", "phase": "env_ready", "message": message})
+
+
+def _snapshot_failed_attempt(
+    ctx: NodeContext,
+    attempt: int,
+    last_error: str | None,
+    failed_stage: str | None,
+    recipe: dict[str, Any] | None = None,
+) -> None:
+    try:
+        from app.contexts.agent.node_failure import snapshot_attempt
+
+        snapshot_attempt(
+            ctx.host_workdir,
+            "env_ready",
+            attempt,
+            previous_error=last_error,
+            platform_error=f"failed_stage={failed_stage or 'unknown'}\n{last_error or ''}",
+            submit=recipe,
+            copy_vuln_env=True,
+        )
+    except Exception:
+        logger.warning("env_ready 失败快照失败 attempt=%s", attempt, exc_info=True)
 
 
 async def collect_compose_logs(
@@ -717,6 +772,28 @@ def _exclude_compose_project(lab_id: str | None) -> str | None:
     return f"crucible-lab-{str(lab_id).lower()}"
 
 
+async def _live_started_containers(compose_project: str | None, fallback: Any) -> list[str]:
+    """以 docker ps 实际容器名为准，AI 提交的名单只是兜底。"""
+    names: list[str] = []
+    if compose_project:
+        try:
+            from app.contexts.lab.docker_ops import list_containers
+
+            items = await list_containers(compose_project)
+            names = [
+                str(item.get("name"))
+                for item in items
+                if isinstance(item, dict) and item.get("name")
+            ]
+        except Exception:  # noqa: BLE001
+            names = []
+    if names:
+        return names
+    if isinstance(fallback, list):
+        return [str(x) for x in fallback if x]
+    return []
+
+
 async def _upload_then_mark_ready(
     ctx: NodeContext,
     svc: Any,
@@ -812,7 +889,9 @@ async def _try_cached_recipe(
         logs = await collect_compose_logs(
             result.workdir, lab_compose, None, lab_id=result.lab_id
         )
-        last_error = f"compose up 失败: {err}\n--- logs ---\n{logs}"
+        last_error = (
+            f"compose up 失败: {err}\n--- logs ---\n{summarize_compose_failure(logs)}"
+        )
         logger.warning("缓存配方 compose up 失败: %s", (err or "")[:200])
         _emit(ctx, "缓存配方启动失败，回喂 AI")
         await docker_compose_down(
@@ -831,7 +910,8 @@ async def _try_cached_recipe(
             result.workdir, lab_compose, None, lab_id=result.lab_id
         )
         last_error = (
-            f"健康检查不过(mapped_ports={web_ports})\n--- logs ---\n{logs}"
+            f"健康检查不过(mapped_ports={web_ports})\n"
+            f"--- logs ---\n{summarize_compose_failure(logs)}"
         )
         _emit(ctx, "缓存配方探活失败，回喂 AI")
         await docker_compose_down(
@@ -851,6 +931,10 @@ async def _try_cached_recipe(
         or [],
         "reused": True,
     }
+    output["started_containers"] = await _live_started_containers(
+        getattr(result, "compose_project", None),
+        output.get("started_containers"),
+    )
     if not output["initial_creds"]:
         output["initial_creds"] = await _lookup_initial_creds(
             ctx,
@@ -966,6 +1050,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
             if not creds_ok:
                 last_error = f"attempt {attempt} {creds_err}"
                 failed_stage = "recipe_validation"
+                _snapshot_failed_attempt(ctx, attempt, last_error, failed_stage, recipe)
                 _emit(
                     ctx,
                     f"initial_creds 无效，回喂 AI 补查（{attempt}/{MAX_ATTEMPTS}）",
@@ -982,6 +1067,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                     "postgres/redis/mysql 不要写 ports 到宿主。"
                 )
                 failed_stage = "recipe_validation"
+                _snapshot_failed_attempt(ctx, attempt, last_error, failed_stage, recipe)
                 _emit(ctx, f"缺少 Web 端口映射，回喂 AI 回溯（{attempt}/{MAX_ATTEMPTS}）")
                 continue
 
@@ -995,6 +1081,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                     "不要改容器内监听口，不要映射已占用端口。"
                 )
                 failed_stage = "port_conflict"
+                _snapshot_failed_attempt(ctx, attempt, last_error, failed_stage, recipe)
                 _emit(
                     ctx,
                     f"端口 {conflicts} 已被占用，回喂 AI 改映射（{attempt}/{MAX_ATTEMPTS}）",
@@ -1015,8 +1102,12 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 logs = await collect_compose_logs(
                     result.workdir, lab_compose, None, lab_id=result.lab_id
                 )
-                last_error = f"attempt {attempt} compose up 失败: {err}\n--- logs ---\n{logs}"
+                last_error = (
+                    f"attempt {attempt} compose up 失败: {err}\n"
+                    f"--- logs ---\n{summarize_compose_failure(logs)}"
+                )
                 failed_stage = "compose_up"
+                _snapshot_failed_attempt(ctx, attempt, last_error, failed_stage, recipe)
                 logger.warning(f"节点 2 attempt {attempt} 失败: {err[:200]}")
                 _emit(ctx, f"启动失败，回喂 AI 回溯（{attempt}/{MAX_ATTEMPTS}）")
                 await docker_compose_down(
@@ -1033,9 +1124,11 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                     result.workdir, lab_compose, None, lab_id=result.lab_id
                 )
                 last_error = (
-                    f"attempt {attempt} 健康检查不过(mapped_ports={web_ports})\n--- logs ---\n{logs}"
+                    f"attempt {attempt} 健康检查不过(mapped_ports={web_ports})\n"
+                    f"--- logs ---\n{summarize_compose_failure(logs)}"
                 )
                 failed_stage = "health_check"
+                _snapshot_failed_attempt(ctx, attempt, last_error, failed_stage, recipe)
                 _emit(ctx, f"探活失败，回喂 AI 回溯（{attempt}/{MAX_ATTEMPTS}）")
                 await docker_compose_down(
                     result.workdir, lab_compose, None, lab_id=result.lab_id
@@ -1063,6 +1156,10 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 "initial_creds": recipe["initial_creds"],
                 "started_containers": recipe.get("started_containers", []),
             }
+            output["started_containers"] = await _live_started_containers(
+                getattr(result, "compose_project", None),
+                output.get("started_containers"),
+            )
             await _upload_then_mark_ready(
                 ctx,
                 svc,

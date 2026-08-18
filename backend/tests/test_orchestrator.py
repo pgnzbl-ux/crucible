@@ -91,6 +91,115 @@ async def test_non_web_exits_after_profile(session_factory):
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_persists_handoff_input_json(session_factory):
+    """执行前必须把实际交接写入 NodeRun.input_json，不能永远是 {}。"""
+    import json
+
+    from app.contexts.agent import orchestrator as orch
+    from app.contexts.task.models import NodeRun
+    from sqlalchemy import select
+
+    async with session_factory() as session:
+        task, run = await _seed_task_run(session)
+        real_nodes = orch.NODE_ORDER
+
+        async def fake_source(ctx):
+            return {"source_path": ctx.source_path, "repo_dirname": "demo"}
+
+        async def fake_profile(ctx):
+            return {"is_web": False, "language": "python"}
+
+        with patch.object(real_nodes[0], "execute", fake_source), \
+             patch.object(real_nodes[1], "execute", fake_profile):
+            await orch.run_orchestration(
+                task_id=task.id, run_id=run.id, session=session,
+                host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
+            )
+
+        nodes = (
+            await session.execute(select(NodeRun).where(NodeRun.run_id == run.id).order_by(NodeRun.node_index))
+        ).scalars().all()
+        by_key = {n.node_key: n for n in nodes}
+        source_in = json.loads(by_key["source"].input_json)
+        assert source_in["project_address"] == task.project_address
+        profile_in = json.loads(by_key["profile"].input_json)
+        assert "source" in (profile_in.get("previous") or {})
+
+
+@pytest.mark.asyncio
+async def test_corrupt_completed_profile_fails_instead_of_exit_a(session_factory):
+    """已完成节点的 output_json 损坏必须失败，不得当成非 web 静默 completed。"""
+    from app.contexts.agent import orchestrator as orch
+    from app.contexts.task.models import NodeRun
+
+    async with session_factory() as session:
+        task, run = await _seed_task_run(session)
+        session.add_all(
+            [
+                NodeRun(
+                    run_id=run.id, task_id=task.id, node_index=0, node_key="source",
+                    status="completed", output_json='{"repo_dirname":"demo"}',
+                ),
+                NodeRun(
+                    run_id=run.id, task_id=task.id, node_index=1, node_key="profile",
+                    status="completed", output_json="{not-json",
+                ),
+            ]
+        )
+        await session.flush()
+
+        result = await orch.run_orchestration(
+            task_id=task.id, run_id=run.id, session=session,
+            host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
+        )
+
+        assert result["status"] == "failed"
+        await session.refresh(task)
+        assert task.status == "failed"
+        assert task.verdict is None
+
+
+@pytest.mark.asyncio
+async def test_ai_event_callback_is_stamped_with_node_run(session_factory):
+    """AI 事件必须带上当前节点的 node_key / node_run_id，事件流才能精确归属。"""
+    from app.contexts.agent import orchestrator as orch
+    from app.contexts.task.models import NodeRun
+    from sqlalchemy import select
+
+    seen: list[dict] = []
+
+    async with session_factory() as session:
+        task, run = await _seed_task_run(session)
+        real_nodes = orch.NODE_ORDER
+
+        async def fake_source(ctx):
+            if ctx.on_event:
+                ctx.on_event({"type": "agent.thinking", "text": "clone"})
+            return {"source_path": ctx.source_path}
+
+        async def fake_profile(ctx):
+            return {"is_web": False, "language": "python"}
+
+        with patch.object(real_nodes[0], "execute", fake_source), \
+             patch.object(real_nodes[1], "execute", fake_profile):
+            await orch.run_orchestration(
+                task_id=task.id, run_id=run.id, session=session,
+                host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
+                on_ai_event=seen.append,
+            )
+
+        source = (
+            await session.execute(
+                select(NodeRun).where(NodeRun.run_id == run.id, NodeRun.node_key == "source")
+            )
+        ).scalar_one()
+        assert seen
+        assert seen[0]["node_key"] == "source"
+        assert seen[0]["node_run_id"] == source.id
+        assert seen[0]["text"] == "clone"
+
+
+@pytest.mark.asyncio
 async def test_missing_is_web_does_not_enter_env_ready(session_factory):
     """画像未给出显式 is_web=True 时 fail-closed，不得当 web 继续搭靶场。"""
     from app.contexts.agent import orchestrator as orch
@@ -182,6 +291,102 @@ async def test_gate_fail_skips_reproduce_and_sets_false_positive(session_factory
         assert statuses[3] == "completed"  # audit
         assert statuses[4] == "skipped"  # reproduce(gate fail 跳过)
         assert statuses[5] == "completed"  # report
+
+
+@pytest.mark.asyncio
+async def test_report_fail_after_gate_fail_keeps_false_positive(session_factory):
+    """audit 已判误报后，报告节点失败不得把整任务改成 failed。"""
+    from app.contexts.agent import orchestrator as orch
+    from app.contexts.task.models import NodeRun
+    from sqlalchemy import select
+
+    async with session_factory() as session:
+        task, run = await _seed_task_run(session)
+
+        async def fake_source(ctx):
+            return {"source_path": ctx.source_path}
+
+        async def fake_profile(ctx):
+            return {"is_web": True, "language": "python"}
+
+        async def fake_env(ctx):
+            return {"target_url": "http://localhost:5000", "compose_path": "x.yml"}
+
+        async def fake_audit(ctx):
+            return {"gate_verdict": "fail", "gate_reason": "链路不通"}
+
+        real_nodes = orch.NODE_ORDER
+        patches = [
+            patch.object(real_nodes[0], "execute", fake_source),
+            patch.object(real_nodes[1], "execute", fake_profile),
+            patch.object(real_nodes[2], "execute", fake_env),
+            patch.object(real_nodes[3], "execute", fake_audit),
+            patch.object(real_nodes[4], "execute", AsyncMock(side_effect=AssertionError("不该 reproduce"))),
+            patch.object(real_nodes[5], "execute", AsyncMock(side_effect=RuntimeError("报告模型超时"))),
+        ]
+        for p in patches:
+            p.__enter__()
+
+        result = await orch.run_orchestration(
+            task_id=task.id, run_id=run.id, session=session,
+            host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
+        )
+
+        await session.refresh(task)
+        await session.refresh(run)
+        assert result["status"] == "completed"
+        assert result["verdict"] == "false_positive"
+        assert task.status == "completed"
+        assert task.verdict == "false_positive"
+        assert run.status == "completed"
+        nodes = (
+            await session.execute(select(NodeRun).where(NodeRun.run_id == run.id).order_by(NodeRun.node_index))
+        ).scalars().all()
+        by_key = {n.node_key: n for n in nodes}
+        assert by_key["report"].status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_report_fail_after_uncertain_keeps_needs_review(session_factory):
+    """audit uncertain 后报告失败，任务仍应待复核，不得 failed。"""
+    from app.contexts.agent import orchestrator as orch
+
+    async with session_factory() as session:
+        task, run = await _seed_task_run(session)
+
+        async def fake_source(ctx):
+            return {"source_path": ctx.source_path}
+
+        async def fake_profile(ctx):
+            return {"is_web": True, "language": "python"}
+
+        async def fake_env(ctx):
+            return {"target_url": "http://localhost:5000", "compose_path": "x.yml"}
+
+        async def fake_audit(ctx):
+            return {"gate_verdict": "uncertain", "gate_reason": "描述对不上"}
+
+        real_nodes = orch.NODE_ORDER
+        patches = [
+            patch.object(real_nodes[0], "execute", fake_source),
+            patch.object(real_nodes[1], "execute", fake_profile),
+            patch.object(real_nodes[2], "execute", fake_env),
+            patch.object(real_nodes[3], "execute", fake_audit),
+            patch.object(real_nodes[4], "execute", AsyncMock(side_effect=AssertionError("不该 reproduce"))),
+            patch.object(real_nodes[5], "execute", AsyncMock(side_effect=RuntimeError("报告写不出"))),
+        ]
+        for p in patches:
+            p.__enter__()
+
+        result = await orch.run_orchestration(
+            task_id=task.id, run_id=run.id, session=session,
+            host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
+        )
+
+        await session.refresh(task)
+        assert result["status"] == "needs_review"
+        assert task.status == "needs_review"
+        assert task.verdict is None
 
 
 @pytest.mark.asyncio
@@ -539,3 +744,77 @@ async def test_resume_reuses_audit_uncertain_skips_reproduce_but_runs_report(ses
         )).scalars().all()}
         assert statuses["reproduce"] == "skipped"
         assert statuses["report"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_mock_sdk_does_not_upload_node_run(session_factory, tmp_path):
+    from types import SimpleNamespace
+
+    from app.contexts.agent import orchestrator as orch
+    from app.shared.object_store import MemoryObjectStore, set_object_store_for_tests
+
+    store = MemoryObjectStore()
+    set_object_store_for_tests(store)
+    try:
+        async with session_factory() as session:
+            task, run = await _seed_task_run(session)
+
+            async def boom(_ctx):
+                raise RuntimeError("源码克隆失败: 网络错误")
+
+            with patch.object(orch.NODE_ORDER[0], "execute", boom), patch(
+                "app.core.config.get_settings",
+                return_value=SimpleNamespace(claude_agent_sdk_enabled=False),
+            ):
+                result = await orch.run_orchestration(
+                    task_id=task.id,
+                    run_id=run.id,
+                    session=session,
+                    host_workdir=str(tmp_path),
+                    source_path=str(tmp_path),
+                    runner_env={},
+                )
+            assert result["status"] == "failed"
+            assert store._data == {}
+    finally:
+        set_object_store_for_tests(None)
+
+
+@pytest.mark.asyncio
+async def test_sdk_enabled_failed_node_uploads_once(session_factory, tmp_path):
+    from types import SimpleNamespace
+
+    from app.contexts.agent import orchestrator as orch
+    from app.contexts.task.models import NodeRunFailure
+    from app.shared.object_store import MemoryObjectStore, set_object_store_for_tests
+    from sqlalchemy import select
+
+    store = MemoryObjectStore()
+    set_object_store_for_tests(store)
+    try:
+        async with session_factory() as session:
+            task, run = await _seed_task_run(session)
+
+            async def boom(_ctx):
+                raise RuntimeError("未产出 .node_output.json")
+
+            with patch.object(orch.NODE_ORDER[0], "execute", boom), patch(
+                "app.core.config.get_settings",
+                return_value=SimpleNamespace(claude_agent_sdk_enabled=True),
+            ):
+                result = await orch.run_orchestration(
+                    task_id=task.id,
+                    run_id=run.id,
+                    session=session,
+                    host_workdir=str(tmp_path),
+                    source_path=str(tmp_path),
+                    runner_env={},
+                )
+            assert result["status"] == "failed"
+            rows = (await session.execute(select(NodeRunFailure))).scalars().all()
+            assert len(rows) == 1
+            assert rows[0].error_class == "runner.no_submit"
+            assert rows[0].bundle_key.startswith("node_run/u1/")
+            assert store.get_at("node_run", rows[0].bundle_key)
+    finally:
+        set_object_store_for_tests(None)

@@ -67,7 +67,7 @@ class Evidence(BaseModel):
     report_id: Mapped[str] = mapped_column(String(36), ForeignKey("reports.id"), index=True)
     task_id: Mapped[str] = mapped_column(String(36), index=True)
     object_key: Mapped[str] = mapped_column(String(512), nullable=False, comment="MinIO 对象 key")
-    bucket: Mapped[str] = mapped_column(String(64), default="crucible-evidence")
+    bucket: Mapped[str] = mapped_column(String(64), default="crucible-task")
     file_name: Mapped[str] = mapped_column(String(255), comment="原始文件名")
     content_type: Mapped[str] = mapped_column(String(128), default="application/octet-stream")
     size_bytes: Mapped[int] = mapped_column(default=0)

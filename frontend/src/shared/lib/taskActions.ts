@@ -1,6 +1,8 @@
 export const ACTIVE_STATUSES = ['pending', 'queued', 'running'] as const
 export const RETRY_STATUSES = ['failed', 'cancelled', 'completed', 'needs_review'] as const
 export const BLOCK_DELETE_STATUSES = ['running', 'pending', 'queued', 'archived'] as const
+/** 单节点重试允许的起点（与后端 _RETRYABLE_FROM_NODES 对齐）。source/profile 走整条重试。 */
+export const RETRYABLE_FROM_NODES = ['env_ready', 'audit', 'reproduce', 'report'] as const
 
 export type TaskDetailTab = 'overview' | 'progress' | 'events' | 'report'
 
@@ -10,6 +12,14 @@ export function canCancel(status: string): boolean {
 
 export function canRetry(status: string): boolean {
   return (RETRY_STATUSES as readonly string[]).includes(status)
+}
+
+export function canRetryFromNode(taskStatus: string, nodeKey: string, nodeStatus: string): boolean {
+  return (
+    canRetry(taskStatus)
+    && nodeStatus === 'failed'
+    && (RETRYABLE_FROM_NODES as readonly string[]).includes(nodeKey)
+  )
 }
 
 export function canDelete(status: string): boolean {

@@ -77,3 +77,17 @@ async def test_create_marks_task_and_run_failed_when_dispatch_fails(session):
     assert task.status == "failed"
     assert run.status == "failed"
     assert "broker down" in (run.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_unsafe_git_url(session):
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.schemas import TaskCreateRequest
+    from app.contexts.task.service import TaskService
+
+    req = TaskCreateRequest(
+        project_address="file:///etc/passwd",
+        vulnerability_description="demonstration vulnerability",
+    )
+    with pytest.raises(ValueError, match="Git"):
+        await TaskService(TaskRepository(session)).create_task(req, "u1")

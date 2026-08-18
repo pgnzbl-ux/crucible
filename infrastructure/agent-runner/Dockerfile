@@ -13,7 +13,7 @@
 # - 内置每节点蒸馏 skill（/app/node-skills），不加载桌面 plugins/
 # - 非 root（uid=1000）+ 只读 rootfs + tmpfs /tmp + cap_drop ALL（worker docker run 叠加）
 # - PYTHONUNBUFFERED=1 保证 JSONL 实时 flush
-# - HOME=/workspace 因 rootfs 只读，SDK/CLI 写 cache 到 $HOME/.claude
+# - HOME=/tmp（容器 tmpfs）供 SDK/CLI 写 cache；不得用 /workspace，避免节点间共享会话
 # - tini 作为 PID 1，回收 SDK fork 出的孤儿子进程
 #
 # 构建（build context = 项目根，以便 COPY node-skills 与 runner/）：
@@ -90,7 +90,7 @@ USER runner
 # JSONL 实时 flush（双保险：Dockerfile ENV + worker docker run --env）
 # PYTHONPATH=/app 让 python -m runner.run_one 找到 /app/runner（不依赖 cwd）
 ENV PYTHONUNBUFFERED=1 \
-    HOME=/workspace \
+    HOME=/tmp \
     PYTHONPATH=/app \
     NODE_SKILL_DIR=/app/node-skills \
     PATH="/usr/local/bin:/home/runner/.local/bin:${PATH}"

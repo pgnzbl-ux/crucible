@@ -17,8 +17,29 @@ agent-runner 内没有 Docker CLI，这是平台设计，不是环境异常。�
 
 ## 本轮你要做的
 
-- `attempt = 1`：按画像选启动方式，写出配方。没有 `.vuln-env` 是正常的。可用 `node -e` / 读文件做只读探测，不要 `npm install` / `pip install`。
-- `attempt > 1`：现有 `.vuln-env` 是上一轮产物。先读取它，再结合 `failed_stage` 和 `previous_error` 定位根因，**一次只改一处**，重写配方。
+- `attempt = 1`：先 recon 再写文件。没有 `.vuln-env` 是正常的。可用 `node -e` / 读文件做只读探测，不要 `npm install` / `pip install`。
+- `attempt > 1`：现有 `.vuln-env` 是上一轮产物。先读取它，再结合 `failed_stage` 和 `previous_error` 对症，**一次只改一处**。不要因为构建网络抖动而改启动拓扑。
+
+### recon（写配方前必须能回答）
+
+读 README、依赖清单、启动配置、已有 Docker 文件，确认：
+
+- 几个可运行模块、各自启动命令与端口
+- 中间件（db / redis / mq）
+- 服务怎么互相发现（`localhost` / hostname / Eureka）
+- 有没有硬编码 Windows 路径、只监听 `127.0.0.1`
+
+答不出就不要写 Dockerfile。
+
+### 失败对症
+
+| 看到 | 改 |
+|---|---|
+| `COPY` / no such file | 只改 `build.context` / COPY 路径，指向原仓库 |
+| `Could not transfer` / `DependencyResolution` / npm `ETIMEDOUT` / pip timeout | 加重试、串行构建、缓存挂载；不要合并容器 |
+| 宿主端口占用 | 只改 compose 的 host 侧映射口 |
+| 健康检查不过 | 映射口对应的进程是否已是 PID 1；日志是否在 stdout；跨容器是否还在用 `localhost` |
+| compose 安全策略拒绝 | 去掉 privileged / host 网络 / 越界 mount |
 
 选启动方式：
 
@@ -27,13 +48,19 @@ agent-runner 内没有 Docker CLI，这是平台设计，不是环境异常。�
 - 现成官方镜像 → 用镜像写 compose
 - 都没有 → 按语言惯例自建最小 Dockerfile + compose
 
-配方约定：
+## 配方形状
 
 - 写到 `{source_path}/.vuln-env/`，不要写平台 lab 目录
+- **`build.context` 指向原仓库模块**（如 `../Eureka-Server`，或 `context: ..` + `dockerfile: .vuln-env/Dockerfile.xxx`）。禁止把源码复制进 `.vuln-env/`
+- **一容器一进程**。多模块 = 多个 compose service + `depends_on` 健康检查。用环境变量把注册中心 / DB 地址改成 **compose 服务名**，不要为了保留 `localhost` 把多个 JVM 塞进一个容器
 - compose 必须 `name: <项目slug>`
 - 只把浏览器要访问的 Web 入口映射到宿主机（`host:container`）。postgres / redis / mysql / mq 不要 `ports` 到宿主
 - 避开 JSON 里的 `occupied_host_ports`：冲突时只改宿主侧映射口
+- 进程日志打 stdout/stderr。禁止 `java -jar > /logs/app.log`
+- 依赖写进 Dockerfile 的 `RUN`：Maven 用 `-B`、失败重试、`-DskipTests`、不要 `-q`；Node 用 lockfile 做 `npm ci`；Python `pip install`
 - `target_url` 只写占位路径即可；最终对外地址由平台填写
+
+语言要点：Java 跟 pom 的 JDK，Spring Cloud 拆服务，启动慢由平台探活；Node / Python 监听 `0.0.0.0`；Go 多阶段静态二进制；PHP 文档根与 nginx/apache 一致。
 
 ## 登录判断与靶场凭据
 

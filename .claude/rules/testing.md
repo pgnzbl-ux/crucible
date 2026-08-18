@@ -11,7 +11,7 @@ paths: ["backend/app/**/*.py", "backend/tests/**/*.py"]
 | 层级 | 范围 | 工具 | 速度要求 |
 |---|---|---|---|
 | 单元 | Repository / Service / Schemas | pytest + pytest-asyncio | < 100ms / case |
-| 集成 | API 端点 + 真实 DB（SQLite in-memory）+ 内存 Redis fake | httpx.AsyncClient + ASGITransport | < 1s / case |
+| 集成 | API 端点 + SQLite in-memory（`tests/conftest.py` 覆盖 `DATABASE_URL`）+ 内存 Redis fake | httpx.AsyncClient + ASGITransport | < 1s / case |
 | Celery | `agent/tasks.py` 工作流（`task_always_eager=True`） | pytest-celery | < 5s / case |
 | 端到端冒烟 | 全链路（创建任务 → 沙箱 → Agent mock → 报告） | 脚本（参考 `smoke_sandbox.py`） | < 30s |
 | 沙箱冒烟 | 真实 Docker：sandbox 创建 / exec / OOM / 网络 / 清理 | `tests/smoke_sandbox.py` | < 60s |
@@ -21,7 +21,7 @@ paths: ["backend/app/**/*.py", "backend/tests/**/*.py"]
 ## 2. Mock 边界
 
 - **必须 Mock**：LLM API（外部依赖、不稳定）、Redis Pub/Sub（集成测试用 fake）、MinIO（S3 fake）
-- **必须真实**：SQLite/PostgreSQL（Repository 测试）、Docker 沙箱（smoke）
+- **必须真实**：pytest 用 SQLite（禁止连 `.env` 的 PostgreSQL）；Docker 沙箱（smoke）
 - Agent 默认走 Mock,`CLAUDE_AGENT_SDK_ENABLED=true` 时切换真实 Executor(6 节点编排)
 
 ## 3. 测试数据

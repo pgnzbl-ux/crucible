@@ -88,6 +88,18 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
             },
         },
         "required": ["gate_verdict", "gate_reason"],
+        "allOf": [
+            {
+                "if": {"properties": {"gate_verdict": {"const": "pass"}}, "required": ["gate_verdict"]},
+                "then": {
+                    "required": ["kill_chain", "payloads", "runtime_dependent", "core_claim"],
+                },
+            },
+            {
+                "if": {"properties": {"gate_verdict": {"const": "fail"}}, "required": ["gate_verdict"]},
+                "then": {"required": ["kill_chain", "defense_layers"]},
+            },
+        ],
     },
     "reproduce": {
         "type": "object",

@@ -55,7 +55,7 @@ class SourceArtifact(BaseModel):
     profile_json: Mapped[str | None] = mapped_column(
         Text, comment="该 commit 的画像 JSON；commit_sha 变更时清空"
     )
-    bucket: Mapped[str] = mapped_column(String(64), nullable=False, default="crucible-source")
+    bucket: Mapped[str] = mapped_column(String(64), nullable=False, default="crucible-durable")
     object_key: Mapped[str] = mapped_column(String(512), nullable=False)
     object_url: Mapped[str] = mapped_column(String(1024), nullable=False, comment="MinIO 访问地址")
     size_bytes: Mapped[int | None] = mapped_column(Integer)

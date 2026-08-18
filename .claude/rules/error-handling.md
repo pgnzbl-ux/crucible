@@ -32,7 +32,7 @@ paths: ["backend/app/**/*.py"]
 }
 ```
 
-由 `app.exception_handlers` 统一捕获 `CrucibleError`，未捕获异常兜底 500 + `INTERNAL_ERROR` + Sentry 上报。
+由 `app.shared.exception_handlers.register_exception_handlers` 捕获 `CrucibleError`、`HTTPException`、`RequestValidationError`、`ValueError`。响应**同时**给信封与兼容字段 `detail`（字符串或历史对象如 `LAB_IN_USE`），避免打崩只读 `detail` 的旧前端。未捕获异常仍由 FastAPI 兜底 500；`INTERNAL_ERROR` + Sentry 待接。
 
 ## 4. 沙箱 / Agent 失败语义
 

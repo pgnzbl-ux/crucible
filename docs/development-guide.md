@@ -59,8 +59,8 @@
 backend/app/
 ├── main.py                    # FastAPI 入口（<100 行，挂 4 个 Context 路由 + 健康检查 + Prometheus）
 ├── core/
-│   ├── config.py              # pydantic-settings，全环境变量注入
-│   ├── database.py            # SQLAlchemy 2.0 Async（SQLite 开发 / PostgreSQL 生产）
+│   ├── config.py              # Settings 类型与校验；连接串无默认，从 .env 读
+│   ├── database.py            # SQLAlchemy 2.0 Async（开发/生产均为 PostgreSQL）
 │   ├── security.py            # JWT + bcrypt（bcrypt 锁 4.0.1 兼容 passlib）
 │   ├── celery_app.py          # Celery + autodiscover agent 任务 + prefetch=1 + acks_late
 │   ├── agent_runner.py        # ★ Agent Runner 编排（Docker SDK + 流式消费，替代 sandbox）
@@ -77,12 +77,13 @@ backend/app/
 │   │   ├── executor.py        #   ClaudeSdkExecutor / MockExecutor + 工厂（遗留兼容）
 │   │   └── tasks.py           #   Celery 工作流（host clone → 调 orchestrator → 实时落库）
 │   ├── report/                # 报告生成 + 状态机 + MinIO 归档
-│   │   └── storage.py         #   MinIO (S3) 存储封装
+│   │   └── service.py         #   报告 + 证据（对象走 shared/object_store）
 │   └── settings/              # ★ LLM Provider 后台配置（多 Provider + 明文存取 + 测试连接）
 │       └── seed.py            #   环境变量 → DB 种子迁移（幂等）
 └── shared/
     ├── base.py                # BaseModel（UUID + 时间戳）
     ├── events.py              # Event + EventBus（Redis Pub/Sub 标准事件结构）
+    ├── object_store.py        # ★ MinIO 唯一客户端（3 桶 + kind 注册表）
     └── sse.py                 # ★ SSE 事件流（StreamingResponse + 历史回放 + 15s 心跳 + 断开清理）
 ```
 
@@ -149,13 +150,13 @@ Task 加 project_id(FK→projects) + verdict(6 档);Report 加 report_data 等�
 | Event Bus（Redis Pub/Sub） | ✅ | shared/events.py（统一事件结构） |
 | 事件持久化 + 查询 | ✅ | agent_events 表 + GET /tasks/{id}/events |
 | **SSE 实时事件推送（P0-1）** | ✅ | shared/sse.py（StreamingResponse + 历史回放 + 15s 心跳 + 断开清理）+ GET /tasks/{id}/events/stream + 前端 useTaskEvents hook |
-| 报告生成 + MinIO 归档 | ✅ | report/service.py + storage.py |
+| 报告生成 + MinIO 归档 | ✅ | report/service.py + shared/object_store.py（3 桶 durable/task/public） |
 | **源码 MinIO 缓存** | ✅ | `source_artifacts` 按 owner+host+project+ref；branch/HEAD 必须 ls-remote 对上 SHA 才用 MinIO；画像 `profile_json` 绑同一 SHA，SHA 变则清空重检 |
 | **靶场配方 MinIO 复用** | ✅ | `lab/recipe_store` 按 owner+project+SHA 存 `.vuln-env/`；env_ready 创建者先 download 短路（命中改宿主口 + 一次 up），未命中/失败再 AI；成功 upload；rebuild 可从 MinIO 拉回 |
 | LLM 后台配置（新增） | ✅ | settings context（Fernet 加密 + 测试连接 + 种子迁移） |
 | DeepSeek 对接 | ✅ | ClaudeSdkAdapter.build_runner_env() 注入 ANTHROPIC_* env(零落盘,容器销毁消失) |
 | 前端 pages/ shared/ 分层 | ✅ | AppLayout + 4 页面 |
-| 事件流展示（Timeline） | ✅ | 详情「事件流」Tab：thinking / 工具 / 人类可读错误 + SSE 历史回放 |
+| 事件流展示（Timeline） | ✅ | 详情「事件流」Tab：thinking / 工具 / 人类可读错误 + SSE 历史回放；流程图/进度条可点，按 sequence 归属节点 |
 | Prometheus 指标 | ✅ | main.py Instrumentator |
 
 ### 3.2 已通过的验证
@@ -247,7 +248,7 @@ P0 全部完成。每个 P1 完成后跑一遍全链路冒烟（任务创建 →
 - LLM Provider 管理接口必须 JWT；`base_url` 须为 HTTPS 域名，解析到公网或 TUN fake-ip（`198.18.0.0/15`），禁止 IP 字面量和重定向；仍拒绝真实私网/回环/元数据地址
 - Task/Report/Evidence 查询与写操作必须绑定 owner；非 owner 与不存在统一 404
 - AI 生成 Compose 在宿主执行前走 `lab/compose_policy.py` 高危字段拒绝
-- 创建/重试任务必须先 commit 再投递 Celery；投递失败把 Task/Run 标 failed 并返回 503
+- 创建/重试任务必须先 commit 再投递 Celery；投递失败把 Task/Run 标 failed 并返回 503。`retry?from_node=` 只允许 env_ready/audit/reproduce/report，前置未完成则 400
 - 生产环境（`ENVIRONMENT=production`）强制校验：必须 AUTH_SECRET + 禁止 SQLite（config validator）
 
 ### 5.4 踩坑记录（务必先读）
@@ -266,7 +267,7 @@ P0 全部完成。每个 P1 完成后跑一遍全链路冒烟（任务创建 →
 | container.logs(stream=True) 按字节 chunk 切分破坏 JSONL 行边界 | `LineBufferedJsonParser` 按 `\n` 累积字节再 json.loads；EOF 时调 `flush()` 处理最后一行 |
 | 宿主机端口冲突（5432/6379 已被占用） | Crucible 用 5433/6380 |
 | Windows 下 Celery 用 solo pool | `run_worker.py` 已固定 `--pool=solo` |
-| **chromium headless 在 read_only rootfs 下崩溃** | 需额外挂 `/tmp` + `/dev/shm` tmpfs + 容器 env `HOME=/workspace`（crashpad / ProcessSingleton 依赖可写 HOME），且 `/workspace` 不能挂 `noexec`（chromium + 搭靶场二进制都需可执行） |
+| **chromium headless 在 read_only rootfs 下崩溃** | 需额外挂 `/tmp` tmpfs + 容器 env `HOME=/tmp`（crashpad / ProcessSingleton 依赖可写 HOME；HOME 不得指向共享 `/workspace`，否则后续节点会读到上一跳 SDK 缓存），且 `/workspace` 不能挂 `noexec`（chromium + 搭靶场二进制都需可执行） |
 | **nginx/反代默认缓冲 SSE** | 响应头加 `X-Accel-Buffering: no` + `Cache-Control: no-cache, no-transform`（sse.py 端点已加） |
 | **Redis Pub/Sub 离线即丢消息** | SSE 连接先回放 DB 历史（`_replay_history`）再订阅 Pub/Sub，保证"刚发生的事件"不丢 |
 | **EventSource 无法注入 Authorization header** | token 走 query 参数 `?token=xxx`（前端 useTaskEvents + 后端 SSE owner 校验已接入） |
@@ -296,17 +297,19 @@ python tests/smoke_sse.py              # SSE 实时推送冒烟（帧格式/历�
 pytest                           # 单元测试（待补，见 backlog P1）
 ```
 
-### 6.3 关键配置（backend/.env）
+### 6.3 关键配置（`backend/.env` 是运行时唯一入口）
+
+`config.py` 只做类型与校验，**不**再抄一份连接串。桶名见 `shared/object_store.py`。LLM 凭据只在后台「设置」。pytest 由 `tests/conftest.py` 把 `DATABASE_URL` 覆盖为 sqlite，不读运行时库。
 
 | 变量 | 说明 |
 |------|------|
-| `CLAUDE_AGENT_SDK_ENABLED` | `true` 启用真实 Agent（否则 Mock），见 README「对接第三方 LLM」 |
+| `DATABASE_URL` | Docker PostgreSQL：`postgresql+asyncpg://crucible:crucible_secret@localhost:5433/crucible` |
 | `REDIS_URL` / `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` | Redis 6380，db0 事件 / db1 broker / db2 result |
-| `S3_ENDPOINT` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | MinIO 连接；bucket 写死 artifacts / evidence / source |
+| `S3_ENDPOINT` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | MinIO 连接；桶名写死 `crucible-durable` / `crucible-task` / `crucible-public` |
+| `CLAUDE_AGENT_SDK_ENABLED` | `true` 启用真实 Agent（否则 Mock） |
 | `AGENT_RUNNER_IMAGE` / `AGENT_RUNNER_TIMEOUT_SECONDS` | Agent Runner 镜像与超时 |
+| `AUTH_SECRET` | JWT；生产必填 |
 | `SETTINGS_ENCRYPT_KEY` | 遗留配置(当前 settings 明文存取,Fernet 未生效) |
-
-LLM Provider（端点 / API Key / 模型）只在后台「设置」配置，不走 `.env`。
 
 ---
 

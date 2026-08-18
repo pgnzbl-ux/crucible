@@ -16,6 +16,7 @@ async def session_factory():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         from app.contexts.identity.models import User  # noqa: F401
+        from app.contexts.lab.models import Lab  # noqa: F401
         from app.contexts.project.models import Project, SourceArtifact  # noqa: F401
         from app.contexts.task.models import Task, TaskRun, NodeRun, AgentEvent  # noqa: F401
         await conn.run_sync(Base.metadata.create_all)
@@ -46,7 +47,7 @@ async def test_find_and_upsert_source_artifact(session_factory):
             ref_name="main",
             commit_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             object_key="source/siteboon/claudecodeui/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.tar.gz",
-            object_url="http://localhost:9000/crucible-source/source/siteboon/claudecodeui/aaa.tar.gz",
+            object_url="http://localhost:9000/crucible-durable/source/siteboon/claudecodeui/aaa.tar.gz",
         )
         await svc.record_source_artifact(result, owner_id="u1")
         await session.commit()
@@ -86,7 +87,7 @@ async def test_find_by_commit_prefix(session_factory):
             ref_name=sha,
             commit_sha=sha,
             object_key=f"source/github.com/siteboon/claudecodeui/{sha}.tar.gz",
-            object_url="http://localhost:9000/crucible-source/x",
+            object_url="http://localhost:9000/crucible-durable/x",
         ), owner_id="u1")
         await session.commit()
         cached = await svc.find_cached_source(
@@ -118,7 +119,7 @@ async def test_list_artifacts_for_project(session_factory):
             ref_name="main",
             commit_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             object_key="source/github.com/siteboon/claudecodeui/aaa.tar.gz",
-            object_url="http://localhost:9000/crucible-source/aaa.tar.gz",
+            object_url="http://localhost:9000/crucible-durable/aaa.tar.gz",
         ), owner_id="u1")
         await session.commit()
 
@@ -151,7 +152,7 @@ async def test_source_cache_not_shared_across_owners(session_factory):
             ref_name="main",
             commit_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             object_key="source/github.com/acme/secret/aaa.tar.gz",
-            object_url="http://localhost:9000/crucible-source/aaa.tar.gz",
+            object_url="http://localhost:9000/crucible-durable/aaa.tar.gz",
         )
         await svc.record_source_artifact(result, owner_id="owner-a")
         await session.commit()
@@ -179,7 +180,7 @@ async def test_source_cache_not_shared_across_hosts(session_factory):
             ref_name="main",
             commit_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             object_key="source/github.com/acme/app/aaa.tar.gz",
-            object_url="http://localhost:9000/crucible-source/aaa.tar.gz",
+            object_url="http://localhost:9000/crucible-durable/aaa.tar.gz",
         ), owner_id="u1")
         await session.commit()
 
@@ -204,7 +205,7 @@ def _artifact_result(**overrides):
         ref_name="main",
         commit_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         object_key="source/github.com/acme/app/aaa.tar.gz",
-        object_url="http://localhost:9000/crucible-source/aaa.tar.gz",
+        object_url="http://localhost:9000/crucible-durable/aaa.tar.gz",
     )
     data.update(overrides)
     return SourceAcquireResult(**data)

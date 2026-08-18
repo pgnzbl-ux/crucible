@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Index, String, Text, ForeignKey
+from sqlalchemy import Index, Integer, String, Text, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.shared.base import BaseModel
@@ -132,3 +132,24 @@ class NodeRun(BaseModel):
 
     def __repr__(self) -> str:
         return f"<NodeRun [{self.node_index}:{self.node_key}] {self.status}>"
+
+
+class NodeRunFailure(BaseModel):
+    """节点失败语料索引：指向 crucible-task 上的 node_run 包。"""
+    __tablename__ = "node_run_failures"
+
+    owner_id: Mapped[str] = mapped_column(String(36), index=True)
+    task_id: Mapped[str] = mapped_column(String(36), ForeignKey("tasks.id"), index=True)
+    run_id: Mapped[str] = mapped_column(String(36), ForeignKey("task_runs.id"), index=True)
+    node_run_id: Mapped[str] = mapped_column(String(36), ForeignKey("node_runs.id"), index=True)
+    node_key: Mapped[str] = mapped_column(String(20), nullable=False)
+    error_class: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    failed_stage: Mapped[str | None] = mapped_column(String(40))
+    language: Mapped[str | None] = mapped_column(String(40))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=1)
+    bundle_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    bucket: Mapped[str] = mapped_column(String(64), nullable=False, default="crucible-task")
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "node_key", name="uq_node_run_failures_run_node"),
+    )

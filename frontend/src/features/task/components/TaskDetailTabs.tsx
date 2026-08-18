@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Alert,
   App,
@@ -17,11 +17,11 @@ import { useLocation } from 'wouter'
 
 import type { TaskDetail } from '../../../shared/lib/api'
 import { api } from '../../../shared/lib/api'
-import { getStatusMeta, getPriorityMeta, getVerdictMeta, getReportStatusMeta } from '../../../shared/lib/meta'
-import { canCancel, shouldFetchTaskReport } from '../../../shared/lib/taskActions'
+import { getStatusMeta, getPriorityMeta, getVerdictMeta, getReportStatusMeta, NODE_LABELS } from '../../../shared/lib/meta'
+import { canCancel, canRetry, shouldFetchTaskReport } from '../../../shared/lib/taskActions'
 import type { TaskDetailTab } from '../../../shared/lib/taskActions'
 import { useTaskEvents, type SSEEvent } from '../../../shared/hooks/useTaskEvents'
-import { dropNoisyEvents, eventsForRun, mergeTaskEvents } from '../../../shared/lib/taskEvents'
+import { dropNoisyEvents, eventsForRun, eventsForNode, mergeTaskEvents } from '../../../shared/lib/taskEvents'
 import { NodeSteps } from '../../../shared/components/NodeSteps'
 import { ReportContent } from '../../../shared/components/ReportContent'
 import { EvidenceList } from './EvidenceList'
@@ -37,7 +37,7 @@ interface TaskDetailTabsProps {
 }
 
 export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTabsProps) {
-  const { message } = App.useApp()
+  const { message, modal } = App.useApp()
   const qc = useQueryClient()
   const [, navigate] = useLocation()
 
@@ -75,6 +75,14 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
     return dropNoisyEvents(eventsForRun(merged, task?.runs[0]?.id))
   }, [restEvents, sseEvents, task?.runs])
 
+  const [selectedNode, setSelectedNode] = useState<string | null>(null)
+  const nodeEvents = useMemo(() => eventsForNode(events, selectedNode), [events, selectedNode])
+
+  const selectNode = (nodeKey: string) => {
+    setSelectedNode((prev) => (prev === nodeKey ? null : nodeKey))
+    onTabChange('events')
+  }
+
   const { data: report } = useQuery({
     queryKey: ['task-report', taskId],
     queryFn: () => api.getReportByTask(taskId),
@@ -93,6 +101,28 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
     onError: (e: Error) => message.error(e.message),
   })
 
+  const retryFromNodeMutation = useMutation({
+    mutationFn: (fromNode: string) => api.retryTask(taskId, fromNode),
+    onSuccess: () => {
+      message.success('已从该节点重新提交')
+      qc.invalidateQueries({ queryKey: ['task', taskId] })
+      qc.invalidateQueries({ queryKey: ['tasks'] })
+      qc.invalidateQueries({ queryKey: ['run-nodes', taskId] })
+    },
+    onError: (e: Error) => message.error(e.message),
+  })
+
+  const confirmRetryFromNode = (nodeKey: string) => {
+    const label = NODE_LABELS[nodeKey] ?? nodeKey
+    modal.confirm({
+      title: `从「${label}」重试`,
+      content: `将复用该节点之前的产出，只重跑「${label}」及之后的节点。确定继续？`,
+      okText: '从本节点重试',
+      cancelText: '返回',
+      onOk: () => retryFromNodeMutation.mutate(nodeKey),
+    })
+  }
+
   if (taskLoading && !task) {
     return <Skeleton active paragraph={{ rows: 8 }} />
   }
@@ -102,7 +132,7 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
   }
 
   const st = getStatusMeta(task.status)
-  const pinNodes = canCancel(task.status)
+  const showPinnedNodes = !!task.runs[0]?.id
 
   const tabItems = [
     {
@@ -119,6 +149,9 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
           runId={task.runs[0]?.id}
           taskStatus={task.status}
           sseEvents={sseEvents as unknown as SSEEvent[]}
+          selectedNode={selectedNode}
+          onSelectNode={selectNode}
+          onRetryFromNode={canRetry(task.status) ? confirmRetryFromNode : undefined}
         />
       ),
     },
@@ -127,11 +160,13 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
       label: '事件流',
       children: (
         <TaskEventTimeline
-          events={events}
+          events={nodeEvents}
           running={running}
           sseEnabled={sseEnabled}
           sseStatus={sseStatus}
           sseError={sseError}
+          nodeLabel={selectedNode ? (NODE_LABELS[selectedNode] ?? selectedNode) : null}
+          onClearNode={() => setSelectedNode(null)}
         />
       ),
     },
@@ -196,7 +231,7 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
 
   return (
     <div className="crucible-detail-body">
-      {pinNodes && (
+      {showPinnedNodes && (
         <div className="crucible-detail-nodes-pin">
           <NodeSteps
             taskId={task.id}
@@ -204,6 +239,8 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
             taskStatus={task.status}
             sseEvents={sseEvents as unknown as SSEEvent[]}
             compact
+            selectedNode={selectedNode}
+            onSelectNode={selectNode}
           />
         </div>
       )}

@@ -60,8 +60,8 @@ class ClaudeSdkAdapter:
         env: dict[str, str] = {
             # 强制项：保证容器内 Python 不缓冲输出
             "PYTHONUNBUFFERED": "1",
-            # HOME 强制指向 /workspace（tmpfs 可写）：rootfs 只读时 SDK/CLI cache 可写
-            "HOME": "/workspace",
+            # HOME 指向容器 tmpfs（/tmp），不落共享 /workspace，避免后续节点读到上一跳 SDK 缓存
+            "HOME": "/tmp",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
             "CLAUDE_SDK_MAX_TURNS": str(self.max_turns),
         }

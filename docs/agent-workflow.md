@@ -65,7 +65,9 @@
 - **非 web 结束**：节点 1 `is_web is not True` → skip 2–5。
 - **误报 Quick-Stop**：audit `gate_verdict=fail` → skip reproduce，仍跑 report。
 - **待复核**：audit `uncertain` → skip reproduce，仍跑 report 产 `needs_review` 验证记录，`task=needs_review`（task.verdict 空）。
+- **报告失败不得覆盖 B/D**：report 节点失败时，若 audit 已是 `fail` / `uncertain`，任务仍 `completed`+`false_positive` 或 `needs_review`；只把 report NodeRun 标 `failed`。
 - **回退环**：reproduce 容器内自行深挖同一 `core_claim`，判定即停（不是平台节点循环）。
+- **单节点重试**：`POST /tasks/{id}/retry?from_node=env_ready|audit|reproduce|report` 拷贝前置产出、从该节点起重跑；默认无参数仍从 source 整条重跑。
 
 ---
 
@@ -118,7 +120,8 @@ user message 只含「调用 submit_result」+ 本轮 `input_json`。
 
 事件 schema 见 [`run_one.py`](../infrastructure/agent-runner/runner/run_one.py) `_stream_messages`。
 `agent.thinking` 来自 SDK ThinkingBlock（或鸭子类型 / dict）；`agent.failed` 带 `title` + `hint` 便于排错。
-前端「事件流」Tab 渲染思考 / 回复 / 工具 / 错误（`EVENT_TYPE_LABELS` / `EVENT_PHASE_LABELS` 在 `frontend/src/shared/lib/meta.ts`）；失败节点在步骤条展示人类可读全文。
+前端「事件流」Tab 渲染思考 / 回复 / 工具 / 错误（`EVENT_TYPE_LABELS` / `EVENT_PHASE_LABELS` 在 `frontend/src/shared/lib/meta.ts`）；失败节点在步骤条展示人类可读全文。节点最终 `failed` 时（真实 SDK，非 Mock）会把本轮 jsonl / 配方快照打成 `node_run` 包写入 MinIO `crucible-task`，索引表 `node_run_failures`。
+详情顶栏流程图与「进度」竖条均可点（`pending` 除外），按节点过滤事件。无 `node_key` 的思考/工具按同一 run 的 `sequence` 归到当时节点，不用 SDK `created_at`（时间戳经常早于 `node.updated`）。
 
 > **待补**：插件 agent.md 的阶段名（start / preflight / scanning / reproducing / completed
 > 等）与前端 `EVENT_PHASE_LABELS` 的映射需对齐，见 P1 backlog。

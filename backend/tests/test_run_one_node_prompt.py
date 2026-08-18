@@ -159,6 +159,16 @@ def test_env_ready_skill_requires_creds_lookup():
     assert "credential_lookup_only=true" in text
 
 
+def test_env_ready_skill_requires_recon_and_one_process():
+    text = _load_node_skill("env_ready")
+    assert "build.context" in text
+    assert "禁止把源码复制" in text
+    assert "一容器一进程" in text
+    assert "Could not transfer" in text
+    assert "不要合并容器" in text
+    assert "stdout" in text
+
+
 def test_build_options_appends_skill_without_desktop_plugin():
     captured: dict = {}
 

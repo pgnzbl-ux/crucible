@@ -69,7 +69,7 @@ def _case_1_basic_lifecycle() -> None:
         env={
             # 故意不设 ANTHROPIC_API_KEY，让容器内 run_one.py 失败
             "PYTHONUNBUFFERED": "1",
-            "HOME": "/workspace",
+            "HOME": "/tmp",
         },
         cpu_limit=0.5,
         memory_limit="512m",
@@ -149,7 +149,7 @@ def _case_3_oom() -> None:
 
     spec = AgentRunnerSpec(
         host_workdir=workdir,
-        env={"PYTHONUNBUFFERED": "1", "HOME": "/workspace"},
+        env={"PYTHONUNBUFFERED": "1", "HOME": "/tmp"},
         cpu_limit=0.5,
         memory_limit="128m",  # 故意极小
     )
@@ -182,7 +182,7 @@ def _case_4_cancel() -> None:
 
     spec = AgentRunnerSpec(
         host_workdir=workdir,
-        env={"PYTHONUNBUFFERED": "1", "HOME": "/workspace"},
+        env={"PYTHONUNBUFFERED": "1", "HOME": "/tmp"},
         cpu_limit=0.5,
         memory_limit="512m",
     )

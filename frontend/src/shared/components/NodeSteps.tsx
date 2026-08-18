@@ -1,5 +1,5 @@
 import { useEffect, useMemo } from 'react'
-import { Steps, Typography } from 'antd'
+import { Button, Steps, Typography } from 'antd'
 import {
   CheckCircleOutlined,
   CloseCircleOutlined,
@@ -7,6 +7,7 @@ import {
   MinusCircleOutlined,
   ClockCircleOutlined,
   StopOutlined,
+  RedoOutlined,
 } from '@ant-design/icons'
 import { useQuery } from '@tanstack/react-query'
 import { api, type NodeRun } from '../lib/api'
@@ -18,11 +19,13 @@ import {
   displayNodeStatus,
   isNodeListLoading,
   isNodeTerminal,
+  isNodeSelectable,
   overlayFromSseEvents,
   summarizeNodeOutput,
 } from '../lib/nodeOutput'
 import { AuditDetail } from './AuditDetail'
 import { EnvReadyDetail } from './EnvReadyDetail'
+import { canRetryFromNode } from '../lib/taskActions'
 
 const { Text } = Typography
 
@@ -34,6 +37,9 @@ interface NodeStepsProps {
   taskStatus?: string
   sseEvents?: SSEEvent[]
   compact?: boolean
+  selectedNode?: string | null
+  onSelectNode?: (nodeKey: NodeRun['node_key']) => void
+  onRetryFromNode?: (nodeKey: NodeRun['node_key']) => void
 }
 
 function nodeIcon(status: NodeRun['status']) {
@@ -58,7 +64,16 @@ function nodeDetail(n: Pick<NodeRun, 'node_key' | 'status' | 'output'>) {
   return null
 }
 
-export function NodeSteps({ taskId, runId, taskStatus, sseEvents = [], compact = false }: NodeStepsProps) {
+export function NodeSteps({
+  taskId,
+  runId,
+  taskStatus,
+  sseEvents = [],
+  compact = false,
+  selectedNode = null,
+  onSelectNode,
+  onRetryFromNode,
+}: NodeStepsProps) {
   const { data: nodes, refetch } = useQuery({
     queryKey: ['run-nodes', taskId, runId],
     queryFn: () => api.getRunNodes(taskId, runId!),
@@ -129,18 +144,51 @@ export function NodeSteps({ taskId, runId, taskStatus, sseEvents = [], compact =
     const items = ordered.map((n) => {
       const meta = NODE_STATUS_META[n.status] ?? NODE_STATUS_META.pending
       const caption = compactNodeCaption(n.node_key, n.output, n.status)
+      const selected = selectedNode === n.node_key
+      const label = NODE_LABELS[n.node_key] ?? n.node_key
+      const selectable = !!onSelectNode && isNodeSelectable(n.status)
       return {
-        title: NODE_LABELS[n.node_key] ?? n.node_key,
+        title: onSelectNode ? (
+          <span
+            className={[
+              'crucible-node-steps-select',
+              `crucible-node-step--${n.node_key}`,
+              selected ? 'is-selected' : '',
+            ]
+              .filter(Boolean)
+              .join(' ')}
+            data-node-key={n.node_key}
+            aria-pressed={selected}
+            aria-disabled={!selectable}
+          >
+            {label}
+          </span>
+        ) : (
+          label
+        ),
         content: caption || undefined,
         status: meta.status as 'wait' | 'process' | 'finish' | 'error',
         icon: nodeIcon(n.status),
+        className: [
+          `crucible-node-step--${n.node_key}`,
+          selected ? 'is-selected' : '',
+          selectable ? 'is-selectable' : 'is-pending',
+        ]
+          .filter(Boolean)
+          .join(' '),
+        onClick: selectable ? () => onSelectNode?.(n.node_key) : undefined,
       }
     })
     return (
       <Steps
         size="small"
         ellipsis
-        className="crucible-node-steps-compact"
+        className={[
+          'crucible-node-steps-compact',
+          onSelectNode ? 'is-clickable' : '',
+        ]
+          .filter(Boolean)
+          .join(' ')}
         classNames={{
           itemTitle: 'crucible-node-steps-compact__title',
           itemContent: 'crucible-node-steps-compact__content',
@@ -148,6 +196,8 @@ export function NodeSteps({ taskId, runId, taskStatus, sseEvents = [], compact =
         current={currentIdx >= 0 ? currentIdx : firstFailed >= 0 ? firstFailed : ordered.length}
         items={items}
         orientation="horizontal"
+        // 空 onChange 只为让步骤可点；选中必须走 item.onClick，否则当前 running 节点点了没反应。
+        onChange={onSelectNode ? () => undefined : undefined}
       />
     )
   }
@@ -158,9 +208,20 @@ export function NodeSteps({ taskId, runId, taskStatus, sseEvents = [], compact =
         const detail = nodeDetail(n)
         const summary = nodeSummary(n)
         const failed = n.status === 'failed'
+        const showRetry = !!onRetryFromNode && canRetryFromNode(taskStatus ?? '', n.node_key, n.status)
+        const selectable = !!onSelectNode && isNodeSelectable(n.status)
+        const selected = selectedNode === n.node_key
         return (
           <div
             key={n.id}
+            data-node-key={n.node_key}
+            className={[
+              selectable ? 'crucible-node-row is-selectable' : 'crucible-node-row',
+              selected ? 'is-selected' : '',
+            ]
+              .filter(Boolean)
+              .join(' ')}
+            onClick={selectable ? () => onSelectNode?.(n.node_key) : undefined}
             style={{
               display: 'grid',
               gridTemplateColumns: '24px 96px 1fr',
@@ -169,7 +230,9 @@ export function NodeSteps({ taskId, runId, taskStatus, sseEvents = [], compact =
               padding: '10px 12px',
               border: '1px solid var(--crucible-border)',
               borderRadius: 8,
-              background: n.status === 'running' ? 'var(--crucible-bg)' : undefined,
+              background:
+                selected || n.status === 'running' ? 'var(--crucible-bg)' : undefined,
+              cursor: selectable ? 'pointer' : undefined,
             }}
           >
             <span style={{ lineHeight: '22px' }}>{nodeIcon(n.status)}</span>
@@ -182,14 +245,30 @@ export function NodeSteps({ taskId, runId, taskStatus, sseEvents = [], compact =
                 </Text>
               )}
             </Text>
-            {detail ?? (
-              <Text
-                type={failed ? 'danger' : 'secondary'}
-                style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}
-              >
-                {summary}
-              </Text>
-            )}
+            <div>
+              {detail ?? (
+                <Text
+                  type={failed ? 'danger' : 'secondary'}
+                  style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}
+                >
+                  {summary}
+                </Text>
+              )}
+              {showRetry && (
+                <Button
+                  size="small"
+                  type="link"
+                  icon={<RedoOutlined />}
+                  style={{ paddingLeft: 0, marginTop: 4 }}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onRetryFromNode?.(n.node_key)
+                  }}
+                >
+                  从本节点重试
+                </Button>
+              )}
+            </div>
           </div>
         )
       })}

@@ -2,21 +2,26 @@ from pathlib import Path
 
 from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
 
 from .config import get_settings
 
 settings = get_settings()
 
-_connect_args = {}
-if "sqlite" in settings.database_url:
-    _connect_args["check_same_thread"] = False
+
+def _engine_kwargs(url: str) -> dict:
+    if "sqlite" in url:
+        return {
+            "connect_args": {"check_same_thread": False},
+            "poolclass": StaticPool,
+        }
+    return {"pool_size": 5, "max_overflow": 10}
+
 
 engine = create_async_engine(
     settings.database_url,
     echo=settings.debug,
-    connect_args=_connect_args,
-    pool_size=5,
-    max_overflow=10,
+    **_engine_kwargs(settings.database_url),
 )
 
 async_session_factory = async_sessionmaker(
@@ -85,7 +90,8 @@ def _align_alembic_version(connection) -> None:
 async def init_db() -> None:
     """按当前 ORM 建表，并与唯一 Alembic 基线对齐。
 
-    开发 SQLite 启动走这里；生产 PostgreSQL 用 `alembic upgrade head`（同一条基线）。
+    运行时开发/生产都是 PostgreSQL（`.env` 的 DATABASE_URL）。
+    pytest 由 `tests/conftest.py` 覆盖为 sqlite。生产迁移用 `alembic upgrade head`。
     """
     from app.shared.base import Base
     from app.shared.models import register_models

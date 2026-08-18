@@ -7,4 +7,4 @@ def register_models() -> None:
     from app.contexts.project.models import Project, SourceArtifact  # noqa: F401
     from app.contexts.report.models import Evidence, Report  # noqa: F401
     from app.contexts.settings.models import Credential, LlmProvider  # noqa: F401
-    from app.contexts.task.models import AgentEvent, NodeRun, Task, TaskRun  # noqa: F401
+    from app.contexts.task.models import AgentEvent, NodeRun, NodeRunFailure, Task, TaskRun  # noqa: F401

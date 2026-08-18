@@ -1,4 +1,4 @@
-<div align="center">
+
 
 # 🔥 Crucible
 
@@ -6,13 +6,13 @@
 
 代码与漏洞投入烈火，真伪自现。
 
-[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
+[Python](https://www.python.org/)
+[FastAPI](https://fastapi.tiangolo.com/)
+[React](https://react.dev/)
+[PostgreSQL](https://www.postgresql.org/)
+[Docker](https://docs.docker.com/compose/)
 
-</div>
+
 
 ---
 
@@ -41,11 +41,13 @@ Crucible 是面向安全研究员的 **漏洞自动验证平台**。
 
 它验证的是「这个洞是不是真的、能不能打、证据是什么」，而不是再扫一遍代码找新洞。
 
-| | |
-|---|---|
-| **你提供** | Git 仓库地址 + 漏洞描述（可附带已有 PoC / 分析过程） |
-| **你得到** | 结构化中文报告：结论、证据链、复现路径、修复建议；确认的漏洞附带可复现 PoC |
-| **判定** | 已确认 / 部分确认 / 代码可达 / CODE SMELL / 误报 / 未复现 |
+
+|         |                                           |
+| ------- | ----------------------------------------- |
+| **你提供** | Git 仓库地址 + 漏洞描述（可附带已有 PoC / 分析过程）         |
+| **你得到** | 结构化中文报告：结论、证据链、复现路径、修复建议；确认的漏洞附带可复现 PoC   |
+| **判定**  | 已确认 / 部分确认 / 代码可达 / CODE SMELL / 误报 / 未复现 |
+
 
 结论由**最强可观察证据**决定：诊断信号（HTTP 500、日志、sink 命中）只说明可达，不能当成「已确认」。
 
@@ -89,9 +91,9 @@ Crucible 按研究员的方法论自动走完这条链路：
 浏览器（React）
     │  HTTP + SSE
     ▼
-FastAPI  API  ── PostgreSQL / SQLite
+FastAPI  API  ── PostgreSQL
     │           Redis（任务队列 + 实时事件）
-    │           MinIO（源码缓存 / 报告 / 证据 / 靶场配方）
+    │           MinIO（源码 / 报告 / 证据 / 靶场配方 / 失败节点包）
     ▼
 Celery Worker
     ├─ 拉取 / 缓存源码
@@ -106,14 +108,16 @@ Celery Worker
 拉取源码 → 项目画像 → 靶场就绪 → 白盒审计 → 靶场复现 → 生成报告
 ```
 
-| 节点 | 做什么 |
-|---|---|
-| 源码 | 拿到可分析的代码快照 |
-| 画像 | 判断技术栈、是否 Web 应用 |
-| 靶场 | 编写或复用运行环境，探活，给出访问方式 |
-| 审计 | 只读源码，推演利用链；过不了门禁则判误报 |
-| 复现 | 对靶场做有限次确认，给出六档判定 |
-| 报告 | 唯一写文档的步骤，落库并归档 |
+
+| 节点  | 做什么                  |
+| --- | -------------------- |
+| 源码  | 拿到可分析的代码快照           |
+| 画像  | 判断技术栈、是否 Web 应用      |
+| 靶场  | 编写或复用运行环境，探活，给出访问方式  |
+| 审计  | 只读源码，推演利用链；过不了门禁则判误报 |
+| 复现  | 对靶场做有限次确认，给出六档判定     |
+| 报告  | 唯一写文档的步骤，落库并归档       |
+
 
 三层隔离：
 
@@ -121,19 +125,21 @@ Celery Worker
 2. **Agent** —— 每个分析步骤一只容器；LLM 凭据只进容器环境变量，容器销毁即消失
 3. **审计** —— Agent 输出不可信，校验通过才写入平台
 
-| 层 | 技术 |
-|---|---|
-| 后端 | Python 3.11+ · FastAPI · SQLAlchemy 2.0 · Celery |
-| 前端 | React 19 · TypeScript · Vite 6 · Ant Design |
-| 数据 | 开发 SQLite / 生产 PostgreSQL 16 · Redis 7 · MinIO |
+
+| 层     | 技术                                               |
+| ----- | ------------------------------------------------ |
+| 后端    | Python 3.11+ · FastAPI · SQLAlchemy 2.0 · Celery |
+| 前端    | React 19 · TypeScript · Vite 6 · Ant Design      |
+| 数据    | PostgreSQL 16 · Redis 7 · MinIO                    |
 | Agent | Claude Agent SDK，镜像 `crucible-agent-runner:base` |
-| 运行 | Docker Compose 起基础设施；Worker 用 Docker 拉起分析容器与靶场 |
+| 运行    | Docker Compose 起基础设施；Worker 用 Docker 拉起分析容器与靶场   |
+
 
 ---
 
 ## 安装部署
 
-开发环境是「基础设施容器 + 本机三个进程」。默认数据库是 **SQLite**（文件在 `backend/crucible.db`）；Compose 里的 PostgreSQL 是可选项。
+开发环境是「基础设施容器 + 本机三个进程」。数据库是 Compose 里的 **PostgreSQL 16**（宿主机 `localhost:5433`）。
 
 ### 前置
 
@@ -170,7 +176,7 @@ npm install
 npm run dev
 ```
 
-开发 SQLite 会在 API 启动时按当前模型建表。若把 `DATABASE_URL` 改成 PostgreSQL，先执行：
+本地开发连 Docker 里的 PostgreSQL（`localhost:5433`）。空库在 API 启动时按当前模型建表；也可用：
 
 ```bash
 cd backend
@@ -179,15 +185,17 @@ alembic upgrade head
 
 ### 访问
 
-| 服务 | 地址 | 说明 |
-|---|---|---|
-| 控制台 | http://localhost:5173 | 日常使用入口 |
-| API / Swagger | http://localhost:8010/docs | 接口文档 |
-| MinIO 控制台 | http://localhost:9001 | `minioadmin` / `minioadmin` |
-| PostgreSQL | localhost:5433 | 仅在改用 PG 时需要 |
-| Redis | localhost:6380 | Worker 与实时进度依赖它 |
 
-打开 http://localhost:5173 。库中还没有账号时，登录页会让你创建第一个账号；之后用该账号登录。
+| 服务            | 地址                                                       | 说明                          |
+| ------------- | -------------------------------------------------------- | --------------------------- |
+| 控制台           | [http://localhost:5173](http://localhost:5173)           | 日常使用入口                      |
+| API / Swagger | [http://localhost:8010/docs](http://localhost:8010/docs) | 接口文档                        |
+| MinIO 控制台     | [http://localhost:9001](http://localhost:9001)           | `minioadmin` / `minioadmin` |
+| PostgreSQL    | localhost:5433                                           | 仅在改用 PG 时需要                 |
+| Redis         | localhost:6380                                           | Worker 与实时进度依赖它             |
+
+
+打开 [http://localhost:5173](http://localhost:5173) 。库中还没有账号时，登录页会让你创建第一个账号；之后用该账号登录。
 
 ```bash
 curl http://localhost:8010/health
@@ -209,9 +217,11 @@ CLAUDE_AGENT_SDK_ENABLED=true
 
 然后：登录 → 设置 → LLM Provider → 新增 → **设为默认**。列表里「默认」才是当前启用的接入点，备用配置不会被任务使用。
 
-| 服务 | Base URL | 模型示例 |
-|---|---|---|
+
+| 服务       | Base URL                             | 模型示例                                    |
+| -------- | ------------------------------------ | --------------------------------------- |
 | DeepSeek | `https://api.deepseek.com/anthropic` | `deepseek-v4-flash` / `deepseek-v4-pro` |
+
 
 保存前可点「测试连接」。改默认后立即生效，不用重启进程。
 
@@ -221,14 +231,14 @@ CLAUDE_AGENT_SDK_ENABLED=true
 
 **Mock（默认）**：`CLAUDE_AGENT_SDK_ENABLED=false`。不调真实模型，用来确认「创建任务 → 进度 → 报告」整条链路能转。
 
-1. 打开 http://localhost:5173，按页面提示创建账号或登录
+1. 打开 [http://localhost:5173，按页面提示创建账号或登录](http://localhost:5173，按页面提示创建账号或登录)
 2. 新建任务，填写 Git 地址和漏洞描述
 3. 打开任务详情看节点进度
 4. 结束后查看报告；需要时上传补充证据
 
 **真实验证**：打开 `CLAUDE_AGENT_SDK_ENABLED=true`，并在设置里配置**默认** LLM Provider。Worker 会按节点拉起隔离容器做白盒分析与靶场复现。
 
-接口文档见 http://localhost:8010/docs（需先登录拿 Token）。
+接口文档见 [http://localhost:8010/docs（需先登录拿](http://localhost:8010/docs（需先登录拿) Token）。
 
 ---
 
@@ -243,8 +253,8 @@ CLAUDE_AGENT_SDK_ENABLED=true
 
 **数据库**
 
-- 开发默认 SQLite，即使 Compose 里起了 PostgreSQL 也不会自动改用它。
-- 生产必须 PostgreSQL，并设置足够长的 `AUTH_SECRET`。
+- 开发连 Docker PostgreSQL（`DATABASE_URL` 指向 `localhost:5433`）。空库在 API 启动时建表。
+- 生产同样是 PostgreSQL，并设置足够长的 `AUTH_SECRET`。
 
 **真实 Agent**
 
@@ -305,7 +315,7 @@ npm run typecheck
 
 ## 尚未完成
 
-完整说明见 [`docs/development-guide.md`](docs/development-guide.md)。当前未做：
+完整说明见 `[docs/development-guide.md](docs/development-guide.md)`。当前未做：
 
 - 平台级 API Key / Service Account、OIDC、RBAC、操作审计日志
 - 生产级部署（嵌套 Docker、mTLS）与 PostgreSQL 生产验证
@@ -317,20 +327,19 @@ npm run typecheck
 
 ## 文档
 
-| 文档 | 内容 |
-|---|---|
-| [docs/development-guide.md](docs/development-guide.md) | 架构决策与后续工作 |
-| [docs/agent-workflow.md](docs/agent-workflow.md) | 六节点如何协作 |
-| [docs/governance/](docs/governance/) | 开发约定 |
-| [CLAUDE.md](CLAUDE.md) | 给协作 AI 的项目入口 |
-| [.claude/api-contract.md](.claude/api-contract.md) | HTTP API 契约 |
+
+| 文档                                                     | 内容           |
+| ------------------------------------------------------ | ------------ |
+| [docs/development-guide.md](docs/development-guide.md) | 架构决策与后续工作    |
+| [docs/agent-workflow.md](docs/agent-workflow.md)       | 六节点如何协作      |
+| [docs/governance/](docs/governance/)                   | 开发约定         |
+| [CLAUDE.md](CLAUDE.md)                                 | 给协作 AI 的项目入口 |
+| [.claude/api-contract.md](.claude/api-contract.md)     | HTTP API 契约  |
+
 
 ---
 
-> **坩埚**：耐高温容器，用于熔炼、提纯。扫描器告警投入验证的烈火，真洞留下证据，误报烧成灰。
 
-<div align="center">
 
 让 AI 像安全研究员一样验证漏洞，而不是像扫描器一样盲射。
 
-</div>

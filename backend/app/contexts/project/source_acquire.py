@@ -170,13 +170,19 @@ def _branch_cache_usable(
 
 
 def _upload_cache(
-    store, project_key: str, sha: str, repo_dir: str, repo_dirname: str, git_host: str
+    store,
+    owner_id: str,
+    project_key: str,
+    sha: str,
+    repo_dir: str,
+    repo_dirname: str,
+    git_host: str,
 ) -> str:
     fd, archive = tempfile.mkstemp(suffix=".tar.gz")
     os.close(fd)
     try:
         pack_project_dir(repo_dir, archive, arcname=repo_dirname)
-        key = source_object_key(git_host, project_key, sha)
+        key = source_object_key(owner_id, git_host, project_key, sha)
         store.upload(key, sha, archive)
         return key
     finally:
@@ -196,6 +202,7 @@ def acquire_source(
     clone_fn: CloneFn | None = None,
     local_sha_fn: ShaFn | None = None,
     remote_sha_fn: RemoteShaFn | None = None,
+    owner_id: str | None = None,
 ) -> SourceAcquireResult:
     """返回源码落地结果。失败时 ok=False 且 error 含网络/权限/空仓等原因。"""
     try:
@@ -261,10 +268,16 @@ def acquire_source(
     sha = sha_fn(dest) or ""
     object_key = None
     object_url = None
-    if sha:
+    if sha and owner_id:
         try:
             object_key = _upload_cache(
-                store, parsed.project_key, sha, dest, parsed.repo_dirname, parsed.host
+                store,
+                owner_id,
+                parsed.project_key,
+                sha,
+                dest,
+                parsed.repo_dirname,
+                parsed.host,
             )
             object_url = object_access_url(object_key)
         except Exception as e:  # noqa: BLE001

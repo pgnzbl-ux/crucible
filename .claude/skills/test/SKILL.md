@@ -13,11 +13,13 @@ cd backend && python tests/smoke_sandbox.py
 
 覆盖：容器创建 / exec / OOM / 网络隔离 / 清理。
 
-## 2. 后端单元测试（待 P1 补）
+## 2. 后端单元测试
 
 ```bash
 cd backend && pytest -x
 ```
+
+pytest 进程覆盖 `DATABASE_URL` 为 sqlite（见 `tests/conftest.py`），不连 `.env` 的 PostgreSQL。
 
 ## 3. 前端类型检查 + 构建
 

@@ -33,7 +33,7 @@ import shutil
 import signal
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -93,16 +93,40 @@ def _worker_engine():
     return create_async_engine(settings.database_url, poolclass=NullPool, connect_args=connect_args)
 
 
+_STARTABLE_TASK_STATUSES = frozenset({"pending", "queued", "running"})
+
+
 async def _load_task(session: AsyncSession, task_id: str) -> Task | None:
     result = await session.execute(select(Task).where(Task.id == task_id))
     return result.scalar_one_or_none()
 
 
-async def _get_or_create_run(session: AsyncSession, task_id: str, run_id: str) -> TaskRun:
-    """复用 API 层创建的 run（run_id），不存在则兜底创建"""
+async def claim_task_run(
+    session: AsyncSession, task_id: str, run_id: str
+) -> tuple[Task | None, TaskRun | None, str | None]:
+    """把 pending/queued/running 认领为 running。终态任务原样拒绝，禁止改回 running。"""
+    task = await _load_task(session, task_id)
+    if task is None:
+        return None, None, "任务不存在"
+    if task.status not in _STARTABLE_TASK_STATUSES:
+        return None, None, f"任务已是 {task.status}，拒绝启动"
+
     run = await session.get(TaskRun, run_id)
+    if run is not None and run.status == "cancelled":
+        return None, None, "运行已取消，拒绝启动"
+
+    claimed = await session.execute(
+        update(Task)
+        .where(Task.id == task_id, Task.status.in_(tuple(_STARTABLE_TASK_STATUSES)))
+        .values(status="running")
+    )
+    if claimed.rowcount == 0:
+        await session.refresh(task)
+        return None, None, f"任务已是 {task.status}，拒绝启动"
+
+    await session.refresh(task)
     if run is None:
-        run = TaskRun(task_id=task_id, status="running", started_at=datetime.now(timezone.utc))
+        run = TaskRun(id=run_id, task_id=task_id, status="running", started_at=datetime.now(timezone.utc))
         session.add(run)
         await session.flush()
         await session.refresh(run)
@@ -110,7 +134,8 @@ async def _get_or_create_run(session: AsyncSession, task_id: str, run_id: str) -
         run.status = "running"
         run.started_at = datetime.now(timezone.utc)
         await session.flush()
-    return run
+    await session.commit()
+    return task, run, None
 
 
 _SKIP_PHASE_MESSAGES = frozenset({"thinking_tokens"})
@@ -134,6 +159,19 @@ def ensure_event_timestamp(event: dict) -> dict:
     return {**event, "timestamp": datetime.now(timezone.utc).timestamp()}
 
 
+async def _resolve_node_run_id(session: AsyncSession, run: TaskRun, event: dict) -> str | None:
+    node_run_id = event.get("node_run_id")
+    if isinstance(node_run_id, str) and node_run_id:
+        return node_run_id
+    node_key = event.get("node_key")
+    if not isinstance(node_key, str) or not node_key:
+        return None
+    result = await session.execute(
+        select(NodeRun.id).where(NodeRun.run_id == run.id, NodeRun.node_key == node_key)
+    )
+    return result.scalar_one_or_none()
+
+
 async def _append_events(session: AsyncSession, run: TaskRun, events: list[dict]) -> None:
     """将执行器事件流持久化为 AgentEvent 行，sequence 从运行内已有事件后递增"""
     base = 0
@@ -152,6 +190,7 @@ async def _append_events(session: AsyncSession, run: TaskRun, events: list[dict]
             AgentEvent(
                 run_id=run.id,
                 task_id=run.task_id,
+                node_run_id=await _resolve_node_run_id(session, run, ev),
                 sequence=i,
                 event_type=ev.get("type", "phase.updated"),
                 payload=json.dumps(ev, ensure_ascii=False, default=str),
@@ -178,6 +217,7 @@ async def _persist_single_event(session: AsyncSession, run: TaskRun, event: dict
         AgentEvent(
             run_id=run.id,
             task_id=run.task_id,
+            node_run_id=await _resolve_node_run_id(session, run, event),
             sequence=next_seq,
             event_type=event_type,
             payload=payload_json,
@@ -290,9 +330,11 @@ async def _platform_preflight_minimal(session: AsyncSession) -> tuple[bool, str 
     from app.contexts.settings.service import SettingsService
 
     provider = await SettingsService(SettingsRepository(session)).get_default_provider()
-    if provider is not None:
-        return True, None
-    return False, "缺少 LLM 凭据：未配置默认 Provider"
+    if provider is None:
+        return False, "缺少 LLM 凭据：未配置默认 Provider"
+    if not (getattr(provider, "api_key_encrypted", None) or "").strip():
+        return False, "缺少 LLM 凭据：默认 Provider 未配置 API Key"
+    return True, None
 
 
 # ── Celery 任务 ──
@@ -313,13 +355,11 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
 
     try:
         async with session_factory() as session:
-            task = await _load_task(session, task_id)
-            if task is None:
-                summary.update(status="failed", error="任务不存在")
+            task, run, claim_err = await claim_task_run(session, task_id, run_id)
+            if claim_err:
+                summary.update(status=task.status if task else "ignored", error=claim_err)
                 return summary
-
-            task.status = "running"
-            run = await _get_or_create_run(session, task_id, run_id)
+            assert task is not None and run is not None
 
             # 1. 最小预检
             ok, preflight_err = await _platform_preflight_minimal(session)
@@ -656,23 +696,13 @@ def _content_type(fname: str) -> str:
     return ct or "application/octet-stream"
 
 
-def _scan_and_upload(project_dir: str, task_id: str) -> list[dict]:
-    """同步扫描 project_dir 的插件产物 → 上传 MinIO，返回 evidence 元数据列表。
-
-    扫描约定（与插件 agent.md / run-project-env SKILL.md 一致）：
-      <project_root>/VULN-<NNN>-<title>/          报告目录
-        ├─ report.md / *.docx / *.pdf              报告正文
-        └─ img/*.png                               截图
-      <project_root>/.vuln-env.json                环境状态
-      <project_root>/.vuln-env/                    靶场配置（Dockerfile/compose/RUN_ENV.md）
-    """
-    from app.contexts.report import storage
-    import uuid
-
-    uploaded: list[dict] = []
+def _scan_artifacts(project_dir: str) -> list[tuple[bytes, str, str, str]]:
+    """扫描插件产物，返回 (data, file_name, content_type, kind)。不上传。"""
+    found: list[tuple[bytes, str, str, str]] = []
     if not os.path.isdir(project_dir):
-        return uploaded
-    def _upload_one(fpath: str, fname: str) -> None:
+        return found
+
+    def _read_one(fpath: str, fname: str) -> None:
         try:
             size = os.path.getsize(fpath)
             if size > _ARTIFACT_MAX_BYTES:
@@ -683,21 +713,8 @@ def _scan_and_upload(project_dir: str, task_id: str) -> list[dict]:
         except OSError as e:
             logger.warning(f"读取产物失败 {fpath}: {e}")
             return
-        key = f"{task_id}/{uuid.uuid4().hex}/{fname}"
-        try:
-            storage.upload_evidence(key, data, _content_type(fname), task_id=task_id)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"上传产物失败 {fname}: {e}")
-            return
-        uploaded.append({
-            "object_key": key,
-            "file_name": fname[:255],
-            "content_type": _content_type(fname)[:128],
-            "size_bytes": len(data),
-            "kind": _classify_artifact(fname),
-        })
+        found.append((data, fname, _content_type(fname), _classify_artifact(fname)))
 
-    # 1. VULN-*/ 报告目录
     for entry in sorted(os.listdir(project_dir)):
         vuln_dir = os.path.join(project_dir, entry)
         if not (entry.startswith("VULN-") and os.path.isdir(vuln_dir)):
@@ -705,43 +722,57 @@ def _scan_and_upload(project_dir: str, task_id: str) -> list[dict]:
         for fname in sorted(os.listdir(vuln_dir)):
             fpath = os.path.join(vuln_dir, fname)
             if os.path.isfile(fpath):
-                _upload_one(fpath, fname)
-        # img/ 子目录（截图，扁平化命名前缀防冲突）
+                _read_one(fpath, fname)
         img_dir = os.path.join(vuln_dir, "img")
         if os.path.isdir(img_dir):
             for fname in sorted(os.listdir(img_dir)):
                 fpath = os.path.join(img_dir, fname)
                 if os.path.isfile(fpath):
-                    _upload_one(fpath, f"img/{fname}")
+                    _read_one(fpath, f"img/{fname}")
 
-    # 2. .vuln-env.json（环境状态）
     env_json = os.path.join(project_dir, ".vuln-env.json")
     if os.path.isfile(env_json):
-        _upload_one(env_json, ".vuln-env.json")
+        _read_one(env_json, ".vuln-env.json")
 
-    # 3. .vuln-env/（靶场配置：Dockerfile/compose/RUN_ENV.md）
     env_dir = os.path.join(project_dir, ".vuln-env")
     if os.path.isdir(env_dir):
         for fname in sorted(os.listdir(env_dir)):
             fpath = os.path.join(env_dir, fname)
             if os.path.isfile(fpath):
-                _upload_one(fpath, f".vuln-env/{fname}")
+                _read_one(fpath, f".vuln-env/{fname}")
 
-    return uploaded
+    return found
 
 
 async def _archive_artifacts(session: AsyncSession, report: Report, host_workdir: str) -> int:
-    """扫描仓库目录的插件产物，上传 MinIO + 落 Evidence（关联 report）。
+    """扫描仓库目录的插件产物，经 ReportService 上传并落 Evidence。
 
-    同步扫描 + 上传走 asyncio.to_thread（storage 是同步客户端）；
     返回归档文件数。失败仅日志（不阻塞主流程）。
     """
-    from app.contexts.report.models import Evidence
+    from app.contexts.report.repository import ReportRepository
+    from app.contexts.report.service import ReportService
 
     project_dir = _discover_repo_dir(host_workdir)
-    metas = await asyncio.to_thread(_scan_and_upload, project_dir, report.task_id)
-    for meta in metas:
-        session.add(Evidence(report_id=report.id, task_id=report.task_id, **meta))
-    if metas:
-        await session.flush()
-    return len(metas)
+    items = await asyncio.to_thread(_scan_artifacts, project_dir)
+    if not items:
+        return 0
+    svc = ReportService(ReportRepository(session))
+    uploaded = 0
+    for data, fname, content_type, kind in items:
+        try:
+            evidence, err = await svc.attach_evidence(
+                report_id=report.id,
+                owner_id=report.owner_id,
+                file_name=fname,
+                content_type=content_type,
+                data=data,
+                kind=kind,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"上传产物失败 {fname}: {e}")
+            continue
+        if evidence is None:
+            logger.warning(f"上传产物失败 {fname}: {err}")
+            continue
+        uploaded += 1
+    return uploaded

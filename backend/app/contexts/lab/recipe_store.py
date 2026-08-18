@@ -1,4 +1,4 @@
-"""Lab 配方 MinIO 存取：key=recipe/{owner_id}/{project_id}/{sha}.tar.gz。"""
+"""Lab 配方打包 / 解包；对象读写走 shared.object_store。"""
 from __future__ import annotations
 
 import io
@@ -6,14 +6,9 @@ import json
 import tarfile
 from pathlib import Path
 
-from minio import Minio
-from minio.error import S3Error
+from app.shared.object_store import KIND_REGISTRY, ObjectNotFoundError, get_object_store
 
-from app.core.config import get_settings
-
-RECIPE_BUCKET = "crucible-lab-recipe"
-
-_client: Minio | None = None
+RECIPE_BUCKET = KIND_REGISTRY["recipe"].bucket
 
 
 def recipe_object_key(owner_id: str, project_id: str, commit_sha: str) -> str:
@@ -47,25 +42,6 @@ def extract_recipe(archive_path: str, dest_workdir: str) -> dict:
     return decoded if isinstance(decoded, dict) else {}
 
 
-def _minio_client() -> Minio:
-    global _client
-    if _client is None:
-        settings = get_settings()
-        _client = Minio(
-            settings.s3_endpoint.replace("http://", "").replace("https://", ""),
-            access_key=settings.s3_access_key,
-            secret_key=settings.s3_secret_key,
-            secure=settings.s3_secure,
-        )
-    return _client
-
-
-def ensure_recipe_bucket() -> None:
-    client = _minio_client()
-    if not client.bucket_exists(RECIPE_BUCKET):
-        client.make_bucket(RECIPE_BUCKET)
-
-
 class MemoryRecipeStore:
     """测试用内存 store，按 object_key 存 tar.gz。"""
 
@@ -84,22 +60,19 @@ class MemoryRecipeStore:
 
 class MinioRecipeStore:
     def upload(self, object_key: str, archive_path: str) -> None:
-        ensure_recipe_bucket()
-        _minio_client().fput_object(
-            RECIPE_BUCKET,
+        get_object_store().put_at(
+            "recipe",
             object_key,
-            archive_path,
+            Path(archive_path).read_bytes(),
             content_type="application/gzip",
-            part_size=5 * 1024 * 1024,
         )
 
     def download(self, object_key: str, dest_path: str) -> None:
         try:
-            _minio_client().fget_object(RECIPE_BUCKET, object_key, dest_path)
-        except S3Error as exc:
-            if exc.code in {"NoSuchKey", "NoSuchBucket", "NoSuchObject"}:
-                raise FileNotFoundError(f"配方不存在: {object_key}") from exc
-            raise
+            data = get_object_store().get_at("recipe", object_key)
+        except ObjectNotFoundError as exc:
+            raise FileNotFoundError(f"配方不存在: {object_key}") from exc
+        Path(dest_path).write_bytes(data)
 
 
 def default_recipe_store() -> MinioRecipeStore:

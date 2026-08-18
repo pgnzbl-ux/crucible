@@ -13,12 +13,12 @@ SHA_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 
 def test_source_bucket_is_platform_constant():
-    assert SOURCE_BUCKET == "crucible-source"
+    assert SOURCE_BUCKET == "crucible-durable"
 
 
 def test_source_object_key_uses_host_project_and_sha():
-    assert source_object_key("github.com", "siteboon/claudecodeui", SHA_A) == (
-        f"source/github.com/siteboon/claudecodeui/{SHA_A}.tar.gz"
+    assert source_object_key("owner-1", "github.com", "siteboon/claudecodeui", SHA_A) == (
+        f"source/owner-1/github.com/siteboon/claudecodeui/{SHA_A}.tar.gz"
     )
 
 

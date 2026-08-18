@@ -134,15 +134,20 @@ async def retry_task(
     task_id: str,
     svc: Annotated[TaskService, Depends(get_task_service)],
     user_id: CurrentUserId,
+    from_node: str | None = None,
 ) -> dict:
-    """重试任务（从节点 0 整条重跑，不复用上一 run 的 NodeRun）。"""
+    """重试任务。
+
+    默认从节点 0 整条重跑；带 from_node=env_ready|audit|reproduce|report 时，
+    复用上一 run 该节点之前的产出，只重跑该节点及之后（不重跑 clone/画像）。
+    """
     try:
-        new_run_id = await svc.retry_task(task_id, user_id)
+        new_run_id = await svc.retry_task(task_id, user_id, from_node=from_node)
     except TaskDispatchError as e:
         raise HTTPException(503, str(e)) from e
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {"task_id": task_id, "run_id": new_run_id, "status": "retrying"}
+    return {"task_id": task_id, "run_id": new_run_id, "status": "retrying", "from_node": from_node}
 
 
 @router.delete("/{task_id}", status_code=204)
