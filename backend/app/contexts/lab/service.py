@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -12,7 +13,6 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.contexts.task.models import Task
 from app.core.config import get_settings
 
 from .errors import LabBusyError, LabNotFoundError
@@ -22,7 +22,6 @@ from .repository import LabRepository
 
 logger = logging.getLogger(__name__)
 
-LIVE_TASK_STATUSES = frozenset({"pending", "queued", "running"})
 RECLAIMABLE_LAB_STATUSES = frozenset({"failed", "expired", "destroyed"})
 
 
@@ -48,6 +47,12 @@ class LabService:
         self.session = session
         self.repository = LabRepository(session)
         self.recipe_store = recipe_store or default_recipe_store()
+
+    def _task_service(self):
+        from app.contexts.task.repository import TaskRepository
+        from app.contexts.task.service import TaskService
+
+        return TaskService(TaskRepository(self.session))
 
     async def download_recipe(
         self,
@@ -294,23 +299,10 @@ class LabService:
     async def bind_task(
         self, task_id: str, lab_id: str, *, commit: bool = True
     ) -> None:
-        task = await self.session.get(Task, task_id)
-        if task is None:
-            raise LookupError(f"Task 不存在: {task_id}")
-        task.lab_id = lab_id
-        if commit:
-            await self.session.commit()
+        await self._task_service().bind_lab(task_id, lab_id, commit=commit)
 
     async def live_task_ids(self, lab_id: str) -> list[str]:
-        result = await self.session.execute(
-            select(Task.id)
-            .where(
-                Task.lab_id == lab_id,
-                Task.status.in_(LIVE_TASK_STATUSES),
-            )
-            .order_by(Task.id)
-        )
-        return list(result.scalars().all())
+        return await self._task_service().list_live_ids(lab_id)
 
     async def list_grouped(self, owner_id: str) -> list[dict]:
         from app.contexts.project.repository import ProjectRepository
@@ -319,26 +311,34 @@ class LabService:
         from . import docker_ops
 
         labs = await self.repository.list_by_owner(owner_id)
+        if not labs:
+            return []
+        live_map = await self._task_service().list_live_ids_by_lab_ids(
+            [lab.id for lab in labs]
+        )
+        project_names = await ProjectService(
+            ProjectRepository(self.session)
+        ).names_by_ids(list({lab.project_id for lab in labs}), owner_id)
+        containers_by_lab = await asyncio.gather(
+            *[docker_ops.list_containers(lab.compose_project) for lab in labs]
+        )
         grouped: dict[str, dict] = {}
-        project_service = ProjectService(ProjectRepository(self.session))
         now = self._now()
-        for lab in labs:
+        for lab, containers in zip(labs, containers_by_lab, strict=True):
             group = grouped.get(lab.project_id)
             if group is None:
-                project = await project_service.get_project(lab.project_id, owner_id)
                 group = {
                     "project_id": lab.project_id,
-                    "project_name": project.name if project else lab.project_id,
+                    "project_name": project_names.get(lab.project_id, lab.project_id),
                     "labs": [],
                 }
                 grouped[lab.project_id] = group
-            live_ids = await self.live_task_ids(lab.id)
             group["labs"].append(
                 await self._management_dict(
                     lab,
                     now=now,
-                    live_task_count=len(live_ids),
-                    containers=await docker_ops.list_containers(lab.compose_project),
+                    live_task_count=len(live_map.get(lab.id, [])),
+                    containers=containers,
                 )
             )
         return list(grouped.values())

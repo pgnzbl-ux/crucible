@@ -17,6 +17,17 @@ class ProjectRepository:
     async def get_by_id(self, project_id: str) -> Project | None:
         return await self.session.get(Project, project_id)
 
+    async def names_by_ids(self, project_ids: list[str], owner_id: str) -> dict[str, str]:
+        if not project_ids:
+            return {}
+        result = await self.session.execute(
+            select(Project.id, Project.name).where(
+                Project.id.in_(project_ids),
+                Project.owner_id == owner_id,
+            )
+        )
+        return {project_id: name for project_id, name in result.all()}
+
     async def get_by_git_url(self, git_url: str, owner_id: str) -> Project | None:
         from .git_url import git_url_lookup_candidates
 

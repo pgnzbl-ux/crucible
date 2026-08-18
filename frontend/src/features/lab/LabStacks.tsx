@@ -12,7 +12,7 @@ import {
 } from '../../shared/lib/api'
 import { safeHttpUrl } from '../../shared/lib/safeUrl'
 import { useErrorToast } from '../../shared/hooks/useErrorToast'
-import { canMutateLab } from './labUi'
+import { canMutateLab, shouldPollLabs } from './labUi'
 
 const { Link, Text } = Typography
 const OCCUPIED_TIP = '有验证任务占用，请先取消任务'
@@ -83,11 +83,7 @@ export function LabStacks() {
   const { data, error, isError, isLoading } = useQuery({
     queryKey: ['labs'],
     queryFn: () => api.listLabs(),
-    refetchInterval: (query) => {
-      const groups = query.state.data?.items ?? []
-      const hasCreatingLab = groups.some((group) => group.labs.some((lab) => lab.status === 'creating'))
-      return hasCreatingLab ? 3000 : false
-    },
+    refetchInterval: (query) => (shouldPollLabs(query.state.data?.items) ? 3000 : false),
   })
   useErrorToast(isError, error, '靶场列表加载失败')
 

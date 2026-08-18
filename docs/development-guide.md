@@ -267,7 +267,7 @@ P0 全部完成。每个 P1 完成后跑一遍全链路冒烟（任务创建 →
 | Windows 下 Celery 用 solo pool | `run_worker.py` 已固定 `--pool=solo` |
 | **chromium headless 在 read_only rootfs 下崩溃** | 需额外挂 `/tmp` tmpfs + 容器 env `HOME=/tmp`（crashpad / ProcessSingleton 依赖可写 HOME；HOME 不得指向共享 `/workspace`，否则后续节点会读到上一跳 SDK 缓存），且 `/workspace` 不能挂 `noexec`（chromium + 搭靶场二进制都需可执行） |
 | **nginx/反代默认缓冲 SSE** | 响应头加 `X-Accel-Buffering: no` + `Cache-Control: no-cache, no-transform`（sse.py 端点已加） |
-| **Redis Pub/Sub 离线即丢消息** | SSE 连接先订阅 Pub/Sub 再回放 DB 历史（`_replay_history`），实时帧丢掉已回放的 sequence |
+| **Redis Pub/Sub 离线即丢消息** | SSE 连接先订阅 Pub/Sub 再回放 DB 历史（`_replay_history`），实时帧丢掉已回放的 sequence；断线续播带 `Last-Event-ID` / `last_event_id` |
 | **EventSource 无法注入 Authorization header** | token 走 query 参数 `?token=xxx`（前端 useTaskEvents + 后端 SSE owner 校验已接入） |
 | **SSE 客户端断开不清理 → Redis 连接泄漏** | `stream_task_events` finally 块强制 `unsubscribe + pubsub.close + r.close`；并发规范见 concurrency.md §5 |
 

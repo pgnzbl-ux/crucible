@@ -829,6 +829,7 @@ async def _archive_artifacts(session: AsyncSession, report: Report, host_workdir
                 content_type=content_type,
                 data=data,
                 kind=kind,
+                report=report,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning(f"上传产物失败 {fname}: {e}")

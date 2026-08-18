@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react'
+import { useMemo } from 'react'
 import { Button, Steps, Typography } from 'antd'
 import {
   CheckCircleOutlined,
@@ -76,7 +76,7 @@ export function NodeSteps({
   onSelectNode,
   onRetryFromNode,
 }: NodeStepsProps) {
-  const { data: nodes, refetch } = useQuery({
+  const { data: nodes } = useQuery({
     queryKey: ['run-nodes', taskId, runId],
     queryFn: () => api.getRunNodes(taskId, runId!),
     enabled: !!taskId && !!runId,
@@ -87,17 +87,6 @@ export function NodeSteps({
         sseLive: sseStatus === 'open',
       }),
   })
-
-  const lastNodeUpdate = useMemo(() => {
-    for (let i = sseEvents.length - 1; i >= 0; i--) {
-      if (sseEvents[i].type === 'node.updated') return sseEvents[i]
-    }
-    return null
-  }, [sseEvents])
-
-  useEffect(() => {
-    if (lastNodeUpdate) refetch()
-  }, [lastNodeUpdate, refetch])
 
   const sseOverlay = useMemo(() => overlayFromSseEvents(sseEvents), [sseEvents])
 

@@ -503,6 +503,7 @@ export function SettingsPage() {
       <PageContainer>
       <Tabs
         type="card"
+        destroyOnHidden
         items={[
           { key: 'providers', label: 'LLM Provider', children: <ProviderPanel /> },
           { key: 'credentials', label: '任务凭据', children: <CredentialsPanel /> },

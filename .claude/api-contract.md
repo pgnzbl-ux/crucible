@@ -162,6 +162,8 @@
 - 响应头：`X-Accel-Buffering: no` + `Cache-Control: no-cache, no-transform`（防 nginx/反代缓冲）
 - 事件名 = `Event.event_type`（`phase.updated` / `agent.thinking` / `agent.message` / `tool.call.*` / `agent.completed` / `agent.failed` / `node.updated` / `ready` / `error`）
 - 启动先回放 **当前 run** DB 最近 1000 条（帧含 `replayed: true`），再订阅 Redis `task.{id}.events` 频道转发实时事件
+- 续播：请求带 `Last-Event-ID` header 或 `?last_event_id=`（EventSource 自管重连不能自定义 header，前端用 query）时，只回放 **sequence 更大** 的历史，实时帧同样丢掉已见过的 sequence
+- 每条事件帧带 SSE `id:`（值为 sequence），便于浏览器原生重连带 `Last-Event-ID`
 - `agent.failed` 的 `event` 含 `error`（原文）、`title`（人类可读）、`hint`（下一步）
 - 15s 心跳：`: heartbeat\n\n`
 - 客户端断开 → 立即 `unsubscribe` + 关闭 Redis 连接（防泄漏）

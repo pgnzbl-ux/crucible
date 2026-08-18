@@ -85,6 +85,9 @@ class ProjectService:
             return None
         return _to_response(p)
 
+    async def names_by_ids(self, project_ids: list[str], owner_id: str) -> dict[str, str]:
+        return await self.repo.names_by_ids(project_ids, owner_id)
+
     async def list_projects(
         self, owner_id: str, limit: int = 50, offset: int = 0
     ) -> ProjectListResponse:

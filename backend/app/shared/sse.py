@@ -48,18 +48,46 @@ def _sse_frame(event_type: str, data: dict[str, Any] | str, event_id: str | None
     return "\n".join(parts) + "\n\n"
 
 
+def _parse_event_seq(raw: object) -> int | None:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_last_event_id(request: Request) -> int:
+    """浏览器 EventSource 自动重连带 Last-Event-ID；自管重连走 ?last_event_id=。"""
+    parsed = _parse_event_seq(request.headers.get("last-event-id"))
+    if parsed is None:
+        parsed = _parse_event_seq(request.query_params.get("last_event_id"))
+    if parsed is None:
+        return 0
+    return max(0, parsed)
+
+
+def should_replay_history_event(sequence: object, after_seq: int) -> bool:
+    """Last-Event-ID 之后的历史才回放；已见过的 sequence 跳过。"""
+    parsed = _parse_event_seq(sequence)
+    if parsed is None:
+        return True
+    return parsed > after_seq
+
+
 def should_emit_live_sse(last_replayed_seq: int, incoming_seq: object) -> bool:
     """回放之后的实时帧：sequence 已见过则丢掉。"""
     if incoming_seq is None or incoming_seq == "":
         return True
-    try:
-        seq = int(incoming_seq)
-    except (TypeError, ValueError):
-        return True
-    return seq > last_replayed_seq
+    return should_replay_history_event(incoming_seq, last_replayed_seq)
 
 
-async def _replay_history(task_id: str, limit: int = 1000) -> tuple[list[str], int]:
+async def _replay_history(
+    task_id: str, limit: int = 1000, after_seq: int = 0
+) -> tuple[list[str], int]:
     """订阅前先回放历史事件（DB 已落库），让前端一连接就拿到完整进度
 
     通过 DB 读 AgentEvent 行 — 比 Redis Pub/Sub 持久可靠（Pub/Sub 离线即丢）。
@@ -76,10 +104,12 @@ async def _replay_history(task_id: str, limit: int = 1000) -> tuple[list[str], i
             events = await TaskRepository(session).get_events_for_task(task_id, limit)
     except Exception as e:  # noqa: BLE001 — DB 读失败不影响后续实时流
         logger.warning(f"SSE 历史回放失败（仅实时流可用）: {e}")
-        return frames, 0
+        return frames, after_seq
 
-    last_seq = 0
+    last_seq = after_seq
     for ev in events:
+        if not should_replay_history_event(ev.sequence, after_seq):
+            continue
         try:
             payload = json.loads(ev.payload)
         except (ValueError, TypeError):
@@ -141,7 +171,9 @@ async def stream_task_events(
         await r.close()
         return
 
-    frames, last_replayed_seq = await _replay_history(task_id)
+    frames, last_replayed_seq = await _replay_history(
+        task_id, after_seq=parse_last_event_id(request)
+    )
     for frame in frames:
         yield frame
 

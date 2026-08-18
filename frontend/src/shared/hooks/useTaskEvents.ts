@@ -6,6 +6,7 @@
  * - 自动断线重连：onerror 后 delay 重连（指数退避 1s→2s→4s 上限 10s）
  * - 客户端组件卸载自动关闭
  * - token 通过 query 注入（EventSource 不支持自定义 header）
+ * - 自管重连带 last_event_id，服务端跳过已回放 sequence
  *
  * 返回：
  * - events: 累积的全部事件数组（包含历史回放 + 实时推送）
@@ -17,8 +18,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 
 import { api, isUnauthorizedError } from '../lib/api'
-
-const API_BASE = '/api/v1'
+import { buildTaskEventStreamUrl } from '../lib/taskEventStream'
 
 export interface SSEEvent<T = unknown> {
   type: string // event_type
@@ -87,9 +87,7 @@ export function useTaskEvents<T = unknown>(
     setStatus('connecting')
 
     const token = localStorage.getItem('crucible_token')
-    const url = new URL(`${API_BASE}/tasks/${taskId}/events/stream`, window.location.origin)
-    if (token) url.searchParams.set('token', token)
-    const urlString = url.toString()
+    const lastEventIdRef = { current: 0 as number }
 
     let es: EventSource | null = null
 
@@ -133,6 +131,12 @@ export function useTaskEvents<T = unknown>(
 
     const connect = () => {
       if (closedByUnmountRef.current) return
+      const urlString = buildTaskEventStreamUrl({
+        origin: window.location.origin,
+        taskId,
+        token,
+        lastEventId: lastEventIdRef.current,
+      })
       const newEs = new EventSource(urlString)
       es = newEs
       eventSourceRef.current = newEs
@@ -145,6 +149,9 @@ export function useTaskEvents<T = unknown>(
             setStatus('open')
             reconnectAttemptsRef.current = 0
             return
+          }
+          if (typeof parsed.sequence === 'number' && parsed.sequence > lastEventIdRef.current) {
+            lastEventIdRef.current = parsed.sequence
           }
           // 去重：同一 run 的 sequence 不重复（历史回放 + 实时推送短暂重叠）
           const eventKey = parsed.sequence == null

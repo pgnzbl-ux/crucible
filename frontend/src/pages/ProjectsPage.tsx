@@ -10,6 +10,7 @@ import { api, type Project } from '../shared/lib/api'
 import { useErrorToast } from '../shared/hooks/useErrorToast'
 import { PageHeader } from '../shared/components/PageHeader'
 import { PageContainer } from '../shared/components/PageContainer'
+import { tableRowNavigateProps } from '../shared/lib/tableRowNavigate'
 
 const { Text } = Typography
 
@@ -101,10 +102,7 @@ export function ProjectsPage() {
               setPageSize(nextPageSize)
             },
           }}
-          onRow={(row) => ({
-            onClick: () => navigate(`/projects/${row.id}`),
-            style: { cursor: 'pointer' },
-          })}
+          onRow={(row) => tableRowNavigateProps(() => navigate(`/projects/${row.id}`))}
           locale={{
             emptyText: (
               <Empty

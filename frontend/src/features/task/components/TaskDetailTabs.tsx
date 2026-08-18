@@ -75,6 +75,19 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
     }
   }, [sseEvents, qc, taskId])
 
+  const lastNodeUpdate = useMemo(() => {
+    for (let i = sseEvents.length - 1; i >= 0; i--) {
+      if (sseEvents[i].type === 'node.updated') return sseEvents[i]
+    }
+    return null
+  }, [sseEvents])
+
+  useEffect(() => {
+    if (lastNodeUpdate) {
+      qc.invalidateQueries({ queryKey: ['run-nodes', taskId] })
+    }
+  }, [lastNodeUpdate, qc, taskId])
+
   const events = useMemo(() => {
     const merged = mergeTaskEvents(restEvents, sseEvents as SSEEvent[])
     return dropNoisyEvents(eventsForRun(merged, task?.runs[0]?.id))
@@ -267,6 +280,7 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
         onChange={(key) => onTabChange(key as TaskDetailTab)}
         items={tabItems}
         type="card"
+        destroyOnHidden
       />
     </div>
   )

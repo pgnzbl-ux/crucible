@@ -81,9 +81,7 @@ class ReportRepository:
     async def list_evidence(
         self, report_id: str, owner_id: str
     ) -> list[Evidence] | None:
-        if await self.get_by_id(report_id, owner_id) is None:
+        report = await self.get_by_id(report_id, owner_id)
+        if report is None:
             return None
-        result = await self.session.execute(
-            select(Evidence).where(Evidence.report_id == report_id).order_by(Evidence.created_at)
-        )
-        return list(result.scalars().all())
+        return list(report.evidence)

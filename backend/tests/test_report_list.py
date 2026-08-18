@@ -140,6 +140,62 @@ async def test_attach_evidence_writes_task_bucket_and_owner_key(session):
 
 
 @pytest.mark.asyncio
+async def test_attach_evidence_reuses_loaded_report(session):
+    from app.contexts.report.models import Report
+    from app.contexts.report.repository import ReportRepository
+    from app.contexts.report.service import ReportService
+    from app.shared.object_store import MemoryObjectStore, set_object_store_for_tests
+
+    report = Report(
+        task_id="t-ev3",
+        run_id="r-ev3",
+        owner_id="u1",
+        status="generated",
+        title="证据",
+    )
+    session.add(report)
+    await session.flush()
+
+    repo = ReportRepository(session)
+    calls = {"n": 0}
+    original = repo.get_by_id
+
+    async def counted(*args, **kwargs):
+        calls["n"] += 1
+        return await original(*args, **kwargs)
+
+    repo.get_by_id = counted  # type: ignore[method-assign]
+    loaded = await original(report.id, "u1")
+    store = MemoryObjectStore()
+    set_object_store_for_tests(store)
+    try:
+        first, err1 = await ReportService(repo).attach_evidence(
+            report_id=report.id,
+            owner_id="u1",
+            file_name="a.log",
+            content_type="text/plain",
+            data=b"a",
+            kind="log",
+            report=loaded,
+        )
+        second, err2 = await ReportService(repo).attach_evidence(
+            report_id=report.id,
+            owner_id="u1",
+            file_name="b.log",
+            content_type="text/plain",
+            data=b"b",
+            kind="log",
+            report=loaded,
+        )
+    finally:
+        set_object_store_for_tests(None)
+
+    assert err1 is None and err2 is None
+    assert first is not None and second is not None
+    assert calls["n"] == 0
+
+
+@pytest.mark.asyncio
 async def test_list_reports_filters_by_verdict_and_query(session):
     from app.contexts.report.models import Report
     from app.contexts.report.repository import ReportRepository

@@ -41,6 +41,7 @@ frontend/src/
 ## 4. SSE
 
 - `GET /api/v1/tasks/{id}/events/stream`；token 只能走 query（EventSource 无自定义 header）
+- 自管重连带 `last_event_id` query（原生 `Last-Event-ID` header 同样识别），避免整段历史再回放
 - 401 时先 `GET /auth/me`，过期则停重连
 - 任务详情独立路由 `TaskDetailPage` + `TaskDetailTabs`，**不是**列表 Drawer
 

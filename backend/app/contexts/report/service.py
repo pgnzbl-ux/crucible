@@ -225,12 +225,17 @@ class ReportService:
         content_type: str,
         data: bytes,
         kind: str = "artifact",
+        report: Report | None = None,
     ) -> tuple[EvidenceResponse | None, str | None]:
         """给报告追加一个证据文件：上传 MinIO + 落 evidences 表。
 
         返回 (evidence, error)。report 不存在或越权返回 (None, error)。
+        归档循环可传入已加载的 report，避免每文件再查一次。
         """
-        report = await self.repo.get_by_id(report_id, owner_id)
+        if report is None:
+            report = await self.repo.get_by_id(report_id, owner_id)
+        elif report.id != report_id or report.owner_id != owner_id:
+            return None, "报告不存在"
         if not report:
             return None, "报告不存在"
         # kind 白名单（防任意值落库）

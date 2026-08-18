@@ -22,6 +22,8 @@ _NODE_INDEX = {
     "source": 0, "profile": 1, "env_ready": 2, "audit": 3, "reproduce": 4, "report": 5,
 }
 _RETRYABLE_FROM_NODES = ("env_ready", "audit", "reproduce", "report")
+# Lab 占用：pending/queued/running。needs_review 不算 live（不续 TTL）。
+LIVE_TASK_STATUSES = frozenset({"pending", "queued", "running"})
 # 前置节点视为"可续跑"的终态:completed(有产出可复用)或 skipped(分支出口跳过)。
 _RESUMABLE_STATUSES = ("completed", "skipped")
 
@@ -271,6 +273,21 @@ class TaskService:
                 }
             )
         return result
+
+    async def list_live_ids(self, lab_id: str) -> list[str]:
+        mapping = await self.list_live_ids_by_lab_ids([lab_id])
+        return mapping.get(lab_id, [])
+
+    async def list_live_ids_by_lab_ids(self, lab_ids: list[str]) -> dict[str, list[str]]:
+        return await self.repo.list_live_ids_by_lab_ids(lab_ids, LIVE_TASK_STATUSES)
+
+    async def bind_lab(self, task_id: str, lab_id: str, *, commit: bool = True) -> None:
+        task = await self.repo.get_by_id(task_id)
+        if task is None:
+            raise LookupError(f"Task 不存在: {task_id}")
+        task.lab_id = lab_id
+        if commit:
+            await self.session.commit()
 
     async def retry_task(
         self, task_id: str, owner_id: str, from_node: str | None = None

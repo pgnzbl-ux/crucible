@@ -186,6 +186,23 @@ class TaskRepository:
         )
         return list(reversed(list(result.scalars().all())))
 
+    async def list_live_ids_by_lab_ids(
+        self, lab_ids: list[str], statuses: frozenset[str]
+    ) -> dict[str, list[str]]:
+        out: dict[str, list[str]] = {lab_id: [] for lab_id in lab_ids}
+        if not lab_ids:
+            return out
+        result = await self.session.execute(
+            select(Task.lab_id, Task.id)
+            .where(Task.lab_id.in_(lab_ids), Task.status.in_(statuses))
+            .order_by(Task.id)
+        )
+        for lab_id, task_id in result.all():
+            if lab_id is None:
+                continue
+            out.setdefault(lab_id, []).append(task_id)
+        return out
+
     async def delete_hard(self, task: Task) -> None:
         """物理删除任务 + 级联清理 runs/nodes/events。
 

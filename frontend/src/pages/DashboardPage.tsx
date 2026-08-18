@@ -16,6 +16,7 @@ import { useLocation } from 'wouter'
 import { api, type TaskStats, type TaskSummary } from '../shared/lib/api'
 import { getStatusMeta, getPriorityMeta } from '../shared/lib/meta'
 import { statsPollMs, sumTaskStats } from '../shared/lib/taskListQuery'
+import { tableRowNavigateProps } from '../shared/lib/tableRowNavigate'
 import { useErrorToast } from '../shared/hooks/useErrorToast'
 import { PageHeader } from '../shared/components/PageHeader'
 import { StatCard } from '../features/dashboard/components/StatCard'
@@ -144,10 +145,9 @@ export function DashboardPage() {
                 columns={recentColumns}
                 dataSource={tasks.slice(0, 8)}
                 pagination={false}
-                onRow={(row) => ({
-                  onClick: () => navigate(`/tasks/${row.id}?tab=progress`),
-                  style: { cursor: 'pointer' },
-                })}
+                onRow={(row) =>
+                  tableRowNavigateProps(() => navigate(`/tasks/${row.id}?tab=progress`))
+                }
               />
             ) : (
               <Empty description="暂无任务">

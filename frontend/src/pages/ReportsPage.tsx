@@ -11,6 +11,7 @@ import { getVerdictMeta, getReportStatusMeta, VERDICT_META } from '../shared/lib
 import { useErrorToast } from '../shared/hooks/useErrorToast'
 import { PageHeader } from '../shared/components/PageHeader'
 import { PageContainer } from '../shared/components/PageContainer'
+import { tableRowNavigateProps } from '../shared/lib/tableRowNavigate'
 
 const { Text } = Typography
 
@@ -140,10 +141,7 @@ export function ReportsPage() {
               setPageSize(nextPageSize)
             },
           }}
-          onRow={(row) => ({
-            onClick: () => navigate(`/reports/${row.id}`),
-            style: { cursor: 'pointer' },
-          })}
+          onRow={(row) => tableRowNavigateProps(() => navigate(`/reports/${row.id}`))}
         />
       </PageContainer>
     </>

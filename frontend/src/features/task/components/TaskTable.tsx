@@ -12,6 +12,7 @@ import { useLocation } from 'wouter'
 import type { TaskSummary } from '../../../shared/lib/api'
 import { getStatusMeta, getPriorityMeta, getVerdictMeta } from '../../../shared/lib/meta'
 import { canCancel, canDelete, canRetry, CONFIRM_COPY } from '../../../shared/lib/taskActions'
+import { tableRowNavigateProps } from '../../../shared/lib/tableRowNavigate'
 
 const { Text } = Typography
 
@@ -177,10 +178,7 @@ export function TaskTable({
         showTotal: (t) => `共 ${t} 条`,
         onChange: onPageChange,
       }}
-      onRow={(row) => ({
-        onClick: () => navigate(`/tasks/${row.id}?tab=progress`),
-        style: { cursor: 'pointer' },
-      })}
+      onRow={(row) => tableRowNavigateProps(() => navigate(`/tasks/${row.id}?tab=progress`))}
     />
   )
 }
