@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { Alert, App, Button, Collapse, Empty, Popconfirm, Space, Table, Tag, Tooltip, Typography } from 'antd'
+import { App, Button, Collapse, Empty, Popconfirm, Space, Table, Tag, Tooltip, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
@@ -10,6 +10,8 @@ import {
   type LabContainer,
   type LabContainerAction,
 } from '../../shared/lib/api'
+import { safeHttpUrl } from '../../shared/lib/safeUrl'
+import { useErrorToast } from '../../shared/hooks/useErrorToast'
 import { canMutateLab } from './labUi'
 
 const { Link, Text } = Typography
@@ -87,6 +89,7 @@ export function LabStacks() {
       return hasCreatingLab ? 3000 : false
     },
   })
+  useErrorToast(isError, error, '靶场列表加载失败')
 
   const mutation = useMutation({
     mutationFn: (input: MutationInput) => {
@@ -207,14 +210,17 @@ export function LabStacks() {
     {
       title: '访问地址',
       dataIndex: 'target_url',
-      render: (url: string | null) =>
-        url ? (
-          <Link href={url} target="_blank" rel="noreferrer">
-            {url}
-          </Link>
-        ) : (
-          '—'
-        ),
+      render: (url: string | null) => {
+        const href = safeHttpUrl(url)
+        if (href) {
+          return (
+            <Link href={href} target="_blank" rel="noopener noreferrer">
+              {url}
+            </Link>
+          )
+        }
+        return url || '—'
+      },
     },
     {
       title: '剩余时间',
@@ -254,12 +260,13 @@ export function LabStacks() {
     },
   ]
 
-  if (isError) {
-    return <Alert type="error" showIcon message="靶场列表加载失败" description={error.message} />
-  }
-
   if (!isLoading && !(data?.items.length)) {
-    return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无靶场" />
+    return (
+      <Empty
+        image={Empty.PRESENTED_IMAGE_SIMPLE}
+        description={isError ? '靶场列表加载失败' : '暂无靶场'}
+      />
+    )
   }
 
   return (

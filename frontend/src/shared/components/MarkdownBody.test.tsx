@@ -26,4 +26,9 @@ describe('MarkdownBody', () => {
     expect(html).not.toMatch(/<script[\s>]/i)
     expect(html).toMatch(/<strong>确认<\/strong>/)
   })
+
+  it('does not turn javascript: links into clickable hrefs', () => {
+    const html = renderToStaticMarkup(<MarkdownBody source={'[x](javascript:alert(1))'} />)
+    expect(html).not.toContain('javascript:')
+  })
 })

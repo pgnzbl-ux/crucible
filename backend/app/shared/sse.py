@@ -48,7 +48,18 @@ def _sse_frame(event_type: str, data: dict[str, Any] | str, event_id: str | None
     return "\n".join(parts) + "\n\n"
 
 
-async def _replay_history(task_id: str, limit: int = 1000) -> list[str]:
+def should_emit_live_sse(last_replayed_seq: int, incoming_seq: object) -> bool:
+    """回放之后的实时帧：sequence 已见过则丢掉。"""
+    if incoming_seq is None or incoming_seq == "":
+        return True
+    try:
+        seq = int(incoming_seq)
+    except (TypeError, ValueError):
+        return True
+    return seq > last_replayed_seq
+
+
+async def _replay_history(task_id: str, limit: int = 1000) -> tuple[list[str], int]:
     """订阅前先回放历史事件（DB 已落库），让前端一连接就拿到完整进度
 
     通过 DB 读 AgentEvent 行 — 比 Redis Pub/Sub 持久可靠（Pub/Sub 离线即丢）。
@@ -65,8 +76,9 @@ async def _replay_history(task_id: str, limit: int = 1000) -> list[str]:
             events = await TaskRepository(session).get_events_for_task(task_id, limit)
     except Exception as e:  # noqa: BLE001 — DB 读失败不影响后续实时流
         logger.warning(f"SSE 历史回放失败（仅实时流可用）: {e}")
-        return frames
+        return frames, 0
 
+    last_seq = 0
     for ev in events:
         try:
             payload = json.loads(ev.payload)
@@ -84,7 +96,9 @@ async def _replay_history(task_id: str, limit: int = 1000) -> list[str]:
                 event_id=str(ev.sequence),
             )
         )
-    return frames
+        if ev.sequence > last_seq:
+            last_seq = ev.sequence
+    return frames, last_seq
 
 
 async def stream_task_events(
@@ -95,10 +109,9 @@ async def stream_task_events(
 
     流程：
       1. 验证 task 存在（不存在 → 404 帧 + 关闭）
-      2. 回放历史事件
-      3. 订阅 Redis 频道 task.{task_id}.events
-      4. 循环：get_message(timeout=1.0) → yield 帧；每 15s yield 心跳
-      5. 客户端断开（request.is_disconnected）→ 退出
+      2. 先订阅 Redis，再回放历史，避免窗口丢事件
+      3. 循环：get_message(timeout=1.0) → yield 帧（丢掉已回放的 sequence）；每 15s yield 心跳
+      4. 客户端断开（request.is_disconnected）→ 退出
     """
     # 1. 验证 task 存在
     from app.core.database import async_session_factory
@@ -115,11 +128,7 @@ async def stream_task_events(
         yield _sse_frame("error", {"code": "INTERNAL_ERROR", "message": "服务暂时不可用"})
         return
 
-    # 2. 回放历史
-    for frame in await _replay_history(task_id):
-        yield frame
-
-    # 3. 订阅 Redis
+    # 2. 先订阅，再回放（订阅后到回放完成之间的 publish 会进缓冲）
     channel = f"task.{task_id}.events"
     r = aioredis.from_url(settings.redis_url, decode_responses=True)
     pubsub = r.pubsub()
@@ -132,10 +141,14 @@ async def stream_task_events(
         await r.close()
         return
 
+    frames, last_replayed_seq = await _replay_history(task_id)
+    for frame in frames:
+        yield frame
+
     logger.info(f"SSE 订阅 task={task_id} channel={channel}")
     yield _sse_frame("ready", {"task_id": task_id, "channel": channel})
 
-    # 4. 主循环：每 1s 检查新消息，每 15s 发心跳
+    # 3. 主循环：每 1s 检查新消息，每 15s 发心跳
     last_heartbeat = asyncio.get_event_loop().time()
     try:
         while True:
@@ -155,15 +168,22 @@ async def stream_task_events(
                 try:
                     event_dict = json.loads(msg["data"])
                     payload_data = event_dict.get("payload", {})
+                    incoming_seq = payload_data.get("sequence")
+                    if not should_emit_live_sse(last_replayed_seq, incoming_seq):
+                        continue
+                    try:
+                        last_replayed_seq = max(last_replayed_seq, int(incoming_seq))
+                    except (TypeError, ValueError):
+                        pass
                     yield _sse_frame(
                         event_type=event_dict.get("event_type", "event"),
                         data={
-                            "sequence": payload_data.get("sequence"),
+                            "sequence": incoming_seq,
                             "run_id": payload_data.get("run_id"),
                             "event": payload_data.get("event"),
                             "correlation_id": event_dict.get("correlation_id"),
                         },
-                        event_id=str(payload_data.get("sequence") or ""),
+                        event_id=str(incoming_seq or ""),
                     )
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"SSE 解析消息失败: {e}")

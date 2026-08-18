@@ -1,6 +1,7 @@
 import { Space, Tag, Typography } from 'antd'
 
 import { parseInitialCreds } from '../lib/nodeOutput'
+import { safeHttpUrl } from '../lib/safeUrl'
 
 const { Link, Text } = Typography
 
@@ -16,15 +17,18 @@ function str(v: unknown): string {
 export function EnvReadyDetail({ output }: EnvReadyDetailProps) {
   const o = output ?? {}
   const url = str(o.target_url)
+  const href = safeHttpUrl(url)
   const creds = parseInitialCreds(o.initial_creds)
 
   return (
     <div className="crucible-env-ready">
       <Space size={[8, 4]} wrap>
-        {url ? (
-          <Link href={url} target="_blank" rel="noreferrer">
+        {href ? (
+          <Link href={href} target="_blank" rel="noopener noreferrer">
             {url}
           </Link>
+        ) : url ? (
+          <Text type="secondary">{url}</Text>
         ) : (
           <Text type="secondary">靶场已就绪</Text>
         )}

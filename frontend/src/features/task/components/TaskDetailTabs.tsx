@@ -18,7 +18,7 @@ import { useLocation } from 'wouter'
 import type { TaskDetail } from '../../../shared/lib/api'
 import { api } from '../../../shared/lib/api'
 import { getStatusMeta, getPriorityMeta, getVerdictMeta, getReportStatusMeta, NODE_LABELS } from '../../../shared/lib/meta'
-import { canCancel, canRetry, shouldFetchTaskReport } from '../../../shared/lib/taskActions'
+import { canCancel, canRetry, reportBelongsToCurrentRun, shouldFetchTaskReport } from '../../../shared/lib/taskActions'
 import type { TaskDetailTab } from '../../../shared/lib/taskActions'
 import { useTaskEvents, type SSEEvent } from '../../../shared/hooks/useTaskEvents'
 import { dropNoisyEvents, eventsForRun, eventsForNode, mergeTaskEvents } from '../../../shared/lib/taskEvents'
@@ -27,6 +27,9 @@ import { ReportContent } from '../../../shared/components/ReportContent'
 import { EvidenceList } from './EvidenceList'
 import { TaskEventTimeline } from './TaskEventTimeline'
 import { FileTextOutlined } from '@ant-design/icons'
+import { tryLockTaskAction, unlockTaskAction } from '../../../shared/lib/taskActionLock'
+import { applyTaskMutationCache } from '../../../shared/lib/taskCache'
+import { useErrorToast } from '../../../shared/hooks/useErrorToast'
 
 const { Title, Paragraph, Text } = Typography
 
@@ -52,11 +55,12 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
     enabled: sseEnabled,
   })
 
-  const { data: restEvents } = useQuery({
+  const { data: restEvents, isError: isEventsError, error: eventsError } = useQuery({
     queryKey: ['task-events', taskId],
     queryFn: () => api.getTaskEvents(taskId),
     enabled: !!taskId,
   })
+  useErrorToast(isEventsError, eventsError, '事件列表加载失败')
 
   useEffect(() => {
     const last = sseEvents[sseEvents.length - 1]
@@ -67,6 +71,7 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
       qc.invalidateQueries({ queryKey: ['task-events', taskId] })
       qc.invalidateQueries({ queryKey: ['run-nodes', taskId] })
       qc.invalidateQueries({ queryKey: ['tasks'] })
+      qc.invalidateQueries({ queryKey: ['task-stats'] })
     }
   }, [sseEvents, qc, taskId])
 
@@ -83,12 +88,13 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
     onTabChange('events')
   }
 
-  const { data: report } = useQuery({
+  const { data: report, isError: isReportError, error: reportError } = useQuery({
     queryKey: ['task-report', taskId],
     queryFn: () => api.getReportByTask(taskId),
     enabled: !!taskId && shouldFetchTaskReport(task?.status ?? ''),
     retry: false,
   })
+  useErrorToast(isReportError, reportError, '报告加载失败')
 
   const publishMutation = useMutation({
     mutationFn: (rid: string) => api.publishReport(rid),
@@ -102,14 +108,22 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
   })
 
   const retryFromNodeMutation = useMutation({
+    mutationKey: ['task-action', taskId],
     mutationFn: (fromNode: string) => api.retryTask(taskId, fromNode),
+    onMutate: () => {
+      if (!tryLockTaskAction(taskId)) throw new Error('请等待当前操作完成')
+      return { locked: true as const }
+    },
     onSuccess: () => {
       message.success('已从该节点重新提交')
-      qc.invalidateQueries({ queryKey: ['task', taskId] })
-      qc.invalidateQueries({ queryKey: ['tasks'] })
-      qc.invalidateQueries({ queryKey: ['run-nodes', taskId] })
+      applyTaskMutationCache(qc, taskId, 'retry')
     },
-    onError: (e: Error) => message.error(e.message),
+    onError: (e: Error) => {
+      if (e.message !== '请等待当前操作完成') message.error(e.message)
+    },
+    onSettled: (_data, _error, _vars, ctx) => {
+      if (ctx?.locked) unlockTaskAction(taskId)
+    },
   })
 
   const confirmRetryFromNode = (nodeKey: string) => {
@@ -133,6 +147,7 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
 
   const st = getStatusMeta(task.status)
   const showPinnedNodes = !!task.runs[0]?.id
+  const visibleReport = reportBelongsToCurrentRun(report, task.runs[0]?.id) ? report : undefined
 
   const tabItems = [
     {
@@ -149,6 +164,7 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
           runId={task.runs[0]?.id}
           taskStatus={task.status}
           sseEvents={sseEvents as unknown as SSEEvent[]}
+          sseStatus={sseStatus}
           selectedNode={selectedNode}
           onSelectNode={selectNode}
           onRetryFromNode={canRetry(task.status) ? confirmRetryFromNode : undefined}
@@ -173,7 +189,7 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
     {
       key: 'report',
       label: '报告',
-      children: report ? (
+      children: visibleReport ? (
         <Card variant="borderless">
           <Descriptions
             column={2}
@@ -184,46 +200,46 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
                 key: 'status',
                 label: '状态',
                 children: (
-                  <Tag color={getReportStatusMeta(report.status).color}>
-                    {getReportStatusMeta(report.status).label}
+                  <Tag color={getReportStatusMeta(visibleReport.status).color}>
+                    {getReportStatusMeta(visibleReport.status).label}
                   </Tag>
                 ),
               },
               {
                 key: 'verdict',
                 label: '判定',
-                children: report.verdict ? (
-                  <Tag color={getVerdictMeta(report.verdict).color}>{getVerdictMeta(report.verdict).label}</Tag>
+                children: visibleReport.verdict ? (
+                  <Tag color={getVerdictMeta(visibleReport.verdict).color}>{getVerdictMeta(visibleReport.verdict).label}</Tag>
                 ) : (
                   <Text type="secondary">—</Text>
                 ),
               },
-              { key: 'title', label: '标题', span: 2, children: report.title },
+              { key: 'title', label: '标题', span: 2, children: visibleReport.title },
             ]}
           />
           <Button
             type="link"
             icon={<FileTextOutlined />}
             style={{ paddingLeft: 0, marginTop: 8 }}
-            onClick={() => navigate(`/reports/${report.id}`)}
+            onClick={() => navigate(`/reports/${visibleReport.id}`)}
           >
             打开全文阅读页
           </Button>
           <Divider style={{ margin: '12px 0' }} />
-          <ReportContent report={report} />
-          {report.status !== 'published' && (
+          <ReportContent report={visibleReport} />
+          {visibleReport.status !== 'published' && (
             <Button
               style={{ marginTop: 12 }}
               type="primary"
-              onClick={() => publishMutation.mutate(report.id)}
+              onClick={() => publishMutation.mutate(visibleReport.id)}
               loading={publishMutation.isPending}
             >
               发布报告
             </Button>
           )}
-          <EvidenceList reportId={report.id} />
+          <EvidenceList reportId={visibleReport.id} />
         </Card>
-      ) : (
+      ) : isReportError ? null : (
         <Alert type="info" title="暂无报告，任务完成后将自动生成" />
       ),
     },
@@ -238,6 +254,7 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
             runId={task.runs[0]?.id}
             taskStatus={task.status}
             sseEvents={sseEvents as unknown as SSEEvent[]}
+          sseStatus={sseStatus}
             compact
             selectedNode={selectedNode}
             onSelectNode={selectNode}

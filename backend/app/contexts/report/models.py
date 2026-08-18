@@ -54,6 +54,7 @@ class Report(BaseModel):
     __table_args__ = (
         Index("idx_reports_task", "task_id"),
         Index("idx_reports_owner_status", "owner_id", "status"),
+        Index("uq_reports_run_id", "run_id", unique=True),
     )
 
     def __repr__(self) -> str:

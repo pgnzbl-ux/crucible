@@ -16,10 +16,26 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
 from app.contexts.settings.models import Credential
+
+logger = logging.getLogger(__name__)
+
+# 平台注入 / 容器运行时保留名，任务凭据不得覆盖
+RESERVED_ENV_NAMES = frozenset({"HOME", "PATH", "NODE_KEY"})
+RESERVED_ENV_PREFIXES = ("ANTHROPIC_",)
+
+
+def is_reserved_env_target(name: str) -> bool:
+    upper = (name or "").strip().upper()
+    if not upper:
+        return False
+    if upper in RESERVED_ENV_NAMES:
+        return True
+    return any(upper.startswith(prefix) for prefix in RESERVED_ENV_PREFIXES)
 
 # host_workdir 下的密钥子目录（bind mount → 容器内 /workspace/.secrets）
 SECRET_DIR_NAME = ".secrets"
@@ -53,6 +69,9 @@ def inject_credentials(
             continue
 
         if cred.kind == "env_var":
+            if is_reserved_env_target(cred.target):
+                logger.warning("跳过保留环境变量凭据 target=%s", cred.target)
+                continue
             runner_env[cred.target] = plain
             secret_files.append({
                 "kind": "env_var",

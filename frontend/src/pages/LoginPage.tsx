@@ -4,6 +4,8 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useLocation, Redirect } from 'wouter'
 import { api } from '../shared/lib/api'
+import { errorToastText } from '../shared/lib/errorToast'
+import { useErrorToast } from '../shared/hooks/useErrorToast'
 
 const { Title, Text, Paragraph } = Typography
 
@@ -14,8 +16,10 @@ export function LoginPage() {
   const setupQuery = useQuery({
     queryKey: ['auth-setup'],
     queryFn: () => api.authSetup(),
+    retry: false,
   })
   const needsSetup = setupQuery.data?.needs_setup === true
+  useErrorToast(setupQuery.isError, setupQuery.error, '无法连接认证服务')
 
   const existingToken = localStorage.getItem('crucible_token')
   if (existingToken && location === '/login') {
@@ -35,7 +39,7 @@ export function LoginPage() {
       const res = await api.login(values)
       persistSession(res.access_token, res.user, `欢迎，${res.user.display_name}`)
     } catch (e) {
-      message.error((e as Error).message)
+      message.error(errorToastText(e, '登录失败，请检查邮箱和密码'))
     } finally {
       setLoading(false)
     }
@@ -52,7 +56,7 @@ export function LoginPage() {
       const res = await api.login({ email: values.email, password: values.password })
       persistSession(res.access_token, res.user, `欢迎，${res.user.display_name}`)
     } catch (e) {
-      message.error((e as Error).message)
+      message.error(errorToastText(e, '创建账号失败'))
     } finally {
       setLoading(false)
     }
@@ -89,14 +93,15 @@ export function LoginPage() {
             </Button>
           ) : needsSetup ? (
             <Form onFinish={onCreateAccount} size="large">
-              <Form.Item name="display_name" rules={[{ required: true, message: '请输入显示名' }]}>
+              <Form.Item name="display_name" label="显示名" rules={[{ required: true, message: '请输入显示名' }]}>
                 <Input prefix={<UserOutlined />} placeholder="显示名" autoComplete="nickname" />
               </Form.Item>
-              <Form.Item name="email" rules={[{ required: true, type: 'email', message: '请输入邮箱' }]}>
+              <Form.Item name="email" label="邮箱" rules={[{ required: true, type: 'email', message: '请输入邮箱' }]}>
                 <Input prefix={<UserOutlined />} placeholder="邮箱" autoComplete="email" />
               </Form.Item>
               <Form.Item
                 name="password"
+                label="密码"
                 rules={[
                   { required: true, message: '请输入密码' },
                   { min: 8, message: '密码至少 8 位' },
@@ -116,10 +121,10 @@ export function LoginPage() {
             </Form>
           ) : (
             <Form onFinish={onLogin} size="large">
-              <Form.Item name="email" rules={[{ required: true, type: 'email', message: '请输入邮箱' }]}>
+              <Form.Item name="email" label="邮箱" rules={[{ required: true, type: 'email', message: '请输入邮箱' }]}>
                 <Input prefix={<UserOutlined />} placeholder="邮箱" autoComplete="email" />
               </Form.Item>
-              <Form.Item name="password" rules={[{ required: true, message: '请输入密码' }]}>
+              <Form.Item name="password" label="密码" rules={[{ required: true, message: '请输入密码' }]}>
                 <Input.Password
                   prefix={<LockOutlined />}
                   placeholder="密码"

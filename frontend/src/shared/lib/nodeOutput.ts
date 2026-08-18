@@ -56,9 +56,7 @@ export function parseInitialCreds(raw: unknown): InitialCredsView {
 function formatInitialCreds(raw: unknown): string {
   const creds = parseInitialCreds(raw)
   if (creds.state === 'creds') {
-    return [creds.username && `账号 ${creds.username}`, creds.password && `密码 ${creds.password}`]
-      .filter(Boolean)
-      .join(' / ')
+    return creds.username ? `已提供凭据 · ${creds.username}` : '已提供凭据'
   }
   return creds.state === 'no_auth' ? '免登录' : '无预设凭据'
 }
@@ -180,6 +178,21 @@ export const NODE_TERMINAL_STATUSES = ['completed', 'failed', 'skipped', 'cancel
 
 export function isNodeTerminal(status: string): boolean {
   return (NODE_TERMINAL_STATUSES as readonly string[]).includes(status)
+}
+
+/** SSE 已连通时靠 node.updated 刷新；否则 3s 轮询。 */
+export function nodeStepsPollMs(opts: {
+  taskStatus?: string
+  nodes?: Array<{ status: string }>
+  sseLive?: boolean
+}): number | false {
+  if (opts.taskStatus === 'cancelled') return false
+  const nodes = opts.nodes
+  if (nodes && nodes.length === 6 && nodes.every((n) => isNodeTerminal(n.status))) {
+    return false
+  }
+  if (opts.sseLive) return false
+  return 3000
 }
 
 /** pending 还没发生，点了只会看到空事件流。 */

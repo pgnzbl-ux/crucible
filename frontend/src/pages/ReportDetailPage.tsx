@@ -6,12 +6,12 @@ import { useLocation, useRoute } from 'wouter'
 import { api } from '../shared/lib/api'
 import { downloadAuthenticated, fetchAuthenticatedText } from '../shared/lib/download'
 import { getReportStatusMeta, getVerdictMeta } from '../shared/lib/meta'
-import { AppLayout } from '../app/layout'
 import { PageHeader } from '../shared/components/PageHeader'
 import { PageContainer } from '../shared/components/PageContainer'
 import { ReportContent } from '../shared/components/ReportContent'
 import { MarkdownBody } from '../shared/components/MarkdownBody'
 import { EvidenceList } from '../features/task/components/EvidenceList'
+import { useErrorToast } from '../shared/hooks/useErrorToast'
 import { asRecord, documentKindOf } from '../shared/lib/reportData'
 
 const { Text, Paragraph } = Typography
@@ -29,12 +29,13 @@ export function ReportDetailPage() {
     enabled: !!reportId,
   })
 
-  const { data: markdown, isLoading: mdLoading } = useQuery({
+  const { data: markdown, isLoading: mdLoading, isError: isMdError, error: mdError } = useQuery({
     queryKey: ['report-md', reportId],
     queryFn: () => fetchAuthenticatedText(api.exportReportUrl(reportId, 'md')),
     enabled: !!reportId && !!report?.report_data,
     retry: false,
   })
+  useErrorToast(isMdError, mdError, '报告正文加载失败')
 
   const publishMutation = useMutation({
     mutationFn: () => api.publishReport(reportId),
@@ -58,7 +59,7 @@ export function ReportDetailPage() {
   }
 
   return (
-    <AppLayout>
+    <>
       <PageHeader
         title={report?.title ?? '报告详情'}
         subtitle={report ? `任务 ${report.task_id.slice(0, 8)}` : undefined}
@@ -153,6 +154,6 @@ export function ReportDetailPage() {
           />
         )}
       </PageContainer>
-    </AppLayout>
+    </>
   )
 }

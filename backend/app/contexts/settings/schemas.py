@@ -100,8 +100,12 @@ class CredentialCreateRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_kind_target(self) -> "CredentialCreateRequest":
+        from app.core.credential_proxy import is_reserved_env_target
+
         if self.kind == "env_var" and not _ENV_NAME_RE.match(self.target):
             raise ValueError("env_var 类型的 target 必须是大写下划线环境变量名（如 DB_PASSWORD）")
+        if self.kind == "env_var" and is_reserved_env_target(self.target):
+            raise ValueError("该环境变量名由平台保留，不能作为任务凭据")
         if self.kind == "file" and not _SAFE_FILE_RE.match(self.target):
             raise ValueError("file 类型的 target 必须是安全文件名（字母数字._-，禁止路径分隔符）")
         return self

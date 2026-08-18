@@ -1,11 +1,13 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 import json
 import logging
 
+from sqlalchemy import select, update
+
 from .models import Task, TaskRun, AgentEvent
 from .repository import TaskRepository
-from .schemas import TaskCreateRequest, TaskDetail, TaskListResponse, TaskSummary, RunSummary
+from .schemas import TaskCreateRequest, TaskDetail, TaskListResponse, TaskStatsResponse, TaskSummary, RunSummary
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +143,40 @@ class TaskService:
 
         return self._to_detail(task, [run])
 
+    async def redispatch_stale_queued(
+        self, *, min_age_seconds: int = 60, now: datetime | None = None
+    ) -> list[str]:
+        """commit 成功但 send_task 未发出时，按原 run.id 再投递。"""
+        clock = now or datetime.now(timezone.utc)
+        cutoff = clock - timedelta(seconds=min_age_seconds)
+        result = await self.repo.session.execute(
+            select(TaskRun)
+            .join(Task, Task.id == TaskRun.task_id)
+            .where(
+                Task.status == "queued",
+                TaskRun.status == "pending",
+                TaskRun.created_at <= cutoff,
+            )
+        )
+        runs = list(result.scalars().all())
+        if not runs:
+            return []
+
+        from app.core.celery_app import celery_app
+
+        dispatched: list[str] = []
+        for run in runs:
+            try:
+                celery_app.send_task(
+                    "agent.run_analysis", args=[run.task_id, run.id], task_id=run.id
+                )
+                dispatched.append(run.id)
+            except Exception:
+                logger.warning("滞留 queued 再投递失败 run=%s", run.id, exc_info=True)
+        if dispatched:
+            logger.info("滞留 queued 再投递 %s 个 run: %s", len(dispatched), dispatched)
+        return dispatched
+
     async def get_task(self, task_id: str, owner_id: str) -> TaskDetail | None:
         task = await self.repo.get_by_id_with_runs(task_id, owner_id)
         if not task:
@@ -159,6 +195,10 @@ class TaskService:
             items=[TaskSummary.model_validate(t) for t in tasks],
             total=total, limit=limit, offset=offset,
         )
+
+    async def task_stats(self, owner_id: str) -> TaskStatsResponse:
+        by_status = await self.repo.count_by_status(owner_id)
+        return TaskStatsResponse(total=sum(by_status.values()), by_status=by_status)
 
     async def cancel_task(self, task_id: str, owner_id: str) -> TaskDetail | None:
         """取消任务：状态机校验 → 标 cancelled 并提交 → revoke → 后台拆容器。
@@ -251,16 +291,37 @@ class TaskService:
             raise ValueError(f"状态为 {task.status} 的任务不能重试")
 
         source_run = task.runs[0] if task.runs else None
+        original_status = task.status
+        claimed = await self.repo.session.execute(
+            update(Task)
+            .where(
+                Task.id == task_id,
+                Task.owner_id == owner_id,
+                Task.status.in_(("failed", "completed", "cancelled", "needs_review")),
+            )
+            .values(status="queued")
+        )
+        if claimed.rowcount == 0:
+            await self.repo.session.refresh(task)
+            raise ValueError(f"状态为 {task.status} 的任务不能重试")
+        await self.repo.session.refresh(task)
+
         new_run = TaskRun(task_id=task_id, status="pending")
         new_run = await self.repo.create_run(new_run)
 
-        if from_node is not None:
-            await self._copy_prior_nodes_for_resume(
-                task, new_run.id, from_node, source_run=source_run
-            )
+        try:
+            if from_node is not None:
+                await self._copy_prior_nodes_for_resume(
+                    task, new_run.id, from_node, source_run=source_run
+                )
+        except Exception:
+            task.status = original_status
+            new_run.status = "failed"
+            new_run.error_message = "重试准备失败"
+            new_run.finished_at = datetime.now(timezone.utc)
+            await self.repo.session.commit()
+            raise
 
-        # 与 create_task 一致：投递后先排队；worker 接管后再标 running
-        task.status = "queued"
         await self.repo.session.flush()
         await self.repo.session.commit()
 

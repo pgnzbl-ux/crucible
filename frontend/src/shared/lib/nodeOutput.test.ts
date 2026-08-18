@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { summarizeNodeOutput, applyNodeOverlay, displayNodeStatus, compactNodeCaption, isNodeListLoading, overlayFromSseEvents, parseInitialCreds } from './nodeOutput'
+import { summarizeNodeOutput, applyNodeOverlay, displayNodeStatus, compactNodeCaption, isNodeListLoading, overlayFromSseEvents, parseInitialCreds, nodeStepsPollMs } from './nodeOutput'
 
 describe('summarizeNodeOutput', () => {
   it('source: MinIO 命中时写出仓库与 commit', () => {
@@ -36,7 +36,7 @@ describe('summarizeNodeOutput', () => {
     ).toBe('nodejs / express · Web · 端口 3001 · sqlite')
   })
 
-  it('env_ready: 地址 + 登录凭据', () => {
+  it('env_ready: 地址 + 已提供凭据，摘要不带密码', () => {
     expect(
       summarizeNodeOutput(
         'env_ready',
@@ -46,7 +46,17 @@ describe('summarizeNodeOutput', () => {
         },
         'completed',
       ),
-    ).toBe('http://192.168.1.8:3001 · 账号 admin / 密码 admin123')
+    ).toBe('http://192.168.1.8:3001 · 已提供凭据 · admin')
+    expect(
+      summarizeNodeOutput(
+        'env_ready',
+        {
+          target_url: 'http://192.168.1.8:3001',
+          initial_creds: { username: 'admin', password: 'admin123' },
+        },
+        'completed',
+      ),
+    ).not.toContain('admin123')
   })
 
   it('audit gate fail 只留短标签，长 gate_reason 留给详情区', () => {
@@ -201,6 +211,22 @@ describe('compactNodeCaption', () => {
       'Building web',
     )
     expect(compactNodeCaption('audit', {}, 'pending')).toBe('')
+  })
+})
+
+describe('nodeStepsPollMs', () => {
+  const sixDone = Array.from({ length: 6 }, () => ({ status: 'completed' }))
+
+  it('stops when all six nodes are terminal', () => {
+    expect(nodeStepsPollMs({ nodes: sixDone })).toBe(false)
+  })
+
+  it('stops while SSE is live', () => {
+    expect(nodeStepsPollMs({ nodes: [{ status: 'running' }], sseLive: true })).toBe(false)
+  })
+
+  it('polls 3s when SSE is down and work remains', () => {
+    expect(nodeStepsPollMs({ nodes: [{ status: 'running' }], sseLive: false })).toBe(3000)
   })
 })
 

@@ -441,10 +441,12 @@ async def test_breakpoint_resume_skips_completed_nodes(session_factory):
              patch.object(real_nodes[5], "execute", fake_report):
             result = await orch.run_orchestration(
                 task_id=task.id, run_id=run.id, session=session,
-                host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
+                host_workdir="/nonexistent-crucible-orch-test",
+                source_path="/nonexistent-crucible-orch-test",
+                runner_env={},
             )
 
-        # source/profile 不应被重算
+        # source/profile 不应被重算（假路径不存在 → 不做磁盘检查）
         assert call_count == {"source": 0, "profile": 0}
         assert result["status"] == "completed"
         assert result["verdict"] == "confirmed"

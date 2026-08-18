@@ -89,8 +89,9 @@ async def _case_2_history_replay() -> None:
                                     payload=json.dumps({"phase": "step", "message": f"ev-{i}"})))
         await session.commit()
 
-    frames = await _replay_history(task_id)
+    frames, last_seq = await _replay_history(task_id)
     assert len(frames) == 3, f"应回放 3 条历史，实际 {len(frames)}"
+    assert last_seq == 2
     # 解析第一条 data
     data_line = [ln for ln in frames[0].split("\n") if ln.startswith("data: ")][0]
     payload = json.loads(data_line[len("data: "):])

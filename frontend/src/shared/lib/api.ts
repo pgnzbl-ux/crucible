@@ -1,7 +1,22 @@
 const API_BASE = '/api/v1'
 
-// 401 处理：清 token + 跳登录（避免循环：登录页本身不触发）
-function handleUnauthorized() {
+export class ApiError extends Error {
+  readonly status: number
+  readonly code?: string
+
+  constructor(message: string, status: number, code?: string) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = code
+  }
+}
+
+export function isUnauthorizedError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 401
+}
+
+export function handleUnauthorized() {
   localStorage.removeItem('crucible_token')
   localStorage.removeItem('crucible_user')
   if (!window.location.pathname.startsWith('/login')) {
@@ -9,45 +24,61 @@ function handleUnauthorized() {
   }
 }
 
-function _apiErrorMessage(body: unknown, status: number): string {
-  if (!body || typeof body !== 'object') return `HTTP ${status}`
+export function parseApiError(body: unknown, status: number): ApiError {
+  const fallback = `HTTP ${status}`
+  if (!body || typeof body !== 'object') return new ApiError(fallback, status)
   const rec = body as Record<string, unknown>
+  let message = fallback
+  let code: string | undefined
   const envelope = rec.error
   if (envelope && typeof envelope === 'object') {
-    const msg = (envelope as { message?: unknown }).message
-    if (typeof msg === 'string' && msg) return msg
+    const env = envelope as { message?: unknown; code?: unknown }
+    if (typeof env.message === 'string' && env.message) message = env.message
+    if (typeof env.code === 'string' && env.code) code = env.code
   }
   const detail = rec.detail
-  if (typeof detail === 'object' && detail) {
-    const msg = (detail as { message?: unknown }).message
-    if (typeof msg === 'string' && msg) return msg
+  if (message === fallback && detail && typeof detail === 'object' && !Array.isArray(detail)) {
+    const nested = detail as { message?: unknown; code?: unknown }
+    if (typeof nested.message === 'string' && nested.message) message = nested.message
+    if (!code && typeof nested.code === 'string' && nested.code) code = nested.code
   }
-  if (typeof detail === 'string' && detail) return detail
-  return `HTTP ${status}`
+  if (message === fallback && typeof detail === 'string' && detail) message = detail
+  if (message === fallback && Array.isArray(detail) && detail[0] && typeof detail[0] === 'object') {
+    const msg = (detail[0] as { msg?: unknown }).msg
+    if (typeof msg === 'string' && msg) message = msg
+  }
+  return new ApiError(message, status, code)
 }
 
-async function request<T>(path: string, options?: RequestInit & { allow404?: boolean }): Promise<T> {
-  const { allow404, ...fetchOpts } = options ?? {}
+export async function rejectIfNotOk(res: Response, hadAuth = false): Promise<void> {
+  if (res.ok) return
+  if (res.status === 401 && hadAuth) {
+    handleUnauthorized()
+    throw new ApiError('登录已过期，请重新登录', 401, 'UNAUTHORIZED')
+  }
+  const body = await res.json().catch(() => ({ detail: '请求失败' }))
+  throw parseApiError(body, res.status)
+}
+
+async function request<T>(
+  path: string,
+  options?: RequestInit & { allow404?: boolean; skipAuth?: boolean },
+): Promise<T> {
+  const { allow404, skipAuth, ...fetchOpts } = options ?? {}
   const token = localStorage.getItem('crucible_token')
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(fetchOpts.headers as Record<string, string>),
   }
-  if (token) {
+  const sendAuth = Boolean(token && !skipAuth)
+  if (sendAuth && token) {
     headers['Authorization'] = `Bearer ${token}`
   }
   const res = await fetch(`${API_BASE}${path}`, { ...fetchOpts, headers })
-  if (res.status === 401) {
-    handleUnauthorized()
-    throw new Error('登录已过期，请重新登录')
-  }
   if (res.status === 404 && allow404) {
     return null as T
   }
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: '请求失败' }))
-    throw new Error(_apiErrorMessage(err, res.status))
-  }
+  await rejectIfNotOk(res, sendAuth)
   if (res.status === 204) {
     return undefined as T
   }
@@ -124,6 +155,11 @@ export interface TaskListResponse {
   total: number
   limit: number
   offset: number
+}
+
+export interface TaskStats {
+  total: number
+  by_status: Record<string, number>
 }
 
 export interface AgentEvent {
@@ -318,20 +354,22 @@ export interface CredentialInput {
 export const api = {
   // Auth
   login: (data: { email: string; password: string }) =>
-    request<TokenResponse>('/auth/login', { method: 'POST', body: JSON.stringify(data) }),
+    request<TokenResponse>('/auth/login', { method: 'POST', body: JSON.stringify(data), skipAuth: true }),
 
   register: (data: { email: string; password: string; display_name: string }) =>
-    request<CurrentUser>('/auth/register', { method: 'POST', body: JSON.stringify(data) }),
+    request<CurrentUser>('/auth/register', { method: 'POST', body: JSON.stringify(data), skipAuth: true }),
 
   me: () => request<CurrentUser>('/auth/me'),
 
-  authSetup: () => request<{ needs_setup: boolean }>('/auth/setup'),
+  authSetup: () => request<{ needs_setup: boolean }>('/auth/setup', { skipAuth: true }),
 
   // Tasks
   listTasks: (params?: Record<string, string>) => {
     const qs = params ? '?' + new URLSearchParams(params).toString() : ''
     return request<TaskListResponse>(`/tasks/${qs}`)
   },
+
+  getTaskStats: () => request<TaskStats>('/tasks/stats'),
 
   createTask: (data: {
     project_address: string
@@ -374,17 +412,10 @@ export const api = {
       // 注意：不设 Content-Type，浏览器自动加 multipart boundary
       body: form,
     }).then(async (res): Promise<Evidence> => {
-      if (res.status === 401) {
-        handleUnauthorized()
-        throw new Error('登录已过期，请重新登录')
-      }
       if (res.status === 413) {
-        throw new Error('文件超过 50MB 限制')
+        throw new ApiError('文件超过 50MB 限制', 413)
       }
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({ detail: '上传失败' }))
-        throw new Error(e.detail || `HTTP ${res.status}`)
-      }
+      await rejectIfNotOk(res, Boolean(token))
       return res.json() as Promise<Evidence>
     })
   },

@@ -16,6 +16,8 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 
+import { api, isUnauthorizedError } from '../lib/api'
+
 const API_BASE = '/api/v1'
 
 export interface SSEEvent<T = unknown> {
@@ -164,16 +166,29 @@ export function useTaskEvents<T = unknown>(
       newEs.onerror = () => {
         if (closedByUnmountRef.current) return
         if (newEs.readyState === EventSource.CLOSED) {
-          const attempt = reconnectAttemptsRef.current + 1
-          reconnectAttemptsRef.current = attempt
-          const delay = Math.min(1000 * 2 ** (attempt - 1), maxReconnectDelay)
-          setStatus('reconnecting')
-          errorRef.current = `连接中断，${Math.round(delay / 1000)}s 后重连...`
-          setError(errorRef.current)
-          reconnectTimerRef.current = window.setTimeout(() => {
-            cleanup()
-            connect()
-          }, delay)
+          void (async () => {
+            try {
+              await api.me()
+            } catch (error) {
+              if (isUnauthorizedError(error) || !localStorage.getItem('crucible_token')) {
+                setStatus('closed')
+                errorRef.current = '登录已过期，请重新登录'
+                setError(errorRef.current)
+                return
+              }
+            }
+            if (closedByUnmountRef.current) return
+            const attempt = reconnectAttemptsRef.current + 1
+            reconnectAttemptsRef.current = attempt
+            const delay = Math.min(1000 * 2 ** (attempt - 1), maxReconnectDelay)
+            setStatus('reconnecting')
+            errorRef.current = `连接中断，${Math.round(delay / 1000)}s 后重连...`
+            setError(errorRef.current)
+            reconnectTimerRef.current = window.setTimeout(() => {
+              cleanup()
+              connect()
+            }, delay)
+          })()
         }
       }
     }

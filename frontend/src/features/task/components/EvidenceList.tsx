@@ -6,6 +6,8 @@ import dayjs from 'dayjs'
 import type { ReactNode } from 'react'
 
 import { api, type Evidence } from '../../../shared/lib/api'
+import { safeHttpUrl } from '../../../shared/lib/safeUrl'
+import { useErrorToast } from '../../../shared/hooks/useErrorToast'
 
 const { Text } = Typography
 
@@ -13,10 +15,11 @@ export function EvidenceList({ reportId }: { reportId: string }) {
   const { message } = App.useApp()
   const qc = useQueryClient()
 
-  const { data: evidences, isLoading } = useQuery({
+  const { data: evidences, isLoading, isError, error } = useQuery({
     queryKey: ['report-evidences', reportId],
     queryFn: () => api.listEvidences(reportId),
   })
+  useErrorToast(isError, error, '证据列表加载失败')
 
   const uploadProps: UploadProps = {
     multiple: false,
@@ -51,18 +54,21 @@ export function EvidenceList({ reportId }: { reportId: string }) {
       <List<Evidence>
         size="small"
         loading={isLoading}
-        locale={{ emptyText: '暂无证据文件' }}
+        locale={{ emptyText: isError ? '证据列表加载失败' : '暂无证据文件' }}
         dataSource={evidences ?? []}
-        renderItem={(ev) => (
+        renderItem={(ev) => {
+          const downloadHref = safeHttpUrl(ev.download_url)
+          return (
           <List.Item
             actions={[
-              ev.download_url ? (
+              downloadHref ? (
                 <Button
                   size="small"
                   type="link"
                   icon={<DownloadOutlined />}
-                  href={ev.download_url}
+                  href={downloadHref}
                   target="_blank"
+                  rel="noopener noreferrer"
                 >
                   下载
                 </Button>
@@ -79,9 +85,9 @@ export function EvidenceList({ reportId }: { reportId: string }) {
               }
               description={
                 <div>
-                  {(ev.kind === 'screenshot' || ev.content_type.startsWith('image/')) && ev.download_url ? (
+                  {(ev.kind === 'screenshot' || ev.content_type.startsWith('image/')) && downloadHref ? (
                     <img
-                      src={ev.download_url}
+                      src={downloadHref}
                       alt={ev.file_name}
                       style={{
                         maxWidth: 280,
@@ -100,7 +106,8 @@ export function EvidenceList({ reportId }: { reportId: string }) {
               }
             />
           </List.Item>
-        )}
+          )
+        }}
       />
     </div>
   )

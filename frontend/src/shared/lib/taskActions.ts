@@ -35,6 +35,13 @@ export function shouldFetchTaskReport(status: string): boolean {
   return status === 'completed' || status === 'needs_review'
 }
 
+export function reportBelongsToCurrentRun(
+  report: { run_id: string } | null | undefined,
+  runId: string | null | undefined,
+): boolean {
+  return !!report && !!runId && report.run_id === runId
+}
+
 export const CONFIRM_COPY = {
   cancel: {
     title: '取消任务',

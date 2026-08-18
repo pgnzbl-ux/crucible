@@ -1,16 +1,18 @@
-import { Alert, App, Button, Space } from 'antd'
+import { App, Button, Space } from 'antd'
 import { PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api } from '../shared/lib/api'
-import { buildTaskListApiParams, DEFAULT_PAGE_SIZE } from '../shared/lib/taskListQuery'
-import { AppLayout } from '../app/layout'
+import { buildTaskListApiParams, DEFAULT_PAGE_SIZE, taskListPollMs } from '../shared/lib/taskListQuery'
 import { PageHeader } from '../shared/components/PageHeader'
 import { PageContainer } from '../shared/components/PageContainer'
 import { TaskFilterBar } from '../features/task/components/TaskFilterBar'
 import { TaskTable } from '../features/task/components/TaskTable'
 import { TaskCreateDrawer } from '../features/task/components/TaskCreateDrawer'
 import { useTaskListParams } from '../features/task/hooks/useTaskListParams'
+import { tryLockTaskAction, unlockTaskAction } from '../shared/lib/taskActionLock'
+import { useErrorToast } from '../shared/hooks/useErrorToast'
+import { applyTaskMutationCache } from '../shared/lib/taskCache'
 
 export function TasksPage() {
   const { message } = App.useApp()
@@ -35,34 +37,62 @@ export function TasksPage() {
     queryKey: ['tasks', apiParams],
     queryFn: () => api.listTasks(apiParams),
     placeholderData: keepPreviousData,
-    refetchInterval: 5000,
+    refetchInterval: (query) => taskListPollMs(query.state.data?.items ?? [], params.status),
   })
+  useErrorToast(isError, error, '任务列表加载失败')
 
   const cancelMutation = useMutation({
     mutationFn: (id: string) => api.cancelTask(id),
-    onSuccess: () => {
-      message.success('任务已取消')
-      qc.invalidateQueries({ queryKey: ['tasks'] })
+    onMutate: (id) => {
+      if (!tryLockTaskAction(id)) throw new Error('请等待当前操作完成')
+      return { locked: true as const }
     },
-    onError: (e: Error) => message.error(e.message),
+    onSuccess: (_data, id) => {
+      message.success('任务已取消')
+      applyTaskMutationCache(qc, id, 'cancel')
+    },
+    onError: (e: Error) => {
+      if (e.message !== '请等待当前操作完成') message.error(e.message)
+    },
+    onSettled: (_data, _error, id, ctx) => {
+      if (ctx?.locked) unlockTaskAction(id)
+    },
   })
 
   const retryMutation = useMutation({
     mutationFn: (id: string) => api.retryTask(id),
-    onSuccess: () => {
-      message.success('任务已重新提交，将从源码获取开始重跑')
-      qc.invalidateQueries({ queryKey: ['tasks'] })
+    onMutate: (id) => {
+      if (!tryLockTaskAction(id)) throw new Error('请等待当前操作完成')
+      return { locked: true as const }
     },
-    onError: (e: Error) => message.error(e.message),
+    onSuccess: (_data, id) => {
+      message.success('任务已重新提交，将从源码获取开始重跑')
+      applyTaskMutationCache(qc, id, 'retry')
+    },
+    onError: (e: Error) => {
+      if (e.message !== '请等待当前操作完成') message.error(e.message)
+    },
+    onSettled: (_data, _error, id, ctx) => {
+      if (ctx?.locked) unlockTaskAction(id)
+    },
   })
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.deleteTask(id),
-    onSuccess: () => {
-      message.success('任务已删除')
-      qc.invalidateQueries({ queryKey: ['tasks'] })
+    onMutate: (id) => {
+      if (!tryLockTaskAction(id)) throw new Error('请等待当前操作完成')
+      return { locked: true as const }
     },
-    onError: (e: Error) => message.error(e.message),
+    onSuccess: (_data, id) => {
+      message.success('任务已删除')
+      applyTaskMutationCache(qc, id, 'delete')
+    },
+    onError: (e: Error) => {
+      if (e.message !== '请等待当前操作完成') message.error(e.message)
+    },
+    onSettled: (_data, _error, id, ctx) => {
+      if (ctx?.locked) unlockTaskAction(id)
+    },
   })
 
   const pendingId =
@@ -72,7 +102,7 @@ export function TasksPage() {
     null
 
   return (
-    <AppLayout>
+    <>
       <PageHeader
         title="任务管理"
         subtitle="提交漏洞验证任务，Agent 将在隔离沙箱中自动分析"
@@ -91,15 +121,6 @@ export function TasksPage() {
       <TaskFilterBar params={params} onChange={setParams} onClear={clearParams} />
 
       <PageContainer>
-        {isError && (
-          <Alert
-            type="error"
-            showIcon
-            title="任务列表加载失败"
-            description={error.message}
-            style={{ marginBottom: 16 }}
-          />
-        )}
         <TaskTable
           data={data?.items ?? []}
           loading={isLoading || isFetching}
@@ -116,6 +137,6 @@ export function TasksPage() {
       </PageContainer>
 
       <TaskCreateDrawer open={createOpen} onClose={() => setParams({ create: undefined })} />
-    </AppLayout>
+    </>
   )
 }

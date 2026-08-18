@@ -36,4 +36,10 @@ describe('EnvReadyDetail', () => {
     expect(html).toContain('无预设凭据')
     expect(html).not.toContain('免登录')
   })
+
+  it('javascript: 靶场地址不当成可点击链接', () => {
+    const html = render({ target_url: 'javascript:alert(1)' })
+    expect(html).not.toMatch(/href=["']javascript:/i)
+    expect(html).toContain('javascript:alert(1)')
+  })
 })

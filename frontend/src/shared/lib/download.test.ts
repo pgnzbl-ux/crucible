@@ -73,4 +73,19 @@ describe('downloadAuthenticated', () => {
       '## 1. 产品介绍\n\nhello',
     )
   })
+
+  it('parses error envelope instead of stringifying detail', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: async () => ({ error: { code: 'BUSY', message: '报告正在生成' } }),
+      }),
+    )
+    await expect(downloadAuthenticated('/api/v1/reports/r1/export?format=md', 'r.md')).rejects.toMatchObject({
+      message: '报告正在生成',
+      status: 409,
+    })
+  })
 })

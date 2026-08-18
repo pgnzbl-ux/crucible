@@ -12,7 +12,7 @@ paths: ["backend/app/contexts/**/*.py", "backend/app/shared/**/*.py", "backend/a
 
 - **跨 Context 数据访问走 Service 接口或事件**，禁止直接 import 对方 repository
 - **禁止跨 Context 建 ORM relationship**（mapper 报错），只保留 `ForeignKey` + 整数/UUID ID，需要时手动查
-- 新表必须在其所属 Context 的 `models.py` 中定义；Celery worker 启动时 import 该 models 以注册 metadata（否则 FK 解析失败）。部署用唯一 Alembic 基线 `c18a0e9b4d21`（`metadata.create_all`），与 `init_db()` 同源
+- 新表必须在其所属 Context 的 `models.py` 中定义；Celery worker 启动时 import 该 models 以注册 metadata（否则 FK 解析失败）。Alembic 基线 `c18a0e9b4d21`（`metadata.create_all`）与 `init_db()` 同源；索引/约束增量走后续 revision（如 `b7e4c2a19f08`）
 
 ## 2. 六个 Context 的职责边界
 

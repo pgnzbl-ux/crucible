@@ -5,7 +5,7 @@ description: Alembic 迁移生成与执行
 
 # Database Migrate
 
-当前只有 **一条基线**：`alembic/versions/c18a0e9b4d21_baseline.py`，`upgrade()` = 当前 ORM `metadata.create_all`。开发启动时 `init_db()` 走同一套 metadata，并 stamp `alembic_version`。库地址只从 `.env` 的 `DATABASE_URL` 读（`alembic/env.py` 注入，不要把真实 URL 写进 `alembic.ini` / `config.py`）。
+当前有一条 **基线** `alembic/versions/c18a0e9b4d21_baseline.py`（`upgrade()` = 当前 ORM `metadata.create_all`），以及后续增量 revision。开发启动时 `init_db()` 走同一套 metadata 并补缺失索引，再 stamp `alembic_version` 到 head。库地址只从 `.env` 的 `DATABASE_URL` 读（`alembic/env.py` 注入，不要把真实 URL 写进 `alembic.ini` / `config.py`）。
 
 ## 1. 空库部署
 
@@ -21,7 +21,7 @@ cd backend
 alembic upgrade head
 ```
 
-已有库（表已在）不要对基线再 `upgrade` 指望改列；启动开发 SQLite 会补缺失索引并 stamp 到 `c18a0e9b4d21`。从旧多版本链过来的库 stamp 即可。
+已有库（表已在）不要对基线再 `upgrade` 指望改列；启动时 `init_db()` 会按 metadata 补缺失索引（含 unique 标志不一致时重建）并 stamp 到当前 head。从旧多版本链过来的库 stamp 即可。增量约束变更优先跑 `alembic upgrade head`。
 
 ## 2. 模型变更后再出增量
 

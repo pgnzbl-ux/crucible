@@ -4,63 +4,64 @@ paths: ["frontend/src/**/*.ts", "frontend/src/**/*.tsx"]
 
 # Crucible 前端规范
 
-> 主线路线（特别是 P0-1 SSE / P0-3 JWT 联调 / P1-5 features 填充）见 `docs/development-guide.md` §4。
+> 主线路线见 `docs/development-guide.md` §4。P1-5（按领域拆 store）仍开放，**不要为对齐本文件去先搬 Zustand**。
 
 ## 1. 目录分层
 
 ```
 frontend/src/
-├── app/            # providers.tsx + layout.tsx（AppLayout + 侧边栏）
-├── pages/          # 路由级页面（Dashboard / Tasks / Reports / Settings / Login）
-├── features/       # ★ 领域模块（task / agent / auth / report），每个含 store.ts + hooks.ts
+├── app/            # providers.tsx（Query + antd）+ layout.tsx（壳：侧栏/顶栏）
+├── pages/          # 路由页：组合 + 当前多数页面直接 useQuery(api.*)
+├── features/       # 领域 UI（task / lab / dashboard）；尚无统一 store.ts
 ├── shared/
-│   ├── components/ # 跨领域复用组件
-│   ├── hooks/      # 通用 hooks（useSSE / usePolling / etc.）
-│   ├── lib/        # api.ts（类型化 API 客户端）+ meta.ts（枚举映射）
-│   └── types/      # 跨领域共享类型
-└── styles/
+│   ├── components/ # 跨页组件（NodeSteps / ReportContent / MarkdownBody）
+│   ├── hooks/      # useTaskEvents（SSE）、useStickToBottom
+│   └── lib/        # api.ts（手写类型）+ meta.ts + 纯函数
+└── styles/         # design-tokens.css + global.css + theme.ts
 ```
 
-- 业务逻辑只放在 `features/<domain>/`，不在 `pages/` 中实现
-- 页面是**组合**层：从 features 拉 store + hooks + 组件，不直接发请求
-- `shared/` 不允许 import `features/`（依赖方向只能向内）
+- `pages/` 应当薄；新代码优先把请求放进 `features/<domain>/`
+- `shared/` **禁止** import `features/`
+- 已登录路由：`App.tsx` 里 `AppLayout` 包住内容区 `Suspense`，切页不卸侧栏
 
 ## 2. 状态管理
 
-- **服务端状态**：TanStack Query（缓存、失效、重试）
-- **客户端状态**：Zustand store，**每个领域一个 store**（不要堆成一个大 store）
-- **派生 UI 状态**：`useState` / `useReducer`，不要进全局 store
-- 事件流（SSE）只放进对应领域 store，不在组件里维护 SSE 生命周期
+- **服务端状态**：TanStack Query（`staleTime: 30s`；`retry` 跳过普通 4xx）
+- **不要**再引入 Zustand，除非出现真正的跨树客户端状态（目前依赖里的 zustand 未使用）
+- 派生 UI 用 `useState`
+- SSE 生命周期只在 `useTaskEvents`，组件禁止 `new EventSource()`
 
 ## 3. API 客户端（`shared/lib/api.ts`）
 
-- 类型**自动从后端 OpenAPI 生成**（P2-12 待办）；过渡期手动维护但要标 `@generated-from` 注释
-- 错误响应统一处理：抛 `ApiError(status, code, message)`，业务层 catch 后显示
-- token 从 `localStorage` 读取，401 自动跳登录页（路由守卫）
-- `owner_id` 从 token 解析，不硬编码 `"system"`
+- 类型手写，OpenAPI 生成是 P2-12
+- 失败抛 `ApiError(message, status, code?)`；登录/注册/setup 用 `skipAuth`，401 展示信封，不当成会话过期
+- 带 `Authorization` 的 401 才 `handleUnauthorized`（清 token + 跳 `/login`）
+- 不硬编码 `owner_id`
 
-## 4. SSE 实时事件（P0-1 已实现）
+## 4. SSE
 
-- `shared/hooks/useTaskEvents.ts` 已封装 EventSource + 指数退避重连 + 卸载清理
-- 频道：`GET /api/v1/tasks/{id}/events/stream`，订阅后端 Redis Pub/Sub 转发；启动先回放历史
-- 组件用 `useTaskEvents(taskId)` 拿事件流，**不要**在组件里 `new EventSource()`
-- token 走 query `?token=<jwt>`（EventSource 不支持自定义 header），P0-3 接入鉴权后统一收口
-- TasksPage 详情 Drawer 已切换：SSE 实时事件流 + 连接状态指示 + agent.completed/failed 触发 task/report 刷新
+- `GET /api/v1/tasks/{id}/events/stream`；token 只能走 query（EventSource 无自定义 header）
+- 401 时先 `GET /auth/me`，过期则停重连
+- 任务详情独立路由 `TaskDetailPage` + `TaskDetailTabs`，**不是**列表 Drawer
 
-## 5. 表单与受控组件
+## 5. 表单
 
-- 表单统一用 Ant Design 5 + `Form.useForm()`
-- 提交前客户端校验**只作 UX**，后端校验仍是**真相**（参考 `error-handling.md` 与 `validation.md`）
-- 敏感字段（API Key、密码）用 `Input.Password`，回显时只显示掩码（`***last4`）
+- Ant Design 6 + `Form.useForm()` / `Form.Item`
+- 客户端校验只作 UX；敏感字段 `Input.Password`，回显掩码
 
 ## 6. 路由与权限
 
-- 路由守卫放在 `app/layout.tsx`：未登录 → `/login`；无权限 → 403
-- 当前 JWT 单一鉴权，OIDC 增量叠加时改此守卫即可（不破坏已有逻辑）
-- 不在前端做角色判断后再隐藏后端调用——后端是**真相源**，前端隐藏只是 UX
+- 守卫在 `App.tsx` 的 `RequireAuth`（看 localStorage token 是否存在）
+- 无 RBAC / 403 页；后端是权限真相源
+- 详情页 `fill`：`/tasks/:id`、`/reports/:id`
 
 ## 7. 样式
 
-- Ant Design 5 主题变量集中在 `styles/theme.ts`，业务组件不直接写 `#1677ff` 等硬编码色值
-- CSS-in-JS 用 `@emotion/css`（项目已依赖），避免散落的 styled-components
-- 图标统一用 `@ant-design/icons`
+- 主题 token：`styles/theme.ts` + `design-tokens.css`
+- 业务组件用 CSS 变量 / antd Token，不写死 `#1677ff`
+- 无 `@emotion/css`；图标用 `@ant-design/icons`
+
+## 8. 反馈
+
+- 操作结果、登录/注册失败、列表或查询失败：`App.useApp().message` toast
+- `Alert` 只留给页面里需要持续阅读的内容（任务失败原因、报告说明、事件卡片），不要用 Alert 当通知条

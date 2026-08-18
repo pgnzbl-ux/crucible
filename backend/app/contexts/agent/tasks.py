@@ -34,6 +34,7 @@ import signal
 from datetime import datetime, timezone
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -83,6 +84,28 @@ def report_columns_from_orch_result(orch_result: dict) -> dict:
     }
 
 
+async def ensure_report_for_run(session: AsyncSession, report: Report) -> Report:
+    """同一 run 只落一份报告；唯一约束冲突时复用已有行。"""
+    existing = (
+        await session.execute(select(Report).where(Report.run_id == report.run_id))
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+    try:
+        async with session.begin_nested():
+            session.add(report)
+            await session.flush()
+        await session.refresh(report)
+        return report
+    except IntegrityError:
+        found = (
+            await session.execute(select(Report).where(Report.run_id == report.run_id))
+        ).scalar_one_or_none()
+        if found is None:
+            raise
+        return found
+
+
 # ── Celery worker 专用 DB 会话（独立 NullPool 引擎） ──
 
 
@@ -93,7 +116,9 @@ def _worker_engine():
     return create_async_engine(settings.database_url, poolclass=NullPool, connect_args=connect_args)
 
 
-_STARTABLE_TASK_STATUSES = frozenset({"pending", "queued", "running"})
+_CLAIMABLE_TASK_STATUSES = frozenset({"pending", "queued"})
+_CLAIMABLE_RUN_STATUSES = frozenset({"pending", "preflight"})
+_PROTECTED_TERMINAL_STATUSES = frozenset({"cancelled", "archived"})
 
 
 async def _load_task(session: AsyncSession, task_id: str) -> Task | None:
@@ -104,24 +129,34 @@ async def _load_task(session: AsyncSession, task_id: str) -> Task | None:
 async def claim_task_run(
     session: AsyncSession, task_id: str, run_id: str
 ) -> tuple[Task | None, TaskRun | None, str | None]:
-    """把 pending/queued/running 认领为 running。终态任务原样拒绝，禁止改回 running。"""
+    """认领 pending/queued 任务。同一 run 已 running 视为 Celery 重投续跑；禁止第二条 run 抢跑。"""
     task = await _load_task(session, task_id)
     if task is None:
         return None, None, "任务不存在"
-    if task.status not in _STARTABLE_TASK_STATUSES:
-        return None, None, f"任务已是 {task.status}，拒绝启动"
 
     run = await session.get(TaskRun, run_id)
+    if run is not None and run.task_id != task_id:
+        return None, None, "运行不属于该任务"
     if run is not None and run.status == "cancelled":
         return None, None, "运行已取消，拒绝启动"
 
+    if task.status == "running" and run is not None and run.status == "running":
+        return task, run, None
+
+    if task.status not in _CLAIMABLE_TASK_STATUSES:
+        return None, None, f"任务已是 {task.status}，拒绝启动"
+
     claimed = await session.execute(
         update(Task)
-        .where(Task.id == task_id, Task.status.in_(tuple(_STARTABLE_TASK_STATUSES)))
+        .where(Task.id == task_id, Task.status.in_(tuple(_CLAIMABLE_TASK_STATUSES)))
         .values(status="running")
     )
     if claimed.rowcount == 0:
         await session.refresh(task)
+        if task.status == "running" and run is not None:
+            await session.refresh(run)
+            if run.status == "running":
+                return task, run, None
         return None, None, f"任务已是 {task.status}，拒绝启动"
 
     await session.refresh(task)
@@ -131,9 +166,18 @@ async def claim_task_run(
         await session.flush()
         await session.refresh(run)
     else:
-        run.status = "running"
-        run.started_at = datetime.now(timezone.utc)
-        await session.flush()
+        run_claimed = await session.execute(
+            update(TaskRun)
+            .where(TaskRun.id == run_id, TaskRun.status.in_(tuple(_CLAIMABLE_RUN_STATUSES)))
+            .values(status="running", started_at=datetime.now(timezone.utc))
+        )
+        if run_claimed.rowcount == 0:
+            await session.refresh(run)
+            if run.status == "running":
+                await session.commit()
+                return task, run, None
+            return None, None, f"运行已是 {run.status}，拒绝启动"
+        await session.refresh(run)
     await session.commit()
     return task, run, None
 
@@ -205,26 +249,35 @@ async def _persist_single_event(session: AsyncSession, run: TaskRun, event: dict
     if not should_persist_agent_event(event):
         return
     event = ensure_event_timestamp(event)
-    # 取本 run 当前最大 sequence
-    result = await session.execute(
-        select(AgentEvent.sequence).where(AgentEvent.run_id == run.id).order_by(AgentEvent.sequence.desc()).limit(1)
-    )
-    latest = result.scalar_one_or_none()
-    next_seq = (latest or 0) + 1
     event_type = event.get("type", "phase.updated")
     payload_json = json.dumps(event, ensure_ascii=False, default=str)
-    session.add(
-        AgentEvent(
-            run_id=run.id,
-            task_id=run.task_id,
-            node_run_id=await _resolve_node_run_id(session, run, event),
-            sequence=next_seq,
-            event_type=event_type,
-            payload=payload_json,
-            source="claude-agent-sdk",
+    node_run_id = await _resolve_node_run_id(session, run, event)
+    next_seq = 0
+    for _ in range(8):
+        result = await session.execute(
+            select(AgentEvent.sequence).where(AgentEvent.run_id == run.id).order_by(AgentEvent.sequence.desc()).limit(1)
         )
-    )
-    await session.flush()
+        next_seq = (result.scalar_one_or_none() or 0) + 1
+        try:
+            async with session.begin_nested():
+                session.add(
+                    AgentEvent(
+                        run_id=run.id,
+                        task_id=run.task_id,
+                        node_run_id=node_run_id,
+                        sequence=next_seq,
+                        event_type=event_type,
+                        payload=payload_json,
+                        source="claude-agent-sdk",
+                    )
+                )
+                await session.flush()
+            break
+        except IntegrityError:
+            continue
+    else:
+        logger.warning("AgentEvent sequence 冲突重试耗尽 run=%s", run.id)
+        return
     await session.commit()
 
     # 发布到 Redis Pub/Sub — SSE 端点订阅本 task 频道后实时转发
@@ -252,6 +305,21 @@ async def _update_run(session: AsyncSession, run: TaskRun, status: str, error: s
     run.error_message = error
     if status in ("completed", "failed", "cancelled"):
         run.finished_at = datetime.now(timezone.utc)
+    await session.flush()
+
+
+async def apply_analysis_failure(
+    session: AsyncSession, task: Task | None, run: TaskRun | None, error: str
+) -> None:
+    """编排兜底失败：已取消/归档的终态不得改回 failed。"""
+    if run is not None:
+        await session.refresh(run)
+        if run.status not in _PROTECTED_TERMINAL_STATUSES:
+            await _update_run(session, run, "failed", error[:1000])
+    if task is not None:
+        await session.refresh(task)
+        if task.status not in _PROTECTED_TERMINAL_STATUSES:
+            task.status = "failed"
     await session.flush()
 
 
@@ -426,8 +494,6 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
 
             # 4. 6 节点编排(替代旧的单次 executor.run)
             from app.contexts.agent.orchestrator import run_orchestration
-            from app.contexts.task.models import NodeRun as _NodeRun
-            from sqlalchemy import select as _select
 
             captured: dict = {}
             loop = asyncio.get_running_loop()
@@ -501,31 +567,27 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
             if orch_result is None:
                 err = str(captured.get("error", "orchestrator 未返回结果"))
                 title, hint = humanize_agent_error(err)
-                await _update_run(session, run, "failed", format_agent_error(err)[:1000])
-                task.status = "failed"
-                await _persist_single_event(
-                    session,
-                    run,
-                    {
-                        "type": "agent.failed",
-                        "error": err,
-                        "title": title,
-                        "hint": hint,
-                    },
-                )
+                await apply_analysis_failure(session, task, run, format_agent_error(err))
+                if task.status not in _PROTECTED_TERMINAL_STATUSES:
+                    await _persist_single_event(
+                        session,
+                        run,
+                        {
+                            "type": "agent.failed",
+                            "error": err,
+                            "title": title,
+                            "hint": hint,
+                        },
+                    )
             else:
                 # 节点 5 产出 report_data 时,落结构化 Report(阶段 4 补 docx 导出)
                 report_data = orch_result.get("report_data")
                 if report_data and task.status in ("completed", "needs_review"):
                     try:
-                        from app.contexts.report.models import Report
-                        existing = await session.execute(
-                            _select(Report).where(Report.task_id == task_id, Report.run_id == run_id)
-                        )
-                        report = existing.scalar_one_or_none()
-                        if report is None:
-                            cols = report_columns_from_orch_result(orch_result)
-                            report = Report(
+                        cols = report_columns_from_orch_result(orch_result)
+                        report = await ensure_report_for_run(
+                            session,
+                            Report(
                                 task_id=task_id, run_id=run_id, owner_id=task.owner_id,
                                 status="generated",
                                 verdict=cols["verdict"],
@@ -539,8 +601,8 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
                                 poc_filename=cols["poc_filename"],
                                 poc_code=cols["poc_code"],
                                 poc_usage=cols["poc_usage"],
-                            )
-                            session.add(report)
+                            ),
+                        )
                         await session.commit()
                         # 归档插件产物(VULN-*/img/.vuln-env 等)到 MinIO + Evidence
                         try:
@@ -596,9 +658,9 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
                 run = await session.get(TaskRun, run_id)
                 task = await session.get(Task, task_id)
                 if run:
-                    await _update_run(session, run, "failed", format_agent_error(str(e))[:1000])
-                if task:
-                    task.status = "failed"
+                    await apply_analysis_failure(session, task, run, format_agent_error(str(e)))
+                elif task:
+                    await apply_analysis_failure(session, task, None, format_agent_error(str(e)))
                 await session.commit()
         except Exception:
             pass

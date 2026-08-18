@@ -94,7 +94,7 @@ class AgentEvent(BaseModel):
     run: Mapped["TaskRun"] = relationship(back_populates="events")
 
     __table_args__ = (
-        Index("idx_agent_events_run_seq", "run_id", "sequence"),
+        Index("idx_agent_events_run_seq", "run_id", "sequence", unique=True),
     )
 
 

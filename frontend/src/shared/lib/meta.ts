@@ -68,7 +68,7 @@ export const NODE_STATUS_META: Record<string, { label: string; color: TagProps['
   running: { label: '执行中', color: 'processing', status: 'process' },
   completed: { label: '完成', color: 'success', status: 'finish' },
   failed: { label: '失败', color: 'error', status: 'error' },
-  cancelled: { label: '已取消', color: 'default', status: 'wait' },
+  skipped: { label: '跳过', color: 'default', status: 'wait' },
 }
 
 export const EVENT_PHASE_LABELS: Record<string, string> = {

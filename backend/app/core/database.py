@@ -56,11 +56,22 @@ def _alembic_head() -> str:
 
 
 def _create_missing_indexes(connection) -> None:
-    """create_all 不给已存在的表补索引；按当前 metadata 幂等补齐。"""
+    """create_all 不给已存在的表补索引；按当前 metadata 幂等补齐。
+
+    同名索引若 unique 标志与模型不一致（例如旧的非唯一 idx_agent_events_run_seq），
+    先 drop 再按 metadata 重建。
+    """
     from app.shared.base import Base
 
+    inspector = inspect(connection)
     for table in Base.metadata.sorted_tables:
+        existing = {ix["name"]: ix for ix in inspector.get_indexes(table.name)}
         for index in table.indexes:
+            current = existing.get(index.name) if index.name else None
+            if current is not None and bool(current.get("unique")) != bool(index.unique):
+                index.drop(connection)
+                index.create(connection)
+                continue
             index.create(connection, checkfirst=True)
 
 

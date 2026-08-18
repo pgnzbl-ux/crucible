@@ -24,3 +24,34 @@ export function buildTaskListApiParams(params: TaskListQueryInput): Record<strin
   if (params.dateTo) api.date_to = params.dateTo
   return api
 }
+
+const ACTIVE = new Set(['pending', 'queued', 'running'])
+
+/** 当前页有进行中任务则 5s；终态筛选不轮询；其余 30s 兜底。 */
+export function taskListPollMs(
+  items: Array<{ status: string }>,
+  statusFilter?: string,
+): number | false {
+  const filters = statusFilter
+    ? statusFilter.split(',').map((s) => s.trim()).filter(Boolean)
+    : []
+  if (filters.length > 0 && filters.every((s) => !ACTIVE.has(s))) {
+    return false
+  }
+  if (items.some((item) => ACTIVE.has(item.status))) return 5_000
+  return 30_000
+}
+
+/** 工作台：有进行中任务 5s，已有数据则 30s，尚未拉到 stats 时 15s。 */
+export function statsPollMs(byStatus?: Record<string, number>): number {
+  if (!byStatus) return 15_000
+  if ([...ACTIVE].some((status) => (byStatus[status] ?? 0) > 0)) return 5_000
+  return 30_000
+}
+
+export function sumTaskStats(byStatus: Record<string, number>, statusFilter?: string): number {
+  if (!statusFilter) {
+    return Object.values(byStatus).reduce((sum, n) => sum + n, 0)
+  }
+  return statusFilter.split(',').reduce((sum, key) => sum + (byStatus[key.trim()] ?? 0), 0)
+}

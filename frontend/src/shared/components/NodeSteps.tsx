@@ -11,17 +11,17 @@ import {
 } from '@ant-design/icons'
 import { useQuery } from '@tanstack/react-query'
 import { api, type NodeRun } from '../lib/api'
-import type { SSEEvent } from '../hooks/useTaskEvents'
+import type { SSEEvent, SSEStatus } from '../hooks/useTaskEvents'
 import { NODE_LABELS, NODE_STATUS_META } from '../lib/meta'
 import {
   applyNodeOverlay,
   compactNodeCaption,
   displayNodeStatus,
   isNodeListLoading,
-  isNodeTerminal,
   isNodeSelectable,
   overlayFromSseEvents,
   summarizeNodeOutput,
+  nodeStepsPollMs,
 } from '../lib/nodeOutput'
 import { AuditDetail } from './AuditDetail'
 import { EnvReadyDetail } from './EnvReadyDetail'
@@ -36,6 +36,7 @@ interface NodeStepsProps {
   runId: string | null | undefined
   taskStatus?: string
   sseEvents?: SSEEvent[]
+  sseStatus?: SSEStatus
   compact?: boolean
   selectedNode?: string | null
   onSelectNode?: (nodeKey: NodeRun['node_key']) => void
@@ -69,6 +70,7 @@ export function NodeSteps({
   runId,
   taskStatus,
   sseEvents = [],
+  sseStatus,
   compact = false,
   selectedNode = null,
   onSelectNode,
@@ -78,14 +80,12 @@ export function NodeSteps({
     queryKey: ['run-nodes', taskId, runId],
     queryFn: () => api.getRunNodes(taskId, runId!),
     enabled: !!taskId && !!runId,
-    refetchInterval: (query) => {
-      if (taskStatus === 'cancelled') return false
-      const ns = query.state.data
-      if (ns && ns.length === 6 && ns.every((n) => isNodeTerminal(n.status))) {
-        return false
-      }
-      return 3000
-    },
+    refetchInterval: (query) =>
+      nodeStepsPollMs({
+        taskStatus,
+        nodes: query.state.data,
+        sseLive: sseStatus === 'open',
+      }),
   })
 
   const lastNodeUpdate = useMemo(() => {

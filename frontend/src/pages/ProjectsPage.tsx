@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Alert, Button, Empty, Space, Table, Tag, Typography } from 'antd'
+import { Button, Empty, Space, Table, Tag, Typography } from 'antd'
 import { CodeOutlined, ReloadOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
@@ -7,7 +7,7 @@ import dayjs from 'dayjs'
 import { useLocation } from 'wouter'
 
 import { api, type Project } from '../shared/lib/api'
-import { AppLayout } from '../app/layout'
+import { useErrorToast } from '../shared/hooks/useErrorToast'
 import { PageHeader } from '../shared/components/PageHeader'
 import { PageContainer } from '../shared/components/PageContainer'
 
@@ -30,6 +30,7 @@ export function ProjectsPage() {
       api.listProjects({ limit: String(pageSize), offset: String((page - 1) * pageSize) }),
     placeholderData: keepPreviousData,
   })
+  useErrorToast(isError, error, '项目列表加载失败')
 
   const columns: ColumnsType<Project> = [
     {
@@ -72,7 +73,7 @@ export function ProjectsPage() {
   ]
 
   return (
-    <AppLayout>
+    <>
       <PageHeader
         title="源码管理"
         subtitle="同一 Git 仓库只登记一次，后续任务优先从 MinIO 缓存取源码"
@@ -83,15 +84,6 @@ export function ProjectsPage() {
         }
       />
       <PageContainer>
-        {isError && (
-          <Alert
-            type="error"
-            showIcon
-            title="项目列表加载失败"
-            description={error.message}
-            style={{ marginBottom: 16 }}
-          />
-        )}
         <Table
           rowKey="id"
           loading={isLoading || isFetching}
@@ -127,6 +119,6 @@ export function ProjectsPage() {
           }}
         />
       </PageContainer>
-    </AppLayout>
+    </>
   )
 }

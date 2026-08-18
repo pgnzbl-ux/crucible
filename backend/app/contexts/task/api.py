@@ -9,7 +9,7 @@ from app.shared.deps import CurrentUserId
 from app.shared.sse import stream_task_events
 
 from .repository import TaskRepository
-from .schemas import TaskCreateRequest, TaskDetail, TaskListResponse
+from .schemas import TaskCreateRequest, TaskDetail, TaskListResponse, TaskStatsResponse
 from .service import TaskDispatchError, TaskService
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -56,6 +56,15 @@ async def list_tasks(
     return await svc.list_tasks(
         user_id, status, priority, limit, offset, q=q, date_from=date_from, date_to=date_to,
     )
+
+
+@router.get("/stats", response_model=TaskStatsResponse)
+async def task_stats(
+    svc: Annotated[TaskService, Depends(get_task_service)],
+    user_id: CurrentUserId,
+) -> TaskStatsResponse:
+    """工作台状态计数（排除 archived）。必须声明在 /{task_id} 之前。"""
+    return await svc.task_stats(user_id)
 
 
 @router.get("/{task_id}", response_model=TaskDetail)

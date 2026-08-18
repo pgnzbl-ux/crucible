@@ -65,6 +65,41 @@ body,
   animation: crucible-fade-in 320ms ease-out both;
 }
 
+/* 路由切换：只在内容区顶沿走一条细进度，不盖住侧栏和顶栏 */
+.crucible-route-fallback {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  z-index: 5;
+  pointer-events: none;
+}
+.crucible-route-progress {
+  height: 2px;
+  overflow: hidden;
+  border-radius: 1px;
+  background: var(--crucible-primary-light);
+}
+.crucible-route-progress-bar {
+  display: block;
+  height: 100%;
+  width: 32%;
+  background: var(--crucible-primary);
+  animation: crucible-route-indet 900ms ease-in-out infinite;
+}
+@keyframes crucible-route-indet {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(380%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .crucible-route-progress-bar {
+    animation: none;
+    width: 100%;
+    opacity: 0.55;
+  }
+}
+
 .crucible-stagger > * {
   animation: crucible-fade-in 360ms ease-out both;
 }
@@ -260,6 +295,7 @@ body,
 /* ── 布局：内容容器 ──
    滚动交给内容区而不是 body：顶栏天然固定，页面也只会出现一条滚动条 */
 .crucible-content {
+  position: relative;
   padding: 16px 20px 24px;
   background: var(--crucible-bg);
   flex: 1;

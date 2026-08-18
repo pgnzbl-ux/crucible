@@ -3,6 +3,13 @@ import dayjs from 'dayjs'
 
 import type { TaskSummary } from '../../../shared/lib/api'
 
+export const TREND_SAMPLE_LIMIT = 200
+export const TREND_SAMPLE_NOTE = `基于最近 ${TREND_SAMPLE_LIMIT} 条`
+
+export function trendChartAriaLabel(summary: string): string {
+  return `近 7 日任务趋势（${TREND_SAMPLE_NOTE}）：${summary}`
+}
+
 interface TaskTrendChartProps {
   tasks: TaskSummary[]
 }
@@ -29,7 +36,7 @@ export function TaskTrendChart({ tasks }: TaskTrendChartProps) {
   return (
     <div
       role="img"
-      aria-label={`近 7 日任务趋势：${accessibleSummary}`}
+      aria-label={trendChartAriaLabel(accessibleSummary)}
       style={{
         display: 'flex',
         alignItems: 'flex-end',

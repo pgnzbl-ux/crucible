@@ -8,6 +8,7 @@ import {
   CONFIRM_COPY,
   defaultTaskDetailTab,
   shouldFetchTaskReport,
+  reportBelongsToCurrentRun,
 } from './taskActions'
 
 describe('taskActions', () => {
@@ -70,6 +71,12 @@ describe('taskActions', () => {
     ['cancelled', false],
   ])('shouldFetchTaskReport(%s) → %s', (status, expected) => {
     expect(shouldFetchTaskReport(status)).toBe(expected)
+  })
+
+  it('reportBelongsToCurrentRun 拒绝上一 run 的缓存', () => {
+    expect(reportBelongsToCurrentRun({ run_id: 'run-old' }, 'run-new')).toBe(false)
+    expect(reportBelongsToCurrentRun({ run_id: 'run-new' }, 'run-new')).toBe(true)
+    expect(reportBelongsToCurrentRun({ run_id: 'run-old' }, undefined)).toBe(false)
   })
 
   it('destructive confirms explain the consequence', () => {

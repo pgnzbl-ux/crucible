@@ -31,7 +31,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 
 import { api, type Credential, type CredentialInput, type LlmProvider, type LlmProviderInput } from '../shared/lib/api'
-import { AppLayout } from '../app/layout'
+import { useErrorToast } from '../shared/hooks/useErrorToast'
 import { PageHeader } from '../shared/components/PageHeader'
 import { PageContainer } from '../shared/components/PageContainer'
 
@@ -201,10 +201,11 @@ function ProviderPanel() {
   const [createOpen, setCreateOpen] = useState(false)
   const [editing, setEditing] = useState<LlmProvider | null>(null)
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['llm-providers'],
     queryFn: () => api.listLlmProviders(),
   })
+  useErrorToast(isError, error, 'Provider 列表加载失败')
 
   const activateMutation = useMutation({
     mutationFn: (id: string) => api.activateLlmProvider(id),
@@ -231,7 +232,7 @@ function ProviderPanel() {
       render: (v: string, row) => (
         <Space>
           {v}
-          {row.is_default && <StarFilled style={{ color: '#faad14' }} />}
+          {row.is_default && <StarFilled style={{ color: 'var(--crucible-warning)' }} />}
         </Space>
       ),
     },
@@ -352,10 +353,11 @@ function CredentialsPanel() {
   const [form] = Form.useForm()
   const kind = Form.useWatch('kind', form)
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ['credentials'],
     queryFn: () => api.listCredentials(),
   })
+  useErrorToast(isError, error, '凭据列表加载失败')
 
   const saveMutation = useMutation({
     mutationFn: (values: CredentialInput & { id?: string }) =>
@@ -493,7 +495,7 @@ function CredentialsPanel() {
 
 export function SettingsPage() {
   return (
-    <AppLayout>
+    <>
       <PageHeader
         title="设置"
         subtitle="管理 AI 模型接入与任务级凭据"
@@ -507,6 +509,6 @@ export function SettingsPage() {
         ]}
       />
       </PageContainer>
-    </AppLayout>
+    </>
   )
 }

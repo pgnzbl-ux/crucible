@@ -210,7 +210,7 @@ Task 加 project_id(FK→projects) + verdict(6 档);Report 加 report_data 等�
 | 14 | **CI/CD（GitHub Actions）** | 后端 pytest + ruff、前端 tsc + build、构建镜像 |
 | 15 | **生产部署实现（嵌套 DinD + mTLS）** | README 已设计完整，落地 `DindManager` + `core/docker_tls.py`（CA 签发），`SANDBOX_RUNTIME=dind` |
 | 16 | **PostgreSQL 生产验证** | asyncpg 连接 + Alembic 迁移在 PG 上跑通 |
-| 17 | **前端 TaskDetailPage / ReportPage 独立路由** | 当前详情是 Drawer，长内容体验一般 |
+| 17 | **前端 TaskDetailPage / ReportPage 独立路由** ✅ | 详情已是独立路由，不再用 Drawer |
 
 ### 4.1 建议实施顺序
 
@@ -269,7 +269,7 @@ P0 全部完成。每个 P1 完成后跑一遍全链路冒烟（任务创建 →
 | Windows 下 Celery 用 solo pool | `run_worker.py` 已固定 `--pool=solo` |
 | **chromium headless 在 read_only rootfs 下崩溃** | 需额外挂 `/tmp` tmpfs + 容器 env `HOME=/tmp`（crashpad / ProcessSingleton 依赖可写 HOME；HOME 不得指向共享 `/workspace`，否则后续节点会读到上一跳 SDK 缓存），且 `/workspace` 不能挂 `noexec`（chromium + 搭靶场二进制都需可执行） |
 | **nginx/反代默认缓冲 SSE** | 响应头加 `X-Accel-Buffering: no` + `Cache-Control: no-cache, no-transform`（sse.py 端点已加） |
-| **Redis Pub/Sub 离线即丢消息** | SSE 连接先回放 DB 历史（`_replay_history`）再订阅 Pub/Sub，保证"刚发生的事件"不丢 |
+| **Redis Pub/Sub 离线即丢消息** | SSE 连接先订阅 Pub/Sub 再回放 DB 历史（`_replay_history`），实时帧丢掉已回放的 sequence |
 | **EventSource 无法注入 Authorization header** | token 走 query 参数 `?token=xxx`（前端 useTaskEvents + 后端 SSE owner 校验已接入） |
 | **SSE 客户端断开不清理 → Redis 连接泄漏** | `stream_task_events` finally 块强制 `unsubscribe + pubsub.close + r.close`；并发规范见 concurrency.md §5 |
 

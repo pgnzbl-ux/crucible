@@ -18,6 +18,7 @@ async def session_factory():
     async with engine.begin() as conn:
         from app.contexts.identity.models import User  # noqa: F401
         from app.contexts.project.models import Project  # noqa: F401
+        from app.contexts.lab.models import Lab  # noqa: F401
         from app.contexts.task.models import Task, TaskRun, NodeRun, AgentEvent  # noqa: F401
         from app.contexts.report.models import Report  # noqa: F401
         from app.contexts.settings.models import LlmProvider  # noqa: F401
@@ -126,3 +127,34 @@ async def test_list_includes_archived_when_filtered(session_factory):
         items, total = await repo.list_by_owner("u1", status="archived")
         assert total == 1
         assert items[0].status == "archived"
+
+
+@pytest.mark.asyncio
+async def test_count_by_status_skips_archived_and_other_owners(session_factory):
+    from app.contexts.task.models import Task
+    from app.contexts.task.repository import TaskRepository
+
+    async with session_factory() as session:
+        await _seed(session)
+        session.add(
+            Task(
+                project_address="https://github.com/acme/archived",
+                vulnerability_description="desc-archived",
+                owner_id="u1",
+                status="archived",
+                priority="medium",
+            )
+        )
+        session.add(
+            Task(
+                project_address="https://github.com/other/x",
+                vulnerability_description="desc-other",
+                owner_id="u2",
+                status="running",
+                priority="medium",
+            )
+        )
+        await session.flush()
+        counts = await TaskRepository(session).count_by_status("u1")
+        assert counts == {"pending": 1, "queued": 1, "running": 1}
+        assert "archived" not in counts

@@ -100,6 +100,12 @@
 
 响应：`{ items, total, limit, offset }`
 
+### GET `/api/v1/tasks/stats`
+
+当前用户非归档任务的状态计数。工作台卡片用这一次查询，不要对 `/tasks` 连打 `limit=1`。
+
+响应：`{ total, by_status }`，`by_status` 为 `status → count`，缺省状态视为 0。必须注册在 `/{id}` 之前。
+
 ### GET `/api/v1/tasks/{id}`
 
 任务只允许 owner 访问；非 owner 与不存在统一返回 404。该规则同样适用于事件、SSE、取消、重试、删除和节点记录。

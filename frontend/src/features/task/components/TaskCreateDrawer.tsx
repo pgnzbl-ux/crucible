@@ -4,6 +4,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation } from 'wouter'
 
 import { api } from '../../../shared/lib/api'
+import { tryLockTaskAction, unlockTaskAction } from '../../../shared/lib/taskActionLock'
+import { TASK_CREATE_LOCK_ID } from '../../../shared/lib/taskCache'
 
 interface TaskCreateDrawerProps {
   open: boolean
@@ -53,10 +55,12 @@ export function TaskCreateDrawer({ open, onClose, initialValues }: TaskCreateDra
       form.resetFields()
       onClose()
       qc.invalidateQueries({ queryKey: ['tasks'] })
+      qc.invalidateQueries({ queryKey: ['task-stats'] })
       qc.invalidateQueries({ queryKey: ['projects'] })
       navigate(`/tasks/${task.id}?tab=progress`)
     },
     onError: (e: Error) => message.error(e.message),
+    onSettled: () => unlockTaskAction(TASK_CREATE_LOCK_ID),
   })
 
   const projectOptions = (projectsData?.items ?? []).map((p) => ({
@@ -69,7 +73,10 @@ export function TaskCreateDrawer({ open, onClose, initialValues }: TaskCreateDra
       <Form
         form={form}
         layout="vertical"
-        onFinish={(v) => createMutation.mutate(v)}
+        onFinish={(v) => {
+          if (!tryLockTaskAction(TASK_CREATE_LOCK_ID)) return
+          createMutation.mutate(v)
+        }}
         initialValues={{ priority: 'medium' }}
       >
         <Form.Item

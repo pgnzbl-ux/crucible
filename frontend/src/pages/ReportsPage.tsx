@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Alert, Button, Empty, Input, Select, Table, Tag, Typography } from 'antd'
+import { Button, Empty, Input, Select, Table, Tag, Typography } from 'antd'
 import { FileProtectOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
@@ -8,7 +8,7 @@ import { useLocation } from 'wouter'
 
 import { api, type ReportSummary } from '../shared/lib/api'
 import { getVerdictMeta, getReportStatusMeta, VERDICT_META } from '../shared/lib/meta'
-import { AppLayout } from '../app/layout'
+import { useErrorToast } from '../shared/hooks/useErrorToast'
 import { PageHeader } from '../shared/components/PageHeader'
 import { PageContainer } from '../shared/components/PageContainer'
 
@@ -41,6 +41,7 @@ export function ReportsPage() {
       }),
     placeholderData: keepPreviousData,
   })
+  useErrorToast(isError, error, '报告列表加载失败')
 
   const columns: ColumnsType<ReportSummary> = [
     {
@@ -79,7 +80,7 @@ export function ReportsPage() {
   ]
 
   return (
-    <AppLayout>
+    <>
       <PageHeader
         title="验证报告"
         subtitle="任务跑完后在这里阅读全文，和本地打开 report.md 一样"
@@ -113,15 +114,6 @@ export function ReportsPage() {
       </div>
 
       <PageContainer>
-        {isError && (
-          <Alert
-            type="error"
-            showIcon
-            title="报告列表加载失败"
-            description={error.message}
-            style={{ marginBottom: 16 }}
-          />
-        )}
         <Table<ReportSummary>
           rowKey="id"
           loading={isLoading || isFetching}
@@ -154,6 +146,6 @@ export function ReportsPage() {
           })}
         />
       </PageContainer>
-    </AppLayout>
+    </>
   )
 }

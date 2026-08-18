@@ -81,3 +81,84 @@ async def test_claim_allows_queued_task(session_factory):
         assert claimed_run is not None
         assert claimed_task.status == "running"
         assert claimed_run.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_claim_refuses_second_run_while_task_already_running(session_factory):
+    from app.contexts.agent.tasks import claim_task_run
+    from app.contexts.task.models import Task, TaskRun
+
+    async with session_factory() as session:
+        task = Task(
+            project_address="x",
+            vulnerability_description="d",
+            owner_id="u1",
+            status="running",
+        )
+        session.add(task)
+        await session.flush()
+        live = TaskRun(task_id=task.id, status="running")
+        other = TaskRun(task_id=task.id, status="pending")
+        session.add_all([live, other])
+        await session.flush()
+
+        claimed_task, claimed_run, err = await claim_task_run(session, task.id, other.id)
+        assert claimed_task is None
+        assert claimed_run is None
+        assert err is not None
+        await session.refresh(other)
+        assert other.status == "pending"
+        await session.refresh(live)
+        assert live.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_claim_allows_redelivery_of_same_running_run(session_factory):
+    from app.contexts.agent.tasks import claim_task_run
+    from app.contexts.task.models import Task, TaskRun
+
+    async with session_factory() as session:
+        task = Task(
+            project_address="x",
+            vulnerability_description="d",
+            owner_id="u1",
+            status="running",
+        )
+        session.add(task)
+        await session.flush()
+        run = TaskRun(task_id=task.id, status="running")
+        session.add(run)
+        await session.flush()
+
+        claimed_task, claimed_run, err = await claim_task_run(session, task.id, run.id)
+        assert err is None
+        assert claimed_task is not None
+        assert claimed_run is not None
+        assert claimed_task.id == task.id
+        assert claimed_run.id == run.id
+        assert claimed_run.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_apply_analysis_failure_does_not_overwrite_cancelled(session_factory):
+    from app.contexts.agent.tasks import apply_analysis_failure
+    from app.contexts.task.models import Task, TaskRun
+
+    async with session_factory() as session:
+        task = Task(
+            project_address="x",
+            vulnerability_description="d",
+            owner_id="u1",
+            status="cancelled",
+        )
+        session.add(task)
+        await session.flush()
+        run = TaskRun(task_id=task.id, status="cancelled")
+        session.add(run)
+        await session.flush()
+
+        await apply_analysis_failure(session, task, run, "boom")
+        await session.refresh(task)
+        await session.refresh(run)
+        assert task.status == "cancelled"
+        assert run.status == "cancelled"

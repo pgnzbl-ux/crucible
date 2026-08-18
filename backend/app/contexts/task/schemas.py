@@ -82,3 +82,9 @@ class TaskListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class TaskStatsResponse(BaseModel):
+    """工作台计数：一次 GROUP BY，排除 archived。"""
+    total: int
+    by_status: dict[str, int]

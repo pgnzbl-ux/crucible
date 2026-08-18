@@ -12,10 +12,11 @@ import { api } from '../shared/lib/api'
 import { getStatusMeta } from '../shared/lib/meta'
 import { canCancel, canDelete, canRetry, CONFIRM_COPY, defaultTaskDetailTab } from '../shared/lib/taskActions'
 import type { TaskDetailTab } from '../shared/lib/taskActions'
-import { AppLayout } from '../app/layout'
 import { PageHeader } from '../shared/components/PageHeader'
 import { PageContainer } from '../shared/components/PageContainer'
 import { TaskDetailTabs } from '../features/task/components/TaskDetailTabs'
+import { tryLockTaskAction, unlockTaskAction } from '../shared/lib/taskActionLock'
+import { applyTaskMutationCache } from '../shared/lib/taskCache'
 
 const TAB_KEYS: TaskDetailTab[] = ['overview', 'progress', 'events', 'report']
 
@@ -44,36 +45,64 @@ export function TaskDetailPage() {
   })
 
   const cancelMutation = useMutation({
+    mutationKey: ['task-action', taskId],
     mutationFn: () => api.cancelTask(taskId),
+    onMutate: () => {
+      if (!tryLockTaskAction(taskId)) throw new Error('请等待当前操作完成')
+      return { locked: true as const }
+    },
     onSuccess: () => {
       message.success('任务已取消')
-      qc.invalidateQueries({ queryKey: ['task', taskId] })
-      qc.invalidateQueries({ queryKey: ['tasks'] })
-      qc.invalidateQueries({ queryKey: ['run-nodes', taskId] })
+      applyTaskMutationCache(qc, taskId, 'cancel')
     },
-    onError: (e: Error) => message.error(e.message),
+    onError: (e: Error) => {
+      if (e.message !== '请等待当前操作完成') message.error(e.message)
+    },
+    onSettled: (_data, _error, _vars, ctx) => {
+      if (ctx?.locked) unlockTaskAction(taskId)
+    },
   })
 
   const retryMutation = useMutation({
+    mutationKey: ['task-action', taskId],
     mutationFn: () => api.retryTask(taskId),
+    onMutate: () => {
+      if (!tryLockTaskAction(taskId)) throw new Error('请等待当前操作完成')
+      return { locked: true as const }
+    },
     onSuccess: () => {
       message.success('任务已重新提交')
-      qc.invalidateQueries({ queryKey: ['task', taskId] })
-      qc.invalidateQueries({ queryKey: ['tasks'] })
-      qc.invalidateQueries({ queryKey: ['run-nodes', taskId] })
+      applyTaskMutationCache(qc, taskId, 'retry')
     },
-    onError: (e: Error) => message.error(e.message),
+    onError: (e: Error) => {
+      if (e.message !== '请等待当前操作完成') message.error(e.message)
+    },
+    onSettled: (_data, _error, _vars, ctx) => {
+      if (ctx?.locked) unlockTaskAction(taskId)
+    },
   })
 
   const deleteMutation = useMutation({
+    mutationKey: ['task-action', taskId],
     mutationFn: () => api.deleteTask(taskId),
+    onMutate: () => {
+      if (!tryLockTaskAction(taskId)) throw new Error('请等待当前操作完成')
+      return { locked: true as const }
+    },
     onSuccess: () => {
       message.success('任务已删除')
       navigate('/tasks')
-      qc.invalidateQueries({ queryKey: ['tasks'] })
+      applyTaskMutationCache(qc, taskId, 'delete')
     },
-    onError: (e: Error) => message.error(e.message),
+    onError: (e: Error) => {
+      if (e.message !== '请等待当前操作完成') message.error(e.message)
+    },
+    onSettled: (_data, _error, _vars, ctx) => {
+      if (ctx?.locked) unlockTaskAction(taskId)
+    },
   })
+
+  const actionBusy = cancelMutation.isPending || retryMutation.isPending || deleteMutation.isPending
 
   if (!taskId) {
     return null
@@ -100,7 +129,7 @@ export function TaskDetailPage() {
   }
 
   return (
-    <AppLayout fill>
+    <>
       <PageHeader
         title={title}
         subtitle={task ? `ID ${task.id.slice(0, 8)}` : undefined}
@@ -127,6 +156,7 @@ export function TaskDetailPage() {
                     icon={<PauseCircleOutlined />}
                     onClick={() => confirm('cancel', () => cancelMutation.mutate())}
                     loading={cancelMutation.isPending}
+                    disabled={actionBusy}
                   >
                     取消
                   </Button>
@@ -136,6 +166,7 @@ export function TaskDetailPage() {
                     icon={<RedoOutlined />}
                     onClick={() => confirm('retry', () => retryMutation.mutate())}
                     loading={retryMutation.isPending}
+                    disabled={actionBusy}
                   >
                     重试
                   </Button>
@@ -146,6 +177,7 @@ export function TaskDetailPage() {
                     icon={<DeleteOutlined />}
                     onClick={() => confirm('delete', () => deleteMutation.mutate())}
                     loading={deleteMutation.isPending}
+                    disabled={actionBusy}
                   >
                     删除
                   </Button>
@@ -171,6 +203,6 @@ export function TaskDetailPage() {
           />
         )}
       </PageContainer>
-    </AppLayout>
+    </>
   )
 }

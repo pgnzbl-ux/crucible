@@ -290,6 +290,42 @@ async def test_retry_rejects_running_task(session_factory):
 
 
 @pytest.mark.asyncio
+async def test_retry_cas_rejects_second_call_after_queued(session_factory):
+    """第一次 retry 已把任务标 queued 后，第二次不能再插一个 TaskRun。"""
+    from unittest.mock import patch
+
+    from sqlalchemy import select
+
+    from app.contexts.task.models import Task, TaskRun
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+
+    async with session_factory() as session:
+        task = Task(
+            project_address="x",
+            vulnerability_description="d",
+            owner_id="u1",
+            status="failed",
+        )
+        session.add(task)
+        await session.flush()
+        session.add(TaskRun(task_id=task.id, status="failed"))
+        await session.flush()
+
+        svc = TaskService(TaskRepository(session))
+        with patch("app.core.celery_app.celery_app.send_task"):
+            first = await svc.retry_task(task.id, "u1")
+            with pytest.raises(ValueError, match="不能重试"):
+                await svc.retry_task(task.id, "u1")
+
+        runs = (await session.execute(select(TaskRun).where(TaskRun.task_id == task.id))).scalars().all()
+        assert len(runs) == 2
+        assert first in {r.id for r in runs}
+        await session.refresh(task)
+        assert task.status == "queued"
+
+
+@pytest.mark.asyncio
 async def test_task_operations_require_owner(session_factory):
     """已知 UUID 也不能读取或重试其他用户的任务。"""
     from app.contexts.task.models import Task

@@ -91,3 +91,73 @@ async def test_create_rejects_unsafe_git_url(session):
     )
     with pytest.raises(ValueError, match="Git"):
         await TaskService(TaskRepository(session)).create_task(req, "u1")
+
+
+@pytest.mark.asyncio
+async def test_redispatch_stale_queued_uses_original_run_id(session):
+    from datetime import datetime, timedelta, timezone
+
+    from app.contexts.task.models import Task, TaskRun
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+
+    now = datetime(2026, 8, 18, 12, 0, tzinfo=timezone.utc)
+    task = Task(
+        project_address="https://github.com/acme/demo",
+        vulnerability_description="d",
+        owner_id="u1",
+        status="queued",
+    )
+    session.add(task)
+    await session.flush()
+    run = TaskRun(
+        task_id=task.id,
+        status="pending",
+        created_at=now - timedelta(seconds=120),
+    )
+    session.add(run)
+    await session.commit()
+
+    sent: list[tuple] = []
+    with patch(
+        "app.core.celery_app.celery_app.send_task",
+        side_effect=lambda *args, **kwargs: sent.append((args, kwargs)),
+    ):
+        ids = await TaskService(TaskRepository(session)).redispatch_stale_queued(
+            min_age_seconds=60, now=now
+        )
+
+    assert ids == [run.id]
+    assert sent[0][0][0] == "agent.run_analysis"
+    assert sent[0][1]["args"] == [task.id, run.id]
+    assert sent[0][1]["task_id"] == run.id
+
+
+@pytest.mark.asyncio
+async def test_redispatch_skips_fresh_queued(session):
+    from datetime import datetime, timezone
+
+    from app.contexts.task.models import Task, TaskRun
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+
+    now = datetime(2026, 8, 18, 12, 0, tzinfo=timezone.utc)
+    task = Task(
+        project_address="https://github.com/acme/demo",
+        vulnerability_description="d",
+        owner_id="u1",
+        status="queued",
+        created_at=now,
+    )
+    session.add(task)
+    await session.flush()
+    session.add(TaskRun(task_id=task.id, status="pending", created_at=now))
+    await session.commit()
+
+    with patch("app.core.celery_app.celery_app.send_task") as send:
+        ids = await TaskService(TaskRepository(session)).redispatch_stale_queued(
+            min_age_seconds=60, now=now
+        )
+
+    assert ids == []
+    send.assert_not_called()

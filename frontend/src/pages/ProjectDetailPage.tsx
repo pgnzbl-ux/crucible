@@ -7,10 +7,10 @@ import dayjs from 'dayjs'
 import { useLocation, useRoute } from 'wouter'
 
 import { api, type SourceArtifact } from '../shared/lib/api'
-import { AppLayout } from '../app/layout'
 import { PageHeader } from '../shared/components/PageHeader'
 import { PageContainer } from '../shared/components/PageContainer'
 import { TaskCreateDrawer } from '../features/task/components/TaskCreateDrawer'
+import { useErrorToast } from '../shared/hooks/useErrorToast'
 
 const { Text } = Typography
 
@@ -26,11 +26,12 @@ export function ProjectDetailPage() {
     enabled: !!projectId,
   })
 
-  const { data: artifacts, isLoading: artifactsLoading } = useQuery({
+  const { data: artifacts, isLoading: artifactsLoading, isError: isArtifactsError, error: artifactsError } = useQuery({
     queryKey: ['project-artifacts', projectId],
     queryFn: () => api.listProjectArtifacts(projectId),
     enabled: !!projectId,
   })
+  useErrorToast(isArtifactsError, artifactsError, '制品列表加载失败')
 
   const columns: ColumnsType<SourceArtifact> = [
     {
@@ -67,7 +68,7 @@ export function ProjectDetailPage() {
   ]
 
   return (
-    <AppLayout>
+    <>
       <PageHeader
         title={project?.name ?? '源码项目'}
         subtitle={project?.git_url}
@@ -141,7 +142,11 @@ export function ProjectDetailPage() {
                 dataSource={artifacts?.items ?? []}
                 columns={columns}
                 pagination={false}
-                locale={{ emptyText: '还没有缓存。跑过一次源码节点后会出现在这里。' }}
+                locale={{
+                  emptyText: isArtifactsError
+                    ? '制品列表加载失败'
+                    : '还没有缓存。跑过一次源码节点后会出现在这里。',
+                }}
               />
             </Card>
           </>
@@ -166,6 +171,6 @@ export function ProjectDetailPage() {
             : undefined
         }
       />
-    </AppLayout>
+    </>
   )
 }

@@ -88,6 +88,15 @@ class TaskRepository:
 
         return list(result.scalars().all()), count_result.scalar() or 0
 
+    async def count_by_status(self, owner_id: str) -> dict[str, int]:
+        """非归档任务按 status 计数。"""
+        result = await self.session.execute(
+            select(Task.status, func.count(Task.id))
+            .where(Task.owner_id == owner_id, Task.status != "archived")
+            .group_by(Task.status)
+        )
+        return {status: int(n) for status, n in result.all()}
+
     async def update_status(self, task: Task, new_status: str) -> Task:
         task.status = new_status
         await self.session.flush()

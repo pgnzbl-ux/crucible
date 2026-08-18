@@ -13,15 +13,19 @@ from app.shared.base import Base
 from app.shared.models import register_models
 
 
-def test_single_alembic_baseline():
-    versions = [
-        p for p in (Path(__file__).resolve().parents[1] / "alembic" / "versions").glob("*.py")
-        if p.name != "__init__.py"
-    ]
-    assert len(versions) == 1, [p.name for p in versions]
-    source = versions[0].read_text(encoding="utf-8")
-    assert 'revision: str = "c18a0e9b4d21"' in source
-    assert "down_revision: Union[str, None] = None" in source
+def test_alembic_chain_from_baseline():
+    versions = Path(__file__).resolve().parents[1] / "alembic" / "versions"
+    baseline = (versions / "c18a0e9b4d21_baseline.py").read_text(encoding="utf-8")
+    assert 'revision: str = "c18a0e9b4d21"' in baseline
+    assert "down_revision: Union[str, None] = None" in baseline
+    incremental = (versions / "b7e4c2a19f08_unique_event_seq_report_run.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'revision: str = "b7e4c2a19f08"' in incremental
+    assert 'down_revision: Union[str, None] = "c18a0e9b4d21"' in incremental
+    from app.core.database import _alembic_head
+
+    assert _alembic_head() == "b7e4c2a19f08"
 
 
 @pytest.mark.asyncio

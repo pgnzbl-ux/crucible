@@ -17,6 +17,7 @@ import { EVENT_PHASE_LABELS, EVENT_TYPE_LABELS, NODE_LABELS, NODE_STATUS_META } 
 import { summarizeNodeOutput } from '../../../shared/lib/nodeOutput'
 import { humanizeAgentError } from '../../../shared/lib/humanizeAgentError'
 import type { SSEStatus } from '../../../shared/hooks/useTaskEvents'
+import { useErrorToast } from '../../../shared/hooks/useErrorToast'
 import { useStickToBottom } from '../../../shared/hooks/useStickToBottom'
 
 const { Text, Paragraph } = Typography
@@ -137,6 +138,7 @@ export function TaskEventTimeline({
 }: TaskEventTimelineProps) {
   const [filter, setFilter] = useState<StreamFilter>('all')
   const [showAll, setShowAll] = useState(false)
+  useErrorToast(sseStatus === 'reconnecting' && !!sseError, sseError, '实时连接中断，正在重连')
 
   const filtered = useMemo(
     () => (events ?? []).filter((ev) => matchesFilter(ev, filter)),
@@ -208,9 +210,6 @@ export function TaskEventTimeline({
           ]}
         />
       </Space>
-      {sseError && sseStatus === 'reconnecting' && (
-        <Alert type="warning" showIcon title={sseError} style={{ marginBottom: 12 }} />
-      )}
       {filtered.length > 0 ? (
         <div className="crucible-stream">
           <div

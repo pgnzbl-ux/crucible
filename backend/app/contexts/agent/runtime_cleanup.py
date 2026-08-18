@@ -246,10 +246,31 @@ async def sweep_lab_lifecycle() -> None:
         await engine.dispose()
 
 
+async def sweep_stale_queued_dispatches() -> None:
+    """用独立 DB session 把滞留 queued 按原 run.id 再投递。"""
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+
+    engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with factory() as session:
+            await TaskService(TaskRepository(session)).redispatch_stale_queued()
+    finally:
+        await engine.dispose()
+
+
 async def sweep_all_runtimes() -> None:
-    """先扫 agent-runner，再巡检共享 Lab 生命周期。"""
+    """先扫 agent-runner，再巡检共享 Lab 生命周期，最后回收滞留 queued。"""
     await sweep_orphan_runtimes()
     await sweep_lab_lifecycle()
+    try:
+        await sweep_stale_queued_dispatches()
+    except Exception:  # noqa: BLE001
+        logger.exception("滞留 queued 再投递失败")
 
 
 def collect_task_ids_from_containers(containers: Iterable, workdir_base: str) -> set[str]:

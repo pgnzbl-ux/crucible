@@ -54,9 +54,10 @@ export function TaskFilterBar({ params, onChange, onClear }: TaskFilterBarProps)
 
   return (
     <div className="crucible-filter-bar">
-      <Space wrap size="medium">
+      <Space wrap size="middle">
         <Select
           allowClear
+          aria-label="状态"
           placeholder="状态"
           style={{ width: 140 }}
           value={params.status}
@@ -65,6 +66,7 @@ export function TaskFilterBar({ params, onChange, onClear }: TaskFilterBarProps)
         />
         <Select
           allowClear
+          aria-label="优先级"
           placeholder="优先级"
           style={{ width: 120 }}
           value={params.priority}
@@ -83,6 +85,7 @@ export function TaskFilterBar({ params, onChange, onClear }: TaskFilterBarProps)
         />
         <Input
           allowClear
+          aria-label="搜索项目地址"
           placeholder="搜索项目地址"
           prefix={<SearchOutlined />}
           style={{ width: 220 }}
