@@ -1,4 +1,4 @@
-"""配置真相源：连接串只进 .env；LLM 只走后台 Provider；MinIO bucket 写死。"""
+"""配置真相源：连接串只进 .env；产品版本只进 pyproject.toml；LLM 只走后台 Provider；MinIO bucket 写死。"""
 import sys
 import os
 from types import SimpleNamespace
@@ -46,6 +46,30 @@ def test_pytest_uses_sqlite_not_runtime_postgres():
     url = get_settings().database_url
     assert url.startswith("sqlite"), url
     assert "postgresql" not in url
+
+
+def test_app_version_has_single_source():
+    """产品版本只写在 backend/pyproject.toml，禁止在 Settings / 前端再抄一份。"""
+    import json
+    import tomllib
+    from pathlib import Path
+
+    from app.core.config import get_settings
+
+    backend_root = Path(__file__).resolve().parents[1]
+    repo_root = backend_root.parent
+    pyproject = tomllib.loads((backend_root / "pyproject.toml").read_text(encoding="utf-8"))
+    declared = pyproject["project"]["version"]
+
+    config_src = (backend_root / "app" / "core" / "config.py").read_text(encoding="utf-8")
+    assert 'app_version: str =' not in config_src
+    assert declared not in config_src
+
+    assert "app_version" not in Settings.model_fields
+    assert get_settings().app_version == declared
+
+    frontend = json.loads((repo_root / "frontend" / "package.json").read_text(encoding="utf-8"))
+    assert "version" not in frontend
 
 
 def test_settings_require_env_for_infra_urls(monkeypatch, tmp_path):

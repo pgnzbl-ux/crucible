@@ -73,6 +73,7 @@ paths: ["backend/app/contexts/**/*.py", "backend/app/shared/**/*.py", "backend/a
 
 | 入口 | 写什么 |
 |---|---|
+| `backend/pyproject.toml` `[project].version` | **唯一**产品版本。`Settings.app_version` 只读这里。前端 `package.json` 不写 version |
 | `backend/.env`（模板 `.env.example`） | **唯一**运行时连接与密钥：`DATABASE_URL`（PostgreSQL）/ `REDIS_*` / `S3_ENDPOINT`+KEYS / `AUTH_SECRET` / SDK 开关 |
 | `tests/conftest.py` | **pytest 进程**把 `DATABASE_URL` 覆盖为 sqlite；不改 `.env`，不碰真实库 |
 | `app/core/config.py` | 类型、校验、行为默认（environment / debug / runner 限额）。**连接串无代码默认值** |

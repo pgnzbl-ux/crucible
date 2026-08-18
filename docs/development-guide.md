@@ -299,7 +299,7 @@ pytest                           # 单元测试（待补，见 backlog P1）
 
 ### 6.3 关键配置（`backend/.env` 是运行时唯一入口）
 
-`config.py` 只做类型与校验，**不**再抄一份连接串。桶名见 `shared/object_store.py`。LLM 凭据只在后台「设置」。pytest 由 `tests/conftest.py` 把 `DATABASE_URL` 覆盖为 sqlite，不读运行时库。
+`config.py` 只做类型与校验，**不**再抄一份连接串。产品版本只写 `backend/pyproject.toml`（前端 `package.json` 不写 version）。桶名见 `shared/object_store.py`。LLM 凭据只在后台「设置」。pytest 由 `tests/conftest.py` 把 `DATABASE_URL` 覆盖为 sqlite，不读运行时库。
 
 | 变量 | 说明 |
 |------|------|

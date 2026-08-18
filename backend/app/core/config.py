@@ -1,7 +1,17 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def read_app_version() -> str:
+    """产品版本唯一入口：backend/pyproject.toml [project].version。"""
+    import tomllib
+
+    pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    with pyproject.open("rb") as fh:
+        return str(tomllib.load(fh)["project"]["version"])
 
 
 class Settings(BaseSettings):
@@ -11,13 +21,13 @@ class Settings(BaseSettings):
     - `.env`：基础设施连接与密钥（DATABASE_URL / REDIS_* / S3_* / AUTH_SECRET）。
       这些字段在本类里**没有代码默认值**。pytest 用环境变量覆盖 DATABASE_URL 为 sqlite。
     - 本类默认值：行为开关与限额（environment / debug / SDK / runner 资源）。
+    - 产品版本：`backend/pyproject.toml`，经 `read_app_version()` 读取，禁止在本文件抄号。
     - 代码常量：MinIO 桶与 kind（`shared/object_store.py`）；LLM 凭据禁止进 Settings。
     - 后台 DB：LLM Provider。
     - `alembic.ini` 不保存真实库地址，由 `alembic/env.py` 从本类注入。
     """
 
     app_name: str = "Crucible API"
-    app_version: str = "0.3.0"
     environment: str = "development"
     debug: bool = False
 
@@ -67,6 +77,10 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def app_version(self) -> str:
+        return read_app_version()
 
 
 @lru_cache
