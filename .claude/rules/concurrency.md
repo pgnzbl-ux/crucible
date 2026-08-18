@@ -10,11 +10,14 @@ paths: ["backend/app/**/*.py"]
 
 - `task_acks_late=True`：任务执行完才 ack，崩溃可重派
 - `task_reject_on_worker_lost=True`：worker 崩溃时任务重新入队
-- `worker_prefetch_multiplier=1`：单 worker 单任务，避免饿死
+- `worker_prefetch_multiplier=1`：每个进程一次只预取一条长任务，避免饿死（Linux prefork 下仍可多进程并行）
 - `task_soft_time_limit` + `task_time_limit`：软超时先发信号，硬超时强制 kill
-- Windows：`--pool=solo`（`run_worker.py` 已固定）
+- Windows：`--pool=solo`（实际并行=1）；Linux：`--pool=prefork --concurrency=$AGENT_RUNNER_CONCURRENCY_LIMIT`
+- 任务并行软上限：表 `platform_settings.max_concurrent_tasks`（仅 Linux 设置页可改，默认 1；Windows solo 实际并行=1）。Worker **先抢 Redis 槽 `crucible:running_run_ids` 再 claim**；无槽则 `retry(countdown=15)`，保持 `queued`
+- Redis 淘汰策略：`noeviction`（禁止 LRU 丢掉 Celery 未 ack 任务）
+- `broker_transport_options.visibility_timeout` ≥ 任务硬超时 + 300s
 - 取消：先提交 cancelled 并立刻返回 HTTP；后台 `schedule_teardown_task_runtime`（先拆 agent-runner 再 compose down）。删除 / 任务结束仍可同步 `teardown_task_runtime`。
-- 孤儿巡检：Celery `worker_ready` 启动守护线程，每 5 分钟扫一次 Docker 容器；活着且未超时的 running 任务不误杀。残留 host_workdir / compose.yml 不算运行时。年龄按 UTC 计算（`utc_unix`），避免 SQLite naive datetime 在东八区被 `.timestamp()` 算超龄。
+- 孤儿巡检：Celery `worker_ready` 启动守护线程，每 5 分钟扫一次 Docker 容器；多进程用 Redis `crucible:runtime_sweeper` SET NX 互斥，并调和运行槽。活着且未超时的 running 任务不误杀。残留 host_workdir / compose.yml 不算运行时。年龄按 UTC 计算（`utc_unix`），避免 SQLite naive datetime 在东八区被 `.timestamp()` 算超龄。
 
 ## 2. asyncio 三件坑
 
@@ -30,7 +33,7 @@ paths: ["backend/app/**/*.py"]
 
 - 同一用户高频创建任务 → `asyncio.Semaphore`（API 层）或 Redis 分布式锁
 - LLM Provider 激活切换（"激活唯一性"）→ DB 事务 + `SELECT ... FOR UPDATE`（PostgreSQL）
-- agent-runner 容器并发上限：默认 4（防宿主 OOM，`settings.agent_runner_concurrency_limit`）
+- agent-runner / 任务并行硬顶：`AGENT_RUNNER_CONCURRENCY_LIMIT` 默认 4、合法 1–8（设置项上限 + Linux worker 进程数）
 
 ## 4. Redis Pub/Sub
 

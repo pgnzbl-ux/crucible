@@ -299,6 +299,26 @@ Provider **没有独立启用/停用字段**。Agent 运行时只读取唯一的
 
 真实请求 `base_url` 验证。Base URL 必须是 HTTPS 域名，禁止 IP 字面量、userinfo、fragment；DNS 须为公网或 TUN fake-ip（`198.18.0.0/15`），仍拒绝真实私网/回环/元数据；不跟随重定向。不使用域名白名单。
 
+### GET `/api/v1/settings/runtime`
+
+平台全局「同时 running 的验证任务数」。无行则插入默认 `max_concurrent_tasks=1`。RBAC 落地前任意已登录用户可读写。
+
+响应：
+
+```json
+{
+  "max_concurrent_tasks": 1,
+  "max_allowed": 4,
+  "worker_pool": "solo"
+}
+```
+
+`max_allowed` 来自 `AGENT_RUNNER_CONCURRENCY_LIMIT`（1–8，默认 4）。`worker_pool` 按 API 进程 `sys.platform` 提示：`win32`→`solo`，否则 `prefork`（不是探测正在跑的 worker）。
+
+### PUT `/api/v1/settings/runtime`
+
+请求：`{ "max_concurrent_tasks": 2 }`（`extra=forbid`）。必须 `1 <= n <= max_allowed`，否则 422 `VALIDATION_FAILED`。改完立即作用于新抢槽；不取消已 running 的任务。Worker 先抢 Redis 槽 `crucible:running_run_ids` 再 claim；无槽保持 `queued` 并 `retry(countdown=15)`。设置页仅在 `worker_pool=prefork`（Linux）可改；`solo`（Windows）控件禁用。Windows Worker 实际并行恒为 1，写库为 2 也不会同时跑两个任务。
+
 ---
 
 ## 健康检查 / 监控

@@ -11,15 +11,19 @@ LLM Provider 管理服务。
 from __future__ import annotations
 
 import json
+import sys
 import time
 from typing import Any
 
 import httpx
 
+from sqlalchemy.exc import IntegrityError
+
+from app.core.config import get_settings
 from app.core.crypto import mask_secret
 from app.core.url_security import validate_public_https_url
 
-from .models import Credential, LlmProvider
+from .models import Credential, LlmProvider, PlatformSetting
 from .repository import CredentialRepository, SettingsRepository
 from .schemas import (
     CredentialCreateRequest,
@@ -29,6 +33,7 @@ from .schemas import (
     LlmProviderResponse,
     LlmProviderTestResult,
     LlmProviderUpdateRequest,
+    RuntimeSettingsResponse,
 )
 
 
@@ -49,6 +54,10 @@ def to_response(provider: LlmProvider, plain_key: str = "") -> LlmProviderRespon
         created_at=provider.created_at,
         updated_at=provider.updated_at,
     )
+
+
+def worker_pool_hint() -> str:
+    return "solo" if sys.platform == "win32" else "prefork"
 
 
 class SettingsService:
@@ -117,6 +126,37 @@ class SettingsService:
 
     async def get_default_provider(self) -> LlmProvider | None:
         return await self.repo.get_default()
+
+    async def _get_or_create_platform_setting(self) -> PlatformSetting:
+        row = await self.repo.get_platform_setting()
+        if row is not None:
+            return row
+        row = PlatformSetting(singleton_key="default", max_concurrent_tasks=1)
+        try:
+            async with self.repo.session.begin_nested():
+                return await self.repo.add_platform_setting(row)
+        except IntegrityError:
+            found = await self.repo.get_platform_setting()
+            if found is None:
+                raise
+            return found
+
+    def _runtime_response(self, row: PlatformSetting) -> RuntimeSettingsResponse:
+        return RuntimeSettingsResponse(
+            max_concurrent_tasks=row.max_concurrent_tasks,
+            max_allowed=get_settings().agent_runner_concurrency_limit,
+            worker_pool=worker_pool_hint(),
+        )
+
+    async def get_runtime_settings(self) -> RuntimeSettingsResponse:
+        row = await self._get_or_create_platform_setting()
+        return self._runtime_response(row)
+
+    async def update_runtime_settings(self, n: int) -> RuntimeSettingsResponse:
+        row = await self._get_or_create_platform_setting()
+        row.max_concurrent_tasks = n
+        await self.repo.session.flush()
+        return self._runtime_response(row)
 
     # ── 测试连接 ──
 

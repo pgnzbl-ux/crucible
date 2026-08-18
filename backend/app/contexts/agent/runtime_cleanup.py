@@ -265,12 +265,44 @@ async def sweep_stale_queued_dispatches() -> None:
 
 async def sweep_all_runtimes() -> None:
     """先扫 agent-runner，再巡检共享 Lab 生命周期，最后回收滞留 queued。"""
+    from app.contexts.agent.task_slots import reconcile_slots, try_sweeper_lock
+
+    try:
+        locked = await try_sweeper_lock()
+    except Exception:  # noqa: BLE001
+        logger.exception("巡检抢锁失败，跳过本轮")
+        return
+    if not locked:
+        return
     await sweep_orphan_runtimes()
     await sweep_lab_lifecycle()
     try:
         await sweep_stale_queued_dispatches()
     except Exception:  # noqa: BLE001
         logger.exception("滞留 queued 再投递失败")
+    try:
+        await reconcile_slots(await load_running_run_ids())
+    except Exception:  # noqa: BLE001
+        logger.exception("运行槽调和失败")
+
+
+async def load_running_run_ids() -> set[str]:
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    from app.contexts.task.models import TaskRun
+
+    engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with factory() as session:
+            rows = (
+                await session.execute(select(TaskRun.id).where(TaskRun.status == "running"))
+            ).scalars().all()
+            return set(rows)
+    finally:
+        await engine.dispose()
 
 
 def collect_task_ids_from_containers(containers: Iterable, workdir_base: str) -> set[str]:

@@ -1,7 +1,7 @@
 from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import Credential, LlmProvider
+from .models import Credential, LlmProvider, PlatformSetting
 
 
 class SettingsRepository:
@@ -44,6 +44,18 @@ class SettingsRepository:
     async def delete(self, provider: LlmProvider) -> None:
         await self.session.delete(provider)
         await self.session.flush()
+
+    async def get_platform_setting(self) -> PlatformSetting | None:
+        result = await self.session.execute(
+            select(PlatformSetting).where(PlatformSetting.singleton_key == "default")
+        )
+        return result.scalar_one_or_none()
+
+    async def add_platform_setting(self, row: PlatformSetting) -> PlatformSetting:
+        self.session.add(row)
+        await self.session.flush()
+        await self.session.refresh(row)
+        return row
 
 
 class CredentialRepository:

@@ -18,6 +18,8 @@ from .schemas import (
     LlmProviderTestRequest,
     LlmProviderTestResult,
     LlmProviderUpdateRequest,
+    RuntimeSettingsResponse,
+    RuntimeSettingsUpdateRequest,
 )
 from .service import SettingsService
 
@@ -156,3 +158,18 @@ async def delete_credential(
     deleted = await svc.delete_credential(user_id, credential_id)
     if not deleted:
         raise HTTPException(404, "凭据不存在")
+
+
+@router.get("/runtime", response_model=RuntimeSettingsResponse)
+async def get_runtime_settings(
+    svc: Annotated[SettingsService, Depends(get_settings_service)],
+) -> RuntimeSettingsResponse:
+    return await svc.get_runtime_settings()
+
+
+@router.put("/runtime", response_model=RuntimeSettingsResponse)
+async def update_runtime_settings(
+    request: RuntimeSettingsUpdateRequest,
+    svc: Annotated[SettingsService, Depends(get_settings_service)],
+) -> RuntimeSettingsResponse:
+    return await svc.update_runtime_settings(request.max_concurrent_tasks)

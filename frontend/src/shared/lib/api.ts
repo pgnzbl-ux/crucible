@@ -351,6 +351,12 @@ export interface CredentialInput {
   description?: string
 }
 
+export interface RuntimeSettings {
+  max_concurrent_tasks: number
+  max_allowed: number
+  worker_pool: 'solo' | 'prefork'
+}
+
 export const api = {
   // Auth
   login: (data: { email: string; password: string }) =>
@@ -455,6 +461,11 @@ export const api = {
 
   deleteCredential: (id: string) =>
     request<void>(`/settings/credentials/${id}`, { method: 'DELETE' }),
+
+  getRuntimeSettings: () => request<RuntimeSettings>('/settings/runtime'),
+
+  updateRuntimeSettings: (data: { max_concurrent_tasks: number }) =>
+    request<RuntimeSettings>('/settings/runtime', { method: 'PUT', body: JSON.stringify(data) }),
 
   // Tasks — 阶段 1 新增(retry / delete / nodes)
   retryTask: (id: string, fromNode?: string) =>

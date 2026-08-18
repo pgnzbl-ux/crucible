@@ -35,7 +35,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: crucible-redis
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy noeviction
     ports:
       - "6380:6379"
     volumes:

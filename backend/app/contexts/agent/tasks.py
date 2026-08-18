@@ -33,6 +33,7 @@ import shutil
 import signal
 from datetime import datetime, timezone
 
+from celery.exceptions import Retry
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -44,7 +45,8 @@ from app.contexts.project.models import Project, SourceArtifact  # noqa: F401 �
 from app.contexts.report.models import Report, Evidence  # noqa: F401 — 注册 reports/evidences 表
 from app.contexts.report.repository import ReportRepository
 from app.contexts.report.service import ReportService
-from app.contexts.settings.models import LlmProvider  # noqa: F401 — 注册 llm_providers 表
+from app.contexts.agent.task_slots import release_slot, try_acquire_slot
+from app.contexts.settings.models import LlmProvider, PlatformSetting  # noqa: F401 — 注册 llm_providers / platform_settings
 from app.contexts.task.models import AgentEvent, Task, TaskRun, NodeRun  # noqa: F401 — NodeRun 注册(阶段 1)
 from app.contexts.agent.errors import format_agent_error, humanize_agent_error
 from app.core.agent_runner import AgentRunnerError, agent_runner_manager
@@ -180,6 +182,39 @@ async def claim_task_run(
         await session.refresh(run)
     await session.commit()
     return task, run, None
+
+
+async def admit_task_run(
+    session: AsyncSession,
+    celery_task: object,
+    task_id: str,
+    run_id: str,
+) -> tuple[Task | None, TaskRun | None, str | None, bool]:
+    """先判断可否启动，再抢槽，再 claim。无槽则 celery retry，不改 queued。"""
+    from app.contexts.settings.repository import SettingsRepository
+    from app.contexts.settings.service import SettingsService
+
+    task = await _load_task(session, task_id)
+    run = await session.get(TaskRun, run_id)
+    if task is None:
+        return None, run, "任务不存在", False
+    if run is not None and run.task_id != task_id:
+        return task, run, "运行不属于该任务", False
+    if run is not None and run.status == "cancelled":
+        return task, run, "运行已取消，拒绝启动", False
+    redelivery = task.status == "running" and run is not None and run.status == "running"
+    if not redelivery and task.status not in _CLAIMABLE_TASK_STATUSES:
+        return task, run, f"任务已是 {task.status}，拒绝启动", False
+
+    runtime = await SettingsService(SettingsRepository(session)).get_runtime_settings()
+    if not await try_acquire_slot(run_id, runtime.max_concurrent_tasks):
+        raise celery_task.retry(countdown=15)  # type: ignore[attr-defined]
+
+    claimed_task, claimed_run, err = await claim_task_run(session, task_id, run_id)
+    if err:
+        await release_slot(run_id)
+        return claimed_task, claimed_run, err, False
+    return claimed_task, claimed_run, None, True
 
 
 _SKIP_PHASE_MESSAGES = frozenset({"thinking_tokens"})
@@ -408,22 +443,25 @@ async def _platform_preflight_minimal(session: AsyncSession) -> tuple[bool, str 
 # ── Celery 任务 ──
 
 
-@celery_app.task(bind=True, name="agent.run_analysis")
+@celery_app.task(bind=True, name="agent.run_analysis", max_retries=None)
 def run_analysis(self, task_id: str, run_id: str) -> dict:
     """漏洞分析主任务"""
-    return asyncio.run(_run_analysis(task_id, run_id))
+    return asyncio.run(_run_analysis(task_id, run_id, celery_task=self))
 
 
-async def _run_analysis(task_id: str, run_id: str) -> dict:
+async def _run_analysis(task_id: str, run_id: str, *, celery_task: object) -> dict:
     engine = _worker_engine()
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     host_workdir = ""
     container_id: str | None = None
     summary: dict = {"task_id": task_id, "run_id": run_id}
+    acquired = False
 
     try:
         async with session_factory() as session:
-            task, run, claim_err = await claim_task_run(session, task_id, run_id)
+            task, run, claim_err, acquired = await admit_task_run(
+                session, celery_task, task_id, run_id
+            )
             if claim_err:
                 summary.update(status=task.status if task else "ignored", error=claim_err)
                 return summary
@@ -651,6 +689,8 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
                 non_web=orch_result.get("non_web") if orch_result else False,
             )
 
+    except Retry:
+        raise
     except Exception as e:  # noqa: BLE001 — 兜底：任何异常都要落库并返回
         logger.exception(f"run_analysis 兜底异常: {e}")
         try:
@@ -666,6 +706,11 @@ async def _run_analysis(task_id: str, run_id: str) -> dict:
             pass
         summary.update(status="failed", error=str(e))
     finally:
+        if acquired:
+            try:
+                await release_slot(run_id)
+            except Exception:  # noqa: BLE001
+                logger.warning("释放运行槽失败 run=%s", run_id, exc_info=True)
         # 9. 清理容器与 host_workdir（成功/失败都拆容器；失败才留目录排查）
         try:
             from app.contexts.agent.runtime_cleanup import teardown_task_runtime

@@ -59,3 +59,19 @@ class Credential(BaseModel):
 
     def __repr__(self) -> str:
         return f"<Credential {self.name} [{self.kind}:{self.target}]>"
+
+
+class PlatformSetting(BaseModel):
+    """平台运行时单例配置（同时运行任务数等）。"""
+
+    __tablename__ = "platform_settings"
+
+    singleton_key: Mapped[str] = mapped_column(
+        String(20), unique=True, nullable=False, default="default", comment="单例键"
+    )
+    max_concurrent_tasks: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, comment="同时 running 的验证任务软上限"
+    )
+
+    def __repr__(self) -> str:
+        return f"<PlatformSetting {self.singleton_key} n={self.max_concurrent_tasks}>"

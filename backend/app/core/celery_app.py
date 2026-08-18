@@ -21,6 +21,9 @@ def create_celery_app() -> Celery:
         task_reject_on_worker_lost=True,
         task_time_limit=settings.agent_runner_timeout_seconds,
         worker_prefetch_multiplier=1,  # 一次只取一个任务，配合 acks_late 保证不丢
+        broker_transport_options={
+            "visibility_timeout": max(3600, settings.agent_runner_timeout_seconds + 300),
+        },
     )
     app.autodiscover_tasks(["app.contexts.agent"])
     return app

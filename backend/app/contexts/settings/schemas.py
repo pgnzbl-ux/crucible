@@ -1,6 +1,7 @@
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.url_security import normalize_https_domain_url
 
@@ -132,3 +133,23 @@ class CredentialResponse(BaseModel):
 class CredentialListResponse(BaseModel):
     items: list[CredentialResponse]
     total: int
+
+
+class RuntimeSettingsUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    max_concurrent_tasks: int = Field(..., ge=1)
+
+    @model_validator(mode="after")
+    def _within_hard_cap(self) -> "RuntimeSettingsUpdateRequest":
+        from app.core.config import get_settings
+
+        allowed = get_settings().agent_runner_concurrency_limit
+        if self.max_concurrent_tasks > allowed:
+            raise ValueError(f"max_concurrent_tasks 不能超过 {allowed}")
+        return self
+
+
+class RuntimeSettingsResponse(BaseModel):
+    max_concurrent_tasks: int
+    max_allowed: int
+    worker_pool: Literal["solo", "prefork"]

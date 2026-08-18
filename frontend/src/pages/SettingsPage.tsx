@@ -34,6 +34,7 @@ import { api, type Credential, type CredentialInput, type LlmProvider, type LlmP
 import { useErrorToast } from '../shared/hooks/useErrorToast'
 import { PageHeader } from '../shared/components/PageHeader'
 import { PageContainer } from '../shared/components/PageContainer'
+import { RuntimePanel } from '../features/settings/RuntimePanel'
 
 const { Text } = Typography
 
@@ -498,7 +499,7 @@ export function SettingsPage() {
     <>
       <PageHeader
         title="设置"
-        subtitle="管理 AI 模型接入与任务级凭据"
+        subtitle="管理 AI 模型接入、任务凭据与任务并行"
       />
       <PageContainer>
       <Tabs
@@ -507,6 +508,7 @@ export function SettingsPage() {
         items={[
           { key: 'providers', label: 'LLM Provider', children: <ProviderPanel /> },
           { key: 'credentials', label: '任务凭据', children: <CredentialsPanel /> },
+          { key: 'runtime', label: '运行', children: <RuntimePanel /> },
         ]}
       />
       </PageContainer>

@@ -23,9 +23,12 @@ def test_alembic_chain_from_baseline():
     )
     assert 'revision: str = "b7e4c2a19f08"' in incremental
     assert 'down_revision: Union[str, None] = "c18a0e9b4d21"' in incremental
+    platform = (versions / "e8c3a1b047d2_add_platform_settings.py").read_text(encoding="utf-8")
+    assert 'revision: str = "e8c3a1b047d2"' in platform
+    assert 'down_revision: Union[str, None] = "b7e4c2a19f08"' in platform
     from app.core.database import _alembic_head
 
-    assert _alembic_head() == "b7e4c2a19f08"
+    assert _alembic_head() == "e8c3a1b047d2"
 
 
 @pytest.mark.asyncio
@@ -54,6 +57,9 @@ async def test_create_all_schema_matches_models():
             assert "node_run_failures" in insp.get_table_names()
             fail_cols = {c["name"] for c in insp.get_columns("node_run_failures")}
             assert {"owner_id", "task_id", "run_id", "node_run_id", "node_key", "error_class", "bundle_key", "bucket"} <= fail_cols
+            assert "platform_settings" in insp.get_table_names()
+            runtime_cols = {c["name"] for c in insp.get_columns("platform_settings")}
+            assert {"singleton_key", "max_concurrent_tasks"} <= runtime_cols
 
         await conn.run_sync(_check)
     await engine.dispose()

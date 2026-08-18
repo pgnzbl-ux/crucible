@@ -74,6 +74,7 @@ Crucible 按研究员的方法论自动走完这条链路：
 - **自己选模型** —— 通过 Anthropic 兼容端点接入 DeepSeek 等；后台配置，设为默认即启用。
 - **任务可取消、可从失败处续跑** —— 取消会停 Worker 并回收容器；重试复用已完成步骤。
 - **登录隔离** —— JWT 认证，数据按用户隔离。
+- **同时跑多个任务（仅 Linux）** —— 只在 Linux 的设置里指定同时运行上限。Windows 上该项不可配置，Worker 一次只处理一个任务；即便把数字写成 2，同一时刻也只跑 1 个。
 
 ---
 
@@ -252,7 +253,7 @@ CLAUDE_AGENT_SDK_ENABLED=true
 **进程与端口**
 
 - 必须同时跑 **API + Worker + 前端**。只开 API 时任务会停在队列里。
-- Worker 请用 `python run_worker.py`，不要自己拼 Celery 命令（Windows 需要 solo 进程池）。
+- **同时运行几个任务**：只在 **Linux** 的控制台「设置」里可改（默认 1）。Windows 上该项不可配置；即便把数字调到 2，同一时刻也只跑 1 个任务。
 - 端口刻意避开本机常见占用：API `8010`、前端 `5173`、Postgres `5433`、Redis `6380`、MinIO `9000/9001`。
 - `python app/main.py` 默认不是 8010，请用上面的 uvicorn 命令。
 

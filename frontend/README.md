@@ -27,7 +27,7 @@ npm run dev
 | `/projects`、`/projects/:id` | 源码项目 |
 | `/labs` | 靶场 |
 | `/reports`、`/reports/:id` | 验证报告 |
-| `/settings` | LLM Provider 与凭据 |
+| `/settings` | LLM Provider、凭据；同时运行任务数仅 Linux 可配 |
 | `/login` | 登录 |
 
 ## 目录

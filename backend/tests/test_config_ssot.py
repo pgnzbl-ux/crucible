@@ -91,6 +91,30 @@ def test_settings_require_env_for_infra_urls(monkeypatch, tmp_path):
         Settings(_env_file=empty)
 
 
+_INFRA_ENV = {
+    "DATABASE_URL": "sqlite+aiosqlite:///:memory:",
+    "REDIS_URL": "redis://localhost:6380/0",
+    "CELERY_BROKER_URL": "redis://localhost:6380/1",
+    "CELERY_RESULT_BACKEND": "redis://localhost:6380/2",
+    "S3_ENDPOINT": "http://localhost:9000",
+    "S3_ACCESS_KEY": "minioadmin",
+    "S3_SECRET_KEY": "minioadmin",
+}
+
+
+@pytest.mark.parametrize("limit", ["0", "9"])
+def test_concurrency_limit_rejects_out_of_range(monkeypatch, tmp_path, limit):
+    from pydantic import ValidationError
+
+    for key, value in _INFRA_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("AGENT_RUNNER_CONCURRENCY_LIMIT", limit)
+    empty = tmp_path / "empty.env"
+    empty.write_text("")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=empty)
+
+
 def test_settings_has_no_s3_bucket_field():
     assert "s3_bucket" not in Settings.model_fields
 

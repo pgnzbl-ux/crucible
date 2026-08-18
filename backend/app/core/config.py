@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     agent_runner_memory_limit: str = "1g"
     agent_runner_network: str = "crucible-sandbox-net"
     agent_runner_workdir_base: str = "/tmp/crucible/audit"
-    agent_runner_concurrency_limit: int = 4
+    agent_runner_concurrency_limit: int = Field(4, ge=1, le=8)
     agent_runner_timeout_seconds: int = 1800
 
     cors_origins: str = "http://localhost:5173,http://localhost:4173,http://localhost:3000"

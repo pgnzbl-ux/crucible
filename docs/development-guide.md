@@ -62,7 +62,7 @@ backend/app/
 │   ├── config.py              # Settings 类型与校验；连接串无默认，从 .env 读
 │   ├── database.py            # SQLAlchemy 2.0 Async（开发/生产均为 PostgreSQL）
 │   ├── security.py            # JWT + bcrypt（bcrypt 锁 4.0.1 兼容 passlib）
-│   ├── celery_app.py          # Celery + autodiscover agent 任务 + prefetch=1 + acks_late
+│   ├── celery_app.py          # Celery + autodiscover agent 任务 + prefetch=1 + acks_late + visibility_timeout
 │   ├── agent_runner.py        # ★ Agent Runner 编排（Docker SDK + 流式消费，替代 sandbox）
 │   └── crypto.py              # Fernet 加密工具(遗留,settings 已不调用,明文存取)
 ├── contexts/                  # Bounded Contexts
@@ -264,7 +264,7 @@ P0 全部完成。每个 P1 完成后跑一遍全链路冒烟（任务创建 →
 | 删除 Runner `host.docker.internal` 会打断 reproduce | reproduce 通过宿主映射端口访问 Lab，本阶段保留 host-gateway；彻底隔离需 Runner 加入 Lab 网络或出站代理 |
 | container.logs(stream=True) 按字节 chunk 切分破坏 JSONL 行边界 | `LineBufferedJsonParser` 按 `\n` 累积字节再 json.loads；EOF 时调 `flush()` 处理最后一行 |
 | 宿主机端口冲突（5432/6379 已被占用） | Crucible 用 5433/6380 |
-| Windows 下 Celery 用 solo pool | `run_worker.py` 已固定 `--pool=solo` |
+| Windows 下 Celery 用 solo pool | `run_worker.py`：Windows `--pool=solo`（并行=1）；Linux `--pool=prefork`，进程数=`AGENT_RUNNER_CONCURRENCY_LIMIT` |
 | **chromium headless 在 read_only rootfs 下崩溃** | 需额外挂 `/tmp` tmpfs + 容器 env `HOME=/tmp`（crashpad / ProcessSingleton 依赖可写 HOME；HOME 不得指向共享 `/workspace`，否则后续节点会读到上一跳 SDK 缓存），且 `/workspace` 不能挂 `noexec`（chromium + 搭靶场二进制都需可执行） |
 | **nginx/反代默认缓冲 SSE** | 响应头加 `X-Accel-Buffering: no` + `Cache-Control: no-cache, no-transform`（sse.py 端点已加） |
 | **Redis Pub/Sub 离线即丢消息** | SSE 连接先订阅 Pub/Sub 再回放 DB 历史（`_replay_history`），实时帧丢掉已回放的 sequence；断线续播带 `Last-Event-ID` / `last_event_id` |
@@ -306,6 +306,7 @@ pytest                           # 单元测试（待补，见 backlog P1）
 | `S3_ENDPOINT` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | MinIO 连接；桶名写死 `crucible-durable` / `crucible-task` / `crucible-public` |
 | `CLAUDE_AGENT_SDK_ENABLED` | `true` 启用真实 Agent（否则 Mock） |
 | `AGENT_RUNNER_IMAGE` / `AGENT_RUNNER_TIMEOUT_SECONDS` | Agent Runner 镜像与超时 |
+| `AGENT_RUNNER_CONCURRENCY_LIMIT` | 并行硬顶（1–8，默认 4）：设置项上限 + Linux worker 进程数 |
 | `AUTH_SECRET` | JWT；生产必填 |
 | `SETTINGS_ENCRYPT_KEY` | 遗留配置(当前 settings 明文存取,Fernet 未生效) |
 
