@@ -8,12 +8,11 @@ from app.core.url_security import normalize_https_domain_url
 
 class LlmProviderCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
-    provider_type: str = Field("custom", pattern=r"^(deepseek|tencent|openai_compat|anthropic|custom)$")
+    provider_type: str = Field("custom", pattern=r"^(deepseek|openai_compat|anthropic|custom)$")
     base_url: str = Field(..., min_length=5, max_length=512)
     api_key: str = Field("", max_length=2048, description="明文 API Key，服务端加密存储")
     model: str = Field(..., min_length=1, max_length=100)
     timeout_ms: int = Field(600000, ge=10_000, le=3_600_000)
-    enabled: bool = True
     is_default: bool = False
     extra: dict = Field(default_factory=dict)
 
@@ -25,12 +24,11 @@ class LlmProviderCreateRequest(BaseModel):
 
 class LlmProviderUpdateRequest(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=100)
-    provider_type: str | None = Field(None, pattern=r"^(deepseek|tencent|openai_compat|anthropic|custom)$")
+    provider_type: str | None = Field(None, pattern=r"^(deepseek|openai_compat|anthropic|custom)$")
     base_url: str | None = Field(None, min_length=5, max_length=512)
     api_key: str | None = Field(None, max_length=2048, description="留空表示不修改")
     model: str | None = Field(None, min_length=1, max_length=100)
     timeout_ms: int | None = Field(None, ge=10_000, le=3_600_000)
-    enabled: bool | None = None
     extra: dict | None = None
 
     @field_validator("base_url")
@@ -62,7 +60,6 @@ class LlmProviderResponse(BaseModel):
     has_api_key: bool = False
     model: str
     timeout_ms: int
-    enabled: bool
     is_default: bool
     created_at: datetime
     updated_at: datetime

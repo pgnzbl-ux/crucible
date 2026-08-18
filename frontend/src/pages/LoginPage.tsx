@@ -1,6 +1,7 @@
 import { Button, Card, Form, Input, Typography, Divider, App as AntApp } from 'antd'
 import { UserOutlined, LockOutlined, SafetyCertificateOutlined } from '@ant-design/icons'
 import { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { useLocation, Redirect } from 'wouter'
 import { api } from '../shared/lib/api'
 
@@ -10,20 +11,46 @@ export function LoginPage() {
   const [location, setLocation] = useLocation()
   const [loading, setLoading] = useState(false)
   const { message } = AntApp.useApp()
+  const setupQuery = useQuery({
+    queryKey: ['auth-setup'],
+    queryFn: () => api.authSetup(),
+  })
+  const needsSetup = setupQuery.data?.needs_setup === true
 
   const existingToken = localStorage.getItem('crucible_token')
   if (existingToken && location === '/login') {
     return <Redirect to="/" />
   }
 
-  const onFinish = async (values: { email: string; password: string }) => {
+  const persistSession = (token: string, user: unknown, greeting: string) => {
+    localStorage.setItem('crucible_token', token)
+    localStorage.setItem('crucible_user', JSON.stringify(user))
+    message.success(greeting)
+    setLocation('/')
+  }
+
+  const onLogin = async (values: { email: string; password: string }) => {
     setLoading(true)
     try {
       const res = await api.login(values)
-      localStorage.setItem('crucible_token', res.access_token)
-      localStorage.setItem('crucible_user', JSON.stringify(res.user))
-      message.success(`欢迎，${res.user.display_name}`)
-      setLocation('/')
+      persistSession(res.access_token, res.user, `欢迎，${res.user.display_name}`)
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const onCreateAccount = async (values: {
+    email: string
+    password: string
+    display_name: string
+  }) => {
+    setLoading(true)
+    try {
+      await api.register(values)
+      const res = await api.login({ email: values.email, password: values.password })
+      persistSession(res.access_token, res.user, `欢迎，${res.user.display_name}`)
     } catch (e) {
       message.error((e as Error).message)
     } finally {
@@ -50,27 +77,62 @@ export function LoginPage() {
         <Card className="crucible-login-card" variant="borderless">
           <div className="crucible-login-brand">
             <Title level={3} style={{ marginBottom: 4 }}>
-              登录
+              {needsSetup ? '创建账号' : '登录'}
             </Title>
-            <Text type="secondary">使用平台账号登录</Text>
+            <Text type="secondary">
+              {needsSetup ? '创建后使用该账号登录控制台' : '使用已有账号登录'}
+            </Text>
           </div>
-          <Form onFinish={onFinish} size="large">
-            <Form.Item name="email" rules={[{ required: true, type: 'email', message: '请输入邮箱' }]}>
-              <Input prefix={<UserOutlined />} placeholder="邮箱" autoComplete="email" />
-            </Form.Item>
-            <Form.Item name="password" rules={[{ required: true, message: '请输入密码' }]}>
-              <Input.Password
-                prefix={<LockOutlined />}
-                placeholder="密码"
-                autoComplete="current-password"
-              />
-            </Form.Item>
-            <Form.Item>
-              <Button type="primary" htmlType="submit" loading={loading} block>
-                登录
-              </Button>
-            </Form.Item>
-          </Form>
+          {setupQuery.isLoading ? (
+            <Button type="primary" loading block>
+              加载中
+            </Button>
+          ) : needsSetup ? (
+            <Form onFinish={onCreateAccount} size="large">
+              <Form.Item name="display_name" rules={[{ required: true, message: '请输入显示名' }]}>
+                <Input prefix={<UserOutlined />} placeholder="显示名" autoComplete="nickname" />
+              </Form.Item>
+              <Form.Item name="email" rules={[{ required: true, type: 'email', message: '请输入邮箱' }]}>
+                <Input prefix={<UserOutlined />} placeholder="邮箱" autoComplete="email" />
+              </Form.Item>
+              <Form.Item
+                name="password"
+                rules={[
+                  { required: true, message: '请输入密码' },
+                  { min: 8, message: '密码至少 8 位' },
+                ]}
+              >
+                <Input.Password
+                  prefix={<LockOutlined />}
+                  placeholder="密码"
+                  autoComplete="new-password"
+                />
+              </Form.Item>
+              <Form.Item>
+                <Button type="primary" htmlType="submit" loading={loading} block>
+                  创建并登录
+                </Button>
+              </Form.Item>
+            </Form>
+          ) : (
+            <Form onFinish={onLogin} size="large">
+              <Form.Item name="email" rules={[{ required: true, type: 'email', message: '请输入邮箱' }]}>
+                <Input prefix={<UserOutlined />} placeholder="邮箱" autoComplete="email" />
+              </Form.Item>
+              <Form.Item name="password" rules={[{ required: true, message: '请输入密码' }]}>
+                <Input.Password
+                  prefix={<LockOutlined />}
+                  placeholder="密码"
+                  autoComplete="current-password"
+                />
+              </Form.Item>
+              <Form.Item>
+                <Button type="primary" htmlType="submit" loading={loading} block>
+                  登录
+                </Button>
+              </Form.Item>
+            </Form>
+          )}
           <Divider plain style={{ margin: '8px 0 0' }}>
             <Text type="secondary" style={{ fontSize: 12 }}>
               安全登录 · 凭证仅用于平台鉴权

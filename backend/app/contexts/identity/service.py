@@ -8,7 +8,12 @@ class IdentityService:
     def __init__(self, repo: IdentityRepository):
         self.repo = repo
 
+    async def needs_setup(self) -> bool:
+        return await self.repo.count() == 0
+
     async def register(self, request: RegisterRequest) -> UserResponse:
+        if not await self.needs_setup():
+            raise PermissionError("已有账号，禁止自行注册")
         existing = await self.repo.get_by_email(request.email)
         if existing:
             raise ValueError("邮箱已被注册")
@@ -17,6 +22,8 @@ class IdentityService:
             email=request.email,
             password_hash=hash_password(request.password),
             display_name=request.display_name,
+            is_admin=True,
+            role="admin",
         )
         user = await self.repo.create(user)
         return UserResponse.model_validate(user)

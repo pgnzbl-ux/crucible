@@ -10,7 +10,6 @@ import {
   Popconfirm,
   Select,
   Space,
-  Switch,
   Table,
   Tabs,
   Tag,
@@ -44,11 +43,6 @@ const PROVIDER_TYPES: Record<string, { label: string; defaultUrl: string; defaul
     defaultUrl: 'https://api.deepseek.com/anthropic',
     defaultModel: 'deepseek-v4-flash',
   },
-  tencent: {
-    label: '腾讯云知识引擎',
-    defaultUrl: 'https://api.lkeap.cloud.tencent.com/anthropic',
-    defaultModel: 'deepseek-v3.2',
-  },
   openai_compat: { label: 'OpenAI 兼容', defaultUrl: 'https://', defaultModel: '' },
   anthropic: { label: 'Anthropic 官方', defaultUrl: 'https://api.anthropic.com', defaultModel: 'claude-sonnet-4' },
   custom: { label: '自定义', defaultUrl: 'https://', defaultModel: '' },
@@ -80,12 +74,11 @@ function ProviderFormDrawer({
         base_url: editing.base_url,
         model: editing.model,
         timeout_ms: editing.timeout_ms,
-        enabled: editing.enabled,
         api_key: undefined,
       })
     } else {
       form.resetFields()
-      form.setFieldsValue({ provider_type: 'deepseek', timeout_ms: 600000, enabled: true })
+      form.setFieldsValue({ provider_type: 'deepseek', timeout_ms: 600000 })
     }
     setTestResult(null)
   }, [open, editing, form])
@@ -178,9 +171,6 @@ function ProviderFormDrawer({
         <Form.Item name="timeout_ms" label="超时 (ms)">
           <InputNumber min={10000} max={3600000} step={60000} style={{ width: '100%' }} />
         </Form.Item>
-        <Form.Item name="enabled" label="启用" valuePropName="checked">
-          <Switch />
-        </Form.Item>
 
         {testResult && (
           <div style={{ marginBottom: 16 }}>
@@ -272,9 +262,9 @@ function ProviderPanel() {
     },
     {
       title: '状态',
-      dataIndex: 'enabled',
+      dataIndex: 'is_default',
       width: 90,
-      render: (v: boolean) => (v ? <Tag color="green">启用</Tag> : <Tag>停用</Tag>),
+      render: (v: boolean) => (v ? <Tag color="gold">默认</Tag> : <Tag>备用</Tag>),
     },
     {
       title: '更新时间',
@@ -317,7 +307,7 @@ function ProviderPanel() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
         <Text type="secondary">
-          管理 AI 模型接入（DeepSeek / 腾讯云等 Anthropic 兼容端点），新任务将使用默认 Provider
+          管理 AI 模型接入（DeepSeek 等 Anthropic 兼容端点）。真正启用某个接入点请点「设为默认」，新任务只使用默认 Provider。
         </Text>
         <Space>
           <Button icon={<ReloadOutlined />} onClick={() => refetch()}>

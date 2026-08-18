@@ -3,7 +3,7 @@ LLM Provider 管理服务。
 
 职责：
 - CRUD(API key 明文落库,列表掩码回显)
-- 默认 Provider 激活（全局唯一 is_default）
+- 默认 Provider 激活（全局唯一 is_default，即当前启用项）
 - 测试连接（真实调用 Anthropic 兼容 /v1/messages）
 - 运行时配置解析（Agent 任务从 DB 取默认 Provider → 环境变量注入沙箱）
 """
@@ -45,7 +45,6 @@ def to_response(provider: LlmProvider, plain_key: str = "") -> LlmProviderRespon
         has_api_key=bool(plain_key),
         model=provider.model,
         timeout_ms=provider.timeout_ms,
-        enabled=provider.enabled,
         is_default=provider.is_default,
         created_at=provider.created_at,
         updated_at=provider.updated_at,
@@ -64,6 +63,10 @@ class SettingsService:
 
     async def create_provider(self, request: LlmProviderCreateRequest) -> LlmProviderResponse:
         base_url = await validate_public_https_url(request.base_url)
+        existing_default = await self.repo.get_default()
+        make_default = request.is_default or existing_default is None
+        if make_default:
+            await self.repo.clear_default()
         provider = LlmProvider(
             name=request.name,
             provider_type=request.provider_type,
@@ -71,12 +74,9 @@ class SettingsService:
             api_key_encrypted=request.api_key,
             model=request.model,
             timeout_ms=request.timeout_ms,
-            enabled=request.enabled,
-            is_default=request.is_default,
+            is_default=make_default,
             extra=json.dumps(request.extra, ensure_ascii=False),
         )
-        if request.is_default:
-            await self.repo.clear_default()
         provider = await self.repo.create(provider)
         return to_response(provider, request.api_key)
 
@@ -110,8 +110,6 @@ class SettingsService:
         provider = await self.repo.get_by_id(provider_id)
         if not provider:
             return None
-        if not provider.enabled:
-            raise ValueError("已禁用的 Provider 不能设为默认")
         await self.repo.clear_default()
         provider.is_default = True
         await self.repo.session.flush()

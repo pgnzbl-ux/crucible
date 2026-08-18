@@ -23,10 +23,10 @@ class SettingsRepository:
         return result.scalar_one_or_none()
 
     async def get_default(self) -> LlmProvider | None:
-        """当前默认 Provider（is_default=true 且 enabled）"""
+        """当前默认（启用）Provider"""
         result = await self.session.execute(
             select(LlmProvider)
-            .where(LlmProvider.is_default.is_(True), LlmProvider.enabled.is_(True))
+            .where(LlmProvider.is_default.is_(True))
             .limit(1)
         )
         return result.scalar_one_or_none()

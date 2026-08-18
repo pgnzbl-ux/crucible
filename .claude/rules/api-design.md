@@ -53,7 +53,7 @@ paths: ["backend/app/**/*.py"]
 
 ## 6. 鉴权
 
-- 除 `/health`、`/metrics`、`/api/v1/auth/login`、`/api/v1/auth/register` 外全部需鉴权
+- 除 `/health`、`/metrics`、`/api/v1/auth/login`、`/api/v1/auth/register`、`/api/v1/auth/setup` 外全部需鉴权
 - 鉴权依赖统一在 `shared/deps.py::get_current_user`
 - API Key（待 P1-7）走独立依赖 `get_api_key_principal`
 

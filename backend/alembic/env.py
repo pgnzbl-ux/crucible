@@ -5,17 +5,11 @@ from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from app.shared.base import Base
 from app.core.config import get_settings
+from app.shared.base import Base
+from app.shared.models import register_models
 
-# 导入所有模型以确保它们注册到 Base.metadata
-from app.contexts.identity.models import User
-from app.contexts.task.models import Task, TaskRun, AgentEvent
-from app.contexts.task.models import NodeRun  # 阶段 1 新增
-from app.contexts.report.models import Report, Evidence
-from app.contexts.settings.models import LlmProvider, Credential
-from app.contexts.project.models import Project, SourceArtifact  # 阶段 1 + 源码制品
-from app.contexts.lab.models import Lab
+register_models()
 
 config = context.config
 settings = get_settings()
@@ -35,7 +29,11 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection):
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        render_as_batch=connection.dialect.name == "sqlite",
+    )
     with context.begin_transaction():
         context.run_migrations()
 

@@ -87,10 +87,7 @@ async def activate_provider(
     provider_id: str,
     svc: Annotated[SettingsService, Depends(get_settings_service)],
 ) -> LlmProviderResponse:
-    try:
-        provider = await svc.activate_provider(provider_id)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+    provider = await svc.activate_provider(provider_id)
     if not provider:
         raise HTTPException(404, "Provider 不存在")
     return provider

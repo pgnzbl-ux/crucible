@@ -5,7 +5,7 @@
 ## 通用约定
 
 - 前缀：`/api/v1`
-- 鉴权：除 `/health`、`/metrics`、`/api/v1/auth/login`、`/api/v1/auth/register` 外全部需 Bearer JWT
+- 鉴权：除 `/health`、`/metrics`、`/api/v1/auth/login`、`/api/v1/auth/register`、`/api/v1/auth/setup` 外全部需 Bearer JWT
 - 时间：ISO-8601 UTC
 - 错误响应统一格式见 `.claude/rules/error-handling.md` §3
 
@@ -13,20 +13,30 @@
 
 ## Identity Context
 
+### GET `/api/v1/auth/setup`
+
+是否还没有任何账号。`needs_setup=true` 时登录页展示创建账号。
+
+**响应 200**
+
+```json
+{ "needs_setup": true }
+```
+
 ### POST `/api/v1/auth/register`
 
-注册新用户。
+仅在库中尚无用户时允许，创建第一个账号。请求体禁止传 `is_admin`。已有用户时返回 403。
 
 **请求**
 
 ```json
-{ "username": "alice", "password": "Passw0rd!" }
+{ "email": "alice@example.com", "password": "Passw0rd!", "display_name": "Alice" }
 ```
 
 **响应 201**
 
 ```json
-{ "id": "uuid", "username": "alice", "created_at": "2026-08-10T..." }
+{ "id": "uuid", "email": "alice@example.com", "display_name": "Alice", "is_admin": true, "role": "admin", "is_active": true }
 ```
 
 ### POST `/api/v1/auth/login`
@@ -34,7 +44,7 @@
 **请求**
 
 ```json
-{ "username": "alice", "password": "Passw0rd!" }
+{ "email": "alice@example.com", "password": "Passw0rd!" }
 ```
 
 **响应 200**
@@ -234,15 +244,21 @@ owner 校验：所有环境均要求 `report.owner_id` 匹配当前用户。
 
 ## Settings Context（LLM Provider）
 
+Provider **没有独立启用/停用字段**。Agent 运行时只读取唯一的 `is_default=true` 项；列表「状态」由该字段派生（默认 / 备用）。真正启用某个 Provider = `POST .../activate`。
+
+响应字段含 `is_default`，**不含** `enabled`。
+
 ### GET `/api/v1/settings/llm/providers`
 
 要求 Bearer JWT。Provider 当前是平台全局配置，RBAC 落地前任意已登录用户均可管理。API Key 只返回掩码（`***last4`）。
 
 ### POST `/api/v1/settings/llm/providers`
 
-新建。`api_key` **明文落库**(存 `api_key_encrypted` 字段),响应层 `mask_secret` 掩码。
+新建。`api_key` **明文落库**(存 `api_key_encrypted` 字段),响应层 `mask_secret` 掩码。当前尚无默认项时，新建的第一条自动 `is_default=true`。请求体可带 `is_default` 显式抢默认。
 
 ### PUT `/api/v1/settings/llm/providers/{id}`
+
+只改名称 / 端点 / 模型 / Key / 超时。不通过 PUT 切换默认。
 
 ### DELETE `/api/v1/settings/llm/providers/{id}`
 

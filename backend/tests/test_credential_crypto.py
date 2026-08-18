@@ -23,7 +23,6 @@ def test_build_env_returns_db_value_directly():
         api_key_encrypted=real_key,  # 明文存
         model="deepseek-v4-flash",
         timeout_ms=600000,
-        enabled=True,
         is_default=True,
     )
 

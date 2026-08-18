@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import User
@@ -13,6 +13,10 @@ class IdentityRepository:
         await self.session.flush()
         await self.session.refresh(user)
         return user
+
+    async def count(self) -> int:
+        result = await self.session.execute(select(func.count()).select_from(User))
+        return int(result.scalar_one())
 
     async def get_by_email(self, email: str) -> User | None:
         result = await self.session.execute(

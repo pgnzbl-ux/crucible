@@ -246,7 +246,6 @@ export interface LlmProvider {
   has_api_key: boolean
   model: string
   timeout_ms: number
-  enabled: boolean
   is_default: boolean
   created_at: string
   updated_at: string
@@ -264,7 +263,6 @@ export interface LlmProviderInput {
   api_key?: string
   model: string
   timeout_ms?: number
-  enabled?: boolean
   is_default?: boolean
 }
 
@@ -311,6 +309,8 @@ export const api = {
     request<CurrentUser>('/auth/register', { method: 'POST', body: JSON.stringify(data) }),
 
   me: () => request<CurrentUser>('/auth/me'),
+
+  authSetup: () => request<{ needs_setup: boolean }>('/auth/setup'),
 
   // Tasks
   listTasks: (params?: Record<string, string>) => {

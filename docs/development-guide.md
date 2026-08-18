@@ -141,7 +141,7 @@ Task 加 project_id(FK→projects) + verdict(6 档);Report 加 report_data 等�
 | 提案要求 | 状态 | 落点 |
 |---------|------|------|
 | Bounded Context 模块化 | ✅ | contexts/{task,agent,report,identity,settings} |
-| SQLAlchemy 2.0 Async | ✅ | database.py + Alembic + 全异步 |
+| SQLAlchemy 2.0 Async | ✅ | database.py + 唯一 Alembic 基线（ORM create_all）+ 全异步 |
 | Repository 现代化 | ✅ | 每 Context repository.py（类型化 + select） |
 | Agent Adapter 抽象 | ✅ | executor.py（Protocol + 双实现 + 工厂） |
 | Agent Runner 编排 | ✅ | core/agent_runner.py（容器编排 + 流式消费 + 行缓冲 + 凭据零落盘） |
@@ -163,7 +163,7 @@ Task 加 project_id(FK→projects) + verdict(6 档);Report 加 report_data 等�
 - 全链路（Mock 模式）：POST /tasks → Celery → 沙箱 clone → Agent → 事件持久化 → 报告生成 → MinIO 归档 ✅
 - SSE 实时推送：agent/tasks.py 落库后 → Redis Pub/Sub → shared/sse.py 转发 → 前端 useTaskEvents hook（历史回放 + 15s 心跳 + 断开清理）✅
 - 沙箱安全：OOM 限制、网络隔离、非 root、只读 rootfs、凭据零落盘（grep 0 命中）✅
-- LLM 后台：CRUD / 掩码 / **明文落库(响应层 mask_secret 掩码)** / 激活唯一性 / 测试连接真实打 DeepSeek 端点 ✅(crypto.encrypt_secret 遗留未用)
+- LLM 后台：CRUD / 掩码 / **明文落库(响应层 mask_secret 掩码)** / `is_default` 唯一启用 / 测试连接真实打 DeepSeek 端点 ✅(crypto.encrypt_secret 遗留未用；无独立 enabled)
 - 种子迁移幂等性 ✅
 
 ---

@@ -24,8 +24,6 @@ class Settings(BaseSettings):
     auth_secret: str = ""
     auth_algorithm: str = "HS256"
     auth_token_expire_minutes: int = 480  # 8 小时
-    admin_email: str = "admin@crucible.local"
-    admin_password: str = ""
 
     # 敏感配置加密（Fernet）— 用于加密落库的 API Key 等凭据
     settings_encrypt_key: str = ""  # 生产必须设置 32 字节 base64 Fernet key

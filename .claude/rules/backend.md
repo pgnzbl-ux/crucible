@@ -12,7 +12,7 @@ paths: ["backend/app/contexts/**/*.py", "backend/app/shared/**/*.py", "backend/a
 
 - **跨 Context 数据访问走 Service 接口或事件**，禁止直接 import 对方 repository
 - **禁止跨 Context 建 ORM relationship**（mapper 报错），只保留 `ForeignKey` + 整数/UUID ID，需要时手动查
-- 新表必须在其所属 Context 的 `models.py` 中定义；Celery worker 启动时 import 该 models 以注册 metadata（否则 FK 解析失败）
+- 新表必须在其所属 Context 的 `models.py` 中定义；Celery worker 启动时 import 该 models 以注册 metadata（否则 FK 解析失败）。部署用唯一 Alembic 基线 `c18a0e9b4d21`（`metadata.create_all`），与 `init_db()` 同源
 
 ## 2. 六个 Context 的职责边界
 
@@ -60,7 +60,7 @@ paths: ["backend/app/contexts/**/*.py", "backend/app/shared/**/*.py", "backend/a
 ## 6. Settings / LLM Provider（`settings` context）
 
 - API Key 当前**明文入库**(`settings/service.py` 存 `api_key_encrypted`),列表接口走 `mask_secret` 掩码。`core/crypto.py::encrypt_secret` 遗留未用
-- 同一时刻**仅一个** Provider 处于 active 状态（业务唯一性约束）
+- 同一时刻**仅一个** Provider 的 `is_default=true`（Agent 只读默认项）。不设独立 `enabled`；列表状态由 `is_default` 派生（默认 / 备用），启用走 `POST /llm/providers/{id}/activate`
 - 测试连接真实打 Provider 的 `base_url`（不 Mock），便于配置阶段就发现端点 / 凭据错误
 
 ## 7. 报告与证据（`report` context）
