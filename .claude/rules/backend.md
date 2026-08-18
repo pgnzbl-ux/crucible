@@ -46,16 +46,11 @@ paths: ["backend/app/contexts/**/*.py", "backend/app/shared/**/*.py", "backend/a
 
 流式消费：`container.logs(stream=True, follow=True)` + `LineBufferedJsonParser`（跨字节 chunk 半行处理）。
 
-## 5. Agent 执行器协议（`agent/executor.py`）
+## 5. Agent 执行（`orchestrator` + `ai_runner`）
 
-`Executor` 是 Protocol，两个实现：
+6 节点由 `orchestrator.py` 驱动；AI 节点经 `ai_runner.py` 拉起 agent-runner 容器。LLM 凭据由 `sdk_adapter.build_runner_env()` 注入 `ANTHROPIC_*`（容器销毁即消失）。
 
-- `ClaudeSdkExecutor` —— 拉起 agent-runner 容器（Claude Agent SDK），**通过 `build_runner_env()` 注入 8 个 ANTHROPIC_* 环境变量实现凭据零落盘**
-- `MockExecutor` —— 单测 / 开发默认
-
-新增 Agent 实现必须注册到工厂；调用方不 `import` 具体类。
-
-事件流：`agent-runner` 容器内 `runner/run_one.py` 把 SDK Message 翻译为统一事件结构（`phase.updated` / `agent.thinking` / `agent.message` / `tool.call.*` / `agent.completed` / `agent.failed`），通过 stdout JSONL 推给 worker。`agent.failed` 带 `title`/`hint`；编排失败文案见 `contexts/agent/errors.py`。
+事件流：容器内 `runner/run_one.py` 把 SDK Message 翻译为统一事件（`phase.updated` / `agent.thinking` / `agent.message` / `tool.call.*` / `agent.completed` / `agent.failed`），stdout JSONL 推给 worker。`agent.failed` 带 `title`/`hint`；编排失败文案见 `contexts/agent/errors.py`。
 
 ## 6. Settings / LLM Provider（`settings` context）
 

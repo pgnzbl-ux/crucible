@@ -74,12 +74,10 @@ backend/app/
 │   │   ├── ai_runner.py      #   AI 节点容器编排 + submit_result 工具 + schema 校验
 │   │   ├── profile_detector.py #  节点 1 规则引擎（强 Web/非 Web 走规则，其余才 AI）
 │   │   ├── sdk_adapter.py     #   Claude Agent SDK 适配器（env + prompt 构造）
-│   │   ├── executor.py        #   ClaudeSdkExecutor / MockExecutor + 工厂（遗留兼容）
 │   │   └── tasks.py           #   Celery 工作流（host clone → 调 orchestrator → 实时落库）
 │   ├── report/                # 报告生成 + 状态机 + MinIO 归档
 │   │   └── service.py         #   报告 + 证据（对象走 shared/object_store）
 │   └── settings/              # ★ LLM Provider 后台配置（多 Provider + 明文存取 + 测试连接）
-│       └── seed.py            #   环境变量 → DB 种子迁移（幂等）
 └── shared/
     ├── base.py                # BaseModel（UUID + 时间戳）
     ├── events.py              # Event + EventBus（Redis Pub/Sub 标准事件结构）
@@ -144,7 +142,7 @@ Task 加 project_id(FK→projects) + verdict(6 档);Report 加 report_data 等�
 | Bounded Context 模块化 | ✅ | contexts/{task,agent,report,identity,settings} |
 | SQLAlchemy 2.0 Async | ✅ | database.py + 唯一 Alembic 基线（ORM create_all）+ 全异步 |
 | Repository 现代化 | ✅ | 每 Context repository.py（类型化 + select） |
-| Agent Adapter 抽象 | ✅ | executor.py（Protocol + 双实现 + 工厂） |
+| Agent Adapter 抽象 | ✅ | sdk_adapter.py + ai_runner.py（env 注入 + 容器编排） |
 | Agent Runner 编排 | ✅ | core/agent_runner.py（容器编排 + 流式消费 + 行缓冲 + 凭据零落盘） |
 | **平台 6 节点编排** | ✅ | orchestrator 驱动 6 节点 + 蒸馏 skill 注入 runner；audit uncertain→跳 reproduce、report 产 needs_review 验证记录 |
 | Event Bus（Redis Pub/Sub） | ✅ | shared/events.py（统一事件结构） |

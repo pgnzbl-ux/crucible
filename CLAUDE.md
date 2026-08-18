@@ -60,7 +60,6 @@ Crucible/
 │   │   │   │   ├── ai_runner.py        # AI 节点容器编排 + submit_result 工具 + schema 校验
 │   │   │   │   ├── profile_detector.py # 节点 1 规则引擎 hints / SDK 关闭回退
 │   │   │   │   ├── sdk_adapter.py      # Claude Agent SDK 适配器（env + prompt 构造）
-│   │   │   │   ├── executor.py         # ClaudeSdkExecutor / MockExecutor + 工厂（遗留兼容）
 │   │   │   │   └── tasks.py            # Celery 工作流（host clone + 调 orchestrator + 实时落库）
 │   │   │   ├── identity/        # 认证与用户管理
 │   │   │   ├── lab/             # Lab 靶场生命周期（复用、TTL、容器管理）

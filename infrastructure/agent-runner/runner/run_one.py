@@ -260,7 +260,7 @@ def _failed_event(raw: str, **extra: Any) -> dict[str, Any]:
 
 
 def _classify_conclusion(text: str) -> str:
-    """文本匹配：exists / not_exists / unconfirmed（与 executor.py 同语义）"""
+    """文本匹配：exists / not_exists / unconfirmed"""
     if not text:
         return "unconfirmed"
     lowered = text.lower()
