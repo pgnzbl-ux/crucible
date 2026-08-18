@@ -140,7 +140,7 @@ Celery Worker
 | [CLAUDE.md](CLAUDE.md) | 给协作 AI 的项目入口 |
 | [.claude/api-contract.md](.claude/api-contract.md) | HTTP API 契约 |
 
-产品版本号只写在 [`backend/pyproject.toml`](backend/pyproject.toml) 的 `[project].version`。`GET /health` 返回该版本。Git tag 与它对齐（当前 `v1.0.0`）。
+产品版本号只写在 [`backend/pyproject.toml`](backend/pyproject.toml) 的 `[project].version`。`GET /health` 返回该版本。Git tag 与它对齐（当前 `v1.0.1`）。
 
 ---
 
