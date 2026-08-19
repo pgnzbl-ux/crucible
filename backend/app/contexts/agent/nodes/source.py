@@ -20,20 +20,40 @@ class SourceNode:
         return False
 
     async def execute(self, ctx: NodeContext) -> dict[str, Any]:
+        from app.contexts.project.git_url import parse_git_url
         from app.contexts.project.repository import ProjectRepository
         from app.contexts.project.service import ProjectService
-        from app.contexts.project.source_acquire import acquire_source
+        from app.contexts.project.source_acquire import CachedSource, acquire_source
 
         cached = None
+        cached_by_sha_fn = None
         svc = None
         owner_id = ctx.owner_id
         if ctx.db_session is not None:
             svc = ProjectService(ProjectRepository(ctx.db_session))
             if owner_id:
                 try:
+                    parsed = parse_git_url(ctx.project_address)
                     cached = await svc.find_cached_source(
                         ctx.project_address, ctx.project_ref, owner_id
                     )
+                    index: dict[str, CachedSource] = {
+                        item.commit_sha.lower(): item
+                        for item in await svc.list_cached_sources(
+                            owner_id, parsed.host, parsed.project_key
+                        )
+                    }
+
+                    def _by_sha(sha: str, _idx: dict[str, CachedSource] = index) -> CachedSource | None:
+                        needle = (sha or "").lower()
+                        if not needle:
+                            return None
+                        for stored, src in _idx.items():
+                            if stored.startswith(needle) or needle.startswith(stored):
+                                return src
+                        return None
+
+                    cached_by_sha_fn = _by_sha if index else None
                 except ValueError:
                     cached = None
 
@@ -44,6 +64,7 @@ class SourceNode:
             ctx.project_ref,
             cached=cached,
             owner_id=owner_id,
+            cached_by_sha_fn=cached_by_sha_fn,
         )
         if not result.ok:
             err = result.error or "源码克隆失败: 未知原因"

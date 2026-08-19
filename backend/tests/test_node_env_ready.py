@@ -206,6 +206,7 @@ async def test_env_ready_health_fail_retries_ai_with_logs(tmp_path):
     assert mock_down.await_count == 1
     assert mock_ai.call_args_list[1].kwargs["failed_stage"] == "health_check"
     assert "健康检查不过" in mock_ai.call_args_list[1].args[2]
+    assert "无 HTTP 应答" in mock_ai.call_args_list[1].args[2]
     assert "app exited 1" in mock_ai.call_args_list[1].args[2]
     assert out["target_url"] == "http://192.168.1.8:3001"
 

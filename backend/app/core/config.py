@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     settings_encrypt_key: str = ""
 
     claude_agent_sdk_enabled: bool = False
-    claude_sdk_max_turns: int = 180
+    claude_sdk_max_turns: int = 480
 
     agent_runner_image: str = "crucible-agent-runner:base"
     agent_runner_cpu_limit: float = 1.0

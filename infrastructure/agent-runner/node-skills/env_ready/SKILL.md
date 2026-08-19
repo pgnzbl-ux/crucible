@@ -7,6 +7,8 @@ description: Crucible 节点 env_ready。只写 Dockerfile/compose 配方；启�
 
 你只负责分析并写出配方。启动、探活、对外地址由平台完成。不要执行 docker compose / docker build / docker run / docker ps，不要宣称已经启动。
 
+平台探活：`compose up` 成功后先等 3s（端口 bind 延迟），再 GET 首页正文。HTTP 通了但正文是 Fatal / 缺表 / Whitelabel / traceback 会判失败，并把首页片段放进 `previous_error`。
+
 agent-runner 内没有 Docker CLI，这是平台设计，不是环境异常。不要探测或安装 Docker，也不要寻找历史会话；每轮都是新会话，跨轮状态只来自现有文件和本轮 JSON。
 
 本轮原料只在 user message 的 JSON 里：`source_path`、`profile`、`attempt`、`previous_error`、`failed_stage`、`occupied_host_ports`，以及凭据补扫时的 `credential_lookup_only` / `existing_target_url` / `existing_compose_path`。
@@ -38,7 +40,7 @@ agent-runner 内没有 Docker CLI，这是平台设计，不是环境异常。�
 | `COPY` / no such file | 只改 `build.context` / COPY 路径，指向原仓库 |
 | `Could not transfer` / `DependencyResolution` / npm `ETIMEDOUT` / pip timeout | 加重试、串行构建、缓存挂载；不要合并容器 |
 | 宿主端口占用 | 只改 compose 的 host 侧映射口 |
-| 健康检查不过 | 映射口对应的进程是否已是 PID 1；日志是否在 stdout；跨容器是否还在用 `localhost` |
+| 健康检查不过 / 首页崩溃正文（Fatal、缺表、Whitelabel） | 进程是否已是 PID 1；DB/迁移是否真正执行；跨容器是否还在用 `localhost`。`previous_error` 会带首页正文，按正文修配方（init SQL / `depends_on` healthy），不要只改端口 |
 | compose 安全策略拒绝 | 去掉 privileged / host 网络 / 越界 mount |
 
 选启动方式：

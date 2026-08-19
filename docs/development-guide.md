@@ -160,7 +160,7 @@ Task 加 project_id(FK→projects) + verdict(6 档);Report 加 report_data 等�
 | 事件持久化 + 查询 | ✅ | agent_events 表 + GET /tasks/{id}/events |
 | **SSE 实时事件推送（P0-1）** | ✅ | shared/sse.py（StreamingResponse + 历史回放 + 15s 心跳 + 断开清理）+ GET /tasks/{id}/events/stream + 前端 useTaskEvents hook |
 | 报告生成 + MinIO 归档 | ✅ | report/service.py + shared/object_store.py（3 桶 durable/task/public） |
-| **源码 MinIO 缓存** | ✅ | `source_artifacts` 按 owner+host+project+ref；branch/HEAD 必须 ls-remote 对上 SHA 才用 MinIO；画像 `profile_json` 绑同一 SHA，SHA 变则清空重检 |
+| **源码 MinIO 缓存** | ✅ | `source_artifacts` 按 owner+host+project+ref；branch/HEAD 先 ls-remote 得到 tip SHA，再按 **commit** 取 MinIO（同一 SHA 不重 clone）；`rev-parse` 清除 GIT_DIR，避免记下平台仓库 SHA 后每次误报「远端已变」 |
 | **靶场配方 MinIO 复用** | ✅ | `lab/recipe_store` 按 owner+project+SHA 存 `.vuln-env/`；env_ready 创建者先 download 短路（命中改宿主口 + 一次 up），未命中/失败再 AI；成功 upload；rebuild 可从 MinIO 拉回 |
 | **靶场 compose 就地执行** | ✅ | 2026-08-18：`.vuln-env` 留在 `{host_workdir}/{repo}/` 就地 up（`-p crucible-lab-{id}` 隔离），删 lab 文件暂存层；`validate_compose_file` 边界=任务 host_workdir；rebuild=clone 源码+拉配方+up --build。修复多模块 build.context 结构性失败（见 troubleshooting/2026-08-18 诊断根因 A） |
 | **MCP 工具 schema 收敛** | ✅ | 2026-08-19：submit_result 工具 schema 顶层只允许 type/properties/required/description，禁 JSON Schema 组合器（allOf/if/then 等）——第三方网关遇顶层组合器静默丢工具，audit 节点曾因此 no_submit；条件形状由后端 validate_output + SKILL.md 表达（见 troubleshooting/2026-08-18 诊断 §9 根因 C） |
@@ -168,6 +168,7 @@ Task 加 project_id(FK→projects) + verdict(6 档);Report 加 report_data 等�
 | **AI 节点形状回喂环（P0#1）** | ✅ | 2026-08-19：`run_ai_node_with_shape_retry`（ai_runner）——audit/reproduce/report 的 output 形状校验失败不再一次判死，把 `previous_error`+`previous_submit_summary` 拼进 input_json 重跑（上限 2 轮重试）；执行层失败（no_submit/SIGKILL/超时）仍立即抛；每轮失败留 `.node-failure` 快照；三个 SKILL.md 增补回喂条款（判定结论不变只修形状） |
 | **容器执行边界加固（P0#5/6）** | ✅ | 2026-08-19：`run_with_streaming` 超时路径三处止血——(a) 超时 stop 失败降级 kill、双双失败写 `summary.stop_failed`（曾 `except:pass` 静默吞 → 容器不停、流不 EOF、worker 无限挂死无线索）；(b) `wait()` 带兜底宽限（超时场景 timeout=30s，ReadTimeout 按 137 收尾，不再无界阻塞）；(c) 超时瞬间 agent 已正常退出（exit 0）保留真实退出码不丢产物（边界竞态）；docker 客户端 read timeout 对齐 `agent_runner_timeout_seconds+120s`（默认 60s 会在 agent 静默思考 >60s 时腰斩 follow 流） |
 | **env_ready 中危修复批次** | ✅ | 2026-08-19：(1) 探活/publish 支持 https——容器口 443/8443/9443 推断 scheme，`health_check` 返回 (ok, port, scheme)，`publish_target_url(scheme=)` 透传（HTTPS 入口靶场不再 5 轮全死；自签证书放宽校验）；(2) reuse/start 复用前快探 `_reused_lab_alive`（DB ready ≠ 应用活着），死靶场 mark_failed→reclaim→缓存配方重建，不烧 AI；(3) 缓存路径凭据补查失败先 `docker_compose_down` 再抛（防 DB=failed/容器在跑的端口泄漏）；(4) `upload_recipe` 返回 bool，MinIO 故障发警告事件不再静默吞；(7) `_create_lab` 外层异常本体优先于陈旧 last_error |
+| **env_ready 探活读首页正文** | ✅ | 2026-08-19：`compose up` 后先等 3s 再探（端口 bind 延迟）；GET 首页拒绝 Fatal/缺表/Whitelabel/traceback（禅道 `zt_config` 这类 200+崩溃页不再误判就绪）；失败把首页片段回喂 AI |
 | LLM 后台配置（新增） | ✅ | settings context（Fernet 加密 + 测试连接 + 种子迁移） |
 | DeepSeek 对接 | ✅ | ClaudeSdkAdapter.build_runner_env() 注入 ANTHROPIC_* env(零落盘,容器销毁消失) |
 | 前端 pages/ shared/ 分层 | ✅ | AppLayout + 4 页面 |

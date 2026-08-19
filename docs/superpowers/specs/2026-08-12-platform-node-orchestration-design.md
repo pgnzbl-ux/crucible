@@ -144,7 +144,7 @@ llm_providers(独立,后台管理)
 | is_web | Bool | 同上；`false` 时项目页禁止开验证任务 |
 | last_cloned_at | DateTime | 最近一次源码落地（clone 或 MinIO 缓存命中） |
 
-源码 tar.gz 存在 MinIO `crucible-durable`（key=`source/{owner_id}/{git_host}/{space}/{project}/{commit_sha}.tar.gz`）。`source_artifacts` 按 **owner + host + space/project + ref** 隔离；规范化 Git URL 去掉 `.git` 与 https userinfo（不把 token 写入 DB）。节点 0：tag/完整 commit 命中表则拉 MinIO；**branch/HEAD 不以分支名为准**（`main`/`master` 名字不变），必须 `git ls-remote` 对上远端 SHA 才用缓存，SHA 变了或 ls-remote 失败则 clone 并覆盖——禁止在未确认新鲜度时用 MinIO。MinIO 解开失败同样回退 clone。Git 协议只允许 `https` / `http` / `ssh` / `git@host:path`，拒绝 `file://` `git://`。节点 1 画像挂在同一条 `SourceArtifact` 上（`profile_json` 对应该 `commit_sha`）；SHA 变则清空并重检。强 Web / 强非 Web 走规则，其余必须起 profiler。编排器仅当 `is_web is True` 才进入节点 2–5（缺省 fail-closed）。
+源码 tar.gz 存在 MinIO `crucible-durable`（key=`source/{owner_id}/{git_host}/{space}/{project}/{commit_sha}.tar.gz`）。`source_artifacts` 按 **owner + host + space/project + ref** 隔离；规范化 Git URL 去掉 `.git` 与 https userinfo（不把 token 写入 DB）。节点 0：tag/完整 commit 命中表则拉 MinIO；**branch/HEAD 先 `git ls-remote` 得到 tip 的 commit SHA，再按该 SHA 取 MinIO 包**（对象键就是 commit，同一 SHA 不重 clone）。对不上已有包才 clone 并覆盖。ls-remote 解析只认 hex SHA、忽略 `refs/remotes/` 与进度行；`git rev-parse` 必须清掉 `GIT_DIR`（worker 在平台仓库目录启动时否则会记下 Crucible 自己的 SHA，每次都误报「远端 SHA 已变」）。MinIO 解开失败同样回退 clone。Git 协议只允许 `https` / `http` / `ssh` / `git@host:path`，拒绝 `file://` `git://`。节点 1 画像挂在同一条 `SourceArtifact` 上（`profile_json` 对应该 `commit_sha`）；SHA 变则清空并重检。强 Web / 强非 Web 走规则，其余必须起 profiler。编排器仅当 `is_web is True` 才进入节点 2–5（缺省 fail-closed）。
 
 #### SourceArtifact（`source_artifacts`）
 
@@ -318,7 +318,7 @@ for attempt in 1..5:
                     未占用则 docker compose up -d --build
                     + 只对 compose 映射到宿主的 Web 端口探活（忽略 postgres/redis）
     if ready:
-        探活 127.0.0.1:{映射端口}（禁止扫本机 80/8080 常用口）
+        探活 127.0.0.1:{映射端口}（禁止扫本机 80/8080 常用口；up 后先等 3s；GET 首页正文，崩溃页不算就绪）
         target_url = http://{宿主机IP}:{映射端口}   # 禁止对外返回 localhost / 容器内端口
         → output_json → node done → 进入审计
     else:

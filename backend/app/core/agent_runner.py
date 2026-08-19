@@ -642,6 +642,21 @@ def _parse_docker_time(s: str) -> float:
     return utc_unix(datetime.fromisoformat(s.replace("Z", "+00:00"))) or 0.0
 
 
+def _git_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    for key in (
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ):
+        env.pop(key, None)
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    return env
+
+
 def git_clone_to_workdir(
     workdir: str,
     project_address: str,
@@ -665,6 +680,7 @@ def git_clone_to_workdir(
 
         shutil.rmtree(project_dir, onerror=_force_remove)
 
+    git_env = _git_subprocess_env()
     cmd = ["git", "clone", "--depth", "1"]
     if project_ref and not _looks_like_commit(project_ref) and project_ref.upper() != "HEAD":
         cmd += ["--branch", project_ref]
@@ -677,19 +693,20 @@ def git_clone_to_workdir(
             capture_output=True,
             text=True,
             timeout=300,
+            env=git_env,
         )
         if result.returncode != 0:
             return False, _classify_clone_error(result.stderr or result.stdout)
         if _looks_like_commit(project_ref or ""):
             co = subprocess.run(
                 ["git", "-C", project_dir, "fetch", "--depth", "1", "origin", project_ref],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True, text=True, timeout=120, env=git_env,
             )
             if co.returncode != 0:
                 return False, _classify_clone_error(co.stderr or co.stdout or "无法获取指定 commit")
             ck = subprocess.run(
                 ["git", "-C", project_dir, "checkout", project_ref],
-                capture_output=True, text=True, timeout=60,
+                capture_output=True, text=True, timeout=60, env=git_env,
             )
             if ck.returncode != 0:
                 return False, f"源码克隆失败: 引用不存在或无法检出: {(ck.stderr or ck.stdout)[:300]}"

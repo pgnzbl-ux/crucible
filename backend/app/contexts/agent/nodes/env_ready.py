@@ -674,6 +674,11 @@ async def health_check(
     return False, None, "http"
 
 
+def _health_fail_detail() -> str:
+    detail = getattr(health_check, "last_error", "")
+    return detail if isinstance(detail, str) and detail else "无 HTTP 应答"
+
+
 def _emit(ctx: NodeContext, message: str) -> None:
     if ctx.on_event:
         ctx.on_event({"type": "phase.updated", "phase": "env_ready", "message": message})
@@ -831,9 +836,9 @@ def _reused_output(
 def _reused_lab_alive(result: Any) -> bool:
     """复用前快探：DB 说 ready 不代表应用进程还活着。
 
-    容器在跑但应用崩溃死锁时，reproduce 会拿死靶标白烧一整个节点。
+    容器在跑但应用崩溃（Fatal/缺表）时，reproduce 会拿死靶标白烧一整个节点。
     单次探测不重试（快失败，死靶场降级重建的成本远低于白跑 reproduce）。
-    target_url host 可能是对外 IP，本机视角换成 127.0.0.1 探。
+    GET 首页正文，崩溃页不算活着。target_url host 可能是对外 IP，本机视角换成 127.0.0.1 探。
     """
     from urllib.parse import urlparse
 
@@ -1088,7 +1093,7 @@ async def _try_cached_recipe(
         )
         last_error = (
             f"健康检查不过(mapped_ports={web_ports})\n"
-            f"{getattr(health_check, 'last_error', '') or '无 HTTP 应答'}\n"
+            f"{_health_fail_detail()}\n"
             f"--- logs ---\n{summarize_compose_failure(logs)}"
         )
         _emit(ctx, "缓存配方探活失败，回喂 AI")
@@ -1351,7 +1356,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 )
                 last_error = (
                     f"attempt {attempt} 健康检查不过(mapped_ports={web_ports})\n"
-                    f"{getattr(health_check, 'last_error', '') or '无 HTTP 应答'}\n"
+                    f"{_health_fail_detail()}\n"
                     f"--- logs ---\n{summarize_compose_failure(logs)}"
                 )
                 failed_stage = "health_check"

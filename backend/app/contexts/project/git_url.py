@@ -116,4 +116,7 @@ def classify_ref(ref: str | None) -> tuple[str, str]:
         return "tag", name[len("tags/") :]
     if _TAG_RE.match(name):
         return "tag", name
+    # 禅道等发行 tag：zentaopms_22.4_20260730（不是合法 branch 名，但旧逻辑会当 branch）
+    if name.startswith("zentaopms_"):
+        return "tag", name
     return "branch", name

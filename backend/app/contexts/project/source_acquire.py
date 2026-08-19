@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -24,6 +25,17 @@ logger = logging.getLogger(__name__)
 CloneFn = Callable[[str, str, str | None, str], tuple[bool, str]]
 ShaFn = Callable[[str], str | None]
 RemoteShaFn = Callable[[str, str | None], str | None]
+CachedByShaFn = Callable[[str], "CachedSource | None"]
+
+_SHA_TOKEN_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
+_GIT_ENV_BLOCKLIST = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+)
 
 
 @dataclass
@@ -71,13 +83,24 @@ def _list_top_level(project_dir: str) -> list[str]:
     return sorted(e for e in os.listdir(project_dir) if e != ".git")[:50]
 
 
+def git_subprocess_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """清掉 GIT_DIR 等，避免 worker 在 Crucible 仓库目录里跑时 rev-parse 读到平台自己的 SHA。"""
+    env = dict(base if base is not None else os.environ)
+    for key in _GIT_ENV_BLOCKLIST:
+        env.pop(key, None)
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    return env
+
+
 def _local_head_sha(project_dir: str) -> str | None:
+    git_dir = os.path.join(project_dir, ".git")
     try:
         result = subprocess.run(
-            ["git", "-C", project_dir, "rev-parse", "HEAD"],
+            ["git", "--git-dir", git_dir, "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
             timeout=10,
+            env=git_subprocess_env(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -125,9 +148,45 @@ def _sha_matches(cached_sha: str, remote_sha: str) -> bool:
     return a.startswith(b) or b.startswith(a)
 
 
-def _ls_remote_sha(git_url: str, ref: str | None) -> str | None:
-    _ref_type, ref_name = classify_ref(ref)
-    specs = ["HEAD"] if ref_name == "HEAD" else [f"refs/heads/{ref_name}", ref_name]
+def _parse_ls_remote_branch_stdout(stdout: str, spec: str) -> str | None:
+    """只认 HEAD / refs/heads，不把同名 tag 当成 branch tip。"""
+    want_head = spec == "HEAD"
+    want_branch = spec[11:] if spec.startswith("refs/heads/") else spec
+    for raw in (stdout or "").splitlines():
+        parts = raw.split()
+        if len(parts) < 2:
+            continue
+        sha, refname = parts[0], parts[1]
+        if not _SHA_TOKEN_RE.fullmatch(sha):
+            continue
+        if refname.startswith("refs/remotes/") or refname.startswith("refs/tags/"):
+            continue
+        if want_head and refname == "HEAD":
+            return sha
+        if refname == f"refs/heads/{want_branch}":
+            return sha
+    return None
+
+
+def _parse_ls_remote_tag_stdout(stdout: str) -> str | None:
+    peeled: str | None = None
+    fallback: str | None = None
+    for raw in (stdout or "").splitlines():
+        parts = raw.split()
+        if len(parts) < 2:
+            continue
+        sha, refname = parts[0], parts[1]
+        if not _SHA_TOKEN_RE.fullmatch(sha) or not refname.startswith("refs/tags/"):
+            continue
+        if refname.endswith("^{}"):
+            peeled = sha
+        else:
+            fallback = sha
+    return peeled or fallback
+
+
+def _ls_remote_branch_sha(git_url: str, ref_name: str) -> str | None:
+    specs = ["HEAD"] if ref_name == "HEAD" else [f"refs/heads/{ref_name}"]
     for spec in specs:
         try:
             result = subprocess.run(
@@ -135,38 +194,96 @@ def _ls_remote_sha(git_url: str, ref: str | None) -> str | None:
                 capture_output=True,
                 text=True,
                 timeout=30,
+                env=git_subprocess_env(),
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
         if result.returncode != 0:
             continue
-        lines = [ln for ln in (result.stdout or "").splitlines() if ln.strip()]
-        if not lines:
-            continue
-        sha = lines[0].split()[0]
-        if len(sha) >= 7:
+        sha = _parse_ls_remote_branch_stdout(result.stdout or "", spec)
+        if sha:
             return sha
     return None
 
 
-def _branch_cache_usable(
-    cached: CachedSource,
-    ref_type: str,
+def _ls_remote_tag_sha(git_url: str, ref_name: str) -> str | None:
+    for spec in (f"refs/tags/{ref_name}", ref_name):
+        try:
+            result = subprocess.run(
+                ["git", "ls-remote", git_url, spec],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=git_subprocess_env(),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            continue
+        sha = _parse_ls_remote_tag_stdout(result.stdout or "")
+        if sha:
+            return sha
+    return None
+
+
+def resolve_remote_ref(
     git_url: str,
     ref: str | None,
-    remote_sha_fn: Callable[[str, str | None], str | None],
-) -> bool:
-    """tag/commit 可永久缓存；branch 必须对上远端 SHA，对不上就 clone。"""
-    if ref_type in ("tag", "commit"):
-        return True
-    remote = remote_sha_fn(git_url, ref)
-    if not remote:
-        logger.warning("无法确认远端 SHA，忽略源码缓存并重新 clone")
-        return False
-    if _sha_matches(cached.commit_sha, remote):
-        return True
-    logger.info("远端 SHA 已变，忽略源码缓存")
-    return False
+    *,
+    remote_sha_fn: RemoteShaFn | None = None,
+) -> tuple[str, str, str | None]:
+    """解析远端 ref 真实类型与 commit SHA（branch 查不到时再试同名 tag）。"""
+    ref_type, ref_name = classify_ref(ref)
+    if ref_type == "commit":
+        return ref_type, ref_name, ref_name.lower()
+    if remote_sha_fn is not None:
+        return ref_type, ref_name, remote_sha_fn(git_url, ref)
+    if ref_type == "tag":
+        return ref_type, ref_name, _ls_remote_tag_sha(git_url, ref_name)
+    branch_sha = _ls_remote_branch_sha(git_url, ref_name)
+    if branch_sha:
+        return "branch", ref_name, branch_sha
+    tag_sha = _ls_remote_tag_sha(git_url, ref_name)
+    if tag_sha:
+        return "tag", ref_name, tag_sha
+    return "branch", ref_name, None
+
+
+def _parse_ls_remote_stdout(stdout: str, spec: str) -> str | None:
+    """从 ls-remote 正文取出 commit SHA：跳过非 hex / refs/remotes；tag 优先 peeled。"""
+    peeled: str | None = None
+    heads: str | None = None
+    first_hex: str | None = None
+    want_head = spec == "HEAD"
+    want_branch = spec[11:] if spec.startswith("refs/heads/") else spec
+    for raw in (stdout or "").splitlines():
+        parts = raw.split()
+        if len(parts) < 2:
+            continue
+        sha, refname = parts[0], parts[1]
+        if not _SHA_TOKEN_RE.fullmatch(sha):
+            continue
+        if refname.startswith("refs/remotes/"):
+            continue
+        if refname.endswith("^{}"):
+            peeled = sha
+            continue
+        if first_hex is None:
+            first_hex = sha
+        if want_head and refname == "HEAD":
+            return sha
+        if refname == f"refs/heads/{want_branch}" or refname == want_branch:
+            heads = sha
+    if peeled:
+        return peeled
+    if heads:
+        return heads
+    return first_hex
+
+
+def _ls_remote_sha(git_url: str, ref: str | None) -> str | None:
+    _ref_type, _ref_name, sha = resolve_remote_ref(git_url, ref)
+    return sha
 
 
 def _upload_cache(
@@ -202,6 +319,7 @@ def acquire_source(
     clone_fn: CloneFn | None = None,
     local_sha_fn: ShaFn | None = None,
     remote_sha_fn: RemoteShaFn | None = None,
+    cached_by_sha_fn: CachedByShaFn | None = None,
     owner_id: str | None = None,
 ) -> SourceAcquireResult:
     """返回源码落地结果。失败时 ok=False 且 error 含网络/权限/空仓等原因。"""
@@ -217,13 +335,47 @@ def acquire_source(
     store = store or MinioSourceStore()
     clone_fn = clone_fn or git_clone_to_workdir
     sha_fn = local_sha_fn or _local_head_sha
-    remote_fn = remote_sha_fn or _ls_remote_sha
     dest = os.path.join(host_workdir, parsed.repo_dirname)
     stored_url = parsed.normalized
 
+    resolved_type, resolved_name, remote_sha = resolve_remote_ref(
+        git_url, ref, remote_sha_fn=remote_sha_fn
+    )
+    if resolved_type != ref_type or resolved_name != ref_name:
+        logger.info(
+            "引用 %r 解析为 %s/%s（原分类 %s/%s）",
+            ref,
+            resolved_type,
+            resolved_name,
+            ref_type,
+            ref_name,
+        )
+        ref_type, ref_name = resolved_type, resolved_name
+
     use_cache = False
-    if cached is not None:
-        use_cache = _branch_cache_usable(cached, ref_type, git_url, ref, remote_fn)
+    if cached is not None or cached_by_sha_fn is not None:
+        if ref_type in ("tag", "commit"):
+            if cached is not None and (
+                not remote_sha or _sha_matches(cached.commit_sha, remote_sha)
+            ):
+                use_cache = True
+        elif not remote_sha:
+            logger.warning("无法确认远端 SHA，忽略源码缓存并重新 clone")
+        else:
+            by_sha = cached_by_sha_fn(remote_sha) if cached_by_sha_fn else None
+            if by_sha is not None:
+                cached = by_sha
+                use_cache = True
+            elif cached is not None and _sha_matches(cached.commit_sha, remote_sha):
+                use_cache = True
+            elif cached is not None:
+                logger.info(
+                    "远端 SHA 已变 cached=%s remote=%s ref=%s(%s)，忽略源码缓存",
+                    cached.commit_sha[:12],
+                    remote_sha[:12],
+                    ref_name,
+                    ref_type,
+                )
     if cached is not None and use_cache:
         cached_dest = os.path.join(host_workdir, cached.repo_dirname)
         try:

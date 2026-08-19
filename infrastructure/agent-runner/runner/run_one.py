@@ -709,9 +709,9 @@ async def _main() -> int:
 
     model = os.environ.get("ANTHROPIC_MODEL", "deepseek-v4-flash")
     try:
-        max_turns = int(os.environ.get("CLAUDE_SDK_MAX_TURNS", "180"))
+        max_turns = int(os.environ.get("CLAUDE_SDK_MAX_TURNS", "480"))
     except ValueError:
-        max_turns = 180
+        max_turns = 480
 
     options = _build_options(
         model, max_turns, node_key=node_key, cwd=_sdk_cwd(input_json)

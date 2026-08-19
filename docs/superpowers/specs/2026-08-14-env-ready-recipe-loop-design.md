@@ -14,7 +14,7 @@
 |---|---|
 | AI 职责 | 只读源码与画像，写出/修改 Dockerfile 与 compose；**禁止**在 agent-runner 内安装依赖或启动靶场 |
 | 依赖安装 | 只写进 Dockerfile / compose 服务镜像（`RUN npm ci`、`pip install`、中间件用官方 image） |
-| 启动与探活 | 宿主机 worker：`docker compose -p crucible-lab-{lab_id} up -d --build` + Web 口探活（约 90s，覆盖 Spring 冷启动） |
+| 启动与探活 | 宿主机 worker：`docker compose -p crucible-lab-{lab_id} up -d --build` + Web 口探活（先等 3s 再 GET 首页正文；Fatal/缺表/Whitelabel 不算就绪；约 90s 覆盖 Spring 冷启动） |
 | 失败 | `compose up` 或探活失败 → **立即**把根因行回喂 AI 改配方（抽出 ERROR / COPY / transfer 失败，丢掉 Maven Help），不拿同一份配方再 up 一轮 |
 | 持久化 | MinIO **只存配方文件**（`.vuln-env/` + 元数据 JSON），不存构建镜像 tar |
 | 复用键 | 与 Lab 相同：`owner_id + project_id + commit_sha`；不跨用户 |
@@ -159,7 +159,7 @@ agent-runner 镜像可继续带 Node 供 `node -e`；**不**再把「镜像里�
 
 | 情况 | 行为 |
 |---|---|
-| 配方构建/应用失败（compose 日志、探活非 2xx） | 立即 AI 修，不重试同一稿 |
+| 配方构建/应用失败（compose 日志、探活非 2xx 或首页崩溃页） | 立即 AI 修，不重试同一稿 |
 | docker 守护进程不可用、命令无法执行 | 节点失败，**不**进 AI（与「配方未命中」区分） |
 | MinIO 下载失败 | 当未命中，走 AI |
 | MinIO 上传失败 | lab 已 ready，只记日志 |

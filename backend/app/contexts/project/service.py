@@ -38,6 +38,20 @@ def _to_artifact(row: Any) -> SourceArtifactResponse:
     return SourceArtifactResponse.model_validate(row)
 
 
+def _cached_from_row(row: Any) -> CachedSource:
+    return CachedSource(
+        object_key=row.object_key,
+        object_url=row.object_url,
+        repo_dirname=row.repo_dirname,
+        commit_sha=row.commit_sha,
+        ref_type=row.ref_type,
+        ref_name=row.ref_name,
+        git_url_normalized=row.git_url,
+        project_key=row.project_key,
+        git_host=row.git_host,
+    )
+
+
 class ProjectService:
     def __init__(self, repo: ProjectRepository):
         self.repo = repo
@@ -169,17 +183,36 @@ class ProjectService:
         )
         if not row:
             return None
-        return CachedSource(
-            object_key=row.object_key,
-            object_url=row.object_url,
-            repo_dirname=row.repo_dirname,
-            commit_sha=row.commit_sha,
-            ref_type=row.ref_type,
-            ref_name=row.ref_name,
-            git_url_normalized=row.git_url,
-            project_key=row.project_key,
-            git_host=row.git_host,
-        )
+        return _cached_from_row(row)
+
+    async def find_cached_source_by_commit(
+        self,
+        owner_id: str,
+        git_host: str,
+        project_key: str,
+        commit_sha: str,
+    ) -> CachedSource | None:
+        """按 owner + host + project + commit 取已打包源码（MinIO 对象键就是 SHA）。"""
+        if not owner_id or not commit_sha:
+            return None
+        row = await self.repo.find_source_artifact_by_sha(owner_id, commit_sha)
+        if (
+            not row
+            or row.git_host != git_host
+            or row.project_key != project_key
+        ):
+            return None
+        return _cached_from_row(row)
+
+    async def list_cached_sources(
+        self, owner_id: str, git_host: str, project_key: str
+    ) -> list[CachedSource]:
+        rows = await self.repo.list_source_artifacts(project_key, owner_id)
+        return [
+            _cached_from_row(row)
+            for row in rows
+            if row.git_host == git_host and row.commit_sha
+        ]
 
     async def record_source_artifact(self, result: SourceAcquireResult, owner_id: str) -> None:
         """clone 成功并上传 MinIO 后写入/覆盖 source_artifacts。"""
