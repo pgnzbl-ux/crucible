@@ -104,6 +104,12 @@ describe('NodeSteps audit detail wiring', () => {
     )
     expect(html).toContain('从本节点重试')
   })
+
+  it('non-compact rows without onSelectNode are not clickable locators', () => {
+    const html = renderWithNodes(stubNodes())
+    expect(html).not.toContain('is-selectable')
+    expect(html).toContain('crucible-node-row')
+  })
 })
 
 function stubNodes(): NodeRun[] {
@@ -182,6 +188,56 @@ describe('NodeSteps compact selection', () => {
       running?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
     expect(clicks).toEqual(['env_ready'])
+    await act(async () => {
+      root.unmount()
+    })
+    container.remove()
+  })
+
+  it('clicking compact step content does not jump to the event stream', async () => {
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      value: (query: string) => ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: () => undefined,
+        removeListener: () => undefined,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+        dispatchEvent: () => false,
+      }),
+    })
+    ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+
+    const { act } = await import('react')
+    const { createRoot } = await import('react-dom/client')
+    const clicks: string[] = []
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    qc.setQueryData(['run-nodes', 't1', 'r1'], runningPipeline())
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={qc}>
+          <App>
+            <NodeSteps
+              taskId="t1"
+              runId="r1"
+              compact
+              onSelectNode={(key) => clicks.push(key)}
+            />
+          </App>
+        </QueryClientProvider>,
+      )
+    })
+    const caption = container.querySelector('[data-node-caption="env_ready"]')
+    expect(caption).toBeTruthy()
+    await act(async () => {
+      caption?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(clicks).toEqual([])
     await act(async () => {
       root.unmount()
     })

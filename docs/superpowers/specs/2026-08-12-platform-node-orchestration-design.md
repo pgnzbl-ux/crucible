@@ -437,7 +437,7 @@ Task `status` 增加 `archived`(软删)。verdict 6 档独立于 status(见 §1.
 ## 7. 前端
 
 - **项目管理页**:project CRUD + 画像缓存展示。
-- **任务详情步骤条**:6 节点状态(`source/profile/env_ready/audit/reproduce/report`),SSE 实时推 `node.updated`。顶栏流程图与进度竖条均可点（`pending` 除外）；无 `node_key` 的思考/工具按同一 run 的 `sequence` 归属当时节点。
+- **任务详情步骤条**:6 节点状态(`source/profile/env_ready/audit/reproduce/report`),SSE 实时推 `node.updated`。顶栏横向进度条可点（`pending` 除外）按节点过滤事件；「进度」详情只展示不跳转。无 `node_key` 的思考/工具按同一 run 的 `sequence` 归属当时节点。
 - **结构化报告页**:按 report_data 8 节渲染,导出 docx/md 按钮。
 - `meta.ts::EVENT_PHASE_LABELS` 重命名为 `NODE_LABELS`,key 对齐 node_key。
 

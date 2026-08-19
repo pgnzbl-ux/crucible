@@ -155,7 +155,15 @@ export function NodeSteps({
         ) : (
           label
         ),
-        content: caption || undefined,
+        content: caption ? (
+          <span
+            className="crucible-node-steps-compact__caption"
+            data-node-caption={n.node_key}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {caption}
+          </span>
+        ) : undefined,
         status: meta.status as 'wait' | 'process' | 'finish' | 'error',
         icon: nodeIcon(n.status),
         className: [

@@ -179,7 +179,6 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
           sseEvents={sseEvents as unknown as SSEEvent[]}
           sseStatus={sseStatus}
           selectedNode={selectedNode}
-          onSelectNode={selectNode}
           onRetryFromNode={canRetry(task.status) ? confirmRetryFromNode : undefined}
         />
       ),

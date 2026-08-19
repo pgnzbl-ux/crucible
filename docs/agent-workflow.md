@@ -150,7 +150,7 @@ SKILL.md 文案里表达。嵌在 properties 内的 `anyOf`/`enum` 实测可用�
 事件 schema 见 [`run_one.py`](../infrastructure/agent-runner/runner/run_one.py) `_stream_messages`。
 `agent.thinking` 来自 SDK ThinkingBlock（或鸭子类型 / dict）；`agent.failed` 带 `title` + `hint` 便于排错。
 前端「事件流」Tab 渲染思考 / 回复 / 工具 / 错误（`EVENT_TYPE_LABELS` / `EVENT_PHASE_LABELS` 在 `frontend/src/shared/lib/meta.ts`）；失败节点在步骤条展示人类可读全文。节点最终 `failed` 时（真实 SDK，非 Mock）会把本轮 jsonl / 配方快照打成 `node_run` 包写入 MinIO `crucible-task`，索引表 `node_run_failures`。
-详情顶栏流程图与「进度」竖条均可点（`pending` 除外），按节点过滤事件。无 `node_key` 的思考/工具按同一 run 的 `sequence` 归到当时节点，不用 SDK `created_at`（时间戳经常早于 `node.updated`）。
+详情顶栏横向进度条可点（`pending` 除外）按节点过滤事件；「进度」Tab 下方详情只展示、不跳转事件流。无 `node_key` 的思考/工具按同一 run 的 `sequence` 归到当时节点，不用 SDK `created_at`（时间戳经常早于 `node.updated`）。
 
 > **待补**：插件 agent.md 的阶段名（start / preflight / scanning / reproducing / completed
 > 等）与前端 `EVENT_PHASE_LABELS` 的映射需对齐，见 P1 backlog。

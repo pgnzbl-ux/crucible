@@ -669,8 +669,15 @@ body,
 .crucible-node-steps-compact.is-clickable .ant-steps-item.is-selectable:hover .ant-steps-item-title {
   color: var(--crucible-primary);
 }
+.crucible-node-steps-compact.is-clickable .ant-steps-item.is-selectable .ant-steps-item-content,
+.crucible-node-steps-compact.is-clickable .ant-steps-item.is-selectable .crucible-node-steps-compact__caption {
+  cursor: default;
+}
 .crucible-node-steps-select {
   display: inline-block;
+}
+.crucible-node-steps-compact__caption {
+  display: block;
 }
 .crucible-node-steps-compact .ant-steps-item-title,
 .crucible-node-steps-compact .ant-steps-item-content,

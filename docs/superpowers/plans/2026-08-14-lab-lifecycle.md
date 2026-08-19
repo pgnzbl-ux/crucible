@@ -6,7 +6,7 @@
 
 **Architecture:** 新 Bounded Context `lab`（`labs` 表 + `LabService`）。task / agent 只调 Service，不直连 repository。Compose 项目名改为 `crucible-lab-{lab_id}`。AI 仍把配方写在任务 workspace 的 `{repo}/.vuln-env/`（bind mount 限制），创建者在 `compose up` 前把该目录拷到 `{agent_runner_workdir_base}/labs/{lab_id}/`。
 
-**Tech Stack:** Python 3.11 / FastAPI / SQLAlchemy 2.0 Async / Alembic / Celery / React 19 / Ant Design 5 / Vitest
+**Tech Stack:** Python 3.11 / FastAPI / SQLAlchemy 2.0 Async / Alembic / Celery / React 19 / Ant Design 6 / Vitest
 
 **Spec:** `docs/superpowers/specs/2026-08-14-lab-lifecycle-design.md`
 

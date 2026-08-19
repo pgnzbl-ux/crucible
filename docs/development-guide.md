@@ -171,7 +171,7 @@ Task 加 project_id(FK→projects) + verdict(6 档);Report 加 report_data 等�
 | LLM 后台配置（新增） | ✅ | settings context（Fernet 加密 + 测试连接 + 种子迁移） |
 | DeepSeek 对接 | ✅ | ClaudeSdkAdapter.build_runner_env() 注入 ANTHROPIC_* env(零落盘,容器销毁消失) |
 | 前端 pages/ shared/ 分层 | ✅ | AppLayout + 4 页面 |
-| 事件流展示（Timeline） | ✅ | 详情「事件流」Tab：thinking / 工具 / 人类可读错误 + SSE 历史回放；流程图/进度条可点，按 sequence 归属节点 |
+| 事件流展示（Timeline） | ✅ | 详情「事件流」Tab：thinking / 工具 / 人类可读错误 + SSE 历史回放；顶栏横向进度条可点定位节点事件，进度详情不跳转；按 sequence 归属节点 |
 | Prometheus 指标 | ✅ | main.py Instrumentator |
 
 ### 3.2 已通过的验证
