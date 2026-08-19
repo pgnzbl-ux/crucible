@@ -576,11 +576,12 @@ agent_runner_manager = AgentRunnerManager()
 
 
 def _parse_docker_time(s: str) -> float:
-    """解析 docker 返回的 ISO 时间字符串为 timestamp"""
-    s = s.replace("Z", "+00:00")
-    import datetime as _dt
+    """解析 docker 返回的 ISO 时间字符串为 UTC unix。naive 按 UTC，禁止当成本地时。"""
+    from datetime import datetime
 
-    return _dt.datetime.fromisoformat(s).timestamp()
+    from app.shared.time import utc_unix
+
+    return utc_unix(datetime.fromisoformat(s.replace("Z", "+00:00"))) or 0.0
 
 
 def git_clone_to_workdir(

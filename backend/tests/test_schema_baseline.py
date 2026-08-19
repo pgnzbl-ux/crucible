@@ -26,9 +26,14 @@ def test_alembic_chain_from_baseline():
     platform = (versions / "e8c3a1b047d2_add_platform_settings.py").read_text(encoding="utf-8")
     assert 'revision: str = "e8c3a1b047d2"' in platform
     assert 'down_revision: Union[str, None] = "b7e4c2a19f08"' in platform
+    timestamptz = (versions / "a1b8c3d049e4_timestamptz_business_columns.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'revision: str = "a1b8c3d049e4"' in timestamptz
+    assert 'down_revision: Union[str, None] = "e8c3a1b047d2"' in timestamptz
     from app.core.database import _alembic_head
 
-    assert _alembic_head() == "e8c3a1b047d2"
+    assert _alembic_head() == "a1b8c3d049e4"
 
 
 @pytest.mark.asyncio
@@ -62,6 +67,18 @@ async def test_create_all_schema_matches_models():
             assert {"singleton_key", "max_concurrent_tasks"} <= runtime_cols
 
         await conn.run_sync(_check)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_align_datetime_timezone_skips_sqlite():
+    from app.core.database import _align_datetime_timezone
+
+    register_models()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_align_datetime_timezone)
     await engine.dispose()
 
 

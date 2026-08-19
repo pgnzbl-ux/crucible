@@ -1,7 +1,8 @@
 """任务 retry（从节点 0 整条重跑）测试。"""
 import asyncio
-import sys
 import os
+import sys
+from contextlib import asynccontextmanager
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -10,6 +11,14 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.shared.base import Base
+
+
+@pytest.fixture(autouse=True)
+def _runner_image_ok(monkeypatch):
+    monkeypatch.setattr(
+        "app.core.agent_runner.agent_runner_manager.image_exists",
+        lambda *args, **kwargs: True,
+    )
 
 
 @pytest_asyncio.fixture
@@ -24,7 +33,27 @@ async def session_factory():
         from app.contexts.settings.models import LlmProvider  # noqa: F401
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    yield factory
+
+    @asynccontextmanager
+    async def open_session(*, seed_llm: bool = True):
+        async with factory() as session:
+            if seed_llm:
+                from app.contexts.settings.models import LlmProvider
+
+                session.add(
+                    LlmProvider(
+                        name="test",
+                        provider_type="deepseek",
+                        base_url="https://api.deepseek.com/anthropic",
+                        api_key_encrypted="sk-test",
+                        model="deepseek-v4-flash",
+                        is_default=True,
+                    )
+                )
+                await session.flush()
+            yield session
+
+    yield open_session
     await engine.dispose()
 
 
@@ -348,6 +377,77 @@ async def test_task_operations_require_owner(session_factory):
 
         with pytest.raises(NotFoundError, match="任务不存在"):
             await svc.retry_task(task.id, "u2")
+
+
+@pytest.mark.asyncio
+async def test_retry_rejects_without_default_llm_provider(session_factory):
+    from unittest.mock import patch
+
+    from sqlalchemy import select
+
+    from app.contexts.task.models import Task, TaskRun
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+
+    async with session_factory(seed_llm=False) as session:
+        task = Task(
+            project_address="x",
+            vulnerability_description="d",
+            owner_id="u1",
+            status="failed",
+        )
+        session.add(task)
+        await session.flush()
+        session.add(TaskRun(task_id=task.id, status="failed"))
+        await session.flush()
+
+        with patch("app.core.celery_app.celery_app.send_task") as send:
+            with pytest.raises(ValueError, match="LLM Provider"):
+                await TaskService(TaskRepository(session)).retry_task(task.id, "u1")
+
+        await session.refresh(task)
+        assert task.status == "failed"
+        runs = (await session.execute(select(TaskRun).where(TaskRun.task_id == task.id))).scalars().all()
+        assert len(runs) == 1
+        send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_retry_rejects_without_runner_image(session_factory, monkeypatch):
+    from unittest.mock import patch
+
+    from sqlalchemy import select
+
+    from app.contexts.task.models import Task, TaskRun
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+
+    monkeypatch.setattr(
+        "app.core.agent_runner.agent_runner_manager.image_exists",
+        lambda *args, **kwargs: False,
+    )
+
+    async with session_factory() as session:
+        task = Task(
+            project_address="x",
+            vulnerability_description="d",
+            owner_id="u1",
+            status="failed",
+        )
+        session.add(task)
+        await session.flush()
+        session.add(TaskRun(task_id=task.id, status="failed"))
+        await session.flush()
+
+        with patch("app.core.celery_app.celery_app.send_task") as send:
+            with pytest.raises(ValueError, match="agent-runner 镜像"):
+                await TaskService(TaskRepository(session)).retry_task(task.id, "u1")
+
+        await session.refresh(task)
+        assert task.status == "failed"
+        runs = (await session.execute(select(TaskRun).where(TaskRun.task_id == task.id))).scalars().all()
+        assert len(runs) == 1
+        send.assert_not_called()
 
 
 @pytest.mark.asyncio

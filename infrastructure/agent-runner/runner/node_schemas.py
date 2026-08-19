@@ -6,6 +6,13 @@
 
 本模块零第三方依赖（纯 dict），后端 import 不会拖入 claude_agent_sdk，
 容器 / 后端 / 单测都能安全导入。真正拒形状仍是后端 `validate_output`。
+
+MCP 工具 schema 约束（2026-08-19 教训）：Anthropic 工具接口只保证
+`type/properties/required` 子集；顶层 `allOf`/`if`/`then`/`const` 会让
+第三方网关（如 360AI）静默丢弃整个工具定义，模型看不到 submit_result，
+节点以 runner.no_submit 失败。条件形状（audit gate_verdict 分支等）只在
+后端 `validate_output` 的 Python 逻辑 + SKILL.md 文案里表达，schema 层
+最多用 `enum`/`anyOf`（嵌在 properties 内，已验证兼容）。
 """
 from __future__ import annotations
 
@@ -88,18 +95,7 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
             },
         },
         "required": ["gate_verdict", "gate_reason"],
-        "allOf": [
-            {
-                "if": {"properties": {"gate_verdict": {"const": "pass"}}, "required": ["gate_verdict"]},
-                "then": {
-                    "required": ["kill_chain", "payloads", "runtime_dependent", "core_claim"],
-                },
-            },
-            {
-                "if": {"properties": {"gate_verdict": {"const": "fail"}}, "required": ["gate_verdict"]},
-                "then": {"required": ["kill_chain", "defense_layers"]},
-            },
-        ],
+        "description": "条件形状：pass 需 kill_chain/payloads/runtime_dependent/core_claim；fail 需 kill_chain/defense_layers（后端 validate_output 强校验，SKILL.md 有表）",
     },
     "reproduce": {
         "type": "object",

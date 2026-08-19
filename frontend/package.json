@@ -14,9 +14,12 @@
     "@tanstack/react-query": "^5.60.0",
     "antd": "^6.0.0",
     "dayjs": "^1.11.0",
+    "highlight.js": "^11.12.0",
+    "lowlight": "^3.3.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
     "remark-gfm": "^4.0.1",
     "wouter": "^3.3.0",
     "zustand": "^5.0.0"

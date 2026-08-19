@@ -131,6 +131,30 @@ async def test_sweep_keeps_live_tears_down_the_rest():
     assert "live" not in torn
 
 
+@pytest.mark.asyncio
+async def test_sweep_default_uses_run_hard_timeout_not_container_timeout():
+    """默认门槛 = run 级硬顶；超过单容器 1800s 但未超硬顶的 live run 不被误杀。"""
+    from app.contexts.agent import runtime_cleanup as rc
+
+    settings = MagicMock()
+    settings.agent_runner_timeout_seconds = 1800
+    settings.agent_run_hard_timeout_seconds = 7200
+    torn = []
+
+    async def fake_teardown(task_id: str) -> None:
+        torn.append(task_id)
+
+    now = 10_000.0
+    with patch("app.contexts.agent.runtime_cleanup.get_settings", return_value=settings):
+        await rc.sweep_orphan_runtimes(
+            discovered_ids={"long-running"},
+            status_by_id={"long-running": ("running", now - 4000)},  # >1800s，<7200s
+            now=now,
+            teardown=fake_teardown,
+        )
+    assert torn == []
+
+
 def test_remove_for_workdir_only_touches_matching_mount():
     """只删 bind 了本任务 host_workdir 的 agent-runner，不动别的任务。"""
     from app.core.agent_runner import AgentRunnerManager

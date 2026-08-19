@@ -75,6 +75,31 @@ def _create_missing_indexes(connection) -> None:
             index.create(connection, checkfirst=True)
 
 
+def _align_datetime_timezone(connection) -> None:
+    """create_all 不改已有列类型。把残留的 timestamp without time zone 升成 timestamptz。"""
+    if connection.dialect.name != "postgresql":
+        return
+    rows = connection.execute(
+        text(
+            """
+            SELECT table_name, column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND data_type = 'timestamp without time zone'
+            """
+        )
+    ).fetchall()
+    for table, column in rows:
+        if not str(table).isidentifier() or not str(column).isidentifier():
+            continue
+        connection.execute(
+            text(
+                f'ALTER TABLE {table} ALTER COLUMN {column} '
+                f"TYPE TIMESTAMP WITH TIME ZONE USING {column} AT TIME ZONE 'UTC'"
+            )
+        )
+
+
 def _align_alembic_version(connection) -> None:
     """create_all 之后把 alembic_version 钉到当前唯一基线，避免旧多 head 链残留。"""
     head = _alembic_head()
@@ -111,6 +136,7 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_create_missing_indexes)
+        await conn.run_sync(_align_datetime_timezone)
         await conn.run_sync(_align_alembic_version)
 
 

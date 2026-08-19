@@ -84,6 +84,25 @@ Dockerfile `COPY infrastructure/agent-runner/node-skills` → `/app/node-skills/
 镜像是分析员工具箱（Python 3.11.15 + Node 20.20.2 + 完整 Linux 命令，非 slim）；
 被测项目的运行时仍写在 `.vuln-env`，由宿主机 `docker compose up` 拉起。
 
+### 4.1.1 靶场 compose 就地执行契约（2026-08-18 起）
+
+配方 `.vuln-env/` 由 AI 直接写在任务 workspace 的仓库目录下
+（`{host_workdir}/{repo}/.vuln-env`），宿主机**就地**执行 compose（不带文件暂存）：
+
+- `build.context: ../X` / `context: ..` 天然解析到仓库内模块（多模块项目正确）；
+- compose 以 `-p crucible-lab-{lab_id}` 项目名隔离；Lab 状态机（reuse/start/stop/destroy/
+  rebuild/容器管理）全部按 project 名操作，**与文件位置无关**，labs 表只做登记；
+- `validate_compose_file` 安全边界 = 任务 `host_workdir`（build context / bind mount
+  圈死在任务工作区内）；
+- MinIO 配方缓存：命中后解压回 `{repo}/.vuln-env` 再就地 up；上传源也是 workspace 的
+  `.vuln-env`；
+- `rebuild_lab`（workspace 已清理时）：按 projects 表 git_url shallow clone 源码到
+  `lab.workdir/{repo}` + MinIO 拉回配方 + `up --build`。
+
+历史背景：2026-08-17 前平台把 `.vuln-env` 单独拷进 `labs/{id}/` 执行，lab 目录无源码，
+`context: ../X` 解析到 `labs/{id}/X` 必然 not found——多模块项目结构性无解，见
+`docs/troubleshooting/2026-08-18-env-ready-no-submit-diagnosis.md` 根因 A。
+
 ### 4.2 凭据零落盘
 
 - 蒸馏 skill 只含静态 `.md`，**不含任何密钥**
@@ -102,6 +121,16 @@ ClaudeAgentOptions(
 ```
 
 user message 只含「调用 submit_result」+ 本轮 `input_json`。
+
+### 4.3.1 MCP 工具 schema 约束（2026-08-19 起）
+
+submit_result 工具的 input schema（`runner/node_schemas.py`）顶层只允许
+`type/properties/required/description`——Anthropic 工具接口不保证 JSON Schema
+组合器（`allOf/anyOf/oneOf/if/then/const`），第三方网关（360AI 实测）遇到顶层
+组合器会**静默丢弃整个工具定义**，模型看不到 submit_result，节点以
+`runner.no_submit` 失败（2026-08-19 audit 节点事故）。条件形状（audit 的
+gate_verdict 分支必填字段等）只在后端 `validate_output` Python 逻辑与
+SKILL.md 文案里表达。嵌在 properties 内的 `anyOf`/`enum` 实测可用。
 
 ---
 

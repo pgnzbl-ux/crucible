@@ -1,10 +1,12 @@
 """平台验证任务运行槽（Redis SET + Lua）。
 
 连接 settings.redis_url（db0），禁止写 Celery broker db1。
+Celery 每个任务 asyncio.run 一次：禁止缓存跨 loop 的 asyncio Redis 客户端。
 """
 from __future__ import annotations
 
-from typing import Any
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator
 
 SLOT_SET_KEY = "crucible:running_run_ids"
 SWEEPER_LOCK_KEY = "crucible:runtime_sweeper"
@@ -26,49 +28,56 @@ redis.call('SADD', key, run_id)
 return 1
 """
 
-_client: Any = None
+_injected: Any = None
 
 
 def set_redis_client(client: Any) -> None:
-    """测试注入；传 None 恢复懒加载。"""
-    global _client
-    _client = client
+    """测试注入；传 None 恢复每调用新建连接。"""
+    global _injected
+    _injected = client
 
 
-async def _redis() -> Any:
-    global _client
-    if _client is None:
-        import redis.asyncio as aioredis
+@asynccontextmanager
+async def _redis() -> AsyncIterator[Any]:
+    if _injected is not None:
+        yield _injected
+        return
+    import redis.asyncio as aioredis
 
-        from app.core.config import get_settings
+    from app.core.config import get_settings
 
-        _client = aioredis.from_url(get_settings().redis_url, decode_responses=True)
-    return _client
+    client = aioredis.from_url(get_settings().redis_url, decode_responses=True)
+    try:
+        yield client
+    finally:
+        close = getattr(client, "aclose", None) or getattr(client, "close", None)
+        if close is not None:
+            await close()
 
 
 async def try_acquire_slot(run_id: str, max_slots: int) -> bool:
-    r = await _redis()
-    capped = max(1, int(max_slots))
-    result = await r.eval(_ACQUIRE_LUA, 1, SLOT_SET_KEY, run_id, str(capped))
-    return int(result) == 1
+    async with _redis() as r:
+        capped = max(1, int(max_slots))
+        result = await r.eval(_ACQUIRE_LUA, 1, SLOT_SET_KEY, run_id, str(capped))
+        return int(result) == 1
 
 
 async def release_slot(run_id: str) -> None:
-    r = await _redis()
-    await r.srem(SLOT_SET_KEY, run_id)
+    async with _redis() as r:
+        await r.srem(SLOT_SET_KEY, run_id)
 
 
 async def reconcile_slots(running_run_ids: set[str]) -> None:
-    r = await _redis()
-    current = set(await r.smembers(SLOT_SET_KEY) or [])
-    wanted = set(running_run_ids)
-    for extra in current - wanted:
-        await r.srem(SLOT_SET_KEY, extra)
-    for missing in wanted - current:
-        await r.sadd(SLOT_SET_KEY, missing)
+    async with _redis() as r:
+        current = set(await r.smembers(SLOT_SET_KEY) or [])
+        wanted = set(running_run_ids)
+        for extra in current - wanted:
+            await r.srem(SLOT_SET_KEY, extra)
+        for missing in wanted - current:
+            await r.sadd(SLOT_SET_KEY, missing)
 
 
 async def try_sweeper_lock() -> bool:
-    r = await _redis()
-    ok = await r.set(SWEEPER_LOCK_KEY, "1", nx=True, ex=240)
-    return bool(ok)
+    async with _redis() as r:
+        ok = await r.set(SWEEPER_LOCK_KEY, "1", nx=True, ex=240)
+        return bool(ok)

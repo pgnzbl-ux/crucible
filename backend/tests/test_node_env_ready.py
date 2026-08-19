@@ -491,3 +491,57 @@ def test_ai_nodes_import_ok():
     for cls in (ProfileNode, EnvReadyNode, AuditNode, ReproduceNode, ReportNode):
         instance = cls()
         assert instance.is_ai is True
+
+
+@pytest.mark.asyncio
+async def test_bump_node_attempt_writes_node_runs_attempt():
+    """第 2 轮起把 attempt 写进 NodeRun；DB 异常只告警不炸排障循环。"""
+    from app.contexts.agent.nodes import env_ready as mod
+
+    session = MagicMock()
+    session.execute = AsyncMock()
+    session.commit = AsyncMock()
+    ctx = _exec_ctx("/tmp/w", {"is_web": True})
+    ctx.db_session = session
+
+    await mod._bump_node_attempt(ctx, 3)
+
+    stmt = session.execute.await_args.args[0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "node_runs" in compiled or "node_index" in compiled
+    session.commit.assert_awaited_once()
+
+    session.execute.side_effect = RuntimeError("db down")
+    await mod._bump_node_attempt(ctx, 4)  # 不抛
+
+
+@pytest.mark.asyncio
+async def test_env_ready_retry_bumps_attempt_per_round(tmp_path):
+    """排障循环从第 2 轮起调用 _bump_node_attempt（attempt 随轮次递增）。"""
+    from app.contexts.agent.nodes import env_ready as mod
+
+    ctx = _exec_ctx(tmp_path, {"is_web": True, "port": 8000})
+    _write_compose(tmp_path, filename="1.yml")
+    _write_compose(tmp_path, filename="2.yml")
+
+    with patch.object(mod, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
+         patch.object(mod, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
+         patch.object(mod, "collect_compose_logs", new_callable=AsyncMock) as mock_logs, \
+         patch.object(mod, "health_check", new_callable=AsyncMock) as mock_hc, \
+         patch.object(mod, "docker_compose_down", new_callable=AsyncMock), \
+         patch.object(mod, "_bump_node_attempt", new_callable=AsyncMock) as bump, \
+         patch.object(mod, "host_advertise_ip", return_value="192.168.1.8"):
+        mock_ai.side_effect = [
+            _recipe(".vuln-env/1.yml", "http://localhost:8000"),
+            _recipe(".vuln-env/2.yml", "http://localhost:8000"),
+        ]
+        mock_up.side_effect = [(False, "fail"), (True, "")]
+        mock_logs.return_value = ""
+        mock_hc.return_value = (True, 8000)
+
+        out = await mod.EnvReadyNode().execute(ctx)
+
+    assert mock_ai.call_count == 2
+    assert bump.await_count == 1  # 第 2 轮才 bump
+    bump.assert_awaited_with(ctx, 2)
+    assert out["target_url"] == "http://192.168.1.8:8000"

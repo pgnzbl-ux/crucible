@@ -5,7 +5,7 @@ SourceArtifact 记录每次落到 MinIO 的源码包（访问地址、规范化 
 """
 from datetime import datetime
 
-from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.shared.base import BaseModel
@@ -24,7 +24,9 @@ class Project(BaseModel):
     detected_language: Mapped[str | None] = mapped_column(String(50))
     detected_framework: Mapped[str | None] = mapped_column(String(100))
     is_web: Mapped[bool | None] = mapped_column(Boolean)
-    last_cloned_at: Mapped[datetime | None] = mapped_column(comment="最近一次源码落地（clone 或缓存命中）")
+    last_cloned_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), comment="最近一次源码落地（clone 或缓存命中）"
+    )
 
     __table_args__ = (
         Index("idx_projects_owner", "owner_id"),

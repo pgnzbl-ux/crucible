@@ -6,6 +6,7 @@
 | --- | --- |
 | [development-guide.md](development-guide.md) | 架构原则、目录约定、后续工作 |
 | [agent-workflow.md](agent-workflow.md) | 六节点如何协作 |
+| [troubleshooting/](troubleshooting/) | 线上故障诊断记录 |
 | [governance/](governance/) | 开发宪法与协作标准 |
 | [superpowers/specs/](superpowers/specs/) | 已评审的设计规格 |
 | [superpowers/plans/](superpowers/plans/) | 对应实现计划 |

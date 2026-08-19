@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
 from app.shared.deps import CurrentUserId
+from app.shared.time import iso_utc
 
 from .repository import ReportRepository
 from .schemas import EvidenceResponse, ReportDetail, ReportListResponse
@@ -162,7 +163,7 @@ async def export_report(
             "severity": report.severity,
             "vulnerable_file": report.vulnerable_file,
             "report_data": report.report_data,
-            "created_at": report.created_at.isoformat(),
+            "created_at": iso_utc(report.created_at),
         },
         headers={"Content-Disposition": f'attachment; filename="report-{report_id[:8]}.json"'},
     )

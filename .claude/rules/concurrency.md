@@ -25,6 +25,7 @@ paths: ["backend/app/**/*.py"]
 |---|---|
 | Celery worker 复用主进程 async engine 报"attached to a different loop" | worker 用独立 NullPool engine（`agent/tasks.py::_worker_engine`） |
 | Celery 任务本体同步却要调 async 代码 | 用 `asyncio.run()` 临时 loop，不要 `loop.run_until_complete`（已废弃） |
+| Redis asyncio 客户端绑死已关闭的 loop | 运行槽 `task_slots.py` 禁止进程级缓存客户端；每个 `asyncio.run` 新建并 `aclose` |
 | `await` 跨进程 / 跨线程 | 不要 await 跨边界；Celery 任务内 async 代码必须包在 `asyncio.run` |
 | 孤儿巡检 naive UTC 当成本地时 | `utc_unix()` 再算 age；否则东八区会把刚启动的 running 判超龄并拆掉 |
 | agent-runner 流式回调要在同步线程内落 DB | 独立 session + `run_coroutine_threadsafe`；已在事件循环线程则 `create_task`，禁止 `.result()` 死锁 |

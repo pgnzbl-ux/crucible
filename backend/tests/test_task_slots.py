@@ -94,3 +94,46 @@ async def test_release_slot(fake_redis):
 async def test_sweeper_lock_nx(fake_redis):
     assert await try_sweeper_lock() is True
     assert await try_sweeper_lock() is False
+
+
+def test_acquire_survives_successive_asyncio_run():
+    """Celery 每个任务 asyncio.run 一次；进程级缓存的 Redis 客户端会绑死已关闭的 loop。"""
+    import asyncio
+    from unittest.mock import patch
+
+    from app.contexts.agent import task_slots as slots
+
+    slots.set_redis_client(None)
+
+    class LoopBoundRedis:
+        def __init__(self) -> None:
+            self.loop = asyncio.get_running_loop()
+
+        async def eval(self, *_args, **_kwargs):
+            if self.loop.is_closed() or asyncio.get_running_loop() is not self.loop:
+                raise RuntimeError("Event loop is closed")
+            return 1
+
+        async def aclose(self) -> None:
+            return None
+
+    created: list[LoopBoundRedis] = []
+
+    def from_url(*_args, **_kwargs):
+        client = LoopBoundRedis()
+        created.append(client)
+        return client
+
+    try:
+        with patch("redis.asyncio.from_url", from_url):
+
+            async def acquire() -> None:
+                assert await try_acquire_slot("r1", 1) is True
+
+            asyncio.run(acquire())
+            asyncio.run(acquire())
+    finally:
+        slots.set_redis_client(None)
+
+    assert len(created) >= 2
+

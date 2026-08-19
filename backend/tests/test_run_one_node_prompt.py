@@ -102,6 +102,29 @@ def test_submit_schema_is_single_source_shared_across_boundary():
     assert set(NODE_INPUT_SCHEMAS) == set(NODE_AI_KEYS)
 
 
+_UNSUPPORTED_TOP_KEYS = ("allOf", "anyOf", "oneOf", "not", "if", "then", "else", "const", "$ref")
+
+
+def test_submit_schema_uses_only_anthropic_tool_subset():
+    """submit_result 工具 schema 只用 Anthropic 工具接口保证的子集。
+
+    Anthropic tools API 只保证 type/properties/required/description/items/enum/
+    minLength 等基础关键字；JSON Schema 组合器（allOf/anyOf/oneOf/if/then/const）
+    不在保证集内，第三方网关（360AI 实测）解析顶层组合器失败时静默丢弃整个
+    工具定义 → 模型看不到 submit_result → 节点以 runner.no_submit 失败
+    （2026-08-19 audit 节点教训）。条件形状只在后端 validate_output 表达。
+    嵌在 properties 内的 anyOf（env_ready.initial_creds）360AI 实测可用，豁免。
+    """
+    from runner import node_schemas
+
+    for node_key, schema in node_schemas.NODE_INPUT_SCHEMAS.items():
+        for key in schema:
+            assert key not in _UNSUPPORTED_TOP_KEYS, (
+                f"{node_key} 工具 schema 顶层出现 {key!r}：第三方网关会静默丢弃 "
+                "submit_result 工具定义，模型无法提交节点结果"
+            )
+
+
 def test_node_skills_exist_and_are_sliced():
     assert NODE_AI_KEYS == frozenset(
         {"profile", "env_ready", "audit", "reproduce", "report"}

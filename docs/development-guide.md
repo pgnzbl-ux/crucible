@@ -151,6 +151,8 @@ Task 加 project_id(FK→projects) + verdict(6 档);Report 加 report_data 等�
 | 报告生成 + MinIO 归档 | ✅ | report/service.py + shared/object_store.py（3 桶 durable/task/public） |
 | **源码 MinIO 缓存** | ✅ | `source_artifacts` 按 owner+host+project+ref；branch/HEAD 必须 ls-remote 对上 SHA 才用 MinIO；画像 `profile_json` 绑同一 SHA，SHA 变则清空重检 |
 | **靶场配方 MinIO 复用** | ✅ | `lab/recipe_store` 按 owner+project+SHA 存 `.vuln-env/`；env_ready 创建者先 download 短路（命中改宿主口 + 一次 up），未命中/失败再 AI；成功 upload；rebuild 可从 MinIO 拉回 |
+| **靶场 compose 就地执行** | ✅ | 2026-08-18：`.vuln-env` 留在 `{host_workdir}/{repo}/` 就地 up（`-p crucible-lab-{id}` 隔离），删 lab 文件暂存层；`validate_compose_file` 边界=任务 host_workdir；rebuild=clone 源码+拉配方+up --build。修复多模块 build.context 结构性失败（见 troubleshooting/2026-08-18 诊断根因 A） |
+| **MCP 工具 schema 收敛** | ✅ | 2026-08-19：submit_result 工具 schema 顶层只允许 type/properties/required/description，禁 JSON Schema 组合器（allOf/if/then 等）——第三方网关遇顶层组合器静默丢工具，audit 节点曾因此 no_submit；条件形状由后端 validate_output + SKILL.md 表达（见 troubleshooting/2026-08-18 诊断 §9 根因 C） |
 | LLM 后台配置（新增） | ✅ | settings context（Fernet 加密 + 测试连接 + 种子迁移） |
 | DeepSeek 对接 | ✅ | ClaudeSdkAdapter.build_runner_env() 注入 ANTHROPIC_* env(零落盘,容器销毁消失) |
 | 前端 pages/ shared/ 分层 | ✅ | AppLayout + 4 页面 |
@@ -305,7 +307,8 @@ pytest                           # 单元测试（待补，见 backlog P1）
 | `REDIS_URL` / `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` | Redis 6380，db0 事件 / db1 broker / db2 result |
 | `S3_ENDPOINT` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | MinIO 连接；桶名写死 `crucible-durable` / `crucible-task` / `crucible-public` |
 | `CLAUDE_AGENT_SDK_ENABLED` | `true` 启用真实 Agent（否则 Mock） |
-| `AGENT_RUNNER_IMAGE` / `AGENT_RUNNER_TIMEOUT_SECONDS` | Agent Runner 镜像与超时 |
+| `AGENT_RUNNER_IMAGE` / `AGENT_RUNNER_TIMEOUT_SECONDS` | Agent Runner 镜像与单容器超时（每 AI 轮独立计时） |
+| `AGENT_RUN_HARD_TIMEOUT_SECONDS` | run 级巡检硬顶（默认 7200s）：live run 超过才被孤儿巡检强拆；与单容器超时解耦（2026-08-18，修复 run 总年龄误杀） |
 | `AGENT_RUNNER_CONCURRENCY_LIMIT` | 并行硬顶（1–8，默认 4）：设置项上限 + Linux worker 进程数 |
 | `AUTH_SECRET` | JWT；生产必填 |
 | `SETTINGS_ENCRYPT_KEY` | 遗留配置(当前 settings 明文存取,Fernet 未生效) |

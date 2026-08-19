@@ -776,15 +776,45 @@ body,
   margin-bottom: 16px;
 }
 
-/* 报告全文：按本地打开 report.md 的阅读密度排版 */
+/* 报告全文：实验室记录排版 — 表格/PoC 要吃满容器，正文保持可读行长 */
 .crucible-markdown {
-  max-width: 820px;
+  --md-code-bg: #111827;
+  --md-code-bar: #1f2937;
+  --md-code-fg: #e5e7eb;
+  --md-code-muted: #9ca3af;
+  --md-code-border: #374151;
+  --md-hl-keyword: #93c5fd;
+  --md-hl-string: #fbbf24;
+  --md-hl-comment: #6b7280;
+  --md-hl-number: #f9a8d4;
+  --md-hl-title: #86efac;
+  --md-hl-attr: #7dd3fc;
+  --md-hl-tag: #c4b5fd;
+  --md-hl-meta: #fdba74;
+  min-width: 0;
+  max-width: 100%;
   color: var(--crucible-text);
   font-size: 15px;
   line-height: 1.75;
+  overflow-wrap: anywhere;
 }
 .crucible-markdown > *:first-child {
   margin-top: 0;
+}
+.crucible-markdown h1,
+.crucible-markdown h2,
+.crucible-markdown h3,
+.crucible-markdown h4,
+.crucible-markdown h5,
+.crucible-markdown h6 {
+  color: var(--crucible-text);
+  font-weight: 600;
+  line-height: 1.35;
+  scroll-margin-top: 12px;
+}
+.crucible-markdown h1 {
+  margin: 0 0 16px;
+  font-size: 22px;
 }
 .crucible-markdown h2 {
   margin: 28px 0 12px;
@@ -792,68 +822,229 @@ body,
   border-left: 3px solid var(--crucible-primary);
   border-bottom: 1px solid var(--crucible-border);
   font-size: 18px;
-  font-weight: 600;
   line-height: 1.4;
 }
 .crucible-markdown h3 {
   margin: 20px 0 8px;
   font-size: 15px;
-  font-weight: 600;
+}
+.crucible-markdown h4,
+.crucible-markdown h5,
+.crucible-markdown h6 {
+  margin: 16px 0 8px;
+  font-size: 14px;
 }
 .crucible-markdown p,
 .crucible-markdown ul,
 .crucible-markdown ol {
   margin: 0 0 12px;
 }
+.crucible-markdown ul,
+.crucible-markdown ol {
+  padding-left: 1.4em;
+}
 .crucible-markdown li + li {
   margin-top: 4px;
 }
+.crucible-markdown li > p {
+  margin: 0 0 4px;
+}
+.crucible-markdown li > p:last-child {
+  margin-bottom: 0;
+}
+.crucible-markdown input[type='checkbox'] {
+  pointer-events: none;
+  margin-right: 8px;
+  accent-color: var(--crucible-primary);
+}
+.crucible-markdown a {
+  color: var(--crucible-primary);
+  text-decoration: none;
+}
+.crucible-markdown a:hover {
+  color: var(--crucible-primary-hover);
+  text-decoration: underline;
+}
+.crucible-markdown hr {
+  border: none;
+  border-top: 1px solid var(--crucible-border);
+  margin: 24px 0;
+}
+.crucible-markdown__img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 8px 0 16px;
+  border: 1px solid var(--crucible-border);
+  border-radius: var(--crucible-radius);
+  background: var(--crucible-bg);
+}
+.crucible-markdown__table-wrap {
+  overflow-x: auto;
+  margin: 8px 0 16px;
+  border: 1px solid var(--crucible-border-strong);
+  border-radius: var(--crucible-radius);
+  background: var(--crucible-surface);
+}
 .crucible-markdown table {
   width: 100%;
+  min-width: 360px;
   border-collapse: collapse;
-  margin: 8px 0 16px;
+  margin: 0;
   font-size: 13px;
 }
 .crucible-markdown th,
 .crucible-markdown td {
-  border: 1px solid var(--crucible-border-strong);
+  border-bottom: 1px solid var(--crucible-border);
   padding: 8px 12px;
   text-align: left;
   vertical-align: top;
+}
+.crucible-markdown tr:last-child td {
+  border-bottom: none;
 }
 .crucible-markdown th {
   background: var(--crucible-bg);
   font-weight: 600;
   white-space: nowrap;
 }
-.crucible-markdown pre {
+.crucible-markdown tbody tr:nth-child(even) td {
   background: var(--crucible-bg);
-  border: 1px solid var(--crucible-border);
-  border-radius: 8px;
-  padding: 12px 16px;
-  overflow-x: auto;
-  margin: 8px 0 16px;
-  font-family: var(--crucible-font-mono);
-  font-size: 13px;
-  line-height: 1.55;
 }
 .crucible-markdown code {
   font-family: var(--crucible-font-mono);
-  font-size: 0.9em;
+  font-size: 0.88em;
   background: var(--crucible-primary-light);
-  padding: 1px 5px;
+  color: var(--crucible-primary-active);
+  padding: 1px 6px;
   border-radius: 4px;
-}
-.crucible-markdown pre code {
-  background: none;
-  padding: 0;
-  font-size: inherit;
 }
 .crucible-markdown blockquote {
   margin: 8px 0 16px;
-  padding: 4px 12px;
-  border-left: 3px solid var(--crucible-border-strong);
+  padding: 8px 14px;
+  border-left: 3px solid var(--crucible-primary);
+  background: var(--crucible-primary-light);
   color: var(--crucible-text-secondary);
+  border-radius: 0 var(--crucible-radius-sm) var(--crucible-radius-sm) 0;
+}
+.crucible-markdown blockquote > *:last-child {
+  margin-bottom: 0;
+}
+
+/* PoC / 证据代码板：深色台面 + 语法高亮，和浅色正文区分 */
+.crucible-codeblock {
+  margin: 12px 0 20px;
+  overflow: hidden;
+  background: var(--md-code-bg);
+  border: 1px solid var(--md-code-border);
+  border-radius: 10px;
+}
+.crucible-codeblock__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px 6px 14px;
+  background: var(--md-code-bar);
+  border-bottom: 1px solid var(--md-code-border);
+}
+.crucible-codeblock__lang {
+  font-family: var(--crucible-font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--md-hl-string);
+}
+.crucible-codeblock__copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--md-code-muted);
+  font-size: 12px;
+  line-height: 20px;
+  cursor: pointer;
+}
+.crucible-codeblock__copy:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--md-code-fg);
+}
+.crucible-codeblock__pre {
+  margin: 0;
+  padding: 14px 16px 16px;
+  overflow-x: auto;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  font-family: var(--crucible-font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--md-code-fg);
+  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+}
+.crucible-codeblock__pre code,
+.crucible-markdown pre code {
+  background: none;
+  color: inherit;
+  padding: 0;
+  font-size: inherit;
+  border-radius: 0;
+}
+.crucible-codeblock .hljs-keyword,
+.crucible-codeblock .hljs-selector-tag,
+.crucible-codeblock .hljs-literal,
+.crucible-codeblock .hljs-section,
+.crucible-codeblock .hljs-link {
+  color: var(--md-hl-keyword);
+}
+.crucible-codeblock .hljs-string,
+.crucible-codeblock .hljs-bullet,
+.crucible-codeblock .hljs-addition {
+  color: var(--md-hl-string);
+}
+.crucible-codeblock .hljs-comment,
+.crucible-codeblock .hljs-quote,
+.crucible-codeblock .hljs-deletion {
+  color: var(--md-hl-comment);
+  font-style: italic;
+}
+.crucible-codeblock .hljs-number,
+.crucible-codeblock .hljs-regexp,
+.crucible-codeblock .hljs-symbol {
+  color: var(--md-hl-number);
+}
+.crucible-codeblock .hljs-title,
+.crucible-codeblock .hljs-title.function_,
+.crucible-codeblock .hljs-title.class_,
+.crucible-codeblock .hljs-built_in,
+.crucible-codeblock .hljs-type {
+  color: var(--md-hl-title);
+}
+.crucible-codeblock .hljs-attr,
+.crucible-codeblock .hljs-attribute,
+.crucible-codeblock .hljs-variable,
+.crucible-codeblock .hljs-template-variable,
+.crucible-codeblock .hljs-params {
+  color: var(--md-hl-attr);
+}
+.crucible-codeblock .hljs-name,
+.crucible-codeblock .hljs-tag,
+.crucible-codeblock .hljs-selector-id,
+.crucible-codeblock .hljs-selector-class {
+  color: var(--md-hl-tag);
+}
+.crucible-codeblock .hljs-meta,
+.crucible-codeblock .hljs-doctag,
+.crucible-codeblock .hljs-emphasis {
+  color: var(--md-hl-meta);
+}
+.crucible-codeblock .hljs-strong {
+  font-weight: 700;
 }
 
 .ant-card-head {

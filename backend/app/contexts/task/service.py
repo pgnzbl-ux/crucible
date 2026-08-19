@@ -5,6 +5,8 @@ import logging
 
 from sqlalchemy import select, update
 
+from app.shared.time import iso_utc
+
 from .models import Task, TaskRun, AgentEvent
 from .repository import TaskRepository
 from .schemas import TaskCreateRequest, TaskDetail, TaskListResponse, TaskStatsResponse, TaskSummary, RunSummary
@@ -50,13 +52,6 @@ def _parse_node_output(raw: str | None) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _iso_utc(value: datetime) -> str:
-    """SQLite 读回的 naive datetime 一律按 UTC 输出，前端才不会当成本地时间。"""
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc).isoformat()
-    return value.isoformat()
-
-
 def _serialize_node_run(nr: Any) -> dict[str, Any]:
     return {
         "id": nr.id,
@@ -65,8 +60,8 @@ def _serialize_node_run(nr: Any) -> dict[str, Any]:
         "status": nr.status,
         "attempt": nr.attempt,
         "error_message": nr.error_message,
-        "started_at": nr.started_at.isoformat() if nr.started_at else None,
-        "finished_at": nr.finished_at.isoformat() if nr.finished_at else None,
+        "started_at": iso_utc(nr.started_at),
+        "finished_at": iso_utc(nr.finished_at),
         "output": _parse_node_output(nr.output_json),
     }
 
@@ -98,12 +93,18 @@ class TaskService:
             runs=[RunSummary.model_validate(r) for r in (runs or [])],
         )
 
+    async def _require_platform_ready(self) -> None:
+        from app.contexts.agent.preflight import require_platform_ready
+
+        await require_platform_ready(self.session)
+
     async def create_task(self, request: TaskCreateRequest, owner_id: str) -> TaskDetail:
         from app.contexts.project.git_url import parse_git_url
         from app.contexts.project.repository import ProjectRepository
         from app.contexts.project.service import ProjectService
 
         stored_address = parse_git_url(request.project_address).normalized
+        await self._require_platform_ready()
         project = await ProjectService(ProjectRepository(self.repo.session)).upsert_by_git_url(
             git_url=stored_address,
             owner_id=owner_id,
@@ -269,7 +270,7 @@ class TaskService:
                     "event_type": ev.event_type,
                     "payload": payload,
                     "source": ev.source,
-                    "created_at": _iso_utc(ev.created_at),
+                    "created_at": iso_utc(ev.created_at),
                 }
             )
         return result
@@ -306,6 +307,7 @@ class TaskService:
             raise NotFoundError("任务不存在", code="TASK_NOT_FOUND", details={"task_id": task_id})
         if task.status not in ("failed", "completed", "cancelled", "needs_review"):
             raise ValueError(f"状态为 {task.status} 的任务不能重试")
+        await self._require_platform_ready()
 
         source_run = task.runs[0] if task.runs else None
         original_status = task.status

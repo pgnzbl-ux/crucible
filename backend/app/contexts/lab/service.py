@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.shared.time import as_utc
 
 from .errors import LabBusyError, LabNotFoundError
 from .models import Lab
@@ -386,6 +387,12 @@ class LabService:
         return lab.status
 
     async def rebuild_lab(self, lab_id: str, *, owner_id: str) -> str:
+        """重建 = 源码 + 配方 + 镜像全重来（与创建路径同构）。
+
+        就地执行契约（2026-08-18）：compose 在 {workdir}/{repo}/.vuln-env。
+        先按新旧两种布局找现成 compose（有则免 clone）；找不到才
+        clone 源码 + MinIO 拉配方，再 compose up --build。
+        """
         from . import docker_ops
 
         lab = await self._require_writable_lab(lab_id, owner_id)
@@ -396,21 +403,17 @@ class LabService:
         )
         if not lab.compose_path:
             raise ValueError("缺少配方，请从验证任务重新创建")
-        compose_file = (
-            f"{lab.workdir.rstrip('/')}/{lab.compose_path.lstrip('/')}"
-            .replace("\\", "/")
-        )
-        if not os.path.isfile(compose_file):
-            await self.download_recipe(
-                owner_id=lab.owner_id,
-                project_id=lab.project_id,
-                commit_sha=lab.commit_sha,
-                dest_workdir=lab.workdir,
-            )
-            if not os.path.isfile(compose_file):
-                raise ValueError("缺少配方，请从验证任务重新创建")
-
         await self._confirm_not_busy(lab.id)
+
+        compose_file = self._locate_rebuild_compose(lab)
+        if compose_file is None:
+            compose_file, error = await self._rebuild_fetch_missing(lab)
+            if error:
+                lab.status = "failed"
+                lab.error_message = error
+                await self.session.commit()
+                raise ValueError(error)
+
         previous_status = lab.status
         lab.status = "creating"
         await self.session.commit()
@@ -433,6 +436,88 @@ class LabService:
         lab.error_message = None
         await self._touch_and_commit(lab)
         return lab.status
+
+    @staticmethod
+    def _locate_rebuild_compose(lab: Lab) -> str | None:
+        """按新（{repo}/.vuln-env）→ 旧（workdir 直下）顺序找现成 compose 文件。"""
+        rel = (lab.compose_path or "").replace("\\", "/").lstrip("/")
+        candidates = [rel]
+        if "/" in rel:
+            candidates.append(rel.split("/", 1)[1])
+        for cand in candidates:
+            path = f"{lab.workdir.rstrip('/')}/{cand}".replace("\\", "/")
+            if os.path.isfile(path):
+                return path
+        return None
+
+    async def _rebuild_fetch_missing(self, lab: Lab) -> tuple[str, str | None]:
+        """compose 文件缺失：clone 源码 + MinIO 拉配方，返回 (compose_file, error)。"""
+        repo_dirname, clone_error = await self._ensure_rebuild_source(lab)
+        if clone_error:
+            return "", clone_error
+
+        compose_rel = (lab.compose_path or "").replace("\\", "/").lstrip("/")
+        repo_prefix = f"{repo_dirname}/" if repo_dirname else ""
+        if repo_prefix and compose_rel.startswith(repo_prefix):
+            compose_rel = compose_rel[len(repo_prefix):]
+        compose_file = (
+            f"{lab.workdir.rstrip('/')}/"
+            f"{(repo_prefix + compose_rel).lstrip('/')}".replace("\\", "/")
+        )
+        if os.path.isfile(compose_file):
+            return compose_file, None
+
+        recipe_hit = await self.download_recipe(
+            owner_id=lab.owner_id,
+            project_id=lab.project_id,
+            commit_sha=lab.commit_sha,
+            dest_workdir=str(Path(lab.workdir) / repo_dirname) if repo_dirname else lab.workdir,
+        )
+        if recipe_hit is None or not os.path.isfile(compose_file):
+            return "", "缺少配方，请从验证任务重新创建"
+        return compose_file, None
+
+    async def _ensure_rebuild_source(self, lab: Lab) -> tuple[str | None, str | None]:
+        """lab.workdir/{repo} 没有源码时，按 projects 表 git_url shallow clone。"""
+        import asyncio
+
+        from sqlalchemy import select as sa_select
+
+        from app.contexts.project.models import Project
+        from app.core.agent_runner import git_clone_to_workdir
+
+        result = await self.session.execute(
+            sa_select(Project).where(Project.id == lab.project_id)
+        )
+        project = result.scalar_one_or_none()
+        if project is None:
+            return None, "项目记录不存在，无法重建源码，请从验证任务重新创建"
+
+        rel = (lab.compose_path or "").replace("\\", "/").strip("/")
+        first_seg = rel.split("/", 1)[0] if rel else ""
+        # 新布局 compose_path 形如 {repo}/.vuln-env/...；首段是隐藏目录则无 repo 前缀
+        if rel and "/" in rel and not first_seg.startswith("."):
+            repo_dirname = first_seg
+        else:
+            from app.core.agent_runner import _dirname_from_url
+
+            repo_dirname = _dirname_from_url(project.git_url)
+        repo_dir = Path(lab.workdir) / repo_dirname
+        if repo_dir.is_dir() and any(
+            p for p in repo_dir.iterdir() if p.name != ".vuln-env"
+        ):
+            return repo_dirname, None
+
+        ok, err = await asyncio.to_thread(
+            git_clone_to_workdir,
+            lab.workdir,
+            project.git_url,
+            None,
+            repo_dirname,
+        )
+        if not ok:
+            return repo_dirname, f"源码克隆失败: {err}"
+        return repo_dirname, None
 
     async def destroy_lab(self, lab_id: str, *, owner_id: str) -> str:
         from . import docker_ops
@@ -666,9 +751,7 @@ class LabService:
 
     @staticmethod
     def _as_utc(value: datetime) -> datetime:
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
+        return as_utc(value)
 
     @staticmethod
     def _now() -> datetime:

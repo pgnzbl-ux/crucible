@@ -183,8 +183,10 @@ async def test_preflight_fails_without_default_provider():
     from app.contexts.agent.tasks import _platform_preflight_minimal
 
     session = MagicMock()
-    with patch("app.contexts.agent.tasks.agent_runner_manager") as mgr:
-        mgr.image_exists.return_value = True
+    with patch(
+        "app.contexts.agent.preflight.agent_runner_manager.image_exists",
+        return_value=True,
+    ):
         with patch(
             "app.contexts.settings.service.SettingsService.get_default_provider",
             new_callable=AsyncMock,
@@ -193,7 +195,7 @@ async def test_preflight_fails_without_default_provider():
             ok, msg = await _platform_preflight_minimal(session)
     assert ok is False
     assert msg is not None
-    assert "默认 Provider" in msg
+    assert "LLM Provider" in msg
     assert "llm_api_key" not in msg
     assert "LLM_API_KEY" not in msg
 
@@ -206,8 +208,10 @@ async def test_preflight_fails_on_empty_api_key():
 
     session = MagicMock()
     empty = SimpleNamespace(api_key_encrypted="  ")
-    with patch("app.contexts.agent.tasks.agent_runner_manager") as mgr:
-        mgr.image_exists.return_value = True
+    with patch(
+        "app.contexts.agent.preflight.agent_runner_manager.image_exists",
+        return_value=True,
+    ):
         with patch(
             "app.contexts.settings.service.SettingsService.get_default_provider",
             new_callable=AsyncMock,
@@ -217,3 +221,26 @@ async def test_preflight_fails_on_empty_api_key():
     assert ok is False
     assert msg is not None
     assert "API Key" in msg
+
+
+@pytest.mark.asyncio
+async def test_preflight_fails_without_runner_image():
+    from types import SimpleNamespace
+
+    from app.contexts.agent.tasks import _platform_preflight_minimal
+
+    session = MagicMock()
+    ready = SimpleNamespace(api_key_encrypted="sk-test")
+    with patch(
+        "app.contexts.agent.preflight.agent_runner_manager.image_exists",
+        return_value=False,
+    ):
+        with patch(
+            "app.contexts.settings.service.SettingsService.get_default_provider",
+            new_callable=AsyncMock,
+            return_value=ready,
+        ):
+            ok, msg = await _platform_preflight_minimal(session)
+    assert ok is False
+    assert msg is not None
+    assert "agent-runner 镜像" in msg

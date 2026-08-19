@@ -418,25 +418,17 @@ def _on_worker_ready(**_kwargs: object) -> None:
 
 
 async def _platform_preflight_minimal(session: AsyncSession) -> tuple[bool, str | None]:
-    """最小预检：镜像存在 + 凭据完整。
+    """最小预检：与创建/重试同一套平台准入（LLM + agent-runner 镜像）。
 
     不实现 agent-workflow.md §2.2 S0 的完整检查（MinIO / python-docx 等）——
     留作阶段化 backlog。本任务只保证 SDK 跑得起来。
     """
-    # 1. 镜像存在
-    exists = await asyncio.to_thread(agent_runner_manager.image_exists)
-    if not exists:
-        return False, f"agent-runner 镜像不存在: {settings.agent_runner_image}（先 docker build）"
+    from app.contexts.agent.preflight import require_platform_ready
 
-    # 2. 凭据：必须有后台默认 Provider
-    from app.contexts.settings.repository import SettingsRepository
-    from app.contexts.settings.service import SettingsService
-
-    provider = await SettingsService(SettingsRepository(session)).get_default_provider()
-    if provider is None:
-        return False, "缺少 LLM 凭据：未配置默认 Provider"
-    if not (getattr(provider, "api_key_encrypted", None) or "").strip():
-        return False, "缺少 LLM 凭据：默认 Provider 未配置 API Key"
+    try:
+        await require_platform_ready(session)
+    except ValueError as e:
+        return False, str(e)
     return True, None
 
 

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Float, ForeignKey, Index, String, Text
+from sqlalchemy import DateTime, Float, ForeignKey, Index, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.shared.base import BaseModel
@@ -44,7 +44,9 @@ class Report(BaseModel):
     poc_code: Mapped[str | None] = mapped_column(Text, comment="完整 PoC 源码")
     poc_usage: Mapped[str | None] = mapped_column(String(1024))
 
-    published_at: Mapped[datetime | None] = mapped_column(comment="发布时间")
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), comment="发布时间"
+    )
 
     # 关系 — 仅同 Context 内
     evidence: Mapped[list["Evidence"]] = relationship(

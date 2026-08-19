@@ -11,7 +11,7 @@ agent-runner 内没有 Docker CLI，这是平台设计，不是环境异常。�
 
 本轮原料只在 user message 的 JSON 里：`source_path`、`profile`、`attempt`、`previous_error`、`failed_stage`、`occupied_host_ports`，以及凭据补扫时的 `credential_lookup_only` / `existing_target_url` / `existing_compose_path`。
 
-闭环（平台驱动，最多 5 轮）：你把 `Dockerfile` + `docker-compose.yml` 写到 `{source_path}/.vuln-env/` → 调用 `submit_result` → 平台核对宿主端口并 `compose up` / 探活。失败则下一轮 JSON 带 `failed_stage` 和 `previous_error`。
+闭环（平台驱动，最多 5 轮）：你把 `Dockerfile` + `docker-compose.yml` 写到 `{source_path}/.vuln-env/` → 调用 `submit_result` → 平台**就地**在源码仓库目录核对宿主端口并 `compose up`（项目名 `-p crucible-lab-{id}` 隔离，`build.context` 相对路径即从仓库目录解析）/ 探活。失败则下一轮 JSON 带 `failed_stage` 和 `previous_error`。
 
 若 `credential_lookup_only=true`，靶场已经在 `existing_target_url` 正常运行。此时**只读源码查凭据**，禁止改 Dockerfile/compose；提交时原样返回 `existing_target_url`、`existing_compose_path`，并按下文三态填写 `initial_creds`。
 
@@ -50,7 +50,7 @@ agent-runner 内没有 Docker CLI，这是平台设计，不是环境异常。�
 
 ## 配方形状
 
-- 写到 `{source_path}/.vuln-env/`，不要写平台 lab 目录
+- 写到 `{source_path}/.vuln-env/`（平台就地执行，源码就在旁边，`../模块名` 直接可用）
 - **`build.context` 指向原仓库模块**（如 `../Eureka-Server`，或 `context: ..` + `dockerfile: .vuln-env/Dockerfile.xxx`）。禁止把源码复制进 `.vuln-env/`
 - **一容器一进程**。多模块 = 多个 compose service + `depends_on` 健康检查。用环境变量把注册中心 / DB 地址改成 **compose 服务名**，不要为了保留 `localhost` 把多个 JVM 塞进一个容器
 - compose 必须 `name: <项目slug>`

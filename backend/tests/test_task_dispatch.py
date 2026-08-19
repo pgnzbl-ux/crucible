@@ -8,6 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.shared.base import Base
 
 
+@pytest.fixture(autouse=True)
+def _runner_image_ok(monkeypatch):
+    monkeypatch.setattr(
+        "app.core.agent_runner.agent_runner_manager.image_exists",
+        lambda *args, **kwargs: True,
+    )
+
+
 @pytest_asyncio.fixture
 async def session():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -35,6 +43,22 @@ def _request():
     )
 
 
+async def _seed_default_llm(session):
+    from app.contexts.settings.models import LlmProvider
+
+    session.add(
+        LlmProvider(
+            name="test",
+            provider_type="deepseek",
+            base_url="https://api.deepseek.com/anthropic",
+            api_key_encrypted="sk-test",
+            model="deepseek-v4-flash",
+            is_default=True,
+        )
+    )
+    await session.flush()
+
+
 @pytest.mark.asyncio
 async def test_create_commits_before_celery_dispatch(session):
     from app.contexts.task.repository import TaskRepository
@@ -48,6 +72,7 @@ async def test_create_commits_before_celery_dispatch(session):
         await real_commit()
 
     session.commit = tracked_commit
+    await _seed_default_llm(session)
     with patch(
         "app.core.celery_app.celery_app.send_task",
         side_effect=lambda *args, **kwargs: events.append("send"),
@@ -65,6 +90,7 @@ async def test_create_marks_task_and_run_failed_when_dispatch_fails(session):
     from app.contexts.task.repository import TaskRepository
     from app.contexts.task.service import TaskDispatchError, TaskService
 
+    await _seed_default_llm(session)
     with patch(
         "app.core.celery_app.celery_app.send_task",
         side_effect=RuntimeError("broker down"),
@@ -131,6 +157,68 @@ async def test_redispatch_stale_queued_uses_original_run_id(session):
     assert sent[0][0][0] == "agent.run_analysis"
     assert sent[0][1]["args"] == [task.id, run.id]
     assert sent[0][1]["task_id"] == run.id
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_without_default_llm_provider(session):
+    from sqlalchemy import select
+
+    from app.contexts.task.models import Task
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+
+    with patch("app.core.celery_app.celery_app.send_task") as send:
+        with pytest.raises(ValueError, match="LLM Provider"):
+            await TaskService(TaskRepository(session)).create_task(_request(), "u1")
+
+    assert (await session.execute(select(Task))).scalar_one_or_none() is None
+    send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_default_provider_without_api_key(session):
+    from app.contexts.settings.models import LlmProvider
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+
+    session.add(
+        LlmProvider(
+            name="empty",
+            provider_type="deepseek",
+            base_url="https://api.deepseek.com/anthropic",
+            api_key_encrypted="  ",
+            model="deepseek-v4-flash",
+            is_default=True,
+        )
+    )
+    await session.flush()
+
+    with patch("app.core.celery_app.celery_app.send_task") as send:
+        with pytest.raises(ValueError, match="API Key"):
+            await TaskService(TaskRepository(session)).create_task(_request(), "u1")
+    send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_without_runner_image(session, monkeypatch):
+    from sqlalchemy import select
+
+    from app.contexts.task.models import Task
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+
+    monkeypatch.setattr(
+        "app.core.agent_runner.agent_runner_manager.image_exists",
+        lambda *args, **kwargs: False,
+    )
+    await _seed_default_llm(session)
+
+    with patch("app.core.celery_app.celery_app.send_task") as send:
+        with pytest.raises(ValueError, match="agent-runner 镜像"):
+            await TaskService(TaskRepository(session)).create_task(_request(), "u1")
+
+    assert (await session.execute(select(Task))).scalar_one_or_none() is None
+    send.assert_not_called()
 
 
 @pytest.mark.asyncio

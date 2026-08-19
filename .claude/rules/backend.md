@@ -32,10 +32,11 @@ paths: ["backend/app/contexts/**/*.py", "backend/app/shared/**/*.py", "backend/a
 - DB → 消息（Redis）→ HTTP（FastAPI）→ 前端流（SSE），任一环节混同步都破坏吞吐
 - SQLAlchemy 2.0 **必须**用 `AsyncSession` + `select()` 形式，禁止 `session.execute(query)` 旧式
 - Celery worker **不复用**主进程的 async engine —— 用独立 NullPool engine（参考 `agent/tasks.py::_worker_engine`）
+- 业务时间列必须 `DateTime(timezone=True)`，与 `created_at`/`updated_at` 一致。naive datetime 一律视为 UTC（`app/shared/time.py`）。asyncpg 不能把 aware UTC 写入 `TIMESTAMP WITHOUT TIME ZONE`
 
 ## 4. Agent Runner 抽象（`core/agent_runner.py`）
 
-`AgentRunnerManager` 是**平台能力**，不是业务代码能跳过的层。
+`AgentRunnerManager` 是**平台能力**，不是业务代码能跳过的层。创建/重试与 worker 共用 `contexts/agent/preflight.py::require_platform_ready`（默认 LLM Provider + API Key + agent-runner 镜像）；镜像检查失败含 Docker 不可用。运行槽满不在提交时 400，入队后由 worker 按间隔重试。
 
 `AgentRunnerSpec` 默认值即安全基线：
 

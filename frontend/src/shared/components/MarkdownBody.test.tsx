@@ -31,4 +31,22 @@ describe('MarkdownBody', () => {
     const html = renderToStaticMarkup(<MarkdownBody source={'[x](javascript:alert(1))'} />)
     expect(html).not.toContain('javascript:')
   })
+
+  it('highlights fenced python and shows a copyable code slab', () => {
+    const html = renderToStaticMarkup(
+      <MarkdownBody source={'```python\ndef ping():\n    return 1\n```'} />,
+    )
+    expect(html).toMatch(/hljs-keyword/)
+    expect(html).toContain('def')
+    expect(html).toMatch(/crucible-codeblock/)
+    expect(html).toMatch(/python/i)
+    expect(html).toMatch(/复制/)
+  })
+
+  it('keeps inline code as a pill without codeblock chrome', () => {
+    const html = renderToStaticMarkup(<MarkdownBody source={'用 `os.system` 调用'} />)
+    expect(html).toMatch(/<code[^>]*>os\.system<\/code>/)
+    expect(html).not.toMatch(/crucible-codeblock/)
+    expect(html).not.toMatch(/hljs-keyword/)
+  })
 })

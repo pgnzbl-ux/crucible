@@ -17,6 +17,7 @@ async def session_factory():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         from app.contexts.identity.models import User  # noqa: F401
+        from app.contexts.lab.models import Lab  # noqa: F401
         from app.contexts.project.models import Project  # noqa: F401
         from app.contexts.task.models import Task, TaskRun, NodeRun, AgentEvent  # noqa: F401
         from app.contexts.report.models import Report  # noqa: F401
@@ -124,3 +125,44 @@ async def test_get_run_nodes_invalid_output_json_becomes_empty_dict(session_fact
 
     assert nodes[0]["output"] == {}
     assert nodes[0]["error_message"] == "源码克隆失败: 网络错误"
+
+
+@pytest.mark.asyncio
+async def test_get_run_nodes_serializes_started_at_as_utc(session_factory):
+    """SQLite 读回 naive datetime；不补 +00:00 前端会按本地时间解析。"""
+    from datetime import datetime
+
+    from app.contexts.task.models import NodeRun, Task, TaskRun
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+
+    async with session_factory() as session:
+        task = Task(
+            project_address="x",
+            vulnerability_description="d" * 10,
+            owner_id="u1",
+            status="running",
+        )
+        session.add(task)
+        await session.flush()
+        run = TaskRun(task_id=task.id, status="running")
+        session.add(run)
+        await session.flush()
+        session.add(
+            NodeRun(
+                run_id=run.id,
+                task_id=task.id,
+                node_index=0,
+                node_key="source",
+                status="running",
+                started_at=datetime(2026, 8, 18, 9, 18, 33),
+            )
+        )
+        await session.flush()
+
+        nodes = await TaskService(TaskRepository(session)).get_run_nodes(
+            task.id, run.id, "u1"
+        )
+
+    assert nodes[0]["started_at"] == "2026-08-18T09:18:33+00:00"
+    assert nodes[0]["finished_at"] is None

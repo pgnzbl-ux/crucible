@@ -1,7 +1,8 @@
 """节点 2 靶场就绪 — AI 出配方 + 代码执行 docker compose 的排障循环。
 
-AI 在 agent-runner 内写/改 .vuln-env/Dockerfile + docker-compose.yml(文本,不碰 docker.sock);
-worker 在 host 执行 docker compose up + 健康检查;失败回喂 AI(max 5 轮)。
+AI 在 agent-runner 内写/改 {repo}/.vuln-env/Dockerfile + docker-compose.yml(文本,不碰 docker.sock);
+worker 就地在任务 workspace 执行 docker compose up(项目名 -p crucible-lab-{id} 隔离,
+无文件暂存,build.context 天然指向仓库内模块) + 健康检查;失败回喂 AI(max 5 轮)。
 """
 from __future__ import annotations
 
@@ -9,7 +10,6 @@ import asyncio
 import logging
 import os
 import re
-import shutil
 import subprocess
 import threading
 import time
@@ -386,10 +386,11 @@ def _compose_ident(*, lab_id: str | None = None, task_id: str | None = None) -> 
     return lab_id if lab_id is not None else task_id
 
 
-def lab_recipe_compose_path(compose_path: str | None) -> str:
-    """把 AI 的 compose 路径收成 lab 目录下的相对路径（.vuln-env/...）。
+def repo_compose_rel(compose_path: str | None) -> str:
+    """把 AI/缓存的 compose 路径收成仓库内相对路径（.vuln-env/...）。
 
-    丢掉 /workspace/<repo>/ 前缀；配方已拷到 labs/{id}/.vuln-env，不能再拼一层仓库名。
+    丢掉 /workspace/<repo>/ 前缀与误带的仓库名，就地执行时以
+    {host_workdir}/{repo}/ 为基准解析。
     """
     raw = (compose_path or ".vuln-env/docker-compose.yml").replace("\\", "/")
     marker = ".vuln-env/"
@@ -400,16 +401,13 @@ def lab_recipe_compose_path(compose_path: str | None) -> str:
     return f".vuln-env/{name}"
 
 
-def sync_recipe_to_lab(src_repo_dir: str, lab_workdir: str) -> None:
-    """把任务 workspace 里的 .vuln-env 拷到 lab 目录（存在则覆盖）。"""
-    from pathlib import Path
-
-    src = Path(src_repo_dir) / ".vuln-env"
-    dst = Path(lab_workdir) / ".vuln-env"
-    if not src.is_dir():
-        raise FileNotFoundError(f"配方目录不存在: {src}")
-    Path(lab_workdir).mkdir(parents=True, exist_ok=True)
-    shutil.copytree(src, dst, dirs_exist_ok=True)
+def workspace_compose_rel(repo: str | None, compose_rel: str) -> str:
+    """lab.compose_path 存 workspace 相对路径（含仓库名前缀），rebuild 同构解析。"""
+    name = (repo or "").strip().strip("/\\")
+    rel = compose_rel.replace("\\", "/").lstrip("/")
+    if name and not rel.startswith(f"{name}/"):
+        return f"{name}/{rel}"
+    return rel
 
 
 async def docker_compose_up(
@@ -421,8 +419,11 @@ async def docker_compose_up(
     task_id: str | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> tuple[bool, str]:
-    """在 host 执行 docker compose up -d --build，返回 (ok, error)。
+    """在 host 就地执行 docker compose up -d --build，返回 (ok, error)。
 
+    - 就地执行（2026-08-18）：compose 留在任务 workspace 的 {repo}/.vuln-env，
+      不再拷进 labs/{id}。build.context 相对路径天然解析到仓库内模块，
+      多模块项目可用；compose 以 -p crucible-lab-{id} 项目名隔离。
     - 保留 --build：AI 改完 Dockerfile 后若不重建会复用坏镜像，回喂轮次无效。
     - --progress plain 必须是 compose 全局旗标；挂在 up 后 Compose v5 会 unknown flag。
     - 同时设 BUILDKIT_PROGRESS=plain，无 TTY 时按行输出构建日志。
@@ -802,13 +803,20 @@ async def _upload_then_mark_ready(
     commit_sha: str,
     lab_compose: str,
     output: dict[str, Any],
+    repo: str | None = None,
 ) -> None:
+    from pathlib import Path
+
+    repo_name = (repo or "").strip() or None
+    recipe_root = (
+        str(Path(ctx.host_workdir) / repo_name) if repo_name else ctx.host_workdir
+    )
     try:
         await svc.upload_recipe(
             owner_id=ctx.owner_id,
             project_id=ctx.project_id or "",
             commit_sha=commit_sha,
-            lab_workdir=result.workdir,
+            lab_workdir=recipe_root,
             compose_path=lab_compose,
             transport_shape=output["transport_shape"],
             initial_creds=output["initial_creds"],
@@ -817,15 +825,15 @@ async def _upload_then_mark_ready(
         await svc.mark_ready(
             result.lab_id,
             target_url=output["target_url"],
-            compose_path=lab_compose,
+            compose_path=workspace_compose_rel(repo_name, lab_compose),
             transport_shape=output["transport_shape"],
             initial_creds=output["initial_creds"],
         )
     except Exception:
         await docker_compose_down(
-            result.workdir,
+            ctx.host_workdir,
             lab_compose,
-            None,
+            repo_name,
             lab_id=result.lab_id,
         )
         raise
@@ -838,23 +846,29 @@ async def _try_cached_recipe(
     *,
     commit_sha: str,
     exclude_project: str | None,
+    repo: str | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """MinIO 命中后改口、up、探活。成功产出含 reused；docker 不可用则抛；失败 (None, last_error)。"""
+    """MinIO 命中后落位 workspace、改口、up、探活。成功产出含 reused；docker 不可用则抛；失败 (None, last_error)。"""
     from pathlib import Path
+
+    repo_name = (repo or "").strip() or None
+    if not repo_name:
+        return None, None
+    repo_dir = Path(ctx.host_workdir) / repo_name
 
     hit = await svc.download_recipe(
         owner_id=ctx.owner_id or "",
         project_id=ctx.project_id or "",
         commit_sha=commit_sha,
-        dest_workdir=result.workdir,
+        dest_workdir=str(repo_dir),
     )
     if not hit:
         return None, None
 
-    lab_compose = lab_recipe_compose_path(hit.get("compose_path") if isinstance(hit, dict) else None)
-    compose_file = Path(result.workdir) / lab_compose
+    compose_rel = repo_compose_rel(hit.get("compose_path") if isinstance(hit, dict) else None)
+    compose_file = repo_dir / compose_rel
     if not compose_file.is_file():
-        return None, f"缓存配方缺少 compose 文件: {lab_compose}"
+        return None, f"缓存配方缺少 compose 文件: {compose_rel}"
 
     occupied = list_docker_occupied_host_ports(exclude_project=exclude_project)
     text = compose_file.read_text(encoding="utf-8", errors="replace")
@@ -877,9 +891,9 @@ async def _try_cached_recipe(
 
     _emit(ctx, "命中已缓存配方，平台启动靶场（docker compose up -d --build）")
     ok, err = await docker_compose_up(
-        lab_compose,
-        result.workdir,
-        None,
+        compose_rel,
+        ctx.host_workdir,
+        repo_name,
         lab_id=result.lab_id,
         on_progress=lambda line: _emit(ctx, line),
     )
@@ -887,7 +901,7 @@ async def _try_cached_recipe(
         if is_docker_unavailable(err):
             raise RuntimeError(err)
         logs = await collect_compose_logs(
-            result.workdir, lab_compose, None, lab_id=result.lab_id
+            ctx.host_workdir, compose_rel, repo_name, lab_id=result.lab_id
         )
         last_error = (
             f"compose up 失败: {err}\n--- logs ---\n{summarize_compose_failure(logs)}"
@@ -895,7 +909,7 @@ async def _try_cached_recipe(
         logger.warning("缓存配方 compose up 失败: %s", (err or "")[:200])
         _emit(ctx, "缓存配方启动失败，回喂 AI")
         await docker_compose_down(
-            result.workdir, lab_compose, None, lab_id=result.lab_id
+            ctx.host_workdir, compose_rel, repo_name, lab_id=result.lab_id
         )
         return None, last_error
 
@@ -907,7 +921,7 @@ async def _try_cached_recipe(
     ok, live_port = await health_check(web_ports)
     if not ok or live_port is None:
         logs = await collect_compose_logs(
-            result.workdir, lab_compose, None, lab_id=result.lab_id
+            ctx.host_workdir, compose_rel, repo_name, lab_id=result.lab_id
         )
         last_error = (
             f"健康检查不过(mapped_ports={web_ports})\n"
@@ -915,7 +929,7 @@ async def _try_cached_recipe(
         )
         _emit(ctx, "缓存配方探活失败，回喂 AI")
         await docker_compose_down(
-            result.workdir, lab_compose, None, lab_id=result.lab_id
+            ctx.host_workdir, compose_rel, repo_name, lab_id=result.lab_id
         )
         return None, last_error
 
@@ -923,7 +937,7 @@ async def _try_cached_recipe(
     target_url = publish_target_url(live_port, advertise)
     output = {
         "target_url": target_url,
-        "compose_path": lab_compose,
+        "compose_path": compose_rel,
         "transport_shape": (hit.get("transport_shape") if isinstance(hit, dict) else None)
         or {"protocol": "http"},
         "initial_creds": (hit.get("initial_creds") if isinstance(hit, dict) else None) or {},
@@ -939,14 +953,14 @@ async def _try_cached_recipe(
         output["initial_creds"] = await _lookup_initial_creds(
             ctx,
             target_url=target_url,
-            compose_path=lab_compose,
+            compose_path=compose_rel,
         )
     await _upload_then_mark_ready(
         ctx,
         svc,
         result,
         commit_sha=commit_sha,
-        lab_compose=lab_compose,
+        lab_compose=compose_rel,
         output=output,
     )
     _emit(ctx, f"靶场就绪：{target_url}")
@@ -1007,9 +1021,27 @@ async def _start_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
     return _reused_output(result, initial_creds=creds)
 
 
-async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
-    from pathlib import Path
+async def _bump_node_attempt(ctx: NodeContext, attempt: int) -> None:
+    """把排障轮次写进 NodeRun.attempt（表上可见真实轮次）。best-effort。"""
+    try:
+        from sqlalchemy import update
 
+        from app.contexts.task.models import NodeRun
+
+        await ctx.db_session.execute(
+            update(NodeRun)
+            .where(
+                NodeRun.run_id == ctx.run_id,
+                NodeRun.node_index == 2,
+            )
+            .values(attempt=attempt)
+        )
+        await ctx.db_session.commit()
+    except Exception:  # noqa: BLE001
+        logger.warning("更新 NodeRun.attempt 失败 attempt=%s", attempt, exc_info=True)
+
+
+async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
     from app.contexts.lab.service import LabService
 
     svc = LabService(ctx.db_session)
@@ -1017,7 +1049,6 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
     failed_stage: str | None = None
     repo = repo_dirname_from_outputs(ctx.previous_outputs)
     exclude_project = _exclude_compose_project(result.lab_id)
-    src_repo = str(Path(ctx.host_workdir) / (repo or "project"))
     commit_sha = _commit_sha_from(ctx)
 
     try:
@@ -1027,6 +1058,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
             result,
             commit_sha=commit_sha,
             exclude_project=exclude_project,
+            repo=repo,
         )
         if cached is not None:
             return cached
@@ -1034,6 +1066,8 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
             failed_stage = "cached_recipe"
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
+            if attempt > 1:
+                await _bump_node_attempt(ctx, attempt)
             occupied = list_docker_occupied_host_ports(exclude_project=exclude_project)
             _emit(ctx, f"第 {attempt}/{MAX_ATTEMPTS} 轮：AI 分析并写 Dockerfile/compose")
             recipe = await run_ai_turn(
@@ -1088,19 +1122,18 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 )
                 continue
 
-            sync_recipe_to_lab(src_repo, result.workdir)
-            lab_compose = lab_recipe_compose_path(compose_path)
+            compose_rel = repo_compose_rel(compose_path)
             _emit(ctx, f"第 {attempt}/{MAX_ATTEMPTS} 轮：平台启动靶场（docker compose up -d --build）")
             ok, err = await docker_compose_up(
-                lab_compose,
-                result.workdir,
-                None,
+                compose_rel,
+                ctx.host_workdir,
+                repo,
                 lab_id=result.lab_id,
                 on_progress=lambda line: _emit(ctx, line),
             )
             if not ok:
                 logs = await collect_compose_logs(
-                    result.workdir, lab_compose, None, lab_id=result.lab_id
+                    ctx.host_workdir, compose_rel, repo, lab_id=result.lab_id
                 )
                 last_error = (
                     f"attempt {attempt} compose up 失败: {err}\n"
@@ -1111,7 +1144,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 logger.warning(f"节点 2 attempt {attempt} 失败: {err[:200]}")
                 _emit(ctx, f"启动失败，回喂 AI 回溯（{attempt}/{MAX_ATTEMPTS}）")
                 await docker_compose_down(
-                    result.workdir, lab_compose, None, lab_id=result.lab_id
+                    ctx.host_workdir, compose_rel, repo, lab_id=result.lab_id
                 )
                 continue
 
@@ -1121,7 +1154,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
             ok, live_port = await health_check(web_ports)
             if not ok or live_port is None:
                 logs = await collect_compose_logs(
-                    result.workdir, lab_compose, None, lab_id=result.lab_id
+                    ctx.host_workdir, compose_rel, repo, lab_id=result.lab_id
                 )
                 last_error = (
                     f"attempt {attempt} 健康检查不过(mapped_ports={web_ports})\n"
@@ -1131,7 +1164,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 _snapshot_failed_attempt(ctx, attempt, last_error, failed_stage, recipe)
                 _emit(ctx, f"探活失败，回喂 AI 回溯（{attempt}/{MAX_ATTEMPTS}）")
                 await docker_compose_down(
-                    result.workdir, lab_compose, None, lab_id=result.lab_id
+                    ctx.host_workdir, compose_rel, repo, lab_id=result.lab_id
                 )
                 continue
 
@@ -1151,7 +1184,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
             _emit(ctx, f"靶场就绪：{target_url}")
             output = {
                 "target_url": target_url,
-                "compose_path": lab_compose,
+                "compose_path": compose_rel,
                 "transport_shape": recipe.get("transport_shape", {"protocol": "http"}),
                 "initial_creds": recipe["initial_creds"],
                 "started_containers": recipe.get("started_containers", []),
@@ -1165,8 +1198,9 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 svc,
                 result,
                 commit_sha=commit_sha,
-                lab_compose=lab_compose,
+                lab_compose=compose_rel,
                 output=output,
+                repo=repo,
             )
             return output
 

@@ -22,6 +22,7 @@ ERROR_CLASSES = (
     "compose_up.runtime",
     "compose_up.policy",
     "health_check",
+    "runner.killed",
     "runner.no_submit",
     "runner.timeout",
     "docker.unavailable",
@@ -73,6 +74,10 @@ def classify_node_error(*, failed_stage: str | None, error_text: str) -> str:
             return "compose_up.copy"
         return "compose_up.runtime"
 
+    # 137（SIGKILL）必须先于 no_submit：强杀时不会有 .node_output.json，
+    # 但成因是平台超时/巡检/OOM，不是模型没调 submit_result
+    if "sigkill" in low or ("exit=137" in low) or ("exit code 137" in low):
+        return "runner.killed"
     if "未产出" in text or ".node_output.json" in text or "submit_result" in low:
         return "runner.no_submit"
     if "timeout" in low:

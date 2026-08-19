@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Index, Integer, String, Text, ForeignKey, UniqueConstraint
+from sqlalchemy import DateTime, Index, Integer, String, Text, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.shared.base import BaseModel
@@ -59,8 +59,12 @@ class TaskRun(BaseModel):
         comment="pending | preflight | running | completed | failed | cancelled"
     )
     agent_session_id: Mapped[str | None] = mapped_column(String(128), comment="Agent 会话 ID")
-    started_at: Mapped[datetime | None] = mapped_column(comment="实际开始执行时间")
-    finished_at: Mapped[datetime | None] = mapped_column(comment="执行完成时间")
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), comment="实际开始执行时间"
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), comment="执行完成时间"
+    )
     error_message: Mapped[str | None] = mapped_column(Text)
 
     # 关系
@@ -122,8 +126,8 @@ class NodeRun(BaseModel):
     attempt: Mapped[int] = mapped_column(default=1, comment="排障重试计数(节点 2 用,max 5)")
     agent_session_id: Mapped[str | None] = mapped_column(String(128), comment="AI 节点 SDK session_id")
     error_message: Mapped[str | None] = mapped_column(Text)
-    started_at: Mapped[datetime | None] = mapped_column()
-    finished_at: Mapped[datetime | None] = mapped_column()
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
         Index("idx_node_runs_run_idx", "run_id", "node_index", unique=True),

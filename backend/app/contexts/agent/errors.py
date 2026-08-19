@@ -9,6 +9,12 @@ _RULES: list[tuple[str, str, str]] = [
         "host_workdir 会盖掉 /workspace。确认镜像把 runner 放到 /app 且 PYTHONPATH=/app，然后在项目根重建: docker build -f infrastructure/agent-runner/Dockerfile -t crucible-agent-runner:base .",
     ),
     (
+        "SIGKILL",
+        "Agent 容器被平台强杀",
+        "exit=137 多为超过 run 硬顶（agent_run_hard_timeout_seconds）被巡检拆掉、单容器超时或 OOM。"
+        "看该节点事件流最后几条确认执行到哪一步。",
+    ),
+    (
         "未产出 .node_output.json",
         "Agent 没有提交节点结果就结束了",
         "模型未调用 submit_result。检查该节点 prompt、MCP 工具是否注入成功，或重建 agent-runner 镜像。",
@@ -49,9 +55,19 @@ _RULES: list[tuple[str, str, str]] = [
         "模型卡住或靶场过慢。可加大 AGENT_RUNNER_TIMEOUT_SECONDS，或检查 compose/健康检查。",
     ),
     (
-        "agent-runner 镜像不存在",
+        "agent-runner 镜像",
         "缺少 agent-runner 镜像",
         "在项目根执行: docker build -f infrastructure/agent-runner/Dockerfile -t crucible-agent-runner:base .",
+    ),
+    (
+        "未配置默认 LLM Provider",
+        "没有可用的 LLM API Key",
+        "到「设置」配置并激活默认 LLM Provider。",
+    ),
+    (
+        "未配置 API Key",
+        "没有可用的 LLM API Key",
+        "到「设置」补全默认 LLM Provider 的 API Key。",
     ),
     (
         "缺少 LLM 凭据",

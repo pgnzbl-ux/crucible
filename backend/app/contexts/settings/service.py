@@ -127,6 +127,19 @@ class SettingsService:
     async def get_default_provider(self) -> LlmProvider | None:
         return await self.repo.get_default()
 
+    async def require_ready_default_provider(self) -> LlmProvider:
+        """创建/重试任务前的准入：必须有已激活且带 API Key 的默认 Provider。"""
+        provider = await self.get_default_provider()
+        if provider is None:
+            raise ValueError(
+                "未配置默认 LLM Provider，请到「设置」配置并激活后再创建或重试任务"
+            )
+        if not (provider.api_key_encrypted or "").strip():
+            raise ValueError(
+                "默认 LLM Provider 未配置 API Key，请到「设置」补全后再创建或重试任务"
+            )
+        return provider
+
     async def _get_or_create_platform_setting(self) -> PlatformSetting:
         row = await self.repo.get_platform_setting()
         if row is not None:

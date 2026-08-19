@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -346,14 +347,21 @@ async def test_start_lab_without_containers_marks_expired(session):
 
 
 @pytest.mark.asyncio
-async def test_rebuild_without_recipe_has_exact_message(session):
+async def test_rebuild_without_recipe_has_exact_message(session, tmp_path):
     svc, result, task = await ready_lab(session)
     task.status = "completed"
+    lab = await session.get(__import__("app.contexts.lab.models", fromlist=["Lab"]).Lab, result.lab_id)
+    lab.workdir = str(tmp_path).replace("\\", "/")
     await session.commit()
     svc.download_recipe = AsyncMock(return_value=None)
 
-    with pytest.raises(ValueError, match="^缺少配方，请从验证任务重新创建$"):
-        await svc.rebuild_lab(result.lab_id, owner_id="u1")
+    with patch(
+        "app.core.agent_runner.git_clone_to_workdir",
+        return_value=(True, ""),
+    ) as clone:
+        with pytest.raises(ValueError, match="^缺少配方，请从验证任务重新创建$"):
+            await svc.rebuild_lab(result.lab_id, owner_id="u1")
+    clone.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -364,6 +372,12 @@ async def test_rebuild_downloads_recipe_when_file_missing(session, tmp_path):
     lab.workdir = str(tmp_path).replace("\\", "/")
     await session.commit()
 
+    def fake_clone(workdir, git_url, ref, dest_dirname):
+        dest = os.path.join(workdir, dest_dirname)
+        os.makedirs(dest, exist_ok=True)
+        (Path(dest) / "pom.xml").write_text("<project/>", encoding="utf-8")
+        return True, ""
+
     async def fake_download(**kwargs):
         dest = kwargs["dest_workdir"]
         os.makedirs(os.path.join(dest, ".vuln-env"), exist_ok=True)
@@ -373,10 +387,14 @@ async def test_rebuild_downloads_recipe_when_file_missing(session, tmp_path):
         return {"compose_path": ".vuln-env/docker-compose.yml"}
 
     svc.download_recipe = fake_download
-    with patch("app.contexts.lab.docker_ops.compose_up_build", new_callable=AsyncMock) as up:
+    with patch("app.contexts.lab.docker_ops.compose_up_build", new_callable=AsyncMock) as up, \
+         patch("app.core.agent_runner.git_clone_to_workdir", side_effect=fake_clone):
         status = await svc.rebuild_lab(result.lab_id, owner_id="u1")
     assert status == "ready"
-    up.assert_awaited()
+    up.assert_awaited_once()
+    up_file = up.await_args.args[1]
+    assert up_file.endswith("/b/.vuln-env/docker-compose.yml".replace("/", os.sep).replace(os.sep, "/"))
+    assert up_file.startswith(str(tmp_path).replace("\\", "/"))
 
 
 @pytest.mark.asyncio

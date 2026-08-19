@@ -273,8 +273,10 @@ def _classify_conclusion(text: str) -> str:
     return "unconfirmed"
 
 
-# SDK SystemMessage 里 thinking_tokens 是逐 token 用量心跳，不是阶段变更
-_KEEP_SYSTEM_SUBTYPES = frozenset({"init"})
+# SDK SystemMessage 里 thinking_tokens 是逐 token 用量心跳，不是阶段变更；
+# 但 mcp_server_error 等 subtype 携带工具注入失败信息，必须透传供排障
+# （2026-08-19 audit 教训：MCP 工具被网关丢弃时唯一的线索在这类消息里）
+_KEEP_SYSTEM_SUBTYPES = frozenset({"init", "mcp_server_error", "stream_error"})
 
 
 def _system_phase_event(
@@ -287,10 +289,16 @@ def _system_phase_event(
     subtype = getattr(message, "subtype", None) or "init"
     if subtype not in _KEEP_SYSTEM_SUBTYPES:
         return None
+    if subtype == "init":
+        phase = "start"
+        message_text = subtype
+    else:
+        phase = "warning"
+        message_text = f"{subtype}: {json.dumps(getattr(message, 'data', {}), ensure_ascii=False, default=str)[:400]}"
     return {
         "type": "phase.updated",
-        "phase": "start",
-        "message": subtype,
+        "phase": phase,
+        "message": message_text,
         "session_id": session_id,
         "sequence": seq,
         "timestamp": timestamp,

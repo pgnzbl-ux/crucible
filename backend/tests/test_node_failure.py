@@ -26,6 +26,8 @@ from app.contexts.agent.node_failure import (
         ("compose_up", "denied by network policy", "compose_up.policy"),
         ("compose_up", "container exited 1", "compose_up.runtime"),
         ("health_check", "健康检查不过", "health_check"),
+        (None, "AI 节点 env_ready 容器被 SIGKILL 终止(exit=137，多为平台超时/巡检强杀或 OOM): x", "runner.killed"),
+        (None, "未产出 .node_output.json (exit=137)", "runner.killed"),
         (None, "未产出 .node_output.json", "runner.no_submit"),
         (None, "Timeout after 600s", "runner.timeout"),
         (None, "Cannot connect to Docker daemon", "docker.unavailable"),

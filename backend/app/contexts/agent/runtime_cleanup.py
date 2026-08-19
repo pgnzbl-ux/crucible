@@ -2,6 +2,8 @@
 
 热路径：cancel / 任务结束 / 删除调用 teardown_task_runtime。
 安全网：Celery worker 启动后每 5 分钟扫一次孤儿（含超时卡住的 running）。
+强杀门槛是 run 级硬顶（agent_run_hard_timeout_seconds）；单容器超时
+（agent_runner_timeout_seconds）由 run_with_streaming 内的定时器负责，两层解耦。
 身份：agent-runner 标签 crucible.task_id，或从 host_workdir 挂载路径反查。
 发现源只认 Docker 容器，不把失败任务留下的 compose.yml 当成还活着的运行时。
 """
@@ -14,10 +16,10 @@ import subprocess
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterable
-from datetime import datetime, timezone
 
 from app.core.agent_runner import agent_runner_manager
 from app.core.config import get_settings
+from app.shared.time import utc_unix
 
 logger = logging.getLogger(__name__)
 
@@ -57,17 +59,12 @@ def task_id_from_host_path(path: str, workdir_base: str) -> str | None:
 
 
 def should_keep_runtime(status: str | None, age_seconds: float, timeout_seconds: int) -> bool:
-    """仅保留未超时的 pending/queued/running。"""
+    """仅保留未超时的 pending/queued/running。
+
+    timeout_seconds 应传 run 级硬顶（agent_run_hard_timeout_seconds），
+    单容器超时由 run_with_streaming 内的定时器负责，巡检不做单容器级强杀。
+    """
     return bool(status) and status in LIVE_STATUSES and age_seconds < timeout_seconds
-
-
-def utc_unix(dt: datetime | None) -> float | None:
-    """SQLite naive datetime 按 UTC 转 unix，避免东八区把 running 任务判超龄。"""
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.timestamp()
 
 
 async def teardown_task_runtime(task_id: str) -> None:
@@ -109,10 +106,14 @@ async def sweep_orphan_runtimes(
     timeout_seconds: int | None = None,
     teardown: Callable[[str], Awaitable[None]] | None = None,
 ) -> list[str]:
-    """拆掉已结束 / 超时 / 库里没有的任务运行时。返回被拆的 task_id。"""
+    """拆掉已结束 / 超时 / 库里没有的任务运行时。返回被拆的 task_id。
+
+    默认门槛用 run 级硬顶（agent_run_hard_timeout_seconds，默认 7200s）；
+    单容器 1800s 超时由 run_with_streaming 的定时器独立负责。
+    """
     clock = time.time() if now is None else now
     timeout = (
-        get_settings().agent_runner_timeout_seconds if timeout_seconds is None else timeout_seconds
+        get_settings().agent_run_hard_timeout_seconds if timeout_seconds is None else timeout_seconds
     )
     ids = discovered_ids if discovered_ids is not None else list_managed_task_ids()
     statuses = status_by_id if status_by_id is not None else await load_task_runtime_status(ids)

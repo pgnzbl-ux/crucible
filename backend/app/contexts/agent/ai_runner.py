@@ -610,8 +610,17 @@ async def run_ai_node(
     if not output_path.exists():
         stderr_tail = summary.get("stderr_tail", "") if summary else ""
         detail = (stderr_tail or last_fail or "").strip()
+        # 取尾部：JSONL 末尾才是 agent.failed 等真实死因，
+        # 头部是 init/thinking 等常规事件（2026-08-19 audit 教训：截头 300
+        # 字符恰好全是 thinking，真实错误一字不露）
+        detail = detail[-600:]
+        if exit_code == 137:
+            raise AgentRunnerError(
+                f"AI 节点 {node_key} 容器被 SIGKILL 终止(exit=137，"
+                f"多为平台超时/巡检强杀或 OOM): {detail}"
+            )
         raise AgentRunnerError(
-            f"AI 节点 {node_key} 未产出 .node_output.json (exit={exit_code}): {detail[:300]}"
+            f"AI 节点 {node_key} 未产出 .node_output.json (exit={exit_code}): {detail}"
         )
 
     try:

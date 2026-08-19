@@ -143,17 +143,16 @@ async def test_env_ready_waits_then_reuses(tmp_path):
 
 @pytest.mark.asyncio
 async def test_env_ready_create_compose_up_uses_lab_id(tmp_path):
+    """就地执行：compose 留在 {host_workdir}/{repo}/.vuln-env，以 lab_id 项目名隔离。"""
     repo = tmp_path / "b" / ".vuln-env"
     repo.mkdir(parents=True)
     (repo / "docker-compose.yml").write_text(
         'services:\n  web:\n    image: x\n    ports:\n      - "3001:3000"\n',
         encoding="utf-8",
     )
-    lab_dir = tmp_path / "lab"
-    lab_dir.mkdir()
     lab = SimpleNamespace(
         lab_id="lab-create", role="create", status="creating", reused=False,
-        workdir=str(lab_dir), compose_project="crucible-lab-lab-create",
+        workdir=str(tmp_path / "lab"), compose_project="crucible-lab-lab-create",
         target_url=None, compose_path=".vuln-env/docker-compose.yml",
         transport_shape={}, initial_creds={},
     )
@@ -176,16 +175,14 @@ async def test_env_ready_create_compose_up_uses_lab_id(tmp_path):
         hc.return_value = (True, 3001)
         out = await EnvReadyNode().execute(ctx)
     assert up.await_args.kwargs["lab_id"] == "lab-create"
-    host_workdir = up.await_args.args[1]
-    assert host_workdir == str(lab_dir)
-    assert host_workdir != str(lab_dir / "b")
+    assert up.await_args.args[1] == str(tmp_path)
     repo_dirname = (
         up.await_args.args[2]
         if len(up.await_args.args) > 2
         else up.await_args.kwargs.get("repo_dirname")
     )
-    assert not repo_dirname
-    assert (lab_dir / ".vuln-env" / "docker-compose.yml").is_file()
+    assert repo_dirname == "b"
+    assert (tmp_path / "b" / ".vuln-env" / "docker-compose.yml").is_file()
     assert out["target_url"] == "http://10.0.0.8:3001"
     LS.return_value.mark_ready.assert_awaited()
     ai.assert_awaited()
@@ -199,11 +196,9 @@ async def test_env_ready_upload_failure_cleans_started_compose(tmp_path):
         'services:\n  web:\n    image: x\n    ports:\n      - "3001:3000"\n',
         encoding="utf-8",
     )
-    lab_dir = tmp_path / "lab"
-    lab_dir.mkdir()
     lab = SimpleNamespace(
         lab_id="lab-create", role="create", status="creating", reused=False,
-        workdir=str(lab_dir), compose_project="crucible-lab-lab-create",
+        workdir=str(tmp_path / "lab"), compose_project="crucible-lab-lab-create",
         target_url=None, compose_path=".vuln-env/docker-compose.yml",
         transport_shape={}, initial_creds={},
     )
@@ -230,9 +225,9 @@ async def test_env_ready_upload_failure_cleans_started_compose(tmp_path):
             await EnvReadyNode().execute(ctx)
 
     down.assert_awaited_once_with(
-        str(lab_dir),
+        str(tmp_path),
         ".vuln-env/docker-compose.yml",
-        None,
+        "b",
         lab_id="lab-create",
     )
     LS.return_value.mark_failed.assert_awaited()
@@ -240,18 +235,16 @@ async def test_env_ready_upload_failure_cleans_started_compose(tmp_path):
 
 @pytest.mark.asyncio
 async def test_env_ready_create_strips_workspace_compose_path(tmp_path):
-    """AI 给出 /workspace/<repo>/... 时，lab compose 仍用拷贝后的相对配方路径。"""
+    """AI 给出 /workspace/<repo>/... 时，就地执行仍用仓库内相对配方路径。"""
     repo = tmp_path / "b" / ".vuln-env"
     repo.mkdir(parents=True)
     (repo / "docker-compose.yml").write_text(
         'services:\n  web:\n    image: x\n    ports:\n      - "3001:3000"\n',
         encoding="utf-8",
     )
-    lab_dir = tmp_path / "lab"
-    lab_dir.mkdir()
     lab = SimpleNamespace(
         lab_id="lab-create", role="create", status="creating", reused=False,
-        workdir=str(lab_dir), compose_project="crucible-lab-lab-create",
+        workdir=str(tmp_path / "lab"), compose_project="crucible-lab-lab-create",
         target_url=None, compose_path=".vuln-env/docker-compose.yml",
         transport_shape={}, initial_creds={},
     )
@@ -276,13 +269,13 @@ async def test_env_ready_create_strips_workspace_compose_path(tmp_path):
         hc.return_value = (True, 3001)
         await EnvReadyNode().execute(ctx)
     assert up.await_args.args[0] == ".vuln-env/docker-compose.yml"
-    assert up.await_args.args[1] == str(lab_dir)
+    assert up.await_args.args[1] == str(tmp_path)
     repo_dirname = (
         up.await_args.args[2]
         if len(up.await_args.args) > 2
         else up.await_args.kwargs.get("repo_dirname")
     )
-    assert not repo_dirname
+    assert repo_dirname == "b"
 
 
 @pytest.mark.asyncio
@@ -400,15 +393,15 @@ async def test_reproduce_touches_lab_when_lab_id_present():
 
 @pytest.mark.asyncio
 async def test_create_recipe_hit_backfills_creds_without_rebuilding(tmp_path):
-    lab_dir = tmp_path / "lab"
-    (lab_dir / ".vuln-env").mkdir(parents=True)
-    (lab_dir / ".vuln-env" / "docker-compose.yml").write_text(
+    repo_dir = tmp_path / "b"
+    (repo_dir / ".vuln-env").mkdir(parents=True)
+    (repo_dir / ".vuln-env" / "docker-compose.yml").write_text(
         'services:\n  web:\n    image: x\n    ports:\n      - "3001:3000"\n',
         encoding="utf-8",
     )
     lab = SimpleNamespace(
         lab_id="lab1", role="create", status="creating", reused=False,
-        workdir=str(lab_dir), compose_project="crucible-lab-lab1",
+        workdir=str(tmp_path / "lab"), compose_project="crucible-lab-lab1",
         target_url=None, compose_path=".vuln-env/docker-compose.yml",
         transport_shape={}, initial_creds={},
     )
@@ -443,23 +436,27 @@ async def test_create_recipe_hit_backfills_creds_without_rebuilding(tmp_path):
     ai.assert_awaited_once()
     assert ai.await_args.kwargs["credential_lookup_only"] is True
     up.assert_awaited_once()
+    assert up.await_args.args[1] == str(tmp_path)
+    assert up.await_args.args[2] == "b"
+    LS.return_value.download_recipe.await_args.kwargs["dest_workdir"] == str(repo_dir)
     assert out["reused"] is True
     assert out["target_url"] == "http://10.0.0.8:3001"
     assert out["initial_creds"] == {"username": "admin", "password": "admin123"}
     LS.return_value.upload_recipe.assert_awaited()
+    LS.return_value.upload_recipe.await_args.kwargs["lab_workdir"] == str(repo_dir)
 
 
 @pytest.mark.asyncio
 async def test_create_recipe_uses_live_container_names_not_ai_guess(tmp_path):
-    lab_dir = tmp_path / "lab"
-    (lab_dir / ".vuln-env").mkdir(parents=True)
-    (lab_dir / ".vuln-env" / "docker-compose.yml").write_text(
+    repo_dir = tmp_path / "b"
+    (repo_dir / ".vuln-env").mkdir(parents=True)
+    (repo_dir / ".vuln-env" / "docker-compose.yml").write_text(
         'services:\n  web:\n    image: x\n    ports:\n      - "3001:3000"\n',
         encoding="utf-8",
     )
     lab = SimpleNamespace(
         lab_id="lab1", role="create", status="creating", reused=False,
-        workdir=str(lab_dir), compose_project="crucible-lab-lab1",
+        workdir=str(tmp_path / "lab"), compose_project="crucible-lab-lab1",
         target_url=None, compose_path=".vuln-env/docker-compose.yml",
         transport_shape={}, initial_creds={},
     )
@@ -549,15 +546,15 @@ async def test_create_recipe_hit_up_fail_goes_ai_once(tmp_path):
 
 @pytest.mark.asyncio
 async def test_create_recipe_hit_docker_unavailable_marks_failed_with_daemon_error(tmp_path):
-    lab_dir = tmp_path / "lab"
-    (lab_dir / ".vuln-env").mkdir(parents=True)
-    (lab_dir / ".vuln-env" / "docker-compose.yml").write_text(
+    repo_dir = tmp_path / "b"
+    (repo_dir / ".vuln-env").mkdir(parents=True)
+    (repo_dir / ".vuln-env" / "docker-compose.yml").write_text(
         'services:\n  web:\n    image: x\n    ports:\n      - "3001:3000"\n',
         encoding="utf-8",
     )
     lab = SimpleNamespace(
         lab_id="lab1", role="create", status="creating", reused=False,
-        workdir=str(lab_dir), compose_project="crucible-lab-lab1",
+        workdir=str(tmp_path / "lab"), compose_project="crucible-lab-lab1",
         target_url=None, compose_path=".vuln-env/docker-compose.yml",
         transport_shape={}, initial_creds={},
     )

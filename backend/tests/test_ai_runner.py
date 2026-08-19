@@ -189,14 +189,19 @@ def test_audit_input_schema_has_uncertain_and_runtime_dependent():
 
 
 def test_audit_input_schema_tells_model_pass_needs_kill_chain():
-    """MCP 工具 schema 不能只要求 gate_verdict；否则模型按松形状提交、后端再拒。"""
+    """MCP 工具 schema 不能只要求 gate_verdict；否则模型按松形状提交、后端再拒。
+
+    2026-08-19：顶层 allOf/if/then 会被第三方网关静默丢弃整个工具定义
+    （audit 节点因模型看不到 submit_result 失败），条件形状改由顶层
+    description 文本传达，强校验仍在后端 _validate_audit_output。
+    """
     spec = NODE_INPUT_SCHEMAS["audit"]
-    required_sets = [
-        set((branch.get("then") or {}).get("required") or [])
-        for branch in spec.get("allOf") or []
-    ]
-    assert any({"kill_chain", "payloads", "core_claim"} <= s for s in required_sets)
-    assert any({"kill_chain", "defense_layers"} <= s for s in required_sets)
+    assert "allOf" not in spec
+    desc = spec.get("description") or ""
+    for field in ("kill_chain", "payloads", "core_claim", "defense_layers"):
+        assert field in desc, f"audit schema description 应提到 {field}"
+    ok, _err = validate_output("audit", {"gate_verdict": "pass", "gate_reason": "x"})
+    assert not ok  # 条件强校验仍在后端
 
 
 def test_audit_mock_output_passes_validation():

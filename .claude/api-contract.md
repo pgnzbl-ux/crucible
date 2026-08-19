@@ -89,7 +89,7 @@
 }
 ```
 
-**响应 202**：`TaskDetail`（含首次 `runs[]`）。先提交 Task/TaskRun 再投 Celery；Broker 失败 → 任务/run 标 `failed`，接口 **503**。
+**响应 202**：`TaskDetail`（含首次 `runs[]`）。先提交 Task/TaskRun 再投 Celery；Broker 失败 → 任务/run 标 `failed`，接口 **503**。未配置默认 LLM Provider、默认项无 API Key、或 agent-runner 镜像不存在/Docker 不可用 → **400**，不落任务、不投递 worker。运行槽满不在创建时拒绝，任务入队后由 worker 按间隔重试。
 
 ### GET `/api/v1/tasks`
 
@@ -116,7 +116,7 @@
 
 ### POST `/api/v1/tasks/{id}/retry`  *(阶段 1 新增；P1.1 支持 from_node)*
 
-重试任务(202 返 `{task_id, run_id, status:retrying, from_node}`)。任务不存在或非 owner → **404** `TASK_NOT_FOUND`（不是 400）。非法状态 / 非法 `from_node` / 前置节点未完成 → **400**。
+重试任务(202 返 `{task_id, run_id, status:retrying, from_node}`)。任务不存在或非 owner → **404** `TASK_NOT_FOUND`（不是 400）。非法状态 / 非法 `from_node` / 前置节点未完成 → **400**。未配置默认 LLM Provider、默认项无 API Key、或 agent-runner 镜像不存在/Docker 不可用 → **400**，不改任务状态、不新建 run。
 
 - 默认：新建 TaskRun，**从节点 0（源码获取）整条重跑**，不复用上一 run 的 NodeRun。
 - 可选 query `from_node=env_ready|audit|reproduce|report`：拷贝上一 run 里该节点**之前**已 `completed`/`skipped` 的 NodeRun 进新 run，编排器断点续跑，只重跑该节点及之后。前置未完成 → 400。`source`/`profile` 不是合法起点（请整条重试）。
@@ -153,7 +153,7 @@
 
 历史事件（默认当前/最新一次 run，最近 1000 条，`limit` 1–1000）。重试会新建 run，历史 run 的 `phase.updated` 不混进本接口。含 `agent.thinking` / `agent.message` / `tool.call.*` / `agent.failed`（`title`+`hint`）/ `node.updated`。
 
-事件时间：`created_at` 一律带 UTC 偏移（开发 SQLite 读回 naive datetime 也按 UTC 输出）；每条事件的 `payload.timestamp` 必有 epoch 秒 —— SDK 事件用 SDK 自带值，平台事件（`phase.updated` 等）落库时补齐，SSE 回放才不会显示成浏览器收到的时刻。AI 事件 payload 带 `node_key` / `node_run_id`，`AgentEvent.node_run_id` 列同步写入；思考/工具事件可按节点过滤而不靠时间边界猜测。
+事件时间：`created_at` 一律带 UTC 偏移（开发 SQLite 读回 naive datetime 也按 UTC 输出）；节点 `started_at` / `finished_at` 同样带 UTC 偏移。每条事件的 `payload.timestamp` 必有 epoch 秒 —— SDK 事件用 SDK 自带值，平台事件（`phase.updated` 等）落库时补齐，SSE 回放才不会显示成浏览器收到的时刻。AI 事件 payload 带 `node_key` / `node_run_id`，`AgentEvent.node_run_id` 列同步写入；思考/工具事件可按节点过滤而不靠时间边界猜测。
 
 ### GET `/api/v1/tasks/{id}/events/stream`
 

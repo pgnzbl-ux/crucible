@@ -11,6 +11,7 @@ def _build_all():
     """触发所有 model 注册并建表(FK 依赖链完整)。"""
     from app.shared.base import Base
     from app.contexts.identity.models import User  # noqa: F401
+    from app.contexts.lab.models import Lab  # noqa: F401
     from app.contexts.project.models import Project  # noqa: F401
     from app.contexts.task.models import Task, TaskRun, AgentEvent, NodeRun  # noqa: F401
     from app.contexts.report.models import Report  # noqa: F401
@@ -51,3 +52,20 @@ def test_agent_event_has_node_run_id():
     engine = _build_all()
     cols = {c["name"] for c in inspect(engine).get_columns("agent_events")}
     assert "node_run_id" in cols, "AgentEvent 缺 node_run_id"
+
+
+def test_all_orm_datetime_columns_are_timezone_aware():
+    """asyncpg 不能把 aware UTC 写入 TIMESTAMP WITHOUT TIME ZONE。"""
+    from sqlalchemy import DateTime
+
+    from app.shared.base import Base
+    from app.shared.models import register_models
+
+    register_models()
+    naive = [
+        f"{table.name}.{col.name}"
+        for table in Base.metadata.sorted_tables
+        for col in table.columns
+        if isinstance(col.type, DateTime) and not col.type.timezone
+    ]
+    assert naive == []

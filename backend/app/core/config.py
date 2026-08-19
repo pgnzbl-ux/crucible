@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     agent_runner_workdir_base: str = "/tmp/crucible/audit"
     agent_runner_concurrency_limit: int = Field(4, ge=1, le=8)
     agent_runner_timeout_seconds: int = 1800
+    # run 级巡检硬顶：live run 超过才被孤儿巡检强拆（与单容器 1800s 解耦，
+    # 避免多轮排障的长任务被按 run 总年龄误杀，见 troubleshooting/2026-08-18 诊断根因 B）
+    agent_run_hard_timeout_seconds: int = 7200
 
     cors_origins: str = "http://localhost:5173,http://localhost:4173,http://localhost:3000"
 
