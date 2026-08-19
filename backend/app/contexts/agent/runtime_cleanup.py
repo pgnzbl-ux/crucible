@@ -325,7 +325,7 @@ def collect_task_ids_from_containers(containers: Iterable, workdir_base: str) ->
 def list_managed_task_ids() -> set[str]:
     """从 Docker 容器收集 task_id。残留 host_workdir / compose.yml 不算运行时。"""
     try:
-        client = agent_runner_manager._client  # noqa: SLF001 — 平台能力内部枚举
+        client = agent_runner_manager._client_or_connect()  # noqa: SLF001 — 平台能力内部枚举
         containers = client.containers.list(all=True)
     except Exception:  # noqa: BLE001
         logger.warning("列举托管容器失败(best-effort)", exc_info=True)

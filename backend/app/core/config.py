@@ -56,6 +56,17 @@ class Settings(BaseSettings):
     # 避免多轮排障的长任务被按 run 总年龄误杀，见 troubleshooting/2026-08-18 诊断根因 B）
     agent_run_hard_timeout_seconds: int = 7200
 
+    @property
+    def celery_task_time_limit(self) -> int:
+        """Celery 对整个 6 节点任务的硬限。
+
+        必须从 run 硬顶推导而非复用单容器超时（2026-08-19 修复：曾直接绑
+        agent_runner_timeout_seconds=1800s，全链正常路径必超 30 分钟，任务
+        被 Celery SIGKILL 且报错面目模糊）。与孤儿巡检同用 agent_run_hard_timeout_seconds
+        这一单一真相，并加 5 分钟余量覆盖 clone/落库等平台开销。
+        """
+        return self.agent_run_hard_timeout_seconds + 300
+
     cors_origins: str = "http://localhost:5173,http://localhost:4173,http://localhost:3000"
 
     s3_endpoint: str

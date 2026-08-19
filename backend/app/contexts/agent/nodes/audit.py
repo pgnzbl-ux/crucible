@@ -15,7 +15,7 @@ class AuditNode:
         return True
 
     async def execute(self, ctx: NodeContext) -> dict[str, Any]:
-        from app.contexts.agent.ai_runner import run_ai_node
+        from app.contexts.agent.ai_runner import run_ai_node_with_shape_retry
 
         src = ctx.previous_outputs.get("source", {})
         repo = src.get("repo_dirname") or repo_dirname_from_outputs(ctx.previous_outputs)
@@ -24,7 +24,7 @@ class AuditNode:
             "vulnerability_description": ctx.vulnerability_description,
             "profile": ctx.previous_outputs.get("profile", {}),
         }
-        return await run_ai_node(
+        return await run_ai_node_with_shape_retry(
             node_key="audit",
             input_json=input_json,
             host_workdir=ctx.host_workdir,

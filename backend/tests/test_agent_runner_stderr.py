@@ -11,6 +11,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from unittest.mock import MagicMock, patch
 
+import docker
+import requests
+
 from app.core.agent_runner import AGENT_EXTRA_HOSTS, AgentRunnerManager, AgentRunnerSpec
 
 
@@ -229,3 +232,120 @@ def test_failed_container_combined_logs_when_stderr_stream_empty():
 
     assert exit_code == 1
     assert "No module named 'runner'" in summary["stderr_tail"]
+
+
+# ── P0#5/6：超时 stop 失败 / wait 无界 / 边界竞态 ──
+
+
+class _ImmediateTimer:
+    def __init__(self, interval, fn, **kwargs):
+        self.fn = fn
+
+    def start(self):
+        self.fn()
+
+    def cancel(self):
+        pass
+
+
+def _make_mgr_with(fake_container, runner_name="r"):
+    mgr = AgentRunnerManager.__new__(AgentRunnerManager)
+    mgr._client = MagicMock()
+    mgr._active_ids = set()
+    fake_runner = MagicMock()
+    fake_runner.container = fake_container
+    fake_runner.id = fake_container.id
+    fake_runner.name = runner_name
+    fake_runner.stop_and_remove = MagicMock()
+    return mgr, fake_runner
+
+
+def test_timeout_stop_failure_escalates_to_kill_and_surfaces():
+    """stop 抛异常必须降级 kill 并把失败信息写进 summary（不能 except:pass 吞掉）。"""
+    fake_container = MagicMock()
+    fake_container.id = "cid-hang"
+    fake_container.logs.side_effect = [iter([])]
+    fake_container.wait.return_value = {"StatusCode": 137}
+    fake_container.attrs = {"State": {"OOMKilled": False}}
+    fake_container.stop.side_effect = docker.errors.APIError("stop refused")
+    fake_container.kill = MagicMock()
+
+    mgr, fake_runner = _make_mgr_with(fake_container, "hang-runner")
+    with patch.object(mgr, "create", return_value=fake_runner), \
+         patch("app.core.agent_runner.threading.Timer", _ImmediateTimer):
+        spec = AgentRunnerSpec(host_workdir="/tmp/x", timeout_seconds=1)
+        exit_code, summary = mgr.run_with_streaming(spec, lambda e: None)
+
+    fake_container.kill.assert_called_once()
+    assert "stop 失败" in summary["stop_failed"]
+    assert exit_code == 137
+
+
+def test_timeout_wait_readtimeout_falls_back_to_137():
+    """stop/kill 均未生效时 wait() 兜底超时，不能无界阻塞，按 137 收尾。"""
+    fake_container = MagicMock()
+    fake_container.id = "cid-stuck"
+    fake_container.logs.side_effect = [iter([])]
+    fake_container.wait.side_effect = requests.exceptions.ReadTimeout("read timed out")
+    fake_container.attrs = {"State": {"OOMKilled": False}}
+
+    mgr, fake_runner = _make_mgr_with(fake_container, "stuck-runner")
+    with patch.object(mgr, "create", return_value=fake_runner), \
+         patch("app.core.agent_runner.threading.Timer", _ImmediateTimer):
+        spec = AgentRunnerSpec(host_workdir="/tmp/x", timeout_seconds=1)
+        exit_code, summary = mgr.run_with_streaming(spec, lambda e: None)
+
+    assert exit_code == 137
+    assert summary["timed_out"] is True
+
+
+def test_timeout_grace_period_passed_to_wait():
+    """超时后 wait 必须带兜底 timeout（非 None）；正常路径不传。"""
+    fake_container = MagicMock()
+    fake_container.id = "cid-grace"
+    fake_container.logs.side_effect = [iter([])]
+    fake_container.wait.return_value = {"StatusCode": 137}
+    fake_container.attrs = {"State": {"OOMKilled": False}}
+
+    mgr, fake_runner = _make_mgr_with(fake_container, "grace-runner")
+    with patch.object(mgr, "create", return_value=fake_runner), \
+         patch("app.core.agent_runner.threading.Timer", _ImmediateTimer):
+        spec = AgentRunnerSpec(host_workdir="/tmp/x", timeout_seconds=1)
+        mgr.run_with_streaming(spec, lambda e: None)
+
+    fake_container.wait.assert_called_once_with(timeout=30)
+
+
+def test_timedout_but_clean_exit_keeps_artifacts():
+    """超时瞬间 agent 已写完 output（exit 0）：保留真实退出码，不判失败。"""
+    fake_container = MagicMock()
+    fake_container.id = "cid-race"
+    fake_container.logs.side_effect = [iter([])]
+    fake_container.wait.return_value = {"StatusCode": 0}
+    fake_container.attrs = {"State": {"OOMKilled": False}}
+
+    mgr, fake_runner = _make_mgr_with(fake_container, "race-runner")
+    with patch.object(mgr, "create", return_value=fake_runner), \
+         patch("app.core.agent_runner.threading.Timer", _ImmediateTimer):
+        spec = AgentRunnerSpec(host_workdir="/tmp/x", timeout_seconds=1)
+        exit_code, summary = mgr.run_with_streaming(spec, lambda e: None)
+
+    assert exit_code == 0
+    assert summary["timed_out"] is True
+
+
+def test_normal_run_wait_without_grace():
+    """正常完成（未超时）wait() 不带 timeout——容器自己退出，无需兜底。"""
+    fake_container = MagicMock()
+    fake_container.id = "cid-normal"
+    fake_container.logs.side_effect = [iter([])]
+    fake_container.wait.return_value = {"StatusCode": 0}
+    fake_container.attrs = {"State": {"OOMKilled": False}}
+
+    mgr, fake_runner = _make_mgr_with(fake_container, "normal-runner")
+    with patch.object(mgr, "create", return_value=fake_runner):
+        spec = AgentRunnerSpec(host_workdir="/tmp/x", timeout_seconds=60)
+        exit_code, _ = mgr.run_with_streaming(spec, lambda e: None)
+
+    fake_container.wait.assert_called_once_with(timeout=None)
+    assert exit_code == 0

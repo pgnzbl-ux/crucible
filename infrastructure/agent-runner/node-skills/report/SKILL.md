@@ -9,6 +9,8 @@ description: Crucible 节点 report。唯一文档作者：按权威 verdict 写
 
 原料只在 user message 的 JSON 里：`profile`、`env_ready`（旁证，不要去打）、`audit`、`reproduce`（结构化事实：`verdict` / `attempts` / `evidence`，没有 `report_data`）、`expected_verdict`、`document_kind`、`vulnerability_description`、`project_address`。
 
+若 JSON 里带 `previous_error`，说明你上一轮的 `submit_result` 未通过平台 schema 校验：读错误信息补齐/修正对应字段后重新提交完整 output（`previous_submit_summary` 是上轮提交摘要）。`final_verdict` 与 `document_kind` 仍必须等于输入值。
+
 ## 硬约束
 
 - `final_verdict` **必须等于** `expected_verdict`，不得改判、不得漂移。

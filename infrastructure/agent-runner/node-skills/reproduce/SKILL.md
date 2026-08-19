@@ -11,6 +11,8 @@ description: Crucible 节点 reproduce。对注入的 target_url 发 HTTP，只�
 
 本轮原料只在 user message 的 JSON 里。必须原样使用 `target_url` / `initial_creds` / `transport_shape`，不要自己猜地址或账号。`target_url` 中的 `host.docker.internal` 指向宿主机上的靶场，不要改成 localhost。
 
+若 JSON 里带 `previous_error`，说明你上一轮的 `submit_result` 未通过平台 schema 校验：读错误信息补齐/修正对应字段后重新提交完整 output（`previous_submit_summary` 是上轮提交摘要，工作区里还有上轮验证产物与证据可参考）。判定结论不要变，只修形状。
+
 ## 关键约束
 
 - 禁止 docker / compose。靶场已由平台拉起。

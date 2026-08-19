@@ -37,7 +37,7 @@ async def test_report_node_always_runs_ai_for_confirmed():
         "cvss": repro["cvss"],
         "vulnerable_file": repro["vulnerable_file"],
     })
-    with patch("app.contexts.agent.ai_runner.run_ai_node", fake):
+    with patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", fake):
         out = await ReportNode().execute(_ctx(reproduce=repro, audit={"gate_verdict": "pass"}))
     fake.assert_awaited_once()
     node_input = fake.await_args.kwargs["input_json"]
@@ -60,7 +60,7 @@ async def test_report_node_rejects_verdict_drift():
             "severity": "Critical",
         },
     })
-    with patch("app.contexts.agent.ai_runner.run_ai_node", fake):
+    with patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", fake):
         with pytest.raises(RuntimeError, match="verdict 漂移"):
             await ReportNode().execute(_ctx(
                 reproduce=_not_reproduced_ok(),
@@ -77,7 +77,7 @@ async def test_report_node_overwrites_poc_commands_from_reproduce():
         "cvss": repro["cvss"],
         "vulnerable_file": repro["vulnerable_file"],
     })
-    with patch("app.contexts.agent.ai_runner.run_ai_node", fake):
+    with patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", fake):
         out = await ReportNode().execute(_ctx(reproduce=repro, audit={"gate_verdict": "pass"}))
     assert "FROM_REPRO" in out["report_data"]["poc_commands"]
     assert "curl rewritten" not in out["report_data"]["poc_commands"]
@@ -90,7 +90,7 @@ async def test_report_node_runs_ai_when_reproduce_skipped():
         "report_data": _record_sections(),
         "final_verdict": "false_positive",
     })
-    with patch("app.contexts.agent.ai_runner.run_ai_node", fake):
+    with patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", fake):
         out = await ReportNode().execute(_ctx(reproduce={}, audit={"gate_verdict": "fail"}))
     fake.assert_awaited_once()
     assert fake.await_args.kwargs["node_key"] == "report"
@@ -106,7 +106,7 @@ async def test_report_node_runs_ai_for_uncertain_audit():
         "report_data": _record_sections(),
         "final_verdict": "needs_review",
     })
-    with patch("app.contexts.agent.ai_runner.run_ai_node", fake):
+    with patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", fake):
         out = await ReportNode().execute(_ctx(reproduce={}, audit={"gate_verdict": "uncertain"}))
     fake.assert_awaited_once()
     node_input = fake.await_args.kwargs["input_json"]

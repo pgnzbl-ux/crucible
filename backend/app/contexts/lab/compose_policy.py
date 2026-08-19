@@ -15,6 +15,9 @@ class ComposePolicyError(ValueError):
 
 _SOCKET_NAMES = ("docker.sock", "containerd.sock", "podman.sock")
 _SENSITIVE_ROOTS = ("/proc", "/sys", "/dev")
+# 任务凭据目录（host_workdir/.secrets，bind 到容器 /workspace/.secrets）：
+# 靶场容器是攻击目标，AI 写一行 volumes 就能把明文凭据挂进靶场
+_FORBIDDEN_WORKDIR_BINDS = (".secrets",)
 _WINDOWS_BIND_RE = re.compile(r"^([A-Za-z]:[\\/][^:]*):")
 
 
@@ -74,12 +77,13 @@ def _validate_volumes(
                     for root in _SENSITIVE_ROOTS
                 ):
                     raise ComposePolicyError(f"服务 {service_name} 禁止挂载宿主敏感目录")
-                _require_local_path(
+                resolved = _require_local_path(
                     source,
                     base=compose_dir,
                     workdir=workdir,
                     label=f"服务 {service_name} bind mount",
                 )
+                _reject_forbidden_workdir_bind(resolved, workdir, service_name)
             continue
         if not isinstance(item, dict):
             raise ComposePolicyError(f"服务 {service_name} volume 格式无效")
@@ -88,12 +92,25 @@ def _validate_volumes(
         if any(name in f"{source} {target}".lower() for name in _SOCKET_NAMES):
             raise ComposePolicyError(f"服务 {service_name} 禁止挂载容器运行时 socket")
         if item.get("type") == "bind":
-            _require_local_path(
+            resolved = _require_local_path(
                 source,
                 base=compose_dir,
                 workdir=workdir,
                 label=f"服务 {service_name} bind mount",
             )
+            _reject_forbidden_workdir_bind(resolved, workdir, service_name)
+
+
+def _reject_forbidden_workdir_bind(resolved: Path, workdir: Path, service_name: str) -> None:
+    """工作区内禁止 bind 到任务凭据等平台敏感子目录。"""
+    rel = resolved.relative_to(workdir) if _inside(resolved, workdir) else None
+    if rel is None:
+        return
+    first = rel.parts[0] if rel.parts else ""
+    if first.lower() in _FORBIDDEN_WORKDIR_BINDS:
+        raise ComposePolicyError(
+            f"服务 {service_name} 禁止挂载任务凭据目录 {first}/"
+        )
 
 
 def _validate_build(

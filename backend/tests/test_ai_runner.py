@@ -1,6 +1,8 @@
 """ai_runner output 校验测试(不起真容器)。"""
+import json
 import sys
 import os
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(
@@ -13,15 +15,19 @@ sys.path.insert(
 )
 
 import pytest
+from unittest.mock import MagicMock, patch
 
 from runner.node_schemas import NODE_INPUT_SCHEMAS
 
 from app.contexts.agent.ai_runner import (
+    AI_NODE_MAX_SHAPE_RETRIES,
     _mock_output,
+    _summarize_submit,
     apply_poc_to_report_output,
     authoritative_verdict,
     render_poc_markdown,
     rewrite_url_for_agent_container,
+    run_ai_node_with_shape_retry,
     validate_output,
 )
 
@@ -511,6 +517,31 @@ def test_txt_screenshot_rejected_even_if_file_exists(tmp_path):
     assert "真实图片" in (err or "")
 
 
+def test_workspace_prefixed_screenshot_maps_to_host_workdir(tmp_path):
+    """模型写容器视角 /workspace/<repo>/...，worker 须映射回宿主路径校验。"""
+    repo = tmp_path / "webapp"
+    img_dir = repo / "VULN-1" / "img"
+    img_dir.mkdir(parents=True)
+    shot = img_dir / "auth-bypass.png"
+    shot.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    ok, err = validate_output(
+        "reproduce",
+        _confirmed_ok(screenshots=["/workspace/webapp/VULN-1/img/auth-bypass.png"]),
+        host_workdir=str(tmp_path),
+    )
+    assert ok, err
+
+
+def test_workspace_prefixed_screenshot_outside_workdir_rejected(tmp_path):
+    ok, err = validate_output(
+        "reproduce",
+        _confirmed_ok(screenshots=["/workspace/../../etc/passwd.png"]),
+        host_workdir=str(tmp_path),
+    )
+    assert not ok
+
+
 def test_mock_reproduce_and_report_pass_validation():
     ok, err = validate_output("reproduce", _mock_output("reproduce", {}))
     assert ok, err
@@ -654,3 +685,131 @@ async def test_missing_output_includes_stderr_runner_import_error(tmp_path, monk
                 runner_env={},
             )
     assert "No module named 'runner'" in str(ei.value)
+
+
+# ── P0#1 形状回喂环 ──
+
+
+class _MgrStub:
+    """容器执行桩：按脚本依次返回 output dict 或抛 AgentRunnerError。"""
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.calls: list[dict] = []
+
+    def run_with_streaming(self, spec, on_event):  # noqa: ANN001
+        self.calls.append(json.loads(Path(spec.host_workdir, ".node.json").read_text("utf-8")))
+        item = self.script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        Path(spec.host_workdir, ".node_output.json").write_text(
+            json.dumps(item, ensure_ascii=False), encoding="utf-8"
+        )
+        return 0, {"timed_out": False, "stderr_tail": ""}
+
+
+def _sdk_on(monkeypatch, tmp_path):
+    settings = MagicMock()
+    settings.claude_agent_sdk_enabled = True
+    monkeypatch.setattr("app.core.config.get_settings", lambda: settings)
+    return settings
+
+
+def _audit_pass_output(**over):
+    base = {
+        "gate_verdict": "pass",
+        "gate_reason": "Q1/Q2/Q3 通过",
+        "kill_chain": "user input → sink",
+        "payloads": [{"method": "GET", "path": "/mock", "expected_observable": "回显 marker"}],
+        "runtime_dependent": False,
+        "core_claim": "匿名可读 /mock 回显",
+    }
+    base.update(over)
+    return base
+
+
+@pytest.mark.asyncio
+async def test_shape_retry_feeds_error_back_and_recovers(tmp_path, monkeypatch):
+    """第 1 轮形状失败 → 第 2 轮 input 带 previous_error，模型修复后返回。"""
+    from app.contexts.agent import ai_runner
+
+    _sdk_on(monkeypatch, tmp_path)
+    bad = {"gate_verdict": "pass", "gate_reason": "链路通"}  # 缺 kill_chain/payloads 等
+    good = _audit_pass_output()
+    stub = _MgrStub([bad, good])
+    with patch.object(ai_runner, "agent_runner_manager", stub):
+        out = await run_ai_node_with_shape_retry(
+            node_key="audit",
+            input_json={"source_path": "/workspace/app"},
+            host_workdir=str(tmp_path),
+            runner_env={},
+        )
+    assert out["core_claim"] == "匿名可读 /mock 回显"
+    assert len(stub.calls) == 2
+    assert "attempt" not in stub.calls[0]["input_json"]
+    second = stub.calls[1]["input_json"]
+    assert second["attempt"] == 2
+    assert "schema 校验" in second["previous_error"]
+    assert "kill_chain" in second["previous_error"]
+    assert "previous_submit_summary" in second
+
+
+@pytest.mark.asyncio
+async def test_shape_retry_raises_after_exhaustion(tmp_path, monkeypatch):
+    from app.core.agent_runner import AgentRunnerError
+
+    from app.contexts.agent import ai_runner
+
+    _sdk_on(monkeypatch, tmp_path)
+    bad = {"gate_verdict": "pass", "gate_reason": "x"}  # 永远缺 core_claim
+    stub = _MgrStub([bad] * (AI_NODE_MAX_SHAPE_RETRIES + 1))
+    with patch.object(ai_runner, "agent_runner_manager", stub):
+        with pytest.raises(AgentRunnerError) as ei:
+            await run_ai_node_with_shape_retry(
+                node_key="audit",
+                input_json={},
+                host_workdir=str(tmp_path),
+                runner_env={},
+            )
+    assert "全失败" in str(ei.value)
+    assert len(stub.calls) == AI_NODE_MAX_SHAPE_RETRIES + 1
+    # 每轮失败都留了快照供排查
+    for attempt in range(1, AI_NODE_MAX_SHAPE_RETRIES + 2):
+        snap = tmp_path / ".node-failure" / "audit" / "attempts" / str(attempt)
+        assert (snap / "previous_error.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_shape_retry_executor_error_does_not_rerun(tmp_path, monkeypatch):
+    """容器执行层失败（no_submit/SIGKILL/超时）不在环内重跑——重跑救不了。"""
+    from app.core.agent_runner import AgentRunnerError
+
+    from app.contexts.agent import ai_runner
+
+    _sdk_on(monkeypatch, tmp_path)
+    stub = _MgrStub([AgentRunnerError("AI 节点 audit 未产出 .node_output.json")])
+    with patch.object(ai_runner, "agent_runner_manager", stub):
+        with pytest.raises(AgentRunnerError, match="未产出 .node_output.json"):
+            await run_ai_node_with_shape_retry(
+                node_key="audit",
+                input_json={},
+                host_workdir=str(tmp_path),
+                runner_env={},
+            )
+    assert len(stub.calls) == 1
+
+
+def test_summarize_submit_truncates_and_tags():
+    s = _summarize_submit({
+        "gate_reason": "长" * 500,
+        "count": 3,
+        "evidence": [1, 2, 3],
+        "cvss": {"vector": "AV:N"},
+        "weird": object(),
+    })
+    data = json.loads(s)
+    assert len(data["gate_reason"]) <= 300
+    assert data["count"] == 3
+    assert data["evidence"].startswith("<list:")
+    assert data["cvss"].startswith("<dict:")
+    assert len(data["weird"]) <= 100

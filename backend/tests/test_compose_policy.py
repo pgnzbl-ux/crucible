@@ -13,6 +13,9 @@ import pytest
         {"image": "demo", "cap_add": ["SYS_ADMIN"]},
         {"image": "demo", "volumes": ["/var/run/docker.sock:/var/run/docker.sock"]},
         {"image": "demo", "volumes": ["../../host:/data"]},
+        # 任务凭据目录：workdir 内合法路径，但靶场容器禁止挂载（AI 一行 volumes 即泄密）
+        {"image": "demo", "volumes": ["../../../.secrets/tls.key:/tls.key"]},
+        {"image": "demo", "volumes": ["/abs/.secrets/x:/x"]},
         {"build": {"context": "../../host"}},
         {"build": {"context": ".", "dockerfile": "../../Dockerfile"}},
     ],

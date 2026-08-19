@@ -15,7 +15,10 @@ class ReproduceNode:
         return True
 
     async def execute(self, ctx: NodeContext) -> dict[str, Any]:
-        from app.contexts.agent.ai_runner import rewrite_url_for_agent_container, run_ai_node
+        from app.contexts.agent.ai_runner import (
+            rewrite_url_for_agent_container,
+            run_ai_node_with_shape_retry,
+        )
 
         if ctx.lab_id:
             from app.contexts.lab.service import LabService
@@ -40,7 +43,7 @@ class ReproduceNode:
             "audit": ctx.previous_outputs.get("audit") or {},
             "vulnerability_description": ctx.vulnerability_description,
         }
-        return await run_ai_node(
+        return await run_ai_node_with_shape_retry(
             node_key="reproduce",
             input_json=input_json,
             host_workdir=ctx.host_workdir,

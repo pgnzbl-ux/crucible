@@ -28,6 +28,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 
 import docker
+import requests
 from docker.errors import DockerException, ImageNotFound, NotFound
 from docker.types import LogConfig
 
@@ -161,21 +162,36 @@ class AgentRunnerManager:
     def __new__(cls) -> "AgentRunnerManager":
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            cls._instance._init()
+            # 只建空壳：Docker 连接惰性建立，daemon 不可达不应炸掉 import
+            # 该模块的所有代码（含 preflight 的友好报错路径）
+            cls._instance._client = None  # type: ignore[assignment]
+            cls._instance._active_ids = set()
         return cls._instance
 
-    def _init(self) -> None:
-        try:
-            self._client = docker.from_env()
-        except DockerException as e:
-            raise AgentRunnerError(f"无法连接 Docker daemon: {e}") from e
-        self._active_ids: set[str] = set()
-        self._ensure_network()
+    def _client_or_connect(self):
+        """惰性连接 Docker daemon；失败抛 AgentRunnerError（调用方转节点失败）。
+
+        read timeout 对齐 agent 超时预算 + 120s 余量：docker-py 默认 60s，
+        而 agent 静默思考/长工具调用超过 60s 属常态——logs(follow=True) 流
+        会中途抛 ReadTimeout 杀掉整个节点（2026-08-19 P0#5）。
+        """
+        if self._client is None:
+            read_timeout = settings.agent_runner_timeout_seconds + 120
+            try:
+                self._client = docker.from_env(timeout=read_timeout)
+            except DockerException as e:
+                raise AgentRunnerError(f"无法连接 Docker daemon: {e}") from e
+            self._ensure_network()
+        return self._client
 
     def _ensure_network(self) -> None:
         """确保专用网络存在且可外联（internal=False）。旧沙箱若建成 internal 则重建。"""
         try:
             net = self._client.networks.get(AGENT_RUNNER_NETWORK)
+        except DockerException as e:
+            # daemon 瞬断 / 权限异常：不阻断 import 与后续重连
+            logger.warning("检查网络 %s 失败（下次重试）: %s", AGENT_RUNNER_NETWORK, e)
+            return
         except NotFound:
             net = None
         if net is not None:
@@ -247,8 +263,9 @@ class AgentRunnerManager:
         }
 
         try:
+            client = self._client_or_connect()
             self._ensure_image(spec.image)
-            container = self._client.containers.create(**container_config)
+            container = client.containers.create(**container_config)
             container.start()
         except ImageNotFound:
             raise AgentRunnerError(f"agent-runner 镜像不存在: {spec.image}（先构建）")
@@ -258,15 +275,16 @@ class AgentRunnerManager:
         if not hasattr(self, "_active_ids"):
             self._active_ids = set()
         self._active_ids.add(container.id)
-        return AgentRunner(self._client, container, spec, name)
+        return AgentRunner(client, container, spec, name)
 
     def _ensure_image(self, image: str) -> None:
         """镜像不存在则拉取（默认本地已有；pull 留给运维）"""
+        client = self._client_or_connect()
         try:
-            self._client.images.get(image)
+            client.images.get(image)
         except NotFound:
             try:
-                self._client.images.pull(image)
+                client.images.pull(image)
             except DockerException as e:
                 raise AgentRunnerError(f"agent-runner 镜像拉取失败: {e}") from e
 
@@ -313,16 +331,30 @@ class AgentRunnerManager:
             logger.info(f"agent-runner 容器启动: {runner.name} image={spec.image}")
 
             timeout = spec.timeout_seconds or 0
+            stop_failed: list[str] = []
 
             def _on_timeout() -> None:
                 nonlocal timed_out
                 timed_out = True
                 logger.warning(f"agent-runner 超时({timeout}s),停止容器: {runner.name if runner else '?'}")
+                # stop 失败必须留痕：容器不停 → logs 流永不 EOF → 消费线程
+                # 挂死在 docker read 上。降级 SIGKILL 强拆，再失败记进
+                # summary 供人工介入（2026-08-19 P0#5：曾 except: pass 静默
+                # 吞掉，超时后平台无限挂死无任何线索）。
+                if runner is None:
+                    return
                 try:
-                    if runner is not None:
-                        runner.container.stop(timeout=10)
-                except Exception:  # noqa: BLE001
-                    pass
+                    runner.container.stop(timeout=10)
+                except Exception as e:  # noqa: BLE001
+                    stop_failed.append(f"stop 失败: {e}")
+                    try:
+                        runner.container.kill()
+                    except Exception as e2:  # noqa: BLE001
+                        stop_failed.append(f"kill 失败: {e2}")
+                        logger.error(
+                            "agent-runner 超时后 stop+kill 均失败，容器可能仍在运行: %s (%s / %s)",
+                            runner.name, e, e2,
+                        )
 
             if timeout > 0:
                 timer = threading.Timer(timeout, _on_timeout)
@@ -346,11 +378,36 @@ class AgentRunnerManager:
             for event in parser.flush():
                 on_event(event)
 
-            # 等待容器结束
-            wait_result = runner.container.wait()
+            # 等待容器结束；超时后 stop/kill 都失败时容器可能永不停 →
+            # wait() 无界阻塞整个 worker 线程。设兜底宽限（stop timeout 10s +
+            # kill 生效余量），到点按超时处理（2026-08-19 P0#6）。
+            wait_grace = 30 if timed_out else None
+            try:
+                wait_result = runner.container.wait(timeout=wait_grace)
+            except requests.exceptions.ReadTimeout:
+                logger.error(
+                    "agent-runner wait() 兜底超时（stop/kill 均未生效）: %s", runner.name
+                )
+                wait_result = {"StatusCode": 137}
+            except Exception as e:  # noqa: BLE001
+                if timed_out:
+                    logger.warning("agent-runner wait() 异常（已超时，按 137 处理）: %s", e)
+                    wait_result = {"StatusCode": 137}
+                else:
+                    raise
             exit_code = int(wait_result.get("StatusCode", 1))
             if timed_out:
-                exit_code = 137
+                # 超时场景 exit 统一 137 归因口径——但若 agent 已在超时瞬间
+                # 正常写完 output（exit 0），保留真实退出码：产物已落盘，
+                # 按超时丢弃会白跑一轮完整验证（P0#6 边界竞态）。归因由
+                # summary.timed_out 携带，不靠 exit_code 编码。
+                if exit_code == 0:
+                    logger.info(
+                        "agent-runner 超时瞬间正常完成（exit 0），保留产物不判失败: %s",
+                        runner.name,
+                    )
+                else:
+                    exit_code = 137
 
             # 检查 OOM
             runner.container.reload()
@@ -387,6 +444,7 @@ class AgentRunnerManager:
                 "oom_killed": oom_killed,
                 "stderr_tail": stderr_tail,
                 "timed_out": timed_out,
+                "stop_failed": "; ".join(stop_failed),
             }
             return exit_code, summary
 
@@ -410,10 +468,10 @@ class AgentRunnerManager:
             return 0
         removed = 0
         try:
-            containers = self._client.containers.list(
+            containers = self._client_or_connect().containers.list(
                 all=True, filters={"label": "managed_by=crucible-agent-runner"}
             )
-        except DockerException as e:
+        except (DockerException, AgentRunnerError) as e:
             logger.warning("列举 agent-runner 失败: %s", e)
             return 0
         for container in containers:
@@ -439,10 +497,10 @@ class AgentRunnerManager:
             return self.remove_for_workdir(host_workdir or "")
         removed = 0
         try:
-            containers = self._client.containers.list(
+            containers = self._client_or_connect().containers.list(
                 all=True, filters={"label": f"crucible.task_id={task_id}"}
             )
-        except DockerException as e:
+        except (DockerException, AgentRunnerError) as e:
             logger.warning("按 task_id 列举 agent-runner 失败: %s", e)
             containers = []
         for container in containers:
@@ -460,11 +518,11 @@ class AgentRunnerManager:
         if hasattr(self, "_active_ids"):
             self._active_ids.discard(container_id)
         try:
-            container = self._client.containers.get(container_id)
+            container = self._client_or_connect().containers.get(container_id)
             container.remove(force=True, v=True)
         except NotFound:
             pass
-        except DockerException as e:
+        except (DockerException, AgentRunnerError) as e:
             logger.warning(f"移除容器 {container_id} 失败: {e}")
 
     def stop_all_active(self) -> int:
@@ -484,7 +542,7 @@ class AgentRunnerManager:
         """清理孤儿/过期 agent-runner 容器（保险 B）"""
         removed = 0
         try:
-            for container in self._client.containers.list(
+            for container in self._client_or_connect().containers.list(
                 all=True, filters={"label": "managed_by=crucible-agent-runner"}
             ):
                 created = container.attrs.get("Created", "")
@@ -508,11 +566,11 @@ class AgentRunnerManager:
 
     def image_exists(self, image: str | None = None) -> bool:
         try:
-            self._client.images.get(image or settings.agent_runner_image)
+            self._client_or_connect().images.get(image or settings.agent_runner_image)
             return True
         except NotFound:
             return False
-        except DockerException:
+        except (DockerException, AgentRunnerError):
             return False
 
     def host_workdir_path(self, task_id: str) -> str:

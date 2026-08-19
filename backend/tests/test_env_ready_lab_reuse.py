@@ -384,7 +384,7 @@ async def test_reproduce_touches_lab_when_lab_id_present():
         db_session=object(),
     )
     with patch("app.contexts.lab.service.LabService") as LS, \
-         patch("app.contexts.agent.ai_runner.run_ai_node", new_callable=AsyncMock) as ai:
+         patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", new_callable=AsyncMock) as ai:
         LS.return_value.touch = AsyncMock()
         ai.return_value = {"verdict": "confirmed"}
         await ReproduceNode().execute(ctx)

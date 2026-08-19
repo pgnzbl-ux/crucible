@@ -674,6 +674,7 @@ async def run_ai_turn(
         runner_env=ctx.runner_env,
         on_event=ctx.on_event,
         task_id=ctx.task_id,
+        validate=False,  # 排障环自带逐项校验 + 回喂重试；平台先斩后奏会废掉回喂分支
     )
 
 
@@ -962,6 +963,7 @@ async def _try_cached_recipe(
         commit_sha=commit_sha,
         lab_compose=compose_rel,
         output=output,
+        repo=repo_name,
     )
     _emit(ctx, f"靶场就绪：{target_url}")
     return output, None

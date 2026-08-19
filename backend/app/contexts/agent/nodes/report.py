@@ -18,7 +18,7 @@ class ReportNode:
         from app.contexts.agent.ai_runner import (
             authoritative_verdict,
             document_kind_for_verdict,
-            run_ai_node,
+            run_ai_node_with_shape_retry,
         )
 
         repro = dict(ctx.previous_outputs.get("reproduce") or {})
@@ -39,7 +39,7 @@ class ReportNode:
             "expected_verdict": expected,
             "document_kind": kind,
         }
-        output = await run_ai_node(
+        output = await run_ai_node_with_shape_retry(
             node_key="report",
             input_json=input_json,
             host_workdir=ctx.host_workdir,

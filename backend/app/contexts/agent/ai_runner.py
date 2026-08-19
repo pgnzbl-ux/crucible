@@ -312,6 +312,23 @@ def _validate_attempts(attempts: Any) -> tuple[bool, str | None]:
     return True, None
 
 
+def _container_to_host_path(raw: str, host_workdir: str | None) -> str:
+    """容器绝对路径 → 宿主路径（agent 只看得见 /workspace bind mount）。
+
+    模型按 SKILL 指示写 {source_path}/VULN-*/img/...（容器视角 /workspace/...），
+    worker 在宿主机校验：/workspace/<repo>/x → {host_workdir}/<repo>/x；
+    /workspace/x → {host_workdir}/x。非容器前缀原样返回（相对路径场景）。
+    """
+    normalized = raw.replace("\\", "/")
+    prefix = "/workspace/"
+    if normalized.startswith(prefix):
+        rel = normalized[len(prefix):]
+        if not host_workdir:
+            return rel
+        return str(Path(host_workdir) / rel)
+    return raw
+
+
 def _validate_screenshots(shots: list[str], host_workdir: str | None) -> tuple[bool, str | None]:
     root = Path(host_workdir).resolve() if host_workdir else None
     for raw in shots:
@@ -320,7 +337,7 @@ def _validate_screenshots(shots: list[str], host_workdir: str | None) -> tuple[b
             return False, "screenshots 必须是工作区内真实图片（禁止 .txt）"
         if root is None:
             continue
-        candidate = Path(raw)
+        candidate = Path(_container_to_host_path(raw, host_workdir))
         path = candidate if candidate.is_absolute() else (root / candidate)
         try:
             resolved = path.resolve()
@@ -535,20 +552,19 @@ def validate_output(
     return True, None
 
 
-async def run_ai_node(
+async def _run_one_container(
     *,
     node_key: str,
     input_json: dict[str, Any],
     host_workdir: str,
     runner_env: dict[str, str],
-    on_event: Callable[[dict], None] | None = None,
-    timeout_seconds: int = 1800,
-    task_id: str | None = None,
+    on_event: Callable[[dict], None] | None,
+    timeout_seconds: int,
+    task_id: str | None,
 ) -> dict[str, Any]:
-    """起 agent-runner 容器跑一个 AI 节点,返回 output_json。
+    """单轮容器执行：写 .node.json → 起容器 → 读 .node_output.json。
 
-    失败抛 AgentRunnerError。
-    SDK 未启用(claude_agent_sdk_enabled=False)时走 mock,返回模拟 output 供编排链路联调。
+    不做 schema 校验（调用方决定）；容器/输出层失败抛 AgentRunnerError。
     """
     # Mock 模式:SDK 未启用时直接返回模拟 output(不起容器)
     from app.core.config import get_settings
@@ -560,7 +576,7 @@ async def run_ai_node(
         return output
 
     # 1. 写 .node.json(容器内 run_one.py 读)
-    #    先清旧的 .node_output.json:env_ready 排障循环每轮重调本函数,
+    #    先清旧的 .node_output.json:回喂重跑每轮重调本函数,
     #    若上轮 agent 没调 submit_result,容器会读到上轮遗留的旧 output(run_one
     #    退出码 0 → 本函数读到旧数据,静默用错)。
     node_input_path = Path(host_workdir) / ".node.json"
@@ -627,10 +643,145 @@ async def run_ai_node(
         output = json.loads(output_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         raise AgentRunnerError(f"AI 节点 {node_key} output JSON 解析失败: {e}") from e
+    return output
 
-    # 4. schema 校验
-    ok, err = validate_output(node_key, output, host_workdir=host_workdir)
-    if not ok:
-        raise AgentRunnerError(f"AI 节点 {node_key} output 校验失败: {err}")
+
+async def run_ai_node(
+    *,
+    node_key: str,
+    input_json: dict[str, Any],
+    host_workdir: str,
+    runner_env: dict[str, str],
+    on_event: Callable[[dict], None] | None = None,
+    timeout_seconds: int = 1800,
+    task_id: str | None = None,
+    validate: bool = True,
+) -> dict[str, Any]:
+    """起 agent-runner 容器跑一个 AI 节点,返回 output_json。
+
+    失败抛 AgentRunnerError。
+    SDK 未启用(claude_agent_sdk_enabled=False)时走 mock,返回模拟 output 供编排链路联调。
+
+    validate=False 供自带回喂环的调用方（env_ready 排障循环）使用：平台层
+    不再对 output 先斩后奏，形状校验交给调用方的逐项检查 + 回喂重试语义
+    （2026-08-19 修复：否则 env_ready 的 initial_creds 回喂分支永不可达）。
+    """
+    output = await _run_one_container(
+        node_key=node_key,
+        input_json=input_json,
+        host_workdir=host_workdir,
+        runner_env=runner_env,
+        on_event=on_event,
+        timeout_seconds=timeout_seconds,
+        task_id=task_id,
+    )
+
+    # 4. schema 校验（validate=False 时跳过：调用方自带回喂环）
+    if validate:
+        ok, err = validate_output(node_key, output, host_workdir=host_workdir)
+        if not ok:
+            raise AgentRunnerError(f"AI 节点 {node_key} output 校验失败: {err}")
 
     return output
+
+
+AI_NODE_MAX_SHAPE_RETRIES = 2
+"""回喂重跑上限：形状修复通常是补一两个字段，2 轮足够；再多说明模型
+系统性不服从 schema，重跑只是烧钱（白盒审计一轮 10-30 分钟）。"""
+
+
+async def run_ai_node_with_shape_retry(
+    *,
+    node_key: str,
+    input_json: dict[str, Any],
+    host_workdir: str,
+    runner_env: dict[str, str],
+    on_event: Callable[[dict], None] | None = None,
+    timeout_seconds: int = 1800,
+    task_id: str | None = None,
+) -> dict[str, Any]:
+    """AI 节点 + 形状回喂环（P0#1 修复）。
+
+    audit/reproduce/report 的一次性形状失败不再直接判死：第一轮
+    validate_output 失败后，把校验错误 + 上轮 submit 摘要拼进 input_json
+    重新起容器，让模型修自己的 output 形状。容器/超时/no_submit 等执行层
+    失败仍立即抛（重跑救不了，别烧钱）。
+
+    与 env_ready 的节点级排障环（多轮、含 compose/探活等平台动作）不同，
+    这里只救「模型差一两个字段」这一种失败模式。
+    """
+    from app.contexts.agent.node_failure import snapshot_attempt
+
+    base_input = dict(input_json)
+    last_submit: dict[str, Any] | None = None
+    last_err: str | None = None
+
+    for attempt in range(1, AI_NODE_MAX_SHAPE_RETRIES + 2):
+        # 回喂：attempt>1 时附上轮校验错误 + 提交摘要（模型看不见上轮容器，
+        # 必须显式带回）
+        run_input = dict(base_input)
+        if attempt > 1:
+            run_input["attempt"] = attempt
+            run_input["previous_error"] = (
+                f"上一轮 submit_result 的 output 未通过平台 schema 校验:\n{last_err}"
+            )
+            if last_submit is not None:
+                run_input["previous_submit_summary"] = _summarize_submit(last_submit)
+
+        output = await _run_one_container(
+            node_key=node_key,
+            input_json=run_input,
+            host_workdir=host_workdir,
+            runner_env=runner_env,
+            on_event=on_event,
+            timeout_seconds=timeout_seconds,
+            task_id=task_id,
+        )
+
+        ok, err = validate_output(node_key, output, host_workdir=host_workdir)
+        if ok:
+            return output
+
+        last_submit = output
+        last_err = err
+        try:
+            snapshot_attempt(
+                host_workdir,
+                node_key,
+                attempt,
+                previous_error=last_err,
+                platform_error=f"failed_stage=shape_validation\n{last_err}",
+                submit=output,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("形状回喂快照失败 node=%s attempt=%s", node_key, attempt, exc_info=True)
+        if on_event:
+            on_event({
+                "type": "phase.updated",
+                "phase": node_key,
+                "message": (
+                    f"output 形状不合格，回喂重跑"
+                    f"（{attempt}/{AI_NODE_MAX_SHAPE_RETRIES + 1}）：{(err or '')[:200]}"
+                ),
+            })
+
+    raise AgentRunnerError(
+        f"AI 节点 {node_key} output 形状校验 {AI_NODE_MAX_SHAPE_RETRIES + 1} 轮全失败: {last_err}"
+    )
+
+
+def _summarize_submit(submit: dict[str, Any]) -> str:
+    """给模型看的上轮提交摘要：关键字段截断，避免 input 爆炸。"""
+    keep = {}
+    for k, v in (submit or {}).items():
+        if isinstance(v, str):
+            keep[k] = v[:300]
+        elif isinstance(v, (int, float, bool)) or v is None:
+            keep[k] = v
+        elif isinstance(v, list):
+            keep[k] = f"<list:{len(v)} 项>"
+        elif isinstance(v, dict):
+            keep[k] = f"<dict:{sorted(v.keys())}>"
+        else:
+            keep[k] = str(v)[:100]
+    return json.dumps(keep, ensure_ascii=False)

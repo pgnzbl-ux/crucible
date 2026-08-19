@@ -9,6 +9,8 @@ description: Crucible 节点 audit。纯白盒走链与 Phase 2.5 三问。禁�
 
 本轮原料只在 user message 的 JSON 里：`source_path`、`vulnerability_description`、`profile`。`gate_verdict=pass` 时产出必须含非空 `core_claim`（一句 HTTP 可观察危害主张）。
 
+若 JSON 里带 `previous_error`，说明你上一轮的 `submit_result` 未通过平台 schema 校验：读错误信息补齐/修正对应字段后重新提交完整 output（`previous_submit_summary` 是上轮提交摘要，工作区里还有上轮产物可参考）。这是一次纠错机会，不是新任务。
+
 ## 工作流
 
 ### Phase 1 — 锁定危害

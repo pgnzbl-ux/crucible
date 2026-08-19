@@ -713,6 +713,8 @@ async def _run_analysis(task_id: str, run_id: str, *, celery_task: object) -> di
         if container_id:
             _unregister_container(container_id)
         if should_retain_hostdir(summary.get("status")):
+            # 排查价值在源码与节点产物，密钥永远不留（与凭据零落盘承诺一致）
+            _purge_secrets_dir(host_workdir)
             logger.warning("任务未成功，保留 host_workdir 供排查: %s", host_workdir)
         else:
             _cleanup_hostdir(host_workdir)
@@ -724,6 +726,19 @@ async def _run_analysis(task_id: str, run_id: str, *, celery_task: object) -> di
 def should_retain_hostdir(status: str | None) -> bool:
     """失败/取消/待复核时保留工作目录，便于对照源码与节点产物。"""
     return status in ("failed", "cancelled", "needs_review")
+
+
+def _purge_secrets_dir(host_workdir: str) -> None:
+    """保留排查目录前删除 .secrets/（明文凭据文件，见 credential_proxy）。
+
+    best-effort：删除失败只记日志不阻断保留逻辑（密钥目录若删不掉，
+    排查价值仍大于整体丢弃目录）。
+    """
+    import shutil as _shutil
+
+    secret_dir = os.path.join(host_workdir, ".secrets")
+    if os.path.isdir(secret_dir):
+        _shutil.rmtree(secret_dir, ignore_errors=True)
 
 
 def _cleanup_hostdir(path: str) -> None:

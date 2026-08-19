@@ -35,7 +35,7 @@ async def test_reproduce_rewrites_localhost_target():
             "audit": {"gate_verdict": "pass", "runtime_dependent": True},
         },
     )
-    with patch("app.contexts.agent.ai_runner.run_ai_node", fake_run_ai_node):
+    with patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", fake_run_ai_node):
         await ReproduceNode().execute(ctx)
 
     inp = captured["input_json"]
