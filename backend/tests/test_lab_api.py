@@ -124,7 +124,6 @@ async def test_stop_rejected_when_task_running(session):
     [
         ("failed", "stop_lab", "compose_stop"),
         ("creating", "destroy_lab", "compose_down"),
-        ("ready", "start_lab", "compose_start"),
     ],
 )
 async def test_management_rejects_invalid_state_before_docker(
@@ -245,19 +244,247 @@ async def test_list_grouped_by_project(session):
     lab.last_seen_at = datetime.now(timezone.utc) - timedelta(seconds=10)
     await session.commit()
 
+    running = [
+        {
+            "name": "web",
+            "status": "running",
+            "state": "running",
+            "ports": "",
+            "image": "x",
+        }
+    ]
     with patch(
         "app.contexts.lab.docker_ops.list_containers",
         new_callable=AsyncMock,
-        return_value=[],
+        return_value=running,
     ):
         grouped = await svc.list_grouped("u1")
 
     assert grouped[0]["project_id"] == "p1"
     assert grouped[0]["project_name"] == "demo"
     assert grouped[0]["labs"][0]["id"] == result.lab_id
-    assert grouped[0]["labs"][0]["containers"] == []
+    assert grouped[0]["labs"][0]["status"] == "ready"
+    assert grouped[0]["labs"][0]["containers"] == running
     assert grouped[0]["labs"][0]["live_task_count"] >= 1
     assert 3580 <= grouped[0]["labs"][0]["ttl_remaining_seconds"] <= 3590
+
+
+@pytest.mark.parametrize(
+    ("db_status", "runtime", "live", "expected"),
+    [
+        ("expired", "running", 0, "ready"),
+        ("expired", "running", 1, "ready"),
+        ("stopped", "running", 0, "ready"),
+        ("ready", "exited", 0, "stopped"),
+        ("ready", "none", 0, "expired"),
+        ("stopped", "none", 0, "expired"),
+        ("expired", "exited", 0, "stopped"),
+        ("ready", "none", 1, "expired"),
+        ("ready", "exited", 1, "stopped"),
+        ("creating", "running", 1, None),
+        ("failed", "running", 0, None),
+        ("destroyed", "running", 0, None),
+        ("expired", "none", 0, None),
+        ("ready", "running", 0, None),
+    ],
+)
+def test_next_aligned_lab_status(db_status, runtime, live, expected):
+    from app.contexts.lab.service import next_aligned_lab_status
+
+    assert next_aligned_lab_status(db_status, runtime, live_task_count=live) == expected
+
+
+def test_container_runtime_kind_prefers_docker_state():
+    from app.contexts.lab.service import container_runtime_kind
+
+    assert (
+        container_runtime_kind(
+            [{"name": "web", "state": "running", "status": "Up 2 minutes"}]
+        )
+        == "running"
+    )
+    assert (
+        container_runtime_kind(
+            [{"name": "web", "state": "exited", "status": "Exited (0) 3 minutes ago"}]
+        )
+        == "exited"
+    )
+    assert container_runtime_kind([]) == "none"
+
+
+@pytest.mark.asyncio
+async def test_list_grouped_promotes_expired_when_containers_running(session):
+    from app.contexts.lab.models import Lab
+
+    svc, result, task = await ready_lab(session)
+    task.status = "completed"
+    lab = await session.get(Lab, result.lab_id)
+    lab.status = "expired"
+    await session.commit()
+
+    running = [
+        {
+            "name": "web",
+            "status": "running",
+            "state": "running",
+            "ports": "3001->3000",
+            "image": "x",
+        }
+    ]
+    with patch(
+        "app.contexts.lab.docker_ops.list_containers",
+        new_callable=AsyncMock,
+        return_value=running,
+    ):
+        grouped = await svc.list_grouped("u1")
+
+    assert grouped[0]["labs"][0]["status"] == "ready"
+    await session.refresh(lab)
+    assert lab.status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_container_start_promotes_stopped_lab_to_ready(session):
+    from app.contexts.lab.models import Lab
+
+    svc, result, task = await ready_lab(session)
+    task.status = "completed"
+    lab = await session.get(Lab, result.lab_id)
+    lab.status = "stopped"
+    await session.commit()
+
+    with patch(
+        "app.contexts.lab.docker_ops.container_start", new_callable=AsyncMock
+    ), patch(
+        "app.contexts.lab.docker_ops.assert_container_in_project",
+        new_callable=AsyncMock,
+    ), patch(
+        "app.contexts.lab.docker_ops.list_containers",
+        new_callable=AsyncMock,
+        return_value=[
+            {
+                "name": "web",
+                "status": "running",
+                "state": "running",
+                "ports": "",
+                "image": "x",
+            }
+        ],
+    ):
+        status = await svc.container_action(
+            result.lab_id, "web", action="start", owner_id="u1"
+        )
+
+    assert status == "ready"
+    await session.refresh(lab)
+    assert lab.status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_start_lab_starts_exited_containers_when_db_says_expired(session):
+    from app.contexts.lab.models import Lab
+
+    svc, result, task = await ready_lab(session)
+    task.status = "completed"
+    lab = await session.get(Lab, result.lab_id)
+    lab.status = "expired"
+    await session.commit()
+
+    exited = [
+        {
+            "name": "web",
+            "status": "exited",
+            "state": "exited",
+            "ports": "",
+            "image": "x",
+        }
+    ]
+    with patch(
+        "app.contexts.lab.docker_ops.list_containers",
+        new_callable=AsyncMock,
+        return_value=exited,
+    ), patch(
+        "app.contexts.lab.docker_ops.compose_start",
+        new_callable=AsyncMock,
+        return_value=True,
+    ) as start:
+        status = await svc.start_lab(result.lab_id, owner_id="u1")
+
+    assert status == "ready"
+    start.assert_awaited_once_with(result.compose_project)
+    await session.refresh(lab)
+    assert lab.status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_start_lab_is_noop_when_containers_already_running(session):
+    from app.contexts.lab.models import Lab
+
+    svc, result, task = await ready_lab(session)
+    task.status = "completed"
+    lab = await session.get(Lab, result.lab_id)
+    lab.status = "expired"
+    await session.commit()
+
+    running = [
+        {
+            "name": "web",
+            "status": "running",
+            "state": "running",
+            "ports": "",
+            "image": "x",
+        }
+    ]
+    with patch(
+        "app.contexts.lab.docker_ops.list_containers",
+        new_callable=AsyncMock,
+        return_value=running,
+    ), patch(
+        "app.contexts.lab.docker_ops.compose_start",
+        new_callable=AsyncMock,
+        return_value=True,
+    ) as start:
+        status = await svc.start_lab(result.lab_id, owner_id="u1")
+
+    assert status == "ready"
+    start.assert_not_awaited()
+    await session.refresh(lab)
+    assert lab.status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_ensure_running_starts_exited_lab_for_live_task(session):
+    from app.contexts.lab.models import Lab
+
+    svc, result, _task = await ready_lab(session, task_status="running")
+    lab = await session.get(Lab, result.lab_id)
+    lab.status = "expired"
+    await session.commit()
+
+    exited = [
+        {
+            "name": "web",
+            "status": "exited",
+            "state": "exited",
+            "ports": "",
+            "image": "x",
+        }
+    ]
+    with patch(
+        "app.contexts.lab.docker_ops.list_containers",
+        new_callable=AsyncMock,
+        return_value=exited,
+    ), patch(
+        "app.contexts.lab.docker_ops.compose_start",
+        new_callable=AsyncMock,
+        return_value=True,
+    ) as start:
+        status = await svc.ensure_running(result.lab_id)
+
+    assert status == "ready"
+    start.assert_awaited_once()
+    await session.refresh(lab)
+    assert lab.status == "ready"
 
 
 @pytest.mark.asyncio
@@ -288,7 +515,15 @@ async def test_management_writes_update_state_and_touch(session, tmp_path):
     ) as stop, patch(
         "app.contexts.lab.docker_ops.list_containers",
         new_callable=AsyncMock,
-        return_value=[{"name": "web", "status": "Exited", "ports": "", "image": "x"}],
+        return_value=[
+            {
+                "name": "web",
+                "status": "exited",
+                "state": "exited",
+                "ports": "",
+                "image": "x",
+            }
+        ],
     ), patch(
         "app.contexts.lab.docker_ops.compose_start",
         new_callable=AsyncMock,
@@ -425,7 +660,7 @@ async def test_docker_container_listing_and_membership():
         list_containers,
     )
 
-    output = "web\tUp 2 minutes\t0.0.0.0:3001->3000/tcp\tnginx:latest\n"
+    output = "web\trunning\tUp 2 minutes\t0.0.0.0:3001->3000/tcp\tnginx:latest\n"
     completed = MagicMock(returncode=0, stdout=output, stderr="")
     with patch("app.contexts.lab.docker_ops.subprocess.run", return_value=completed):
         containers = await list_containers("crucible-lab-abc")
@@ -434,7 +669,8 @@ async def test_docker_container_listing_and_membership():
     assert containers == [
         {
             "name": "web",
-            "status": "Up 2 minutes",
+            "status": "running",
+            "state": "running",
             "ports": "0.0.0.0:3001->3000/tcp",
             "image": "nginx:latest",
         }
@@ -445,7 +681,15 @@ async def test_docker_container_listing_and_membership():
 async def test_container_command_surfaces_docker_failure():
     from app.contexts.lab.docker_ops import container_stop
 
-    listed = [{"name": "web", "status": "Up", "ports": "", "image": "nginx"}]
+    listed = [
+        {
+            "name": "web",
+            "status": "running",
+            "state": "running",
+            "ports": "",
+            "image": "nginx",
+        }
+    ]
     failed = MagicMock(returncode=1, stdout="", stderr="boom")
     with patch(
         "app.contexts.lab.docker_ops.list_containers",

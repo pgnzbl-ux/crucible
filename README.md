@@ -251,6 +251,7 @@ CLAUDE_AGENT_SDK_ENABLED=true
 - 不要把 Key 写进 Dockerfile、compose 或提交到 Git
 - Agent 默认非 root、只读根文件系统、去掉全部 Linux capability，并有 CPU / 内存 / 超时上限
 - Agent 不能直连平台数据库；其输出校验后才落库
+- 发现安全漏洞请按 [SECURITY.md](SECURITY.md) 的流程私密报告
 
 **能力边界**
 

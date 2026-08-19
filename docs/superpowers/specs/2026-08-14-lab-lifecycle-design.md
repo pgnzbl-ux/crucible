@@ -108,7 +108,7 @@ expired / destroyed / failed ── rebuild 或再次 acquire──► creating
 6. **任务成功 / 失败 / 删除**  
    不拆 lab。删除任务若它是唯一 live 占用者，只清 `tasks.lab_id`，lab 继续走 TTL。
 
-复现节点每次开始打 `target_url` 时 `LabService.touch(lab_id)`。
+复现节点每次开始打 `target_url` 时 `LabService.touch(lab_id)`，并 `align_runtime_status`：若容器已在跑而库仍是 `expired`/`stopped`，回写 `ready`。
 
 ---
 
@@ -128,6 +128,8 @@ expired / destroyed / failed ── rebuild 或再次 acquire──► creating
 - lab.status ∈ {ready, stopped}
 
 动作：`docker compose -p crucible-lab-{id} down -v`，status=`expired`。
+
+终态补偿巡检 `cleanup_terminal_runtimes`：`expired` 但 compose 仍有 running 容器时，回写 `ready` 并刷新 TTL，**不** `down`（AI 复现已把靶场再次拉起）。`failed`/`destroyed` 仍 best-effort `down`。
 
 **僵死 creating**
 
@@ -153,8 +155,8 @@ expired / destroyed / failed ── rebuild 或再次 acquire──► creating
 
 | 方法 | 路径 | 行为 |
 |---|---|---|
-| GET | `/labs` | 按 `project_id` 分组。每组含项目名、labs[]（status、sha 短号、target_url、ttl 剩余秒、容器摘要） |
-| GET | `/labs/{id}` | 详情 + `docker ps` 过滤该 compose 项目的容器列表（name、status、ports、image） |
+| GET | `/labs` | 按 `project_id` 分组。每组含项目名、labs[]（status、sha 短号、target_url、ttl 剩余秒、容器摘要）。**status 按 compose 实际容器校正并回写**：`expired`/`stopped` 且有 running 容器 → `ready`；无 live 任务时 `ready` 全停 → `stopped`、无容器 → `expired`。`creating`/`failed`/`destroyed` 不校正。 |
+| GET | `/labs/{id}` | 详情 + `docker ps` 过滤该 compose 项目的容器列表（name、status、ports、image）。与列表相同，按容器实际状态校正并回写 `status`。 |
 | POST | `/labs/{id}/actions/stop` | `compose stop` → `stopped` |
 | POST | `/labs/{id}/actions/start` | `compose start` → `ready`，touch |
 | POST | `/labs/{id}/actions/rebuild` | `creating` → `compose up -d --build` → `ready` 或 `failed` |
@@ -210,6 +212,7 @@ expired / destroyed / failed ── rebuild 或再次 acquire──► creating
 | 有 live 任务时管理操作 | 409，不改 Docker |
 | 等待创建超时 | 本任务 env_ready failed，lab 不由等待者标 failed |
 | 库 `ready` 但 docker 已无该项目 | acquire/start/rebuild 视为过期：标 `expired` 后允许重新创建 |
+| 库 `expired`/`stopped` 但容器已在跑 | 列表/详情/复现 `align_runtime_status` 回写 `ready`，管理页不再卡在 expired |
 | lab 目录或 compose 文件缺失 | rebuild 先从 MinIO 拉配方再 `compose up`；仍无则 400。start 不能只靠缺失文件硬起。创建者路径仍先 MinIO 再决定是否 AI |
 | 端口占用 | 仍只发生在**创建者**写配方时；复用不改端口 |
 | 无 project_id | 按 git_url 确保 Project，失败则 env_ready fail-fast |

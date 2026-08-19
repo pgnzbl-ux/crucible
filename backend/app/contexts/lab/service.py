@@ -24,6 +24,46 @@ from .repository import LabRepository
 logger = logging.getLogger(__name__)
 
 RECLAIMABLE_LAB_STATUSES = frozenset({"failed", "expired", "destroyed"})
+_ALIGN_FROZEN_STATUSES = frozenset({"creating", "destroyed", "failed"})
+_ALIGN_TO_READY = frozenset({"expired", "stopped"})
+
+
+def container_runtime_kind(containers: list[dict[str, str]]) -> str:
+    """把 docker ps 摘要收成 none / running / exited。"""
+    if not containers:
+        return "none"
+    if any(_container_is_running(item.get("status", "")) for item in containers):
+        return "running"
+    return "exited"
+
+
+def _container_is_running(status: str) -> bool:
+    text = (status or "").strip().lower()
+    return text.startswith("up") or text.startswith("restarting")
+
+
+def next_aligned_lab_status(
+    db_status: str, runtime: str, *, live_task_count: int
+) -> str | None:
+    """按容器实际状态校正 labs.status；无需改动则返回 None。
+
+    creating / failed / destroyed 不校正（进行中或用户终态）。
+    容器已在跑而库仍是 expired/stopped → ready（复现拉起后管理页不再卡 expired）。
+    无 live 任务时才降级，避免 env_ready 重建窗口被误标过期。
+    """
+    if db_status in _ALIGN_FROZEN_STATUSES:
+        return None
+    if runtime == "running" and db_status in _ALIGN_TO_READY:
+        return "ready"
+    if live_task_count > 0:
+        return None
+    if runtime == "exited" and db_status == "ready":
+        return "stopped"
+    if runtime == "none" and db_status in {"ready", "stopped"}:
+        return "expired"
+    if runtime == "exited" and db_status == "expired":
+        return "stopped"
+    return None
 
 
 @dataclass(frozen=True)
@@ -264,6 +304,41 @@ class LabService:
         lab.last_seen_at = self._now()
         await self.session.commit()
 
+    async def align_runtime_status(self, lab_id: str) -> str:
+        """按 compose 实际容器回写 labs.status。复现拉起后管理页不再卡 expired。"""
+        from . import docker_ops
+
+        lab = await self._require_lab(lab_id)
+        live_count = len(await self.live_task_ids(lab.id))
+        try:
+            containers = await docker_ops.list_containers(lab.compose_project)
+        except Exception:  # noqa: BLE001
+            logger.warning("对齐 Lab 运行时状态失败 lab=%s", lab_id, exc_info=True)
+            return lab.status
+        if self._apply_aligned_status(lab, containers, live_task_count=live_count):
+            await self.session.commit()
+        return lab.status
+
+    def _apply_aligned_status(
+        self,
+        lab: Lab,
+        containers: list[dict[str, str]],
+        *,
+        live_task_count: int,
+    ) -> bool:
+        nxt = next_aligned_lab_status(
+            lab.status,
+            container_runtime_kind(containers),
+            live_task_count=live_task_count,
+        )
+        if nxt is None or nxt == lab.status:
+            return False
+        lab.status = nxt
+        if nxt == "ready":
+            lab.error_message = None
+            lab.last_seen_at = self._now()
+        return True
+
     async def mark_ready(
         self,
         lab_id: str,
@@ -329,7 +404,11 @@ class LabService:
         )
         grouped: dict[str, dict] = {}
         now = self._now()
+        aligned = False
         for lab, containers in zip(labs, containers_by_lab, strict=True):
+            live_count = len(live_map.get(lab.id, []))
+            if self._apply_aligned_status(lab, containers, live_task_count=live_count):
+                aligned = True
             group = grouped.get(lab.project_id)
             if group is None:
                 group = {
@@ -342,23 +421,29 @@ class LabService:
                 await self._management_dict(
                     lab,
                     now=now,
-                    live_task_count=len(live_map.get(lab.id, [])),
+                    live_task_count=live_count,
                     containers=containers,
                 )
             )
+        if aligned:
+            await self.session.commit()
         return list(grouped.values())
 
     async def get_detail(self, lab_id: str, *, owner_id: str) -> dict:
         from . import docker_ops
 
         lab = await self._require_owned_lab(lab_id, owner_id)
-        await self.touch(lab.id)
         live_ids = await self.live_task_ids(lab.id)
+        containers = await docker_ops.list_containers(lab.compose_project)
+        self._apply_aligned_status(
+            lab, containers, live_task_count=len(live_ids)
+        )
+        await self.touch(lab.id)
         return await self._management_dict(
             lab,
             now=self._now(),
             live_task_count=len(live_ids),
-            containers=await docker_ops.list_containers(lab.compose_project),
+            containers=containers,
         )
 
     async def stop_lab(self, lab_id: str, *, owner_id: str) -> str:
@@ -559,6 +644,8 @@ class LabService:
             raise ValueError(f"不支持的容器操作: {action}")
         await self._confirm_not_busy(lab.id)
         await operation(name, lab.compose_project)
+        containers = await docker_ops.list_containers(lab.compose_project)
+        self._apply_aligned_status(lab, containers, live_task_count=0)
         await self._touch_and_commit(lab)
         return lab.status
 
@@ -649,6 +736,19 @@ class LabService:
         for lab in result.scalars().all():
             if await self.live_task_ids(lab.id):
                 continue
+            if lab.status == "expired":
+                try:
+                    containers = await docker_ops.list_containers(lab.compose_project)
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "列举过期 Lab 容器失败(best-effort) lab=%s",
+                        lab.id,
+                        exc_info=True,
+                    )
+                    containers = []
+                if self._apply_aligned_status(lab, containers, live_task_count=0):
+                    await self.session.commit()
+                    continue
             try:
                 await docker_ops.compose_down(lab.compose_project)
             except Exception:  # noqa: BLE001

@@ -244,8 +244,8 @@ owner 校验：所有环境均要求 `report.owner_id` 匹配当前用户。报�
 
 | 方法 | 路径 | 行为 |
 |---|---|---|
-| GET | `/api/v1/labs` | 按 `project_id` 分组返回项目及其 labs；lab 含 status、commit_sha、target_url、ttl_remaining_seconds、live_task_count、容器摘要 |
-| GET | `/api/v1/labs/{id}` | 返回 lab 详情及所属 compose 项目的容器列表（name、status、ports、image），并刷新 TTL |
+| GET | `/api/v1/labs` | 按 `project_id` 分组返回项目及其 labs；lab 含 status、commit_sha、target_url、ttl_remaining_seconds、live_task_count、容器摘要。status 按 compose 实际容器校正并回写（expired/stopped 且容器在跑 → ready；无 live 任务时 ready 全停 → stopped、无容器 → expired） |
+| GET | `/api/v1/labs/{id}` | 返回 lab 详情及所属 compose 项目的容器列表（name、status、ports、image），按容器实际状态校正 status，并刷新 TTL |
 | POST | `/api/v1/labs/{id}/actions/stop` | `compose stop`，状态变为 `stopped` |
 | POST | `/api/v1/labs/{id}/actions/start` | `compose start`，状态变为 `ready` 并刷新 TTL |
 | POST | `/api/v1/labs/{id}/actions/rebuild` | 状态变为 `creating`，执行 `compose up -d --build`，成功为 `ready`、失败为 `failed`。本地缺 compose 时先从 MinIO 拉配方，仍无则 400。 |

@@ -23,7 +23,9 @@ class ReproduceNode:
         if ctx.lab_id:
             from app.contexts.lab.service import LabService
 
-            await LabService(ctx.db_session).touch(ctx.lab_id)
+            svc = LabService(ctx.db_session)
+            await svc.touch(ctx.lab_id)
+            await svc.align_runtime_status(ctx.lab_id)
 
         env = ctx.previous_outputs.get("env_ready") or {}
         raw_url = env.get("target_url")

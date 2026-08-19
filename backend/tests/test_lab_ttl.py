@@ -204,6 +204,31 @@ async def test_failed_lab_runtime_is_cleaned_by_sweeper(session):
 
 
 @pytest.mark.asyncio
+async def test_cleanup_promotes_expired_lab_with_running_containers(session):
+    from app.contexts.lab.models import Lab
+
+    svc, result = await ready_lab(session)
+    lab = await session.get(Lab, result.lab_id)
+    lab.status = "expired"
+    await session.commit()
+
+    with patch(
+        "app.contexts.lab.docker_ops.list_containers",
+        new_callable=AsyncMock,
+        return_value=[{"name": "web", "status": "Up 4 minutes", "ports": "", "image": "x"}],
+    ), patch(
+        "app.contexts.lab.docker_ops.compose_down",
+        new_callable=AsyncMock,
+    ) as down:
+        cleaned = await svc.cleanup_terminal_runtimes()
+
+    assert cleaned == []
+    down.assert_not_awaited()
+    await session.refresh(lab)
+    assert lab.status == "ready"
+
+
+@pytest.mark.asyncio
 async def test_ttl_down_failure_does_not_block_other_labs(session):
     from app.contexts.lab.models import Lab
 
