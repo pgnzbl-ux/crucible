@@ -233,16 +233,22 @@ def resolve_remote_ref(
     ref_type_hint: str | None = None,
     remote_sha_fn: RemoteShaFn | None = None,
 ) -> tuple[str, str, str | None]:
-    """解析远端 ref 真实类型与 commit SHA（branch 查不到时再试同名 tag）。"""
+    """解析远端 ref 真实类型与 commit SHA（branch 查不到时再试同名 tag）。
+
+    ref_type_hint 为 tag/commit 时直接查对应渠道，不调 remote_sha_fn（tag 不变性）。
+    remote_sha_fn 仅在自动推断（无 hint）的 branch 流程中用于测试注入。
+    """
     ref_type, ref_name = resolve_ref_type(ref_type_hint, ref)
     if ref_type == "commit":
         return ref_type, ref_name, ref_name.lower()
-    if remote_sha_fn is not None:
-        return ref_type, ref_name, remote_sha_fn(git_url, ref)
     if ref_type == "tag":
         return ref_type, ref_name, _ls_remote_tag_sha(git_url, ref_name)
+    # branch（含显式 hint 和自动推断）
+    if remote_sha_fn is not None:
+        return ref_type, ref_name, remote_sha_fn(git_url, ref)
     if ref_type == "branch":
         return ref_type, ref_name, _ls_remote_branch_sha(git_url, ref_name)
+    # 自动推断：branch 查不到则再试 tag
     branch_sha = _ls_remote_branch_sha(git_url, ref_name)
     if branch_sha:
         return "branch", ref_name, branch_sha
