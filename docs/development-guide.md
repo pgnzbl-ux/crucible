@@ -124,12 +124,23 @@ llm_providers(独立,后台管理) / credentials(凭据,明文存)
 Task 加 project_id(FK→projects) + verdict(6 档);Report 加 report_data 等结构化字段
 ```
 
-### 2.5 运行时两种模式
+### 2.5 部署形态（2026-08-19 定稿：路线 1 — 后端宿主机进程部署）
 
-| 模式 | 沙箱运行时 | 用途 |
-|------|-----------|------|
-| host（默认） | AgentRunnerManager 直连宿主 docker.sock | Windows 开发机 |
-| dind（生产） | 每任务嵌套 DinD + mTLS（2376） | 全 Docker 化部署，详见 README.md |
+**架构事实**：后端（API + Celery worker）直接编排宿主 Docker daemon——`docker.from_env()`（agent_runner.py）创建 agent-runner 沙箱、`subprocess docker compose`（lab/docker_ops.py）调度靶场、任务工作区靠「宿主路径 bind mount」进沙箱。三者共享**同一文件系统视图**这一前提。
+
+**因此后端不能容器化**（含挂 docker.sock 的 sidecar 形式）：一旦后端进容器，`host_workdir` 解析为容器内路径，宿主 daemon 视角找不到 → 每个任务拉起沙箱即失败；挂 socket 本身也违背 compose_policy 禁止 socket 挂载的安全模型。
+
+| 组件 | 部署方式 |
+|------|---------|
+| PostgreSQL / Redis / MinIO | 容器（`infrastructure/docker-compose.yml`） |
+| **后端 API + Celery worker** | **宿主机进程（systemd 托管）** |
+| agent-runner 沙箱 | 宿主 daemon 按需创建/销毁（后端调度） |
+| Lab 靶场 compose | 宿主 daemon 按需创建/销毁（后端调度） |
+| 前端 | 静态构建产物，Nginx 托管 |
+
+部署模板：`infrastructure/deploy/`（systemd unit + Nginx + 操作手册）。
+
+> 历史注：曾规划「嵌套 DinD + mTLS」的全容器化方案（每任务独立 dockerd），已放弃——复杂度高且与 bind-mount 语义天然冲突。未来多机扩展走「runner-node agent 服务化」（每机轻量 daemon，后端 HTTP 派活），另立项。
 
 ---
 
@@ -156,6 +167,7 @@ Task 加 project_id(FK→projects) + verdict(6 档);Report 加 report_data 等�
 | **Agent 潜问题修复第一批（止血+安全）** | ✅ | 2026-08-19：(4) Celery `task_time_limit` 从 run 硬顶推导（`agent_run_hard_timeout_seconds+300`），不再绑单容器 1800s 全链必 SIGKILL；(9a) 失败保留 host_workdir 前删 `.secrets/`；(9b) compose_policy 拒绝 `.secrets` bind mount（AI 一行 volumes 不能把凭据挂进靶场）；(7) 缓存配方命中路径 `_upload_then_mark_ready` 补传 repo；(8) AgentRunnerManager 懒连接 Docker（daemon 不可达不再炸 import）；(3) screenshots `/workspace/` 容器前缀映射回宿主 workdir；(2) env_ready 走 `validate=False`——排障环自带逐项校验+回喂，平台层先斩后奏曾使回喂分支永不可达 |
 | **AI 节点形状回喂环（P0#1）** | ✅ | 2026-08-19：`run_ai_node_with_shape_retry`（ai_runner）——audit/reproduce/report 的 output 形状校验失败不再一次判死，把 `previous_error`+`previous_submit_summary` 拼进 input_json 重跑（上限 2 轮重试）；执行层失败（no_submit/SIGKILL/超时）仍立即抛；每轮失败留 `.node-failure` 快照；三个 SKILL.md 增补回喂条款（判定结论不变只修形状） |
 | **容器执行边界加固（P0#5/6）** | ✅ | 2026-08-19：`run_with_streaming` 超时路径三处止血——(a) 超时 stop 失败降级 kill、双双失败写 `summary.stop_failed`（曾 `except:pass` 静默吞 → 容器不停、流不 EOF、worker 无限挂死无线索）；(b) `wait()` 带兜底宽限（超时场景 timeout=30s，ReadTimeout 按 137 收尾，不再无界阻塞）；(c) 超时瞬间 agent 已正常退出（exit 0）保留真实退出码不丢产物（边界竞态）；docker 客户端 read timeout 对齐 `agent_runner_timeout_seconds+120s`（默认 60s 会在 agent 静默思考 >60s 时腰斩 follow 流） |
+| **env_ready 中危修复批次** | ✅ | 2026-08-19：(1) 探活/publish 支持 https——容器口 443/8443/9443 推断 scheme，`health_check` 返回 (ok, port, scheme)，`publish_target_url(scheme=)` 透传（HTTPS 入口靶场不再 5 轮全死；自签证书放宽校验）；(2) reuse/start 复用前快探 `_reused_lab_alive`（DB ready ≠ 应用活着），死靶场 mark_failed→reclaim→缓存配方重建，不烧 AI；(3) 缓存路径凭据补查失败先 `docker_compose_down` 再抛（防 DB=failed/容器在跑的端口泄漏）；(4) `upload_recipe` 返回 bool，MinIO 故障发警告事件不再静默吞；(7) `_create_lab` 外层异常本体优先于陈旧 last_error |
 | LLM 后台配置（新增） | ✅ | settings context（Fernet 加密 + 测试连接 + 种子迁移） |
 | DeepSeek 对接 | ✅ | ClaudeSdkAdapter.build_runner_env() 注入 ANTHROPIC_* env(零落盘,容器销毁消失) |
 | 前端 pages/ shared/ 分层 | ✅ | AppLayout + 4 页面 |
@@ -211,7 +223,7 @@ Task 加 project_id(FK→projects) + verdict(6 档);Report 加 report_data 等�
 | 12 | **OpenAPI → TS 类型生成** | 后端导出 OpenAPI schema，前端自动生成 types.ts（当前手动维护 api.ts 类型） |
 | 13 | **OpenTelemetry + Sentry** | config 已有 sentry_dsn 字段，接入初始化；OTel 追踪 |
 | 14 | **CI/CD（GitHub Actions）** | 后端 pytest + ruff、前端 tsc + build、构建镜像 |
-| 15 | **生产部署实现（嵌套 DinD + mTLS）** | README 已设计完整，落地 `DindManager` + `core/docker_tls.py`（CA 签发），`SANDBOX_RUNTIME=dind` |
+| 15 | **生产部署实现（宿主机 systemd + Nginx）** | 路线 1 定稿（2026-08-19）：后端宿主机进程部署，DinD 方案放弃（与 bind-mount 语义冲突）。模板已落地 `infrastructure/deploy/`（systemd unit ×3 + Nginx + 操作手册），待真机验证 |
 | 16 | **PostgreSQL 生产验证** | asyncpg 连接 + Alembic 迁移在 PG 上跑通 |
 | 17 | **前端 TaskDetailPage / ReportPage 独立路由** ✅ | 详情已是独立路由，不再用 Drawer |
 
@@ -254,7 +266,13 @@ P0 全部完成。每个 P1 完成后跑一遍全链路冒烟（任务创建 →
 - 创建/重试任务必须先 commit 再投递 Celery；投递失败把 Task/Run 标 failed 并返回 503。`retry?from_node=` 只允许 env_ready/audit/reproduce/report，前置未完成则 400
 - 生产环境（`ENVIRONMENT=production`）强制校验：必须 AUTH_SECRET + 禁止 SQLite（config validator）
 
-### 5.4 踩坑记录（务必先读）
+### 5.4 部署红线（2026-08-19 定稿）
+
+- **后端（API + Celery worker）禁止容器化部署**——`docker.from_env()` 沙箱编排、`subprocess docker compose` 靶场调度、`host_workdir` bind mount 三者都依赖「后端与宿主 daemon 同一文件系统视图」。挂 docker.sock 的 sidecar 同样禁止（路径语义错乱 + 违背 socket 挂载禁令）
+- 生产部署形态：基础设施容器（compose）+ 后端宿主机进程（systemd：`crucible-api` / `crucible-worker`）+ 前端 Nginx 静态托管
+- 多机扩展不靠容器化后端，走「runner-node agent 服务化」路线（未来立项）
+
+### 5.5 踩坑记录（务必先读）
 
 | 坑 | 结论 |
 |----|------|

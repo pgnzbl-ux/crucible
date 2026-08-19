@@ -105,11 +105,13 @@ class LabService:
         transport_shape: dict,
         initial_creds: dict,
         started_containers: list | None = None,
-    ) -> None:
+    ) -> bool:
+        """打包 .vuln-env 上传 MinIO。失败吞错返回 False（靶场已就绪不该连坐），
+        调用方据此发事件告知用户「本次未缓存，rebuild 需重跑 AI」。"""
         vuln_env = Path(lab_workdir) / ".vuln-env"
         if not vuln_env.is_dir():
             logger.warning("上传配方跳过：缺少 .vuln-env 目录 workdir=%s", lab_workdir)
-            return
+            return False
         object_key = recipe_object_key(owner_id, project_id, commit_sha)
         meta = {
             "compose_path": compose_path,
@@ -124,8 +126,10 @@ class LabService:
             self.recipe_store.upload(object_key, archive_path)
         except Exception:
             logger.error("上传配方失败 key=%s", object_key, exc_info=True)
+            return False
         finally:
             Path(archive_path).unlink(missing_ok=True)
+        return True
 
     @staticmethod
     def _commit_extracted_recipe(extract_dir: str, dest_workdir: str) -> None:

@@ -218,6 +218,20 @@ def web_host_ports(mappings: list[tuple[int, int]]) -> list[int]:
     return ports
 
 
+def web_container_ports(mappings: list[tuple[int, int]]) -> list[int]:
+    """与 web_host_ports 同序的容器侧端口（供 scheme 推断）。"""
+    seen: set[int] = set()
+    ports: list[int] = []
+    for host_port, container_port in mappings:
+        if container_port in _SIDECAR_CONTAINER_PORTS:
+            continue
+        if host_port in seen:
+            continue
+        seen.add(host_port)
+        ports.append(container_port)
+    return ports
+
+
 _SHORT_HOST_IN_LINE = re.compile(
     r"(?:(?:\d{1,3}\.){3}\d{1,3}:)?(?P<host>\d+):\d+(?:/(?:tcp|udp))?",
     re.I,
@@ -324,6 +338,21 @@ def load_web_host_ports(compose_abs: str) -> list[int]:
     except OSError:
         return []
     return web_host_ports(parse_compose_port_mappings(text))
+
+
+def load_web_container_ports(compose_abs: str) -> list[int]:
+    """与 load_web_host_ports 同序的容器侧端口（host_port 去重后对位）。
+
+    用于探活推断入口 scheme（443/8443 → https）。容器侧信息在去重时可能
+    丢失（同一 host 口多个 target），此时对位退化为 None → http，可接受。
+    """
+    from pathlib import Path
+
+    try:
+        text = Path(compose_abs).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return web_container_ports(parse_compose_port_mappings(text))
 
 
 _PUBLISHED_HOST_PORT = re.compile(r"(\d+)->")
@@ -500,13 +529,24 @@ async def docker_compose_up(
 
 
 def _http_alive(url: str, timeout: float = 5) -> bool:
-    """探活：能连上且不是 5xx 即视为靶场起来了（401/404 也算）。"""
+    """探活：能连上且不是 5xx 即视为靶场起来了（401/404 也算）。
+
+    https URL 直接探测；自签证书场景放宽证书校验（靶场探活只关心
+    "服务应答了"，不校验身份）。
+    """
+    import ssl
     import urllib.error
     import urllib.request
 
+    ctx = None
+    if url.startswith("https://"):
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
     try:
         req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
             code = getattr(resp, "status", 200)
             return 200 <= int(code) < 500
     except urllib.error.HTTPError as e:
@@ -515,28 +555,50 @@ def _http_alive(url: str, timeout: float = 5) -> bool:
         return False
 
 
-async def health_check(ports: list[int] | None, extra_ports: list[int] | None = None) -> tuple[bool, int | None]:
-    """只对 compose 映射到宿主机的 Web 端口探活，不扫本机 80/8080 等常用口。"""
+_HTTPS_CONTAINER_PORTS = {443, 8443, 9443}
+
+
+def _probe_scheme_for(container_port: int | None) -> str:
+    """容器侧端口暗示入口协议：443/8443/9443 → https，其余 http。"""
+    if container_port in _HTTPS_CONTAINER_PORTS:
+        return "https"
+    return "http"
+
+
+async def health_check(
+    ports: list[int] | None,
+    extra_ports: list[int] | None = None,
+    container_ports: list[int] | None = None,
+) -> tuple[bool, int | None, str]:
+    """只对 compose 映射到宿主机的 Web 端口探活，不扫本机 80/8080 等常用口。
+
+    container_ports 与 ports 等长对位（compose 映射的容器侧口），用于推断
+    入口 scheme：443/8443 → https（否则 https 靶场 5 轮全死）。返回
+    (ok, live_port, scheme)。
+    """
     ordered: list[int] = []
+    schemes: list[str] = []
     seen: set[int] = set()
-    for p in list(ports or []) + list(extra_ports or []):
+    cps = list(container_ports or [])
+    for idx, p in enumerate(list(ports or []) + list(extra_ports or [])):
         port = int(p)
         if port in seen:
             continue
         seen.add(port)
         ordered.append(port)
+        schemes.append(_probe_scheme_for(cps[idx] if idx < len(cps) else None))
     if not ordered:
-        return False, None
+        return False, None, "http"
 
     primary = ordered[0]
     for _ in range(HEALTH_RETRIES):
-        if _http_alive(f"http://127.0.0.1:{primary}"):
-            return True, primary
+        if _http_alive(f"{schemes[0]}://127.0.0.1:{primary}"):
+            return True, primary, schemes[0]
         await asyncio.sleep(HEALTH_RETRY_SECONDS)
-    for p in ordered[1:]:
-        if _http_alive(f"http://127.0.0.1:{p}"):
-            return True, p
-    return False, None
+    for p, scheme in zip(ordered[1:], schemes[1:], strict=False):
+        if _http_alive(f"{scheme}://127.0.0.1:{p}"):
+            return True, p, scheme
+    return False, None, "http"
 
 
 def _emit(ctx: NodeContext, message: str) -> None:
@@ -693,6 +755,25 @@ def _reused_output(
     }
 
 
+def _reused_lab_alive(result: Any) -> bool:
+    """复用前快探：DB 说 ready 不代表应用进程还活着。
+
+    容器在跑但应用崩溃死锁时，reproduce 会拿死靶标白烧一整个节点。
+    单次探测不重试（快失败，死靶场降级重建的成本远低于白跑 reproduce）。
+    target_url host 可能是对外 IP，本机视角换成 127.0.0.1 探。
+    """
+    from urllib.parse import urlparse
+
+    raw = str(result.target_url or "")
+    if not raw:
+        return False
+    parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+    if not parsed.port:
+        return False
+    scheme = parsed.scheme or "http"
+    return _http_alive(f"{scheme}://127.0.0.1:{parsed.port}")
+
+
 async def _lookup_initial_creds(
     ctx: NodeContext,
     *,
@@ -813,7 +894,7 @@ async def _upload_then_mark_ready(
         str(Path(ctx.host_workdir) / repo_name) if repo_name else ctx.host_workdir
     )
     try:
-        await svc.upload_recipe(
+        uploaded = await svc.upload_recipe(
             owner_id=ctx.owner_id,
             project_id=ctx.project_id or "",
             commit_sha=commit_sha,
@@ -823,6 +904,12 @@ async def _upload_then_mark_ready(
             initial_creds=output["initial_creds"],
             started_containers=output.get("started_containers") or [],
         )
+        if uploaded is False:
+            _emit(
+                ctx,
+                "警告：配方缓存上传失败（MinIO 异常），靶场仍可用；"
+                "rebuild 时将无法复用本配方",
+            )
         await svc.mark_ready(
             result.lab_id,
             target_url=output["target_url"],
@@ -919,7 +1006,9 @@ async def _try_cached_recipe(
         f"正在探活 127.0.0.1:{web_ports[0]}"
         + (f" 等 {len(web_ports)} 个映射口" if len(web_ports) > 1 else ""),
     )
-    ok, live_port = await health_check(web_ports)
+    ok, live_port, scheme = await health_check(
+        web_ports, container_ports=load_web_container_ports(str(compose_file))
+    )
     if not ok or live_port is None:
         logs = await collect_compose_logs(
             ctx.host_workdir, compose_rel, repo_name, lab_id=result.lab_id
@@ -935,7 +1024,7 @@ async def _try_cached_recipe(
         return None, last_error
 
     advertise = host_advertise_ip()
-    target_url = publish_target_url(live_port, advertise)
+    target_url = publish_target_url(live_port, advertise, scheme=scheme)
     output = {
         "target_url": target_url,
         "compose_path": compose_rel,
@@ -951,11 +1040,19 @@ async def _try_cached_recipe(
         output.get("started_containers"),
     )
     if not output["initial_creds"]:
-        output["initial_creds"] = await _lookup_initial_creds(
-            ctx,
-            target_url=target_url,
-            compose_path=compose_rel,
-        )
+        # 凭据补查失败必须先拆刚 up 的靶场再抛：否则 DB=failed/容器在跑，
+        # 端口泄漏且孤儿 compose 阻塞后续轮次（该分支随 P0#2 修复变可达）
+        try:
+            output["initial_creds"] = await _lookup_initial_creds(
+                ctx,
+                target_url=target_url,
+                compose_path=compose_rel,
+            )
+        except Exception:
+            await docker_compose_down(
+                ctx.host_workdir, compose_rel, repo_name, lab_id=result.lab_id
+            )
+            raise
     await _upload_then_mark_ready(
         ctx,
         svc,
@@ -1011,6 +1108,9 @@ async def _start_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
         _emit(ctx, "靶场容器已不存在，改为重新创建")
         await svc.reclaim_gone_runtime(result.lab_id, ctx.task_id)
         return await _create_lab(ctx, result)
+    rebuilt = await _reuse_or_rebuild_dead_lab(ctx, svc, result)
+    if rebuilt is not None:
+        return rebuilt
     creds = await _backfill_reused_initial_creds(ctx, svc, result)
     if result.initial_creds:
         await svc.mark_ready(
@@ -1021,6 +1121,21 @@ async def _start_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
             initial_creds=creds,
         )
     return _reused_output(result, initial_creds=creds)
+
+
+async def _reuse_or_rebuild_dead_lab(
+    ctx: NodeContext, svc: Any, result: Any
+) -> dict[str, Any] | None:
+    """复用前快探；死靶场标 failed → reclaim → 缓存配方重建（不烧 AI）。
+
+    返回 None 表示靶场活着，继续复用流程。
+    """
+    if _reused_lab_alive(result):
+        return None
+    _emit(ctx, "复用靶场探活失败（应用可能已死），降级重建")
+    await svc.mark_failed(result.lab_id, "复用前探活失败：应用不响应")
+    await svc.reclaim_gone_runtime(result.lab_id, ctx.task_id)
+    return await _create_lab(ctx, result)
 
 
 async def _bump_node_attempt(ctx: NodeContext, attempt: int) -> None:
@@ -1153,7 +1268,9 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
             _emit(ctx, f"正在探活 127.0.0.1:{web_ports[0]}" + (
                 f" 等 {len(web_ports)} 个映射口" if len(web_ports) > 1 else ""
             ))
-            ok, live_port = await health_check(web_ports)
+            ok, live_port, scheme = await health_check(
+                web_ports, container_ports=load_web_container_ports(str(abs_compose))
+            )
             if not ok or live_port is None:
                 logs = await collect_compose_logs(
                     ctx.host_workdir, compose_rel, repo, lab_id=result.lab_id
@@ -1171,7 +1288,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 continue
 
             advertise = host_advertise_ip()
-            target_url = publish_target_url(live_port, advertise)
+            target_url = publish_target_url(live_port, advertise, scheme=scheme)
             raw_url = recipe.get("target_url") or ""
             if raw_url:
                 from urllib.parse import urlparse
@@ -1208,7 +1325,10 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
 
         raise RuntimeError(f"靶场搭建 {MAX_ATTEMPTS} 轮全失败: {(last_error or 'unknown')[:500]}")
     except Exception as e:
-        await svc.mark_failed(result.lab_id, (last_error or str(e))[:500])
+        # 异常本体优先：last_error 是上一轮排障的旧账，拿它掩盖本轮异常
+        # 会误导排障（attempt≥2 的 AI 异常曾被旧错误顶替）
+        detail = str(e).strip() or last_error or "unknown"
+        await svc.mark_failed(result.lab_id, detail[:500])
         raise
 
 
@@ -1260,6 +1380,9 @@ class EnvReadyNode:
         if result.role == "reuse":
             _emit(ctx, f"复用靶场：{result.target_url}")
             svc = LabService(ctx.db_session)
+            rebuilt = await _reuse_or_rebuild_dead_lab(ctx, svc, result)
+            if rebuilt is not None:
+                return rebuilt
             creds = await _backfill_reused_initial_creds(ctx, svc, result)
             return _reused_output(result, initial_creds=creds)
         if result.role == "start":

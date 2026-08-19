@@ -109,7 +109,7 @@ async def test_env_ready_first_attempt_success(tmp_path):
             "http://localhost:8000",
         )
         mock_up.return_value = (True, "")
-        mock_hc.return_value = (True, 8000)
+        mock_hc.return_value = (True, 8000, "http")
 
         node = mod.EnvReadyNode()
         out = await node.execute(ctx)
@@ -147,7 +147,7 @@ async def test_env_ready_retry_until_success(tmp_path):
             (True, ""),
         ]
         mock_logs.return_value = ""
-        mock_hc.return_value = (True, 8000)
+        mock_hc.return_value = (True, 8000, "http")
 
         node = mod.EnvReadyNode()
         out = await node.execute(ctx)
@@ -198,7 +198,7 @@ async def test_env_ready_health_fail_retries_ai_with_logs(tmp_path):
         ]
         mock_up.return_value = (True, "")
         mock_logs.return_value = "app exited 1"
-        mock_hc.side_effect = [(False, None), (True, 3001)]
+        mock_hc.side_effect = [(False, None, "http"), (True, 3001, "http")]
 
         out = await mod.EnvReadyNode().execute(ctx)
 
@@ -254,10 +254,67 @@ async def test_health_check_does_not_scan_host_common_ports():
         patch.object(mod, "HEALTH_RETRIES", 1),
         patch.object(mod, "HEALTH_RETRY_SECONDS", 0),
     ):
-        ok, port = await mod.health_check([3001])
+        ok, port, scheme = await mod.health_check([3001])
     assert ok is False
     assert port is None
+    assert scheme == "http"
     assert seen == ["http://127.0.0.1:3001"]
+
+
+@pytest.mark.asyncio
+async def test_health_check_probes_https_for_tls_container_port():
+    from app.contexts.agent.nodes import env_ready as mod
+
+    seen: list[str] = []
+
+    def fake_alive(url: str, timeout: float = 5) -> bool:
+        seen.append(url)
+        return "https" in url
+
+    with (
+        patch.object(mod, "_http_alive", fake_alive),
+        patch.object(mod, "HEALTH_RETRIES", 1),
+        patch.object(mod, "HEALTH_RETRY_SECONDS", 0),
+    ):
+        ok, port, scheme = await mod.health_check(
+            [8443, 3001], container_ports=[8443, 3000]
+        )
+    assert ok is True
+    assert port == 8443
+    assert scheme == "https"
+    assert seen == ["https://127.0.0.1:8443"]
+
+
+def test_web_container_ports_keeps_alignment_with_host_ports():
+    from app.contexts.agent.nodes.env_ready import web_container_ports, web_host_ports
+
+    mappings = [(3001, 3000), (8443, 8443), (3306, 3306), (3001, 3000)]
+    assert web_host_ports(mappings) == [3001, 8443]
+    assert web_container_ports(mappings) == [3000, 8443]
+
+
+def test_publish_target_url_supports_https_scheme():
+    from app.contexts.agent.target_url import publish_target_url
+
+    assert publish_target_url(8443, advertise_ip="192.168.1.8", scheme="https") == (
+        "https://192.168.1.8:8443"
+    )
+    assert publish_target_url(3001, advertise_ip="192.168.1.8") == "http://192.168.1.8:3001"
+
+
+def test_reused_lab_alive_uses_target_url_scheme():
+    from types import SimpleNamespace
+
+    from app.contexts.agent.nodes.env_ready import _reused_lab_alive
+
+    with patch(
+        "app.contexts.agent.nodes.env_ready._http_alive", return_value=True
+    ) as alive:
+        ok = _reused_lab_alive(
+            SimpleNamespace(target_url="https://10.0.0.8:8443")
+        )
+    assert ok is True
+    assert alive.call_args.args[0] == "https://127.0.0.1:8443"
 
 
 def test_health_check_budget_covers_slow_jvm():
@@ -323,7 +380,7 @@ async def test_env_ready_url_uses_mapped_host_port_not_container_port(tmp_path):
             "http://localhost:3000",
         )
         mock_up.return_value = (True, "")
-        mock_hc.return_value = (True, 3001)
+        mock_hc.return_value = (True, 3001, "http")
         out = await mod.EnvReadyNode().execute(ctx)
     assert mock_hc.await_args.args[0] == [3001]
     assert out["target_url"] == "http://10.0.0.8:3001"
@@ -537,7 +594,7 @@ async def test_env_ready_retry_bumps_attempt_per_round(tmp_path):
         ]
         mock_up.side_effect = [(False, "fail"), (True, "")]
         mock_logs.return_value = ""
-        mock_hc.return_value = (True, 8000)
+        mock_hc.return_value = (True, 8000, "http")
 
         out = await mod.EnvReadyNode().execute(ctx)
 

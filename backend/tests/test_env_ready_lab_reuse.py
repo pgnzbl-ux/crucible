@@ -65,6 +65,7 @@ async def test_env_ready_backfills_missing_creds_without_compose_up(tmp_path):
     )
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
+         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=True), \
          patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
          patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up:
         gs.return_value.claude_agent_sdk_enabled = True
@@ -98,6 +99,7 @@ async def test_env_ready_reuses_existing_creds_without_ai_or_compose_up(tmp_path
     ctx = _ctx(tmp_path)
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
+         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=True), \
          patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
          patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up:
         gs.return_value.claude_agent_sdk_enabled = True
@@ -126,6 +128,7 @@ async def test_env_ready_waits_then_reuses(tmp_path):
     ctx = _ctx(tmp_path)
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
+         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=True), \
          patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
          patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
          patch("app.contexts.agent.nodes.env_ready.asyncio.sleep", new_callable=AsyncMock) as sleep:
@@ -159,6 +162,7 @@ async def test_env_ready_create_compose_up_uses_lab_id(tmp_path):
     ctx = _ctx(tmp_path)
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
+         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=True), \
          patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
          patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
          patch("app.contexts.agent.nodes.env_ready.health_check", new_callable=AsyncMock) as hc, \
@@ -172,7 +176,7 @@ async def test_env_ready_create_compose_up_uses_lab_id(tmp_path):
         LS.return_value.mark_failed = AsyncMock()
         ai.return_value = _ai_recipe()
         up.return_value = (True, "")
-        hc.return_value = (True, 3001)
+        hc.return_value = (True, 3001, "http")
         out = await EnvReadyNode().execute(ctx)
     assert up.await_args.kwargs["lab_id"] == "lab-create"
     assert up.await_args.args[1] == str(tmp_path)
@@ -205,6 +209,7 @@ async def test_env_ready_upload_failure_cleans_started_compose(tmp_path):
     ctx = _ctx(tmp_path)
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
+         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=True), \
          patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
          patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
          patch("app.contexts.agent.nodes.env_ready.docker_compose_down", new_callable=AsyncMock) as down, \
@@ -219,7 +224,7 @@ async def test_env_ready_upload_failure_cleans_started_compose(tmp_path):
         LS.return_value.mark_failed = AsyncMock()
         ai.return_value = _ai_recipe()
         up.return_value = (True, "")
-        hc.return_value = (True, 3001)
+        hc.return_value = (True, 3001, "http")
 
         with pytest.raises(RuntimeError, match="minio down"):
             await EnvReadyNode().execute(ctx)
@@ -251,6 +256,7 @@ async def test_env_ready_create_strips_workspace_compose_path(tmp_path):
     ctx = _ctx(tmp_path)
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
+         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=True), \
          patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
          patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
          patch("app.contexts.agent.nodes.env_ready.health_check", new_callable=AsyncMock) as hc, \
@@ -266,7 +272,7 @@ async def test_env_ready_create_strips_workspace_compose_path(tmp_path):
             compose_path="/workspace/b/.vuln-env/docker-compose.yml",
         )
         up.return_value = (True, "")
-        hc.return_value = (True, 3001)
+        hc.return_value = (True, 3001, "http")
         await EnvReadyNode().execute(ctx)
     assert up.await_args.args[0] == ".vuln-env/docker-compose.yml"
     assert up.await_args.args[1] == str(tmp_path)
@@ -289,6 +295,7 @@ async def test_env_ready_start_stopped_lab_without_ai(tmp_path):
     ctx = _ctx(tmp_path)
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
+         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=True), \
          patch("app.contexts.lab.docker_ops.compose_start", new_callable=AsyncMock) as start, \
          patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
          patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up:
@@ -342,7 +349,7 @@ async def test_env_ready_start_gone_runtime_falls_back_to_create(tmp_path):
         start.return_value = False
         ai.return_value = _ai_recipe()
         up.return_value = (True, "")
-        hc.return_value = (True, 3001)
+        hc.return_value = (True, 3001, "http")
         out = await EnvReadyNode().execute(ctx)
     start.assert_awaited_once_with("crucible-lab-lab1")
     listed.assert_awaited_with("crucible-lab-lab1")
@@ -414,6 +421,7 @@ async def test_create_recipe_hit_backfills_creds_without_rebuilding(tmp_path):
     }
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
+         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=True), \
          patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
          patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
          patch("app.contexts.agent.nodes.env_ready.health_check", new_callable=AsyncMock) as hc, \
@@ -431,7 +439,7 @@ async def test_create_recipe_hit_backfills_creds_without_rebuilding(tmp_path):
             "initial_creds": {"username": "admin", "password": "admin123"},
         }
         up.return_value = (True, "")
-        hc.return_value = (True, 3001)
+        hc.return_value = (True, 3001, "http")
         out = await EnvReadyNode().execute(ctx)
     ai.assert_awaited_once()
     assert ai.await_args.kwargs["credential_lookup_only"] is True
@@ -469,6 +477,7 @@ async def test_create_recipe_uses_live_container_names_not_ai_guess(tmp_path):
     }
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
+         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=True), \
          patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
          patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
          patch("app.contexts.agent.nodes.env_ready.health_check", new_callable=AsyncMock) as hc, \
@@ -486,7 +495,7 @@ async def test_create_recipe_uses_live_container_names_not_ai_guess(tmp_path):
         LS.return_value.mark_ready = AsyncMock()
         LS.return_value.mark_failed = AsyncMock()
         up.return_value = (True, "")
-        hc.return_value = (True, 3001)
+        hc.return_value = (True, 3001, "http")
         out = await EnvReadyNode().execute(ctx)
     ai.assert_not_awaited()
     assert out["started_containers"] == ["crucible-lab-lab1-web-1"]
@@ -521,6 +530,7 @@ async def test_create_recipe_hit_up_fail_goes_ai_once(tmp_path):
     }
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
+         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=True), \
          patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
          patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
          patch("app.contexts.agent.nodes.env_ready.docker_compose_down", new_callable=AsyncMock), \
@@ -535,7 +545,7 @@ async def test_create_recipe_hit_up_fail_goes_ai_once(tmp_path):
         LS.return_value.mark_ready = AsyncMock()
         LS.return_value.mark_failed = AsyncMock()
         up.side_effect = [(False, "build failed"), (True, "")]
-        hc.return_value = (True, 3001)
+        hc.return_value = (True, 3001, "http")
         ai.return_value = _ai_recipe()
         await EnvReadyNode().execute(ctx)
     assert up.await_count == 2
@@ -568,6 +578,7 @@ async def test_create_recipe_hit_docker_unavailable_marks_failed_with_daemon_err
     daemon_err = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
+         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=True), \
          patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
          patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
          patch("app.contexts.agent.nodes.env_ready.list_docker_occupied_host_ports", return_value=set()):
@@ -585,3 +596,126 @@ async def test_create_recipe_hit_docker_unavailable_marks_failed_with_daemon_err
     reason = LS.return_value.mark_failed.await_args.args[1]
     assert "Cannot connect to the Docker daemon" in reason
     assert reason != "unknown"
+
+
+@pytest.mark.asyncio
+async def test_reuse_dead_lab_degrades_to_rebuild_without_ai(tmp_path):
+    """快探失败 → mark_failed + reclaim + 缓存配方重建，不烧 AI。"""
+    lab = SimpleNamespace(
+        lab_id="lab1", role="reuse", status="ready", reused=True,
+        workdir=str(tmp_path), compose_project="crucible-lab-lab1",
+        target_url="http://10.0.0.8:3001", compose_path=".vuln-env/docker-compose.yml",
+        transport_shape={"protocol": "http"}, initial_creds={"note": "x"},
+    )
+    ctx = _ctx(tmp_path)
+    vuln_env = tmp_path / ".vuln-env"
+    vuln_env.mkdir(exist_ok=True)
+    (vuln_env / "docker-compose.yml").write_text(
+        "services:\n  web:\n    ports:\n      - '3001:3000'\n", encoding="utf-8"
+    )
+    with patch("app.core.config.get_settings") as gs, \
+         patch("app.contexts.lab.service.LabService") as LS, \
+         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=False), \
+         patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
+         patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
+         patch("app.contexts.agent.nodes.env_ready.health_check", new_callable=AsyncMock) as hc, \
+         patch("app.contexts.agent.nodes.env_ready.host_advertise_ip", return_value="10.0.0.8"), \
+         patch("app.contexts.agent.nodes.env_ready.list_docker_occupied_host_ports", return_value=set()):
+        gs.return_value.claude_agent_sdk_enabled = True
+        LS.return_value.acquire = AsyncMock(return_value=lab)
+        LS.return_value.download_recipe = AsyncMock(return_value=None)
+        LS.return_value.upload_recipe = AsyncMock()
+        LS.return_value.mark_ready = AsyncMock()
+        LS.return_value.mark_failed = AsyncMock()
+        LS.return_value.reclaim_gone_runtime = AsyncMock()
+        ai.return_value = _ai_recipe()
+        up.return_value = (True, "")
+        hc.return_value = (True, 3001, "http")
+        out = await EnvReadyNode().execute(ctx)
+    LS.return_value.mark_failed.assert_awaited_once()
+    LS.return_value.reclaim_gone_runtime.assert_awaited_once()
+    # 重建路径走缓存 miss → AI 一轮
+    ai.assert_awaited_once()
+    assert out["target_url"] == "http://10.0.0.8:3001"
+
+
+@pytest.mark.asyncio
+async def test_cached_recipe_cred_lookup_failure_tears_down_compose(tmp_path):
+    """缓存路径凭据补查失败必须 down 刚 up 的 compose 再抛错。"""
+    lab = SimpleNamespace(
+        lab_id="lab1", role="create", status="creating", reused=False,
+        workdir=str(tmp_path), compose_project="crucible-lab-lab1",
+        target_url=None, compose_path=None,
+        transport_shape={}, initial_creds={},
+    )
+    hit = {
+        "compose_path": ".vuln-env/docker-compose.yml",
+        "transport_shape": {"protocol": "http"},
+        "initial_creds": {},
+        "started_containers": [],
+    }
+    repo_env = tmp_path / "b" / ".vuln-env"
+    repo_env.mkdir(parents=True)
+    (repo_env / "docker-compose.yml").write_text(
+        "services:\n  web:\n    ports:\n      - '3001:3000'\n", encoding="utf-8"
+    )
+    ctx = _ctx(tmp_path)
+    with patch("app.core.config.get_settings") as gs, \
+         patch("app.contexts.lab.service.LabService") as LS, \
+         patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
+         patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
+         patch("app.contexts.agent.nodes.env_ready.docker_compose_down", new_callable=AsyncMock) as down, \
+         patch("app.contexts.agent.nodes.env_ready.health_check", new_callable=AsyncMock) as hc, \
+         patch("app.contexts.agent.nodes.env_ready.host_advertise_ip", return_value="10.0.0.8"), \
+         patch("app.contexts.agent.nodes.env_ready.list_docker_occupied_host_ports", return_value=set()):
+        gs.return_value.claude_agent_sdk_enabled = True
+        LS.return_value.acquire = AsyncMock(return_value=lab)
+        LS.return_value.download_recipe = AsyncMock(return_value=hit)
+        LS.return_value.upload_recipe = AsyncMock()
+        LS.return_value.mark_ready = AsyncMock()
+        LS.return_value.mark_failed = AsyncMock()
+        # 探活通过后凭据补查炸掉
+        up.return_value = (True, "")
+        hc.return_value = (True, 3001, "http")
+        ai.side_effect = RuntimeError("AI 补查凭据失败")
+        with pytest.raises(RuntimeError, match="AI 补查凭据失败"):
+            await EnvReadyNode().execute(ctx)
+    down.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_upload_recipe_failure_emits_warning_event(tmp_path):
+    """upload_recipe 失败返回 False → 事件流提示未缓存，但不连坐失败。"""
+    lab = SimpleNamespace(
+        lab_id="lab1", role="create", status="creating", reused=False,
+        workdir=str(tmp_path), compose_project="crucible-lab-lab1",
+        target_url=None, compose_path=None,
+        transport_shape={}, initial_creds={},
+    )
+    (tmp_path / ".vuln-env").mkdir()
+    (tmp_path / ".vuln-env" / "docker-compose.yml").write_text(
+        "services:\n  web:\n    ports:\n      - '3001:3000'\n", encoding="utf-8"
+    )
+    ctx = _ctx(tmp_path)
+    events: list[dict] = []
+    ctx.on_event = events.append
+    with patch("app.core.config.get_settings") as gs, \
+         patch("app.contexts.lab.service.LabService") as LS, \
+         patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
+         patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
+         patch("app.contexts.agent.nodes.env_ready.health_check", new_callable=AsyncMock) as hc, \
+         patch("app.contexts.agent.nodes.env_ready.host_advertise_ip", return_value="10.0.0.8"), \
+         patch("app.contexts.agent.nodes.env_ready.list_docker_occupied_host_ports", return_value=set()):
+        gs.return_value.claude_agent_sdk_enabled = True
+        LS.return_value.acquire = AsyncMock(return_value=lab)
+        LS.return_value.download_recipe = AsyncMock(return_value=None)
+        LS.return_value.upload_recipe = AsyncMock(return_value=False)
+        LS.return_value.mark_ready = AsyncMock()
+        LS.return_value.mark_failed = AsyncMock()
+        ai.return_value = _ai_recipe()
+        up.return_value = (True, "")
+        hc.return_value = (True, 3001, "http")
+        out = await EnvReadyNode().execute(ctx)
+    assert out["target_url"] == "http://10.0.0.8:3001"
+    warned = [e for e in events if "配方缓存上传失败" in str(e.get("message", ""))]
+    assert warned, "upload 失败必须发出警告事件"

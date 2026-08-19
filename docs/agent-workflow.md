@@ -199,7 +199,7 @@ shadow `can_use_tool`（`CanUseToolShadowedWarning`，自动批准发生在回�
 | 权限 hook 重构 | ~~Bash 黑白名单不生效~~ | ✅ v0.2 完成（PreToolUse hook） |
 | 插件产物自动归档 | ~~报告/截图须手动上传~~ | ✅ v0.2 完成（worker 扫 host_workdir/{仓库名} → MinIO + Evidence） |
 | browser MCP 未接入 | XSS/DOM 类证据须降级 HTTP | P1（独立子项目，见下） |
-| 容器内无法 docker compose 搭靶场 | 阶段 B 自建环境受限 | P1（DinD / docker.sock 架构决策） |
+| 容器内无法 docker compose 搭靶场 | ~~阶段 B 自建环境受限~~ | ✅ 已解决（worker 宿主机直接执行 `.vuln-env` compose，就地 up；DinD 方案已放弃） |
 | credential_store 未接入 | ~~需登录的漏洞进 `needs_credentials`~~ | ✅ v0.2 完成（P1-6 Credential Proxy：env_var/file 注入） |
 | 阶段名 ↔ 前端标签映射 | 部分阶段显示英文 phase key | P1 |
 

@@ -1,37 +1,27 @@
+<div align="center">
+
 # Crucible
 
 **AI 驱动的漏洞自动验证平台**
 
 代码与漏洞投入烈火，真伪自现。
 
-[Python](https://www.python.org/) ·
-[FastAPI](https://fastapi.tiangolo.com/) ·
-[React](https://react.dev/) ·
-[PostgreSQL](https://www.postgresql.org/) ·
-[Docker](https://docs.docker.com/compose/)
+[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![React](https://img.shields.io/badge/React_19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL_16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
----
+[特性](#平台特色) · [界面](#界面预览) · [架构](#架构) · [快速开始](#快速开始) · [配置](#配置-llm) · [文档](#文档)
 
-## 目录
-
-- [这是什么](#这是什么)
-- [解决什么问题](#解决什么问题)
-- [平台特色](#平台特色)
-- [技术方案与架构](#技术方案与架构)
-- [仓库总目](#仓库总目)
-- [安装部署](#安装部署)
-- [配置 LLM](#配置-llm)
-- [开始使用](#开始使用)
-- [注意事项](#注意事项)
-- [测试](#测试)
-- [尚未完成](#尚未完成)
-- [文档](#文档)
+</div>
 
 ---
 
 ## 这是什么
 
-Crucible 是面向安全研究员的 **漏洞自动验证平台**。
+Crucible 是面向安全研究员的**漏洞自动验证平台**。
 
 你提交一个项目地址和一段漏洞描述，平台在隔离环境里自动完成：读源码、搭建靶场、白盒推演利用链、在靶场上确认危害、出具中文报告。
 
@@ -45,13 +35,11 @@ Crucible 是面向安全研究员的 **漏洞自动验证平台**。
 
 结论由**最强可观察证据**决定：诊断信号（HTTP 500、日志、sink 命中）只说明可达，不能当成「已确认」。
 
----
-
 ## 解决什么问题
 
 扫描器（SAST / DAST）的输出通常是噪声大于信号：真实可利用漏洞、误报、代码异味混在一起。人工逐条复核贵，直接信扫描器又会漏掉真正能打的洞。
 
-安全研究员真正要的是 **验证**，不是再「发现」一遍：
+安全研究员真正要的是**验证**，不是再「发现」一遍：
 
 1. 这个告警是不是误报？
 2. 攻击者能不能实际打出可观察危害？
@@ -60,25 +48,35 @@ Crucible 是面向安全研究员的 **漏洞自动验证平台**。
 
 Crucible 按研究员的方法论自动走完这条链路：
 
-> **白盒优先** —— 先用源码走通调用链、读全每一层防御，把 payload 在纸上推演到「理论可通」，再用一次请求在靶场确认。推演不通即判误报，不在靶场上黑盒盲试。
-
----
+> **白盒优先** —— 先用源码走通调用链、读全每一层防御，把 payload 在纸上推演到「理论可通」，再用一次请求在靶场确认。推演不通即判误报，绝不在靶场上黑盒盲试。
 
 ## 平台特色
 
-- **白盒优先的验证，而不是扫描** —— 源码是主战场，靶场只做最后确认。
-- **自动搭靶场并复用** —— 为 Web 项目拉起隔离运行环境；同一项目可复用已就绪靶场。
-- **Agent 在沙箱里跑** —— 分析过程在独立 Docker 容器中执行，与平台进程隔离。
-- **进度看得见** —— 任务详情实时展示节点进度和 Agent 过程（思考、工具调用、结论）。
-- **报告与证据可归档** —— 中文结构化报告，证据进对象存储，可导出 JSON / Markdown。
-- **自己选模型** —— 通过 Anthropic 兼容端点接入 DeepSeek 等；后台配置，设为默认即启用。
-- **任务可取消、可从失败处续跑** —— 取消会停 Worker 并回收容器；重试复用已完成步骤。
-- **登录隔离** —— JWT 认证，数据按用户隔离。
-- **同时跑多个任务（仅 Linux）** —— 只在 Linux 的设置里指定同时运行上限。Windows 上该项不可配置，Worker 一次只处理一个任务；即便把数字写成 2，同一时刻也只跑 1 个。
+- **白盒优先的验证，而不是扫描** —— 源码是主战场，靶场只做最后确认
+- **自动搭靶场并复用** —— 为 Web 项目拉起隔离运行环境；同一项目可复用已就绪靶场
+- **Agent 在沙箱里跑** —— 分析过程在独立 Docker 容器中执行，与平台进程隔离
+- **进度看得见** —— 任务详情实时展示节点进度和 Agent 过程（思考、工具调用、结论）
+- **报告与证据可归档** —— 中文结构化报告，证据进对象存储，可导出 JSON / Markdown
+- **自己选模型** —— 通过 Anthropic 兼容端点接入 DeepSeek 等；后台配置，设为默认即启用
+- **任务可取消、可从失败处续跑** —— 取消会停 Worker 并回收容器；重试复用已完成步骤
+- **登录隔离** —— JWT 认证，数据按用户隔离
+- **并行任务（仅 Linux）** —— 设置里指定同时运行上限；Windows 单进程一次一个任务
 
----
+## 界面预览
 
-## 技术方案与架构
+任务详情实时展示六节点进度：源码、画像、靶场、审计、复现、报告。
+
+![任务进度：源码 / 画像 / 靶场已完成，审计执行中](docs/assets/screenshot-task-progress.png)
+
+源码按 Git 地址接入，自动识别技术栈，并按 commit 缓存到对象存储。
+
+![源码管理：项目画像与已缓存源码包](docs/assets/screenshot-source-management.png)
+
+靶场按项目隔离，提供访问地址与停止 / 启动 / 重建 / 销毁。
+
+![靶场管理：隔离环境及其 compose 容器](docs/assets/screenshot-lab-management.png)
+
+## 架构
 
 平台是 **Web 控制台 + 后台 Worker + 隔离 Agent 容器**：
 
@@ -112,7 +110,7 @@ Celery Worker
 | 复现 | 对靶场做有限次确认，给出六档判定 |
 | 报告 | 唯一写文档的步骤，落库并归档 |
 
-三层隔离：
+### 三层隔离
 
 1. **平台** —— API、Worker、数据库、Redis、MinIO
 2. **Agent** —— 每个分析步骤一只容器；LLM 凭据只进容器环境变量，容器销毁即消失
@@ -126,28 +124,7 @@ Celery Worker
 | Agent | Claude Agent SDK，镜像 `crucible-agent-runner:base` |
 | 运行 | Docker Compose 起基础设施；Worker 用 Docker 拉起分析容器与靶场 |
 
----
-
-## 仓库总目
-
-| 路径 | 说明 |
-| --- | --- |
-| [README.md](README.md) | 本文件：产品说明与全仓启动 |
-| [backend/README.md](backend/README.md) | API、Worker、数据库、测试 |
-| [frontend/README.md](frontend/README.md) | 控制台、开发服务器、页面 |
-| [infrastructure/](infrastructure/) | Docker Compose（PostgreSQL / Redis / MinIO）与 Agent 镜像 |
-| [plugins/vuln-verify-expert/README.md](plugins/vuln-verify-expert/README.md) | 桌面 Claude Code 方法论母本（不进入运行镜像） |
-| [docs/](docs/) | 架构、节点设计、工程治理 |
-| [CLAUDE.md](CLAUDE.md) | 给协作 AI 的项目入口 |
-| [.claude/api-contract.md](.claude/api-contract.md) | HTTP API 契约 |
-
-产品版本号只写在 [`backend/pyproject.toml`](backend/pyproject.toml) 的 `[project].version`。`GET /health` 返回该版本。Git tag 与它对齐（当前 `v1.0.1`）。
-
----
-
-## 安装部署
-
-开发环境是「基础设施容器 + 本机三个进程」。数据库是 Compose 里的 **PostgreSQL 16**（宿主机 `localhost:5433`）。
+## 快速开始
 
 ### 前置
 
@@ -160,13 +137,13 @@ Celery Worker
 ### 启动
 
 ```bash
-git clone <repo-url> Crucible && cd Crucible
+git clone https://github.com/pgnzbl-ux/crucible.git Crucible && cd Crucible
 
 # 1. PostgreSQL + Redis + MinIO
 cd infrastructure && docker compose up -d && cd ..
 
 # 2. 构建 Agent 镜像（首次，或改了 agent-runner / 节点 skill 之后）
-#    必须在仓库根目录构建
+#    必须在仓库根目录构建，否则镜像里会缺节点 skill
 docker build -f infrastructure/agent-runner/Dockerfile -t crucible-agent-runner:base .
 
 # 3. 后端 API（终端 1）
@@ -184,37 +161,41 @@ npm install
 npm run dev
 ```
 
-后端与前端的细节见 [backend/README.md](backend/README.md)、[frontend/README.md](frontend/README.md)。
-
-空库在 API 启动时按当前模型建表；也可以：
-
-```bash
-cd backend
-alembic upgrade head
-```
-
 ### 访问
 
 | 服务 | 地址 | 说明 |
 | --- | --- | --- |
-| 控制台 | [http://localhost:5173](http://localhost:5173) | 日常使用入口 |
-| API / Swagger | [http://localhost:8010/docs](http://localhost:8010/docs) | 接口文档 |
-| MinIO 控制台 | [http://localhost:9001](http://localhost:9001) | `minioadmin` / `minioadmin` |
+| 控制台 | <http://localhost:5173> | 日常使用入口 |
+| API / Swagger | <http://localhost:8010/docs> | 接口文档 |
+| MinIO 控制台 | <http://localhost:9001> | `minioadmin` / `minioadmin` |
 | PostgreSQL | `localhost:5433` | 用户 `crucible` / 库 `crucible` |
 | Redis | `localhost:6380` | Worker 与实时进度 |
 
-打开 [http://localhost:5173](http://localhost:5173)。库中还没有账号时，登录页会让你创建第一个账号；之后用该账号登录。
+打开控制台。库中还没有账号时，登录页会让你创建第一个账号；之后用该账号登录。
 
 ```bash
 curl http://localhost:8010/health
-# {"status":"ok","version":"..."}
+# {"status":"ok","version":"1.0.1"}
 ```
 
----
+后端与前端的细节见 [backend/README.md](backend/README.md)、[frontend/README.md](frontend/README.md)。数据库迁移：
+
+```bash
+cd backend && alembic upgrade head
+```
+
+<details>
+<summary><b>生产部署</b></summary>
+
+生产用同形态部署：基础设施容器 + 宿主机 systemd 托管后端 + Nginx，模板见 [infrastructure/deploy/](infrastructure/deploy/)。
+
+> **后端必须留在宿主机** —— 它要直连 Docker daemon 调度沙箱与靶场，不能装进容器（包括挂 `docker.sock` 的 sidecar）。
+
+</details>
 
 ## 配置 LLM
 
-LLM 凭据 **只** 在控制台「设置 → LLM Provider」里配置，不要写进 `.env`。
+LLM 凭据**只**在控制台「设置 → LLM Provider」里配置，不要写进 `.env`。
 
 `.env` 只负责打开真实 Agent：
 
@@ -231,60 +212,52 @@ CLAUDE_AGENT_SDK_ENABLED=true
 
 保存前可点「测试连接」。改默认后立即生效，不用重启进程。
 
----
-
-## 开始使用
+## 使用
 
 **Mock（默认）**：`CLAUDE_AGENT_SDK_ENABLED=false`。不调真实模型，用来确认「创建任务 → 进度 → 报告」整条链路能转。
 
-1. 打开 [http://localhost:5173](http://localhost:5173)，按页面提示创建账号或登录
+1. 打开控制台，按页面提示创建账号或登录
 2. 新建任务，填写 Git 地址和漏洞描述
 3. 打开任务详情看节点进度
 4. 结束后查看报告；需要时上传补充证据
 
 **真实验证**：打开 `CLAUDE_AGENT_SDK_ENABLED=true`，并在设置里配置**默认** LLM Provider。Worker 会按节点拉起隔离容器做白盒分析与靶场复现。
 
-接口文档见 [http://localhost:8010/docs](http://localhost:8010/docs)（需先登录拿 Token）。
-
----
-
 ## 注意事项
 
 **进程与端口**
 
-- 必须同时跑 **API + Worker + 前端**。只开 API 时任务会停在队列里。
-- **同时运行几个任务**：只在 **Linux** 的控制台「设置」里可改（默认 1）。Windows 上该项不可配置；即便把数字调到 2，同一时刻也只跑 1 个任务。
-- 端口刻意避开本机常见占用：API `8010`、前端 `5173`、Postgres `5433`、Redis `6380`、MinIO `9000/9001`。
-- `python app/main.py` 默认不是 8010，请用上面的 uvicorn 命令。
+- 必须同时跑 **API + Worker + 前端**。只开 API 时任务会停在队列里
+- **同时运行几个任务**：只在 **Linux** 的控制台「设置」里可改（默认 1）。Windows 上该项不可配置；即便把数字调到 2，同一时刻也只跑 1 个任务
+- 端口刻意避开本机常见占用：API `8010`、前端 `5173`、Postgres `5433`、Redis `6380`、MinIO `9000/9001`
+- `python app/main.py` 默认不是 8010，请用快速开始里的 uvicorn 命令
 
 **数据库**
 
-- 运行时连 Docker PostgreSQL（`DATABASE_URL` 指向 `localhost:5433`）。空库在 API 启动时建表。
-- 生产同样是 PostgreSQL，并设置足够长的 `AUTH_SECRET`。
+- 运行时连 Docker PostgreSQL（`DATABASE_URL` 指向 `localhost:5433`）。空库在 API 启动时建表
+- 生产同样是 PostgreSQL，并设置足够长的 `AUTH_SECRET`
 
 **真实 Agent**
 
-- 需要本机 Docker，且已构建 `crucible-agent-runner:base`。
-- 构建必须在**仓库根目录**执行，否则镜像里会缺节点 skill。
-- 改过 `infrastructure/agent-runner/` 下的 skill 或 Dockerfile 后要重新 build。
-- 任务会访问公网（拉代码、拉镜像、调 LLM）；请在可接受该行为的环境运行。
+- 需要本机 Docker，且已构建 `crucible-agent-runner:base`
+- 构建必须在**仓库根目录**执行，否则镜像里会缺节点 skill
+- 改过 `infrastructure/agent-runner/` 下的 skill 或 Dockerfile 后要重新 build
+- 任务会访问公网（拉代码、拉镜像、调 LLM）；请在可接受该行为的环境运行
 
 **凭据与安全**
 
-- LLM API Key 存在平台数据库中（列表只显示掩码）。不要把这个开发实例直接暴露到公网。
-- 账号存在数据库。只有库中还没有任何用户时，登录页才允许创建第一个账号；之后不能公开自助注册。
-- 不要把 Key 写进 Dockerfile、compose 或提交到 Git。
-- Agent 默认非 root、只读根文件系统、去掉全部 Linux capability，并有 CPU / 内存 / 超时上限。
-- Agent 不能直连平台数据库；其输出校验后才落库。
+- LLM API Key 存在平台数据库中（列表只显示掩码）。不要把这个开发实例直接暴露到公网
+- 账号存在数据库。只有库中还没有任何用户时，登录页才允许创建第一个账号；之后不能公开自助注册
+- 不要把 Key 写进 Dockerfile、compose 或提交到 Git
+- Agent 默认非 root、只读根文件系统、去掉全部 Linux capability，并有 CPU / 内存 / 超时上限
+- Agent 不能直连平台数据库；其输出校验后才落库
 
 **能力边界**
 
-- 验证对象是「给定描述的那一个漏洞」，不是全量扫描。
-- 非 Web 项目不会搭靶场，也不会给出漏洞结论。
-- 靶场起不来（多轮失败）时任务失败，可重试。
-- Mock 模式的报告不能当作真实审计结果。
-
----
+- 验证对象是「给定描述的那一个漏洞」，不是全量扫描
+- 非 Web 项目不会搭靶场，也不会给出漏洞结论
+- 靶场起不来（多轮失败）时任务失败，可重试
+- Mock 模式的报告不能当作真实审计结果
 
 ## 测试
 
@@ -301,18 +274,29 @@ npm test
 
 后端单元测试使用 sqlite，不连接运行时的 PostgreSQL。细节见 [backend/README.md](backend/README.md)。
 
----
+## 仓库结构
 
-## 尚未完成
+```text
+Crucible/
+├── backend/                 # FastAPI API + Celery Worker
+│   └── app/contexts/        # Bounded Contexts（task/agent/report/identity/settings/lab/project）
+├── frontend/                # React 19 控制台
+├── infrastructure/          # Docker Compose + Agent 镜像 + 部署模板
+│   ├── agent-runner/        # Agent 沙箱镜像（node-skills 蒸馏方法论）
+│   └── deploy/              # systemd + Nginx 生产模板
+├── plugins/                 # 桌面 Claude Code 方法论母本（不进运行镜像）
+├── docs/                    # 架构、节点设计、工程治理
+└── CLAUDE.md                # 给协作 AI 的项目入口
+```
 
-完整说明见 [docs/development-guide.md](docs/development-guide.md)。当前未做：
+## 路线图
 
 - 平台级 API Key / Service Account、OIDC、RBAC、操作审计日志
-- 生产级部署（嵌套 Docker、mTLS）
+- 生产部署真机验证（systemd + Nginx 模板已备）
 - CI/CD、OpenTelemetry / Sentry
 - OpenAPI 生成前端类型
 
----
+完整清单见 [docs/development-guide.md](docs/development-guide.md)。
 
 ## 文档
 
@@ -326,6 +310,22 @@ npm test
 | [CLAUDE.md](CLAUDE.md) | 给协作 AI 的项目入口 |
 | [.claude/api-contract.md](.claude/api-contract.md) | HTTP API 契约 |
 
+## 参与贡献
+
+欢迎 Issue / PR。提交前请读 [docs/governance/](docs/governance/) 了解工程约定：
+
+- Commit 描述用简体中文，type/scope 用英文（Conventional Commits）
+- 新功能 / Bug 修复先写失败测试
+- PR 描述含背景 / 改动 / 验证
+
+## License
+
+[MIT](./LICENSE) © 2026 pgnzbl
+
 ---
 
+<div align="center">
+
 让 AI 像安全研究员一样验证漏洞，而不是像扫描器一样盲射。
+
+</div>

@@ -13,7 +13,7 @@ Crucible 是一个 AI 驱动的漏洞自动验证平台。安全研究员提交�
 - **数据库**: PostgreSQL 16（开发连 Docker `localhost:5433`；生产同引擎）
 - **对象存储**: MinIO (S3 兼容)
 - **Agent**: Claude Agent SDK (Python 0.2.134) — 跑在独立 Docker 容器 `crucible-agent-runner:base`
-- **部署**: Docker Compose (全容器化)
+- **部署**: 基础设施容器化（PostgreSQL/Redis/MinIO）；**后端（API+Celery worker）宿主机进程部署**（systemd）——后端需直连宿主 Docker daemon 编排沙箱/靶场，禁止容器化（含挂 docker.sock），详见 `docs/development-guide.md` §2.5/§5.4
 
 ## 架构原则
 

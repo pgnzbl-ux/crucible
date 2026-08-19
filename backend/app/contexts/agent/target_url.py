@@ -41,9 +41,9 @@ def port_from_url(url: str | None) -> int | None:
     return None
 
 
-def publish_target_url(port: int, advertise_ip: str | None = None) -> str:
+def publish_target_url(port: int, advertise_ip: str | None = None, scheme: str = "http") -> str:
     ip = advertise_ip or host_advertise_ip()
-    return f"http://{ip}:{int(port)}"
+    return f"{scheme}://{ip}:{int(port)}"
 
 
 def rewrite_loopback_host(url: str, advertise_ip: str) -> str:

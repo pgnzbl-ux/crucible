@@ -1,0 +1,44 @@
+# Crucible Celery Worker
+# 安装: cp crucible-worker.service /etc/systemd/system/ && systemctl daemon-reload
+# 启用: systemctl enable --now crucible-worker
+#
+# 前置: 同 crucible-api.service；且 AGENT_RUNNER_CONCURRENCY_LIMIT 与
+#       run_worker.py 推导的 prefork 进程数一致（Linux 下进程数=并发上限）
+#
+# 注意: 本服务是沙箱/靶场编排的主体，必须在宿主机运行（禁止容器化），
+#       且 docker 组权限必需（docker.from_env + subprocess docker compose）。
+
+[Unit]
+Description=Crucible Celery Worker (agent orchestration)
+Documentation=file:///opt/crucible/docs/development-guide.md
+After=network-online.target docker.service crucible-api.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=crucible
+Group=crucible
+SupplementaryGroups=docker
+WorkingDirectory=/opt/crucible/backend
+EnvironmentFile=/opt/crucible/backend/.env
+ExecStart=/opt/crucible/backend/.venv/bin/python run_worker.py
+# worker 被 SIGKILL 时 acks_late + reject_on_worker_lost 会重派任务
+KillSignal=SIGTERM
+TimeoutStopSec=120        # 等运行中节点收尾（容器 stop 宽限 10s×多次）
+Restart=on-failure
+RestartSec=10
+
+# 安全加固
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=false          # 任务工作区 /tmp/crucible/*：worker 写入 → Docker daemon bind mount，必须同一视图
+ReadWritePaths=/opt/crucible/backend /tmp/crucible
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=crucible-worker
+
+[Install]
+WantedBy=multi-user.target
