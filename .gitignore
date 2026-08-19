@@ -100,4 +100,5 @@ $RECYCLE.BIN/
 
 # Harness / 本地工具缓存
 .wiscode/
+.zcode/
 .ipynb_checkpoints/
