@@ -10,6 +10,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.shared.base import BaseModel
 
+LANGUAGE_SNAPSHOT_MAX = 50
+FRAMEWORK_SNAPSHOT_MAX = 100
+
 
 class Project(BaseModel):
     """项目(Git 仓库)的元数据与画像。"""
@@ -21,8 +24,8 @@ class Project(BaseModel):
     description: Mapped[str | None] = mapped_column(Text)
     owner_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), index=True)
 
-    detected_language: Mapped[str | None] = mapped_column(String(50))
-    detected_framework: Mapped[str | None] = mapped_column(String(100))
+    detected_language: Mapped[str | None] = mapped_column(String(LANGUAGE_SNAPSHOT_MAX))
+    detected_framework: Mapped[str | None] = mapped_column(String(FRAMEWORK_SNAPSHOT_MAX))
     is_web: Mapped[bool | None] = mapped_column(Boolean)
     last_cloned_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), comment="最近一次源码落地（clone 或缓存命中）"

@@ -347,10 +347,20 @@ async def apply_analysis_failure(
     session: AsyncSession, task: Task | None, run: TaskRun | None, error: str
 ) -> None:
     """编排兜底失败：已取消/归档的终态不得改回 failed。"""
+    if not session.is_active:
+        await session.rollback()
     if run is not None:
         await session.refresh(run)
         if run.status not in _PROTECTED_TERMINAL_STATUSES:
             await _update_run(session, run, "failed", error[:1000])
+            result = await session.execute(
+                select(NodeRun).where(NodeRun.run_id == run.id, NodeRun.status == "running")
+            )
+            now = datetime.now(timezone.utc)
+            for nr in result.scalars():
+                nr.status = "failed"
+                nr.error_message = (nr.error_message or error)[:1000]
+                nr.finished_at = now
     if task is not None:
         await session.refresh(task)
         if task.status not in _PROTECTED_TERMINAL_STATUSES:

@@ -3,7 +3,7 @@ from typing import Any
 import json
 
 from .git_url import classify_ref, parse_git_url
-from .models import Project
+from .models import FRAMEWORK_SNAPSHOT_MAX, LANGUAGE_SNAPSHOT_MAX, Project
 from .repository import ProjectRepository
 from .schemas import (
     ProjectCreateRequest,
@@ -14,6 +14,20 @@ from .schemas import (
 )
 from .source_acquire import CachedSource, SourceAcquireResult
 from .source_cache import SOURCE_BUCKET
+
+
+def _snapshot_text(value: Any, max_len: int) -> str | None:
+    """画像列表快照：list 拼成短句并截到列宽，避免 PG VARCHAR 截断把节点卡死。"""
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        parts = [str(item).strip() for item in value if item not in (None, "")]
+        text = ", ".join(parts)
+    else:
+        text = str(value).strip()
+    if not text:
+        return None
+    return text[:max_len]
 
 
 def _to_response(p: Project) -> ProjectResponse:
@@ -118,8 +132,8 @@ class ProjectService:
         self,
         project_id: str,
         *,
-        language: str | None = None,
-        framework: str | None = None,
+        language: Any = None,
+        framework: Any = None,
         is_web: bool | None = None,
     ) -> None:
         """节点 1 画像后回填 Project 列表快照（权威画像在 SourceArtifact.profile_json）。"""
@@ -127,9 +141,9 @@ class ProjectService:
         if not p:
             return
         if language is not None:
-            p.detected_language = language
+            p.detected_language = _snapshot_text(language, LANGUAGE_SNAPSHOT_MAX)
         if framework is not None:
-            p.detected_framework = framework
+            p.detected_framework = _snapshot_text(framework, FRAMEWORK_SNAPSHOT_MAX)
         if is_web is not None:
             p.is_web = is_web
         await self.repo.session.flush()

@@ -26,6 +26,22 @@ logger = logging.getLogger(__name__)
 RECLAIMABLE_LAB_STATUSES = frozenset({"failed", "expired", "destroyed"})
 _ALIGN_FROZEN_STATUSES = frozenset({"creating", "destroyed", "failed"})
 _ALIGN_TO_READY = frozenset({"expired", "stopped"})
+TTL_ACTIVE_STATUSES = frozenset({"ready", "stopped"})
+
+
+def ttl_remaining_seconds(
+    status: str,
+    last_seen_at: datetime | None,
+    ttl_seconds: int,
+    now: datetime,
+) -> int | None:
+    """仅 ready/stopped 倒计时；创建中等非就绪状态返回 None。"""
+    if status not in TTL_ACTIVE_STATUSES:
+        return None
+    if last_seen_at is None:
+        return 0
+    elapsed = (as_utc(now) - as_utc(last_seen_at)).total_seconds()
+    return max(0, int(ttl_seconds - elapsed))
 
 
 def container_runtime_kind(containers: list[dict[str, str]]) -> str:
@@ -435,10 +451,14 @@ class LabService:
         lab = await self._require_owned_lab(lab_id, owner_id)
         live_ids = await self.live_task_ids(lab.id)
         containers = await docker_ops.list_containers(lab.compose_project)
-        self._apply_aligned_status(
+        aligned = self._apply_aligned_status(
             lab, containers, live_task_count=len(live_ids)
         )
-        await self.touch(lab.id)
+        if lab.status in TTL_ACTIVE_STATUSES:
+            lab.last_seen_at = self._now()
+            await self.session.commit()
+        elif aligned:
+            await self.session.commit()
         return await self._management_dict(
             lab,
             now=self._now(),
@@ -487,7 +507,7 @@ class LabService:
         lab = await self._require_writable_lab(lab_id, owner_id)
         self._require_status(
             lab,
-            {"ready", "stopped", "failed", "expired", "destroyed"},
+            {"ready", "stopped", "failed", "expired", "destroyed", "creating"},
             "rebuild",
         )
         if not lab.compose_path:
@@ -611,11 +631,19 @@ class LabService:
     async def destroy_lab(self, lab_id: str, *, owner_id: str) -> str:
         from . import docker_ops
 
-        lab = await self._require_writable_lab(lab_id, owner_id)
+        lab = await self._require_owned_lab(lab_id, owner_id)
         self._require_status(
-            lab, {"ready", "stopped", "failed", "expired"}, "destroy"
+            lab, {"ready", "stopped", "failed", "expired", "creating"}, "destroy"
         )
-        await self._confirm_not_busy(lab.id)
+        if lab.status == "creating":
+            for task_id in await self.live_task_ids(lab.id):
+                try:
+                    await self._task_service().cancel_task(task_id, owner_id)
+                except ValueError:
+                    pass
+            await self.session.refresh(lab)
+        else:
+            await self._confirm_not_busy(lab.id)
         await docker_ops.compose_down(lab.compose_project)
         lab.status = "destroyed"
         await self._touch_and_commit(lab)
@@ -799,13 +827,10 @@ class LabService:
         live_task_count: int,
         containers: list[dict[str, str]],
     ) -> dict:
-        if lab.last_seen_at is None:
-            ttl_remaining = 0
-        else:
-            elapsed = (
-                self._as_utc(now) - self._as_utc(lab.last_seen_at)
-            ).total_seconds()
-            ttl_remaining = max(0, int(lab.ttl_seconds - elapsed))
+        ttl_seconds = lab.ttl_seconds if lab.ttl_seconds is not None else 3600
+        ttl_remaining = ttl_remaining_seconds(
+            lab.status, lab.last_seen_at, ttl_seconds, now
+        )
         return {
             "id": lab.id,
             "project_id": lab.project_id,

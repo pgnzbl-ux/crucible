@@ -1,4 +1,4 @@
-import { App, Button, Card, Result, Skeleton, Space, Tabs, Tag, Typography } from 'antd'
+import { App, Button, Result, Skeleton, Space, Tabs, Tag, Typography } from 'antd'
 import { ArrowLeftOutlined, DownloadOutlined, FileTextOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation, useRoute } from 'wouter'
@@ -74,11 +74,11 @@ export function ReportDetailPage() {
           </Space>
         }
       />
-      <PageContainer>
+      <PageContainer fill>
         {isLoading && !report ? (
           <Skeleton active paragraph={{ rows: 10 }} />
         ) : report ? (
-          <Card variant="borderless">
+          <div className="crucible-detail-body">
             <Space wrap style={{ marginBottom: 16 }}>
               {report.verdict ? (
                 <Tag color={getVerdictMeta(report.verdict).color}>{getVerdictMeta(report.verdict).label}</Tag>
@@ -110,6 +110,7 @@ export function ReportDetailPage() {
               )}
             </Space>
             <Tabs
+              className="crucible-fill-tabs"
               defaultActiveKey="markdown"
               items={[
                 {
@@ -141,7 +142,7 @@ export function ReportDetailPage() {
                 },
               ]}
             />
-          </Card>
+          </div>
         ) : (
           <Result
             status={isError ? 'error' : '404'}

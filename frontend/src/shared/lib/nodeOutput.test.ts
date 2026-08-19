@@ -108,6 +108,12 @@ describe('summarizeNodeOutput', () => {
     expect(displayNodeStatus('running', 'running')).toBe('running')
   })
 
+  it('failed task coerces in-flight nodes', () => {
+    expect(displayNodeStatus('running', 'failed')).toBe('failed')
+    expect(displayNodeStatus('pending', 'failed')).toBe('failed')
+    expect(displayNodeStatus('completed', 'failed')).toBe('completed')
+  })
+
   it('SSE overlay does not revive a terminal node as running', () => {
     expect(applyNodeOverlay({ status: 'cancelled' }, { status: 'running' })).toBe('cancelled')
     expect(applyNodeOverlay({ status: 'running' }, { status: 'running' })).toBe('running')

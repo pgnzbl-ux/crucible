@@ -419,6 +419,7 @@ async def run_orchestration(
                 await on_node_event(node.node_key, "completed", output)
         except Exception as e:  # noqa: BLE001
             logger.exception(f"节点 {node.node_key} 执行失败")
+            await session.rollback()
             if await _is_cancelled(session, task, run):
                 nr.status = "cancelled"
                 nr.finished_at = datetime.now(timezone.utc)

@@ -240,12 +240,12 @@ owner 校验：所有环境均要求 `report.owner_id` 匹配当前用户。报�
 
 ## Lab Context
 
-所有端点只访问当前用户的 lab。列表与详情中的 lab 对象包含 `live_task_count`；大于 0 时，所有靶场级和容器级写操作均拒绝。
+所有端点只访问当前用户的 lab。列表与详情中的 lab 对象包含 `live_task_count`；大于 0 时，停止/启动/重建及容器级写操作均拒绝。**例外：`creating` 的销毁先取消占用任务再 `down`，不返回 409。** `ttl_remaining_seconds` 仅 `ready`/`stopped` 为非负整数，其余状态为 `null`（创建中不计 TTL）。
 
 | 方法 | 路径 | 行为 |
 |---|---|---|
-| GET | `/api/v1/labs` | 按 `project_id` 分组返回项目及其 labs；lab 含 status、commit_sha、target_url、ttl_remaining_seconds、live_task_count、容器摘要。status 按 compose 实际容器校正并回写（expired/stopped 且容器在跑 → ready；无 live 任务时 ready 全停 → stopped、无容器 → expired） |
-| GET | `/api/v1/labs/{id}` | 返回 lab 详情及所属 compose 项目的容器列表（name、status、ports、image），按容器实际状态校正 status，并刷新 TTL |
+| GET | `/api/v1/labs` | 按 `project_id` 分组返回项目及其 labs；lab 含 status、commit_sha、target_url、ttl_remaining_seconds、live_task_count、容器摘要。ttl_remaining_seconds 仅 ready/stopped 有值。status 按 compose 实际容器校正并回写（expired/stopped 且容器在跑 → ready；无 live 任务时 ready 全停 → stopped、无容器 → expired） |
+| GET | `/api/v1/labs/{id}` | 返回 lab 详情及所属 compose 项目的容器列表（name、status、ports、image），按容器实际状态校正 status；仅 ready/stopped 刷新 TTL |
 | POST | `/api/v1/labs/{id}/actions/stop` | `compose stop`，状态变为 `stopped` |
 | POST | `/api/v1/labs/{id}/actions/start` | `compose start`，状态变为 `ready` 并刷新 TTL |
 | POST | `/api/v1/labs/{id}/actions/rebuild` | 状态变为 `creating`，执行 `compose up -d --build`，成功为 `ready`、失败为 `failed`。本地缺 compose 时先从 MinIO 拉配方，仍无则 400。 |
@@ -255,7 +255,7 @@ owner 校验：所有环境均要求 `report.owner_id` 匹配当前用户。报�
 | POST | `/api/v1/labs/{id}/containers/{name}/actions/restart` | `docker restart` |
 | DELETE | `/api/v1/labs/{id}/containers/{name}` | `docker rm -f` |
 
-`{name}` 不属于该 lab 的 compose 项目时返回 404。存在 live 任务时，上述所有写操作返回 **409**，错误码 `LAB_IN_USE`：
+`{name}` 不属于该 lab 的 compose 项目时返回 404。存在 live 任务时，停止/启动/重建及容器写操作返回 **409**，错误码 `LAB_IN_USE`（`creating` 的 DELETE 除外）：
 
 ```json
 {

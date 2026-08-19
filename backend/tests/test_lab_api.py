@@ -123,7 +123,7 @@ async def test_stop_rejected_when_task_running(session):
     ("status", "method_name", "docker_operation"),
     [
         ("failed", "stop_lab", "compose_stop"),
-        ("creating", "destroy_lab", "compose_down"),
+        ("creating", "start_lab", "compose_start"),
     ],
 )
 async def test_management_rejects_invalid_state_before_docker(
@@ -145,6 +145,126 @@ async def test_management_rejects_invalid_state_before_docker(
             await getattr(svc, method_name)(result.lab_id, owner_id="u1")
 
     docker.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_list_grouped_creating_lab_has_no_ttl(session):
+    from app.contexts.lab.service import LabService
+
+    await seed(session, task_id="t1")
+    svc = LabService(session)
+    result = await svc.acquire(
+        owner_id="u1", project_id="p1", commit_sha=SHA, task_id="t1"
+    )
+
+    with patch(
+        "app.contexts.lab.docker_ops.list_containers",
+        new_callable=AsyncMock,
+        return_value=[],
+    ):
+        grouped = await svc.list_grouped("u1")
+
+    lab = grouped[0]["labs"][0]
+    assert lab["id"] == result.lab_id
+    assert lab["status"] == "creating"
+    assert lab["ttl_remaining_seconds"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_detail_does_not_refresh_ttl_while_creating(session):
+    from app.contexts.lab.models import Lab
+    from app.contexts.lab.service import LabService
+
+    await seed(session, task_id="t1")
+    svc = LabService(session)
+    result = await svc.acquire(
+        owner_id="u1", project_id="p1", commit_sha=SHA, task_id="t1"
+    )
+    lab = await session.get(Lab, result.lab_id)
+    frozen = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    lab.last_seen_at = frozen
+    await session.commit()
+
+    with patch(
+        "app.contexts.lab.docker_ops.list_containers",
+        new_callable=AsyncMock,
+        return_value=[],
+    ):
+        detail = await svc.get_detail(result.lab_id, owner_id="u1")
+
+    await session.refresh(lab)
+    assert lab.last_seen_at.year == 2000
+    assert detail["ttl_remaining_seconds"] is None
+    assert detail["status"] == "creating"
+
+
+@pytest.mark.asyncio
+async def test_destroy_creating_lab_without_live_task(session):
+    from app.contexts.lab.models import Lab
+
+    svc, result, task = await ready_lab(session)
+    task.status = "completed"
+    lab = await session.get(Lab, result.lab_id)
+    lab.status = "creating"
+    await session.commit()
+
+    with patch(
+        "app.contexts.lab.docker_ops.compose_down", new_callable=AsyncMock
+    ) as down:
+        status = await svc.destroy_lab(result.lab_id, owner_id="u1")
+
+    assert status == "destroyed"
+    down.assert_awaited_once_with(result.compose_project)
+    assert (await session.get(Lab, result.lab_id)).status == "destroyed"
+
+
+@pytest.mark.asyncio
+async def test_destroy_creating_lab_cancels_live_tasks(session):
+    from app.contexts.lab.models import Lab
+    from app.contexts.lab.service import LabService
+
+    await seed(session, task_id="t1", status="running")
+    svc = LabService(session)
+    result = await svc.acquire(
+        owner_id="u1", project_id="p1", commit_sha=SHA, task_id="t1"
+    )
+    lab = await session.get(Lab, result.lab_id)
+    assert lab.status == "creating"
+
+    with patch(
+        "app.contexts.task.service.TaskService.cancel_task",
+        new_callable=AsyncMock,
+    ) as cancel, patch(
+        "app.contexts.lab.docker_ops.compose_down", new_callable=AsyncMock
+    ) as down:
+        status = await svc.destroy_lab(result.lab_id, owner_id="u1")
+
+    assert status == "destroyed"
+    cancel.assert_awaited_once_with("t1", "u1")
+    down.assert_awaited_once_with(result.compose_project)
+
+
+@pytest.mark.asyncio
+async def test_rebuild_creating_lab_when_idle(session, tmp_path):
+    from app.contexts.lab.models import Lab
+
+    svc, result, task = await ready_lab(session)
+    task.status = "completed"
+    lab = await session.get(Lab, result.lab_id)
+    lab.status = "creating"
+    lab.workdir = str(tmp_path).replace("\\", "/")
+    compose_file = tmp_path / ".vuln-env" / "docker-compose.yml"
+    compose_file.parent.mkdir()
+    compose_file.write_text("services: {}", encoding="utf-8")
+    await session.commit()
+
+    with patch(
+        "app.contexts.lab.docker_ops.compose_up_build", new_callable=AsyncMock
+    ) as rebuild:
+        status = await svc.rebuild_lab(result.lab_id, owner_id="u1")
+
+    assert status == "ready"
+    rebuild.assert_awaited_once()
 
 
 @pytest.mark.asyncio

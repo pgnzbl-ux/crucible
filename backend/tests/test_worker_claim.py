@@ -162,3 +162,51 @@ async def test_apply_analysis_failure_does_not_overwrite_cancelled(session_facto
         await session.refresh(run)
         assert task.status == "cancelled"
         assert run.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_apply_analysis_failure_after_flush_error_fails_running_node(session_factory):
+    """flush 失败后 session 需 rollback，并把仍 running 的 NodeRun 标 failed。"""
+    from app.contexts.agent.tasks import apply_analysis_failure
+    from app.contexts.project.models import Project
+    from app.contexts.task.models import NodeRun, Task, TaskRun
+
+    async with session_factory() as session:
+        task = Task(
+            project_address="x",
+            vulnerability_description="d",
+            owner_id="u1",
+            status="running",
+        )
+        session.add(task)
+        await session.flush()
+        run = TaskRun(task_id=task.id, status="running")
+        session.add(run)
+        await session.flush()
+        nr = NodeRun(
+            run_id=run.id,
+            task_id=task.id,
+            node_index=1,
+            node_key="profile",
+            status="running",
+            input_json="{}",
+        )
+        session.add(nr)
+        await session.commit()
+
+        session.add(Project(id="dup", name="a", git_url="https://github.com/a/b", owner_id="u1"))
+        await session.flush()
+        session.add(Project(id="dup", name="b", git_url="https://github.com/a/c", owner_id="u1"))
+        try:
+            await session.flush()
+        except Exception:
+            pass
+
+        await apply_analysis_failure(session, task, run, "value too long")
+        await session.commit()
+        await session.refresh(task)
+        await session.refresh(run)
+        await session.refresh(nr)
+        assert task.status == "failed"
+        assert run.status == "failed"
+        assert nr.status == "failed"

@@ -200,10 +200,11 @@ export function isNodeSelectable(status: string): boolean {
   return status !== 'pending'
 }
 
-/** 任务已取消时，仍显示 running/pending 的节点按已取消展示。 */
+/** 任务已取消/失败时，仍显示 running/pending 的节点跟任务终态对齐。 */
 export function displayNodeStatus(nodeStatus: string, taskStatus?: string): string {
-  if (taskStatus === 'cancelled' && (nodeStatus === 'running' || nodeStatus === 'pending')) {
-    return 'cancelled'
+  if (nodeStatus === 'running' || nodeStatus === 'pending') {
+    if (taskStatus === 'cancelled') return 'cancelled'
+    if (taskStatus === 'failed') return 'failed'
   }
   return nodeStatus
 }

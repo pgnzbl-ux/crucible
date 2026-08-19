@@ -601,6 +601,52 @@ async def test_orchestration_stops_after_cancel(session_factory):
 
 
 @pytest.mark.asyncio
+async def test_orchestration_flush_error_marks_node_failed(session_factory):
+    """节点 flush 失败后必须 rollback，才能把 NodeRun/任务标 failed，步骤条不能卡在执行中。"""
+    from app.contexts.agent import orchestrator as orch
+    from app.contexts.project.models import Project
+    from app.contexts.task.models import NodeRun
+    from sqlalchemy import select
+
+    async with session_factory() as session:
+        task, run = await _seed_task_run(session)
+
+        async def fake_source(ctx):
+            return {"source_path": ctx.source_path, "commit_sha": "a" * 40}
+
+        async def fake_profile(ctx):
+            ctx.db_session.add(
+                Project(id="dup", name="a", git_url="https://github.com/a/b", owner_id="u1")
+            )
+            await ctx.db_session.flush()
+            ctx.db_session.add(
+                Project(id="dup", name="b", git_url="https://github.com/a/c", owner_id="u1")
+            )
+            await ctx.db_session.flush()
+
+        real_nodes = orch.NODE_ORDER
+        with patch.object(real_nodes[0], "execute", fake_source), patch.object(
+            real_nodes[1], "execute", fake_profile
+        ):
+            result = await orch.run_orchestration(
+                task_id=task.id, run_id=run.id, session=session,
+                host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
+            )
+
+        assert result["status"] == "failed"
+        await session.refresh(task)
+        await session.refresh(run)
+        assert task.status == "failed"
+        assert run.status == "failed"
+        profile = (
+            await session.execute(
+                select(NodeRun).where(NodeRun.run_id == run.id, NodeRun.node_key == "profile")
+            )
+        ).scalar_one()
+        assert profile.status == "failed"
+
+
+@pytest.mark.asyncio
 async def test_orchestration_killed_node_does_not_overwrite_cancelled(session_factory):
     """容器被拆掉后 execute 抛错，不得把已取消任务改成 failed。"""
     from app.contexts.agent import orchestrator as orch

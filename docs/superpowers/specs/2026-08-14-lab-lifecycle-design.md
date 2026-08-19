@@ -14,10 +14,10 @@
 |---|---|
 | 复用键 | 同一用户 + 同一 `project_id` + 同一 `commit_sha` 共用一套靶场 |
 | 并发 | 第一个任务创建中，后来的任务只查状态、等待或复用，不另起一套 |
-| TTL | 默认 1 小时；任务使用（env_ready / 复现打靶）或管理页查看/操作都刷新 `last_seen_at` |
+| TTL | 默认 1 小时；**仅 `ready` / `stopped` 计时**（靶场已就绪可访问或暂停保留）。创建中不计时。任务使用（复用/复现打靶）或管理页查看/操作 `ready`/`stopped` 时刷新 `last_seen_at` |
 | 到期动作 | 完全静默满 TTL **且** 无 queued/running 任务 → `compose down -v`，记录留 `expired`，可重建 |
 | 任务结束 | **不**拆靶场；取消/删除任务只拆该任务的 agent-runner |
-| 占用中操作 | 有 queued/running 任务使用该 lab 时，停止/启动/重建/销毁（含容器级）一律拒绝 |
+| 占用中操作 | 有 queued/running 任务使用该 lab 时，停止/启动/重建/容器级操作一律拒绝。**例外：`creating` 允许销毁**（先取消占用任务再 `down`，中止未完成的创建） |
 | 落地 | 新 Bounded Context `lab` + `labs` 表；compose 项目名 `crucible-lab-{lab_id}` |
 | UI | 独立「靶场管理」`/labs`，按源码项目分组，组内是 commit 靶场，再下是该 compose 的容器 |
 | 操作 | 靶场级：停 / 起 / 重建 / 销毁；容器级：停 / 起 / 重启 / 删除。容器不单独 rebuild |
@@ -73,8 +73,8 @@
 
 ready ──管理页停止──► stopped ── start 或任务复用 start──► ready
 ready / stopped ── TTL 到期且无 live 任务──► expired（down -v）
-ready / stopped / failed / expired ──管理页销毁──► destroyed（down -v）
-expired / destroyed / failed ── rebuild 或再次 acquire──► creating
+creating / ready / stopped / failed / expired ──管理页销毁──► destroyed（down -v）
+expired / destroyed / failed / creating（无 live 任务）── rebuild 或再次 acquire──► creating
 ```
 
 `creating` 时其他任务只轮询。`stopped` 时后来的任务不跑 AI，只 `compose start`，起来后当 `ready`。
@@ -114,12 +114,13 @@ expired / destroyed / failed ── rebuild 或再次 acquire──► creating
 
 ## 3. TTL 与巡检
 
-**刷新 `last_seen_at`（touch）**
+**刷新 `last_seen_at`（touch）** — 只对 TTL 时钟有意义；`creating` / `failed` / `expired` / `destroyed` 的剩余秒返回 `null`，管理页显示 —。
 
-- acquire 成功（创建开始、复用、stopped→start）
+- 首次变为 `ready`（`mark_ready`）起算 TTL
+- acquire 复用 / stopped→start
 - 复现节点开始执行
-- `GET /api/v1/labs/{id}`
-- 任何靶场/容器管理写操作
+- `GET /api/v1/labs/{id}` **且当前 status ∈ {ready, stopped}**
+- 任何靶场/容器管理写操作（终态仍可写时间戳，但不展示倒计时）
 
 **销毁条件（须同时满足）**
 
@@ -151,12 +152,12 @@ expired / destroyed / failed ── rebuild 或再次 acquire──► creating
 
 前缀 `/api/v1`，需登录，只返回 `owner_id = 当前用户` 的 lab。
 
-占用拒绝：该 lab 存在 live 任务时，下列写操作 **409**，body 为 `detail: {code, message, task_ids}`，其中 `code=LAB_IN_USE`。
+占用拒绝：该 lab 存在 live 任务时，下列写操作 **409**，body 为 `detail: {code, message, task_ids}`，其中 `code=LAB_IN_USE`。**例外：`creating` 的 DELETE 不 409**，先取消占用任务再销毁。
 
 | 方法 | 路径 | 行为 |
 |---|---|---|
-| GET | `/labs` | 按 `project_id` 分组。每组含项目名、labs[]（status、sha 短号、target_url、ttl 剩余秒、容器摘要）。**status 按 compose 实际容器校正并回写**：`expired`/`stopped` 且有 running 容器 → `ready`；无 live 任务时 `ready` 全停 → `stopped`、无容器 → `expired`。`creating`/`failed`/`destroyed` 不校正。 |
-| GET | `/labs/{id}` | 详情 + `docker ps` 过滤该 compose 项目的容器列表（name、status、ports、image）。与列表相同，按容器实际状态校正并回写 `status`。 |
+| GET | `/labs` | 按 `project_id` 分组。每组含项目名、labs[]（status、sha 短号、target_url、ttl 剩余秒、容器摘要）。**ttl_remaining_seconds 仅 ready/stopped 为整数，其余为 null**。**status 按 compose 实际容器校正并回写**：`expired`/`stopped` 且有 running 容器 → `ready`；无 live 任务时 `ready` 全停 → `stopped`、无容器 → `expired`。`creating`/`failed`/`destroyed` 不校正。 |
+| GET | `/labs/{id}` | 详情 + `docker ps` 过滤该 compose 项目的容器列表（name、status、ports、image）。与列表相同，按容器实际状态校正并回写 `status`。仅 ready/stopped 刷新 TTL。 |
 | POST | `/labs/{id}/actions/stop` | `compose stop` → `stopped` |
 | POST | `/labs/{id}/actions/start` | `compose start` → `ready`，touch |
 | POST | `/labs/{id}/actions/rebuild` | `creating` → `compose up -d --build` → `ready` 或 `failed` |
@@ -166,7 +167,7 @@ expired / destroyed / failed ── rebuild 或再次 acquire──► creating
 | POST | `/labs/{id}/containers/{name}/actions/restart` | `docker restart` |
 | DELETE | `/labs/{id}/containers/{name}` | `docker rm -f` |
 
-`{name}` 必须属于该 lab 的 compose 项目，否则 404。GET 详情即 touch。
+`{name}` 必须属于该 lab 的 compose 项目，否则 404。GET 详情仅在 ready/stopped 时 touch。
 
 列表分组 JSON 形状：
 
@@ -200,7 +201,8 @@ expired / destroyed / failed ── rebuild 或再次 acquire──► creating
 - 交互对标 Docker Desktop：项目为可展开组 → 该项目下每个 commit 一套靶场 → 展开容器。
 - 靶场行：状态、短 SHA、可点击的 `target_url`、TTL 倒计时、停/起/重建/销毁。
 - 容器行：停/起/重启/删除。
-- live 占用时按钮 disable，tooltip 说明先取消任务。
+- TTL 倒计时仅 `ready` / `stopped` 显示；`creating` 等显示 —。
+- live 占用时停/起/重建/容器操作 disable，tooltip 说明先取消任务。`creating` 时销毁仍可点（中止创建）。
 - 任务详情仍展示节点 2 的 `target_url`，不在任务页做容器操作。
 
 ---
@@ -209,7 +211,7 @@ expired / destroyed / failed ── rebuild 或再次 acquire──► creating
 
 | 情况 | 行为 |
 |---|---|
-| 有 live 任务时管理操作 | 409，不改 Docker |
+| 有 live 任务时管理操作 | 停/起/重建/容器操作 409，不改 Docker。`creating` 销毁除外：先取消占用任务再 `down` |
 | 等待创建超时 | 本任务 env_ready failed，lab 不由等待者标 failed |
 | 库 `ready` 但 docker 已无该项目 | acquire/start/rebuild 视为过期：标 `expired` 后允许重新创建 |
 | 库 `expired`/`stopped` 但容器已在跑 | 列表/详情/复现 `align_runtime_status` 回写 `ready`，管理页不再卡在 expired |

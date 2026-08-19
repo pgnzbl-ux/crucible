@@ -273,7 +273,7 @@ export interface Lab {
   commit_sha: string
   status: string
   target_url: string | null
-  ttl_remaining_seconds: number
+  ttl_remaining_seconds: number | null
   containers: LabContainer[]
   live_task_count: number
   error_message?: string | null

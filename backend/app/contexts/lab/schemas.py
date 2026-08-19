@@ -18,7 +18,7 @@ class LabResponse(BaseModel):
     commit_sha: str
     status: str
     target_url: str | None
-    ttl_remaining_seconds: int = Field(ge=0)
+    ttl_remaining_seconds: int | None = Field(default=None, ge=0)
     containers: list[ContainerResponse]
     live_task_count: int = Field(ge=0)
     error_message: str | None = None

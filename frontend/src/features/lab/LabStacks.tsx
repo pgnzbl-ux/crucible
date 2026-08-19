@@ -12,10 +12,14 @@ import {
 } from '../../shared/lib/api'
 import { safeHttpUrl } from '../../shared/lib/safeUrl'
 import { useErrorToast } from '../../shared/hooks/useErrorToast'
-import { canMutateLab, shouldPollLabs } from './labUi'
+import { canDestroyLab, canMutateLab, canRebuildLab, canStartLab, canStopLab, shouldPollLabs } from './labUi'
 
 const { Link, Text } = Typography
 const OCCUPIED_TIP = '有验证任务占用，请先取消任务'
+
+function canMutateContainer(status: string, liveTaskCount: number): boolean {
+  return (status === 'ready' || status === 'stopped') && canMutateLab(liveTaskCount)
+}
 
 function statusColor(status: string) {
   if (status === 'running') return 'green'
@@ -107,10 +111,14 @@ export function LabStacks() {
     lab: Lab,
     label: string,
     input: MutationInput,
+    canAct: (status: string, liveTaskCount: number) => boolean,
     danger = false,
     confirmation?: string,
   ) => {
-    const occupied = !canMutateLab(lab.live_task_count ?? 0)
+    const live = lab.live_task_count ?? 0
+    const allowed = canAct(lab.status, live)
+    const statusOk = canAct(lab.status, 0)
+    const occupiedTip = !allowed && statusOk
     const pendingSameRow =
       mutation.isPending &&
       mutation.variables !== undefined &&
@@ -123,15 +131,15 @@ export function LabStacks() {
       <Button
         size="small"
         danger={danger}
-        disabled={occupied || pendingSameRow}
+        disabled={!allowed || pendingSameRow}
         loading={loading}
         onClick={confirmation ? undefined : () => mutation.mutate(input)}
       >
         {label}
       </Button>
     )
-    const guarded = <GuardedAction disabled={occupied}>{button}</GuardedAction>
-    return confirmation && !occupied ? (
+    const guarded = <GuardedAction disabled={occupiedTip}>{button}</GuardedAction>
+    return confirmation && allowed ? (
       <Popconfirm title={confirmation} onConfirm={() => mutation.mutate(input)}>
         {guarded}
       </Popconfirm>
@@ -160,28 +168,44 @@ export function LabStacks() {
       width: 260,
       render: (_, container) => (
         <Space size={4}>
-          {actionButton(lab, '停止', {
-            kind: 'container-action',
-            labId: lab.id,
-            containerName: container.name,
-            action: 'stop',
-          })}
-          {actionButton(lab, '启动', {
-            kind: 'container-action',
-            labId: lab.id,
-            containerName: container.name,
-            action: 'start',
-          })}
-          {actionButton(lab, '重启', {
-            kind: 'container-action',
-            labId: lab.id,
-            containerName: container.name,
-            action: 'restart',
-          })}
+          {actionButton(
+            lab,
+            '停止',
+            {
+              kind: 'container-action',
+              labId: lab.id,
+              containerName: container.name,
+              action: 'stop',
+            },
+            canMutateContainer,
+          )}
+          {actionButton(
+            lab,
+            '启动',
+            {
+              kind: 'container-action',
+              labId: lab.id,
+              containerName: container.name,
+              action: 'start',
+            },
+            canMutateContainer,
+          )}
+          {actionButton(
+            lab,
+            '重启',
+            {
+              kind: 'container-action',
+              labId: lab.id,
+              containerName: container.name,
+              action: 'restart',
+            },
+            canMutateContainer,
+          )}
           {actionButton(
             lab,
             '删除',
             { kind: 'container-delete', labId: lab.id, containerName: container.name },
+            canMutateContainer,
             true,
             `确定删除容器 ${container.name}？`,
           )}
@@ -222,7 +246,8 @@ export function LabStacks() {
       title: '剩余时间',
       dataIndex: 'ttl_remaining_seconds',
       width: 120,
-      render: (seconds: number) => <TtlCountdown seconds={seconds} />,
+      render: (seconds: number | null) =>
+        seconds == null ? '—' : <TtlCountdown seconds={seconds} />,
     },
     {
       title: '占用任务',
@@ -235,12 +260,13 @@ export function LabStacks() {
       width: 280,
       render: (_, lab) => (
         <Space size={4}>
-          {actionButton(lab, '停止', { kind: 'lab-action', labId: lab.id, action: 'stop' })}
-          {actionButton(lab, '启动', { kind: 'lab-action', labId: lab.id, action: 'start' })}
+          {actionButton(lab, '停止', { kind: 'lab-action', labId: lab.id, action: 'stop' }, canStopLab)}
+          {actionButton(lab, '启动', { kind: 'lab-action', labId: lab.id, action: 'start' }, canStartLab)}
           {actionButton(
             lab,
             '重建',
             { kind: 'lab-action', labId: lab.id, action: 'rebuild' },
+            canRebuildLab,
             false,
             '确定重建该靶场？',
           )}
@@ -248,6 +274,7 @@ export function LabStacks() {
             lab,
             '销毁',
             { kind: 'lab-delete', labId: lab.id },
+            canDestroyLab,
             true,
             '确定销毁该靶场？',
           )}

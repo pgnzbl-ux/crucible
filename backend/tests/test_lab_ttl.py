@@ -12,8 +12,31 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.shared.base import Base
+from app.contexts.lab.service import ttl_remaining_seconds
 
 SHA = "a" * 40
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        ("creating", None),
+        ("failed", None),
+        ("expired", None),
+        ("destroyed", None),
+        ("ready", 3500),
+        ("stopped", 3500),
+    ],
+)
+def test_ttl_remaining_only_when_lab_is_ready_or_stopped(status, expected):
+    now = datetime(2026, 8, 19, 6, 0, tzinfo=timezone.utc)
+    last_seen = now - timedelta(seconds=100)
+    assert ttl_remaining_seconds(status, last_seen, 3600, now) == expected
+
+
+def test_ttl_remaining_ready_without_last_seen_is_zero():
+    now = datetime(2026, 8, 19, 6, 0, tzinfo=timezone.utc)
+    assert ttl_remaining_seconds("ready", None, 3600, now) == 0
 
 
 @pytest_asyncio.fixture

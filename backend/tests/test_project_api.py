@@ -17,6 +17,7 @@ async def session():
     async with engine.begin() as conn:
         # 触发全部 model 注册(FK 链完整)
         from app.contexts.identity.models import User  # noqa: F401
+        from app.contexts.lab.models import Lab  # noqa: F401
         from app.contexts.project.models import Project  # noqa: F401
         from app.contexts.task.models import Task, TaskRun, NodeRun, AgentEvent  # noqa: F401
         from app.contexts.report.models import Report  # noqa: F401
@@ -91,6 +92,40 @@ async def test_update_profile_backfills(session):
     assert fetched.detected_language == "python"
     assert fetched.detected_framework == "fastapi"
     assert fetched.is_web is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "language,framework,want_lang,want_fw",
+    [
+        ("python", "fastapi", "python", "fastapi"),
+        ("x" * 80, "y" * 150, "x" * 50, "y" * 100),
+        (
+            ["PHP", "JavaScript", "HTML"],
+            ["zentao", "jquery"],
+            "PHP, JavaScript, HTML",
+            "zentao, jquery",
+        ),
+    ],
+)
+async def test_update_profile_snapshot_fits_columns(
+    session, language, framework, want_lang, want_fw
+):
+    """列表快照必须能进 detected_language(50)/detected_framework(100)，否则 PG 截断失败会卡死节点。"""
+    from app.contexts.project.repository import ProjectRepository
+    from app.contexts.project.service import ProjectService
+
+    svc = ProjectService(ProjectRepository(session))
+    p = await svc.upsert_by_git_url(
+        git_url="https://github.com/easysoft/zentaopms.git", owner_id="u1"
+    )
+    await svc.update_profile(p.id, language=language, framework=framework, is_web=True)
+
+    fetched = await svc.get_project(p.id, owner_id="u1")
+    assert fetched.detected_language == want_lang
+    assert fetched.detected_framework == want_fw
+    assert len(fetched.detected_language or "") <= 50
+    assert len(fetched.detected_framework or "") <= 100
 
 
 @pytest.mark.asyncio

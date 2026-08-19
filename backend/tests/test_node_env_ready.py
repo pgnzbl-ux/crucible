@@ -239,6 +239,87 @@ services:
     assert parse_compose_port_mappings(long_form) == [(3001, 3000)]
 
 
+def _urlopen_cm(body: str, status: int = 200):
+    resp = MagicMock()
+    resp.status = status
+    resp.read.return_value = body.encode("utf-8")
+    cm = MagicMock()
+    cm.__enter__.return_value = resp
+    cm.__exit__.return_value = False
+    return cm
+
+
+_ZENTAO_FATAL = (
+    "Fatal error: Uncaught PDOException: SQLSTATE[42S02]: Base table or view not found: "
+    "1146 Table 'zentao.zt_config' doesn't exist ,the sql is: 'SELECT `value` FROM `zt_config`'"
+)
+
+
+@pytest.mark.parametrize(
+    ("body", "expect_alive"),
+    [
+        (_ZENTAO_FATAL, False),
+        ("<html><title>Whitelabel Error Page</title></html>", False),
+        ("Traceback (most recent call last):\n  File app.py", False),
+        ("Error establishing a database connection", False),
+        ("<html><title>禅道</title><body>登录</body></html>", True),
+        ("<html><form action='/login'>username</form></html>", True),
+        ("ok", True),
+    ],
+)
+def test_http_alive_rejects_crash_homepage(body, expect_alive):
+    """探活必须读首页正文：HTTP 200 但 Fatal/缺表不能当就绪。"""
+    from app.contexts.agent.nodes import env_ready as mod
+
+    with patch("urllib.request.urlopen", return_value=_urlopen_cm(body)):
+        assert mod._http_alive("http://127.0.0.1:8080") is expect_alive
+
+
+@pytest.mark.asyncio
+async def test_health_check_settles_before_first_probe():
+    """compose up 后端口未立刻 bind，先等 3s 再探。"""
+    from app.contexts.agent.nodes import env_ready as mod
+
+    events: list[tuple] = []
+
+    async def fake_sleep(seconds):
+        events.append(("sleep", seconds))
+
+    def fake_alive(url: str, timeout: float = 5) -> bool:
+        events.append(("probe", url))
+        return True
+
+    with (
+        patch.object(mod, "_http_alive", fake_alive),
+        patch.object(mod, "HEALTH_SETTLE_SECONDS", 3),
+        patch.object(mod, "HEALTH_RETRIES", 1),
+        patch.object(mod, "HEALTH_RETRY_SECONDS", 0),
+        patch.object(mod.asyncio, "sleep", fake_sleep),
+    ):
+        ok, port, scheme = await mod.health_check([3001])
+    assert ok is True
+    assert port == 3001
+    assert scheme == "http"
+    assert events[0] == ("sleep", 3)
+    assert events[1] == ("probe", "http://127.0.0.1:3001")
+
+
+@pytest.mark.asyncio
+async def test_health_check_records_crash_body_for_ai_feedback():
+    from app.contexts.agent.nodes import env_ready as mod
+
+    with (
+        patch("urllib.request.urlopen", return_value=_urlopen_cm(_ZENTAO_FATAL)),
+        patch.object(mod, "HEALTH_SETTLE_SECONDS", 0),
+        patch.object(mod, "HEALTH_RETRIES", 1),
+        patch.object(mod, "HEALTH_RETRY_SECONDS", 0),
+    ):
+        ok, port, scheme = await mod.health_check([8080])
+    assert ok is False
+    assert port is None
+    assert "zt_config" in (getattr(mod.health_check, "last_error", "") or "")
+
+
 @pytest.mark.asyncio
 async def test_health_check_does_not_scan_host_common_ports():
     from app.contexts.agent.nodes import env_ready as mod
@@ -251,6 +332,7 @@ async def test_health_check_does_not_scan_host_common_ports():
 
     with (
         patch.object(mod, "_http_alive", fake_alive),
+        patch.object(mod, "HEALTH_SETTLE_SECONDS", 0),
         patch.object(mod, "HEALTH_RETRIES", 1),
         patch.object(mod, "HEALTH_RETRY_SECONDS", 0),
     ):
@@ -273,6 +355,7 @@ async def test_health_check_probes_https_for_tls_container_port():
 
     with (
         patch.object(mod, "_http_alive", fake_alive),
+        patch.object(mod, "HEALTH_SETTLE_SECONDS", 0),
         patch.object(mod, "HEALTH_RETRIES", 1),
         patch.object(mod, "HEALTH_RETRY_SECONDS", 0),
     ):
