@@ -9,6 +9,17 @@ from pydantic import BaseModel, Field
 class TaskCreateRequest(BaseModel):
     project_address: str = Field(..., min_length=1, max_length=1024, description="项目 Git 地址")
     project_ref: str | None = Field(None, max_length=255, description="分支/commit/tag")
+    project_ref_type: str | None = Field(
+        None,
+        pattern=r"^(branch|tag|commit)$",
+        description="引用类型；省略则自动推断",
+    )
+    clone_depth: int | None = Field(
+        1,
+        ge=0,
+        le=500,
+        description="浅克隆深度；0=全量 clone",
+    )
     source_type: str = Field("git", pattern=r"^(git|local_upload)$")
     vulnerability_description: str = Field(..., min_length=10, description="漏洞描述")
     vulnerability_reasoning: str | None = Field(None, description="漏洞推理过程")
@@ -71,6 +82,8 @@ class AgentEventResponse(BaseModel):
 
 class TaskDetail(TaskSummary):
     project_ref: str | None = None
+    project_ref_type: str | None = None
+    clone_depth: int | None = 1
     vulnerability_description: str = ""
     vulnerability_reasoning: str | None = None
     credential_refs: list[str] = []

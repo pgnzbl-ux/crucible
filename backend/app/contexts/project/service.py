@@ -171,15 +171,22 @@ class ProjectService:
         await self.repo.session.flush()
 
     async def find_cached_source(
-        self, git_url: str, ref: str | None, owner_id: str
+        self,
+        git_url: str,
+        ref: str | None,
+        owner_id: str,
+        *,
+        ref_type: str | None = None,
     ) -> CachedSource | None:
         """按 owner + host + space/project + 用户提交的 branch/tag/commit 查表。"""
         if not owner_id:
             return None
         parsed = parse_git_url(git_url)
-        ref_type, ref_name = classify_ref(ref)
+        from app.contexts.project.git_url import resolve_ref_type
+
+        resolved_type, ref_name = resolve_ref_type(ref_type, ref)
         row = await self.repo.find_source_artifact(
-            owner_id, parsed.host, parsed.project_key, ref_type, ref_name
+            owner_id, parsed.host, parsed.project_key, resolved_type, ref_name
         )
         if not row:
             return None

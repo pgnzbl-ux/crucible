@@ -394,6 +394,8 @@ async def run_orchestration(
             source_path=source_path,
             vulnerability_description=task.vulnerability_description,
             project_address=task.project_address, project_ref=task.project_ref,
+            project_ref_type=getattr(task, "project_ref_type", None),
+            clone_depth=getattr(task, "clone_depth", None),
             previous_outputs=dict(previous_outputs), runner_env=runner_env,
             on_event=_stamp_ai_event(on_ai_event, node.node_key, nr.id),
             db_session=session,

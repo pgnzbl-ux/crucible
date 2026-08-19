@@ -64,6 +64,8 @@ class NodeContext:
     vulnerability_description: str
     project_address: str
     project_ref: str | None
+    project_ref_type: str | None = None
+    clone_depth: int | None = 1
     previous_outputs: dict[str, dict] = field(default_factory=dict)
     runner_env: dict[str, str] = field(default_factory=dict)
     on_event: Callable[[dict], None] | None = None

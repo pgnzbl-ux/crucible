@@ -35,7 +35,10 @@ class SourceNode:
                 try:
                     parsed = parse_git_url(ctx.project_address)
                     cached = await svc.find_cached_source(
-                        ctx.project_address, ctx.project_ref, owner_id
+                        ctx.project_address,
+                        ctx.project_ref,
+                        owner_id,
+                        ref_type=ctx.project_ref_type,
                     )
                     index: dict[str, CachedSource] = {
                         item.commit_sha.lower(): item
@@ -62,6 +65,8 @@ class SourceNode:
             ctx.host_workdir,
             ctx.project_address,
             ctx.project_ref,
+            ref_type_hint=ctx.project_ref_type,
+            clone_depth=ctx.clone_depth,
             cached=cached,
             owner_id=owner_id,
             cached_by_sha_fn=cached_by_sha_fn,

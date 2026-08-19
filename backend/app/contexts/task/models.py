@@ -12,6 +12,12 @@ class Task(BaseModel):
 
     project_address: Mapped[str] = mapped_column(String(1024), nullable=False, comment="项目地址 (Git URL)")
     project_ref: Mapped[str | None] = mapped_column(String(255), comment="分支/commit/tag")
+    project_ref_type: Mapped[str | None] = mapped_column(
+        String(16), comment="branch | tag | commit；空=自动推断",
+    )
+    clone_depth: Mapped[int | None] = mapped_column(
+        Integer, default=1, comment="git clone --depth；0=全量 clone",
+    )
     project_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("projects.id"), index=True,
         comment="关联 Project(P1 新增,project_address 保留兼容)",

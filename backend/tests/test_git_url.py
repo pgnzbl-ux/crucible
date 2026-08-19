@@ -1,7 +1,7 @@
 """Git 地址规范化：去 .git、抽出 space/project 与落地目录名。"""
 import pytest
 
-from app.contexts.project.git_url import ParsedGitUrl, classify_ref, parse_git_url
+from app.contexts.project.git_url import ParsedGitUrl, classify_ref, parse_git_url, resolve_ref_type
 
 
 @pytest.mark.parametrize(
@@ -109,5 +109,21 @@ def test_parse_git_url_keeps_ssh_git_user():
 )
 def test_classify_ref(ref, expect_type, expect_name):
     got_type, got_name = classify_ref(ref)
+    assert got_type == expect_type
+    assert got_name == expect_name
+
+
+@pytest.mark.parametrize(
+    "explicit,ref,expect_type,expect_name",
+    [
+        (None, "main", "branch", "main"),
+        ("tag", "zentaopms_22.4_20260730", "tag", "zentaopms_22.4_20260730"),
+        ("branch", "zentaopms_22.4_20260730", "branch", "zentaopms_22.4_20260730"),
+        ("commit", "abc1234", "commit", "abc1234"),
+        ("tag", "release-candidate", "tag", "release-candidate"),
+    ],
+)
+def test_resolve_ref_type(explicit, ref, expect_type, expect_name):
+    got_type, got_name = resolve_ref_type(explicit, ref)
     assert got_type == expect_type
     assert got_name == expect_name

@@ -224,6 +224,72 @@ def test_resolve_remote_ref_finds_zentao_tag():
     assert sha.startswith(ZENTAO_TAG_SHA[:12])
 
 
+def test_resolve_remote_ref_explicit_tag_skips_branch(monkeypatch):
+    from app.contexts.project import source_acquire as sa
+
+    calls: list[str] = []
+
+    def fake_branch(_url: str, _ref: str) -> str | None:
+        calls.append("branch")
+        return "abbef96f08ce"
+
+    def fake_tag(_url: str, _ref: str) -> str | None:
+        calls.append("tag")
+        return ZENTAO_TAG_SHA
+
+    monkeypatch.setattr(sa, "_ls_remote_branch_sha", fake_branch)
+    monkeypatch.setattr(sa, "_ls_remote_tag_sha", fake_tag)
+
+    ref_type, ref_name, sha = sa.resolve_remote_ref(
+        "https://github.com/easysoft/zentaopms.git",
+        ZENTAO_TAG,
+        ref_type_hint="tag",
+    )
+    assert ref_type == "tag"
+    assert ref_name == ZENTAO_TAG
+    assert sha == ZENTAO_TAG_SHA
+    assert calls == ["tag"]
+
+
+def test_acquire_source_forwards_ref_type_and_depth(tmp_path, monkeypatch):
+    workdir = tmp_path / "audit-uuid"
+    workdir.mkdir()
+    captured: dict[str, object] = {}
+
+    def fake_git_clone(
+        wd: str,
+        _url: str,
+        _ref: str | None,
+        dirname: str,
+        *,
+        ref_type: str | None = None,
+        clone_depth: int | None = 1,
+    ) -> tuple[bool, str]:
+        captured["ref_type"] = ref_type
+        captured["clone_depth"] = clone_depth
+        _write_repo(Path(wd), dirname, "app.py", "from-git")
+        return True, ""
+
+    monkeypatch.setattr(
+        "app.contexts.project.source_acquire.git_clone_to_workdir",
+        fake_git_clone,
+    )
+
+    result = acquire_source(
+        host_workdir=str(workdir),
+        git_url=URL,
+        ref=ZENTAO_TAG,
+        ref_type_hint="tag",
+        clone_depth=5,
+        store=MemorySourceStore(),
+        local_sha_fn=lambda _p: SHA,
+        remote_sha_fn=lambda _u, _r: SHA,
+    )
+    assert result.ok is True
+    assert captured["ref_type"] == "tag"
+    assert captured["clone_depth"] == 5
+
+
 def test_tag_ref_uses_minio_when_commit_matches(tmp_path):
     cached, store, parsed = _cached_and_store(
         tmp_path, ZENTAO_TAG_SHA, ref_name=ZENTAO_TAG, ref_type="tag"

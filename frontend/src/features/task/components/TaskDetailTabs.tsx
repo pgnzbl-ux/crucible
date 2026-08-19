@@ -320,7 +320,17 @@ function OverviewTab({
             span: 2,
             children: <Text code>{task.project_address}</Text>,
           },
-          { key: 'ref', label: '引用', children: task.project_ref ?? '默认分支' },
+          {
+            key: 'ref',
+            label: '引用',
+            children: [
+              task.project_ref ?? '默认分支',
+              task.project_ref_type ? ` (${task.project_ref_type})` : '',
+              task.clone_depth != null && task.clone_depth !== 1
+                ? ` · depth=${task.clone_depth}`
+                : '',
+            ].join(''),
+          },
           {
             key: 'priority',
             label: '优先级',

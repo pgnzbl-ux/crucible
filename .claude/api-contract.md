@@ -84,10 +84,14 @@
 {
   "project_address": "https://github.com/owner/repo",
   "project_ref": "main",
+  "project_ref_type": "branch | tag | commit（可选；省略则自动推断）",
+  "clone_depth": 1,
   "vulnerability_description": "漏洞描述（至少 10 字符）",
   "priority": "low | medium | high | critical"
 }
 ```
+
+`clone_depth`：浅克隆层数，默认 `1`；`0` 表示全量 clone（流量更大）。`project_ref_type` 显式指定可避免 tag 名被误判为 branch 导致缓存 SHA 对不上。
 
 **响应 202**：`TaskDetail`（含首次 `runs[]`）。先提交 Task/TaskRun 再投 Celery；Broker 失败 → 任务/run 标 `failed`，接口 **503**。未配置默认 LLM Provider、默认项无 API Key、或 agent-runner 镜像不存在/Docker 不可用 → **400**，不落任务、不投递 worker。运行槽满不在创建时拒绝，任务入队后由 worker 按间隔重试。
 

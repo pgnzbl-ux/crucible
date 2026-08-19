@@ -128,6 +128,8 @@ export interface RunSummary {
 
 export interface TaskDetail extends TaskSummary {
   project_ref: string | null
+  project_ref_type: 'branch' | 'tag' | 'commit' | null
+  clone_depth: number | null
   vulnerability_description: string
   vulnerability_reasoning: string | null
   credential_refs: string[]
@@ -382,6 +384,8 @@ export const api = {
     vulnerability_description: string
     priority?: string
     project_ref?: string
+    project_ref_type?: 'branch' | 'tag' | 'commit'
+    clone_depth?: number
     vulnerability_reasoning?: string
     credential_refs?: string[]
   }) => request<TaskDetail>('/tasks/', { method: 'POST', body: JSON.stringify(data) }),

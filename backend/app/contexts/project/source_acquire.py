@@ -10,7 +10,7 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Callable
 
-from app.contexts.project.git_url import classify_ref, parse_git_url
+from app.contexts.project.git_url import classify_ref, parse_git_url, resolve_ref_type
 from app.contexts.project.source_cache import (
     MinioSourceStore,
     extract_source_archive,
@@ -230,16 +230,19 @@ def resolve_remote_ref(
     git_url: str,
     ref: str | None,
     *,
+    ref_type_hint: str | None = None,
     remote_sha_fn: RemoteShaFn | None = None,
 ) -> tuple[str, str, str | None]:
     """解析远端 ref 真实类型与 commit SHA（branch 查不到时再试同名 tag）。"""
-    ref_type, ref_name = classify_ref(ref)
+    ref_type, ref_name = resolve_ref_type(ref_type_hint, ref)
     if ref_type == "commit":
         return ref_type, ref_name, ref_name.lower()
     if remote_sha_fn is not None:
         return ref_type, ref_name, remote_sha_fn(git_url, ref)
     if ref_type == "tag":
         return ref_type, ref_name, _ls_remote_tag_sha(git_url, ref_name)
+    if ref_type == "branch":
+        return ref_type, ref_name, _ls_remote_branch_sha(git_url, ref_name)
     branch_sha = _ls_remote_branch_sha(git_url, ref_name)
     if branch_sha:
         return "branch", ref_name, branch_sha
@@ -314,6 +317,8 @@ def acquire_source(
     git_url: str,
     ref: str | None,
     *,
+    ref_type_hint: str | None = None,
+    clone_depth: int | None = 1,
     cached: CachedSource | None = None,
     store=None,
     clone_fn: CloneFn | None = None,
@@ -331,17 +336,29 @@ def acquire_source(
             error=f"源码克隆失败: {e}",
             git_url_original=git_url or "",
         )
-    ref_type, ref_name = classify_ref(ref)
+    ref_type, ref_name = resolve_ref_type(ref_type_hint, ref)
     store = store or MinioSourceStore()
-    clone_fn = clone_fn or git_clone_to_workdir
     sha_fn = local_sha_fn or _local_head_sha
     dest = os.path.join(host_workdir, parsed.repo_dirname)
     stored_url = parsed.normalized
 
+    if clone_fn is None:
+        depth = clone_depth
+        hint = ref_type_hint
+
+        def clone_fn(  # noqa: ANN001
+            wd: str, url: str, r: str | None, dirname: str,
+        ) -> tuple[bool, str]:
+            return git_clone_to_workdir(
+                wd, url, r, dirname, ref_type=hint, clone_depth=depth,
+            )
+
     resolved_type, resolved_name, remote_sha = resolve_remote_ref(
-        git_url, ref, remote_sha_fn=remote_sha_fn
+        git_url, ref, ref_type_hint=ref_type_hint, remote_sha_fn=remote_sha_fn
     )
-    if resolved_type != ref_type or resolved_name != ref_name:
+    if ref_type_hint is None and (
+        resolved_type != ref_type or resolved_name != ref_name
+    ):
         logger.info(
             "引用 %r 解析为 %s/%s（原分类 %s/%s）",
             ref,

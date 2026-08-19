@@ -120,3 +120,14 @@ def classify_ref(ref: str | None) -> tuple[str, str]:
     if name.startswith("zentaopms_"):
         return "tag", name
     return "branch", name
+
+
+def resolve_ref_type(
+    explicit_type: str | None,
+    ref: str | None,
+) -> tuple[str, str]:
+    """用户显式 branch|tag|commit 优先；否则走 classify_ref 自动推断。"""
+    ref_type, ref_name = classify_ref(ref)
+    if explicit_type in ("branch", "tag", "commit"):
+        return explicit_type, ref_name
+    return ref_type, ref_name

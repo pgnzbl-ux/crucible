@@ -662,11 +662,17 @@ def git_clone_to_workdir(
     project_address: str,
     project_ref: str | None,
     dest_dirname: str | None = None,
+    *,
+    ref_type: str | None = None,
+    clone_depth: int | None = 1,
 ) -> tuple[bool, str]:
     """在 host 上 git clone 到 workdir/{dest_dirname}（仓库名，而非固定 project）。
 
+    ref_type 可选 branch|tag|commit；省略则自动推断。clone_depth=0 时不加 --depth（全量 clone）。
     返回 (ok, error_or_empty)。失败信息带「源码克隆失败」前缀，便于节点 0 展示。
     """
+    from app.contexts.project.git_url import resolve_ref_type
+
     name = dest_dirname or _dirname_from_url(project_address)
     project_dir = os.path.join(workdir, name)
     if os.path.isdir(project_dir):
@@ -681,10 +687,16 @@ def git_clone_to_workdir(
         shutil.rmtree(project_dir, onerror=_force_remove)
 
     git_env = _git_subprocess_env()
-    cmd = ["git", "clone", "--depth", "1"]
-    if project_ref and not _looks_like_commit(project_ref) and project_ref.upper() != "HEAD":
-        cmd += ["--branch", project_ref]
+    rt, rn = resolve_ref_type(ref_type, project_ref)
+    depth = 1 if clone_depth is None else clone_depth
+    cmd = ["git", "clone"]
+    if depth > 0:
+        cmd += ["--depth", str(depth)]
+    if rn and rt != "commit" and rn.upper() != "HEAD":
+        cmd += ["--branch", rn]
     cmd += [project_address, project_dir]
+
+    fetch_depth = depth if depth > 0 else 1
 
     try:
         result = subprocess.run(
@@ -697,15 +709,18 @@ def git_clone_to_workdir(
         )
         if result.returncode != 0:
             return False, _classify_clone_error(result.stderr or result.stdout)
-        if _looks_like_commit(project_ref or ""):
+        if rt == "commit" and rn:
             co = subprocess.run(
-                ["git", "-C", project_dir, "fetch", "--depth", "1", "origin", project_ref],
+                [
+                    "git", "-C", project_dir, "fetch",
+                    "--depth", str(fetch_depth), "origin", rn,
+                ],
                 capture_output=True, text=True, timeout=120, env=git_env,
             )
             if co.returncode != 0:
                 return False, _classify_clone_error(co.stderr or co.stdout or "无法获取指定 commit")
             ck = subprocess.run(
-                ["git", "-C", project_dir, "checkout", project_ref],
+                ["git", "-C", project_dir, "checkout", rn],
                 capture_output=True, text=True, timeout=60, env=git_env,
             )
             if ck.returncode != 0:
