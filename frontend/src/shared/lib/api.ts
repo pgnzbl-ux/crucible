@@ -236,6 +236,7 @@ export interface Project {
   id: string
   name: string
   git_url: string
+  source_type?: 'git' | 'local_upload' | string
   default_ref: string | null
   description: string | null
   owner_id: string
@@ -386,9 +387,41 @@ export const api = {
     project_ref?: string
     project_ref_type?: 'branch' | 'tag' | 'commit'
     clone_depth?: number
+    source_type?: 'git' | 'local_upload'
     vulnerability_reasoning?: string
     credential_refs?: string[]
   }) => request<TaskDetail>('/tasks/', { method: 'POST', body: JSON.stringify(data) }),
+
+  createTaskFromUpload: (data: {
+    file: File
+    vulnerability_description: string
+    name?: string
+    priority?: string
+    vulnerability_reasoning?: string
+    credential_refs?: string[]
+  }) => {
+    const form = new FormData()
+    form.append('file', data.file)
+    form.append('vulnerability_description', data.vulnerability_description)
+    if (data.name) form.append('name', data.name)
+    if (data.priority) form.append('priority', data.priority)
+    if (data.vulnerability_reasoning) form.append('vulnerability_reasoning', data.vulnerability_reasoning)
+    if (data.credential_refs?.length) {
+      form.append('credential_refs', JSON.stringify(data.credential_refs))
+    }
+    const token = localStorage.getItem('crucible_token')
+    return fetch(`${API_BASE}/tasks/upload`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: form,
+    }).then(async (res): Promise<TaskDetail> => {
+      if (res.status === 413) {
+        throw new ApiError('源码包超过 200MB 限制', 413)
+      }
+      await rejectIfNotOk(res, Boolean(token))
+      return res.json() as Promise<TaskDetail>
+    })
+  },
 
   getTask: (id: string) => request<TaskDetail>(`/tasks/${id}`),
 

@@ -18,7 +18,7 @@ def test_project_table_columns():
     expected = {
         "id", "name", "git_url", "default_ref", "description", "owner_id",
         "detected_language", "detected_framework", "is_web",
-        "last_cloned_at", "created_at", "updated_at",
+        "last_cloned_at", "source_type", "created_at", "updated_at",
     }
     assert expected.issubset(cols), f"缺字段: {expected - cols}"
 

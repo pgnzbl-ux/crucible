@@ -479,3 +479,40 @@ def test_branch_cache_reclones_when_remote_sha_unknown(tmp_path):
     assert result.ok is True
     assert result.origin == "git"
     assert (workdir / parsed.repo_dirname / "app.py").read_text(encoding="utf-8") == "from-git-fresh"
+
+
+def test_acquire_uploaded_source_restores_from_cache(tmp_path):
+    from app.contexts.project.source_acquire import acquire_uploaded_source
+
+    repo = _write_repo(tmp_path / "cached", "demo", "app.py", "uploaded")
+    archive = tmp_path / "src.tar.gz"
+    pack_project_dir(str(repo), str(archive), arcname="demo")
+    store = MemorySourceStore()
+    object_key = "source/u1/upload/local/demo/abcd.tar.gz"
+    store.upload(object_key, "a" * 64, str(archive))
+    cached = CachedSource(
+        object_key=object_key,
+        object_url=f"s3://crucible-durable/{object_key}",
+        repo_dirname="demo",
+        commit_sha="a" * 64,
+        ref_type="upload",
+        ref_name="local",
+        git_url_normalized="upload://local/demo-abcd",
+        project_key="local/demo-abcd",
+        git_host="upload",
+    )
+    workdir = tmp_path / "task-wd"
+    workdir.mkdir()
+    result = acquire_uploaded_source(str(workdir), cached=cached, store=store)
+    assert result.ok is True
+    assert result.origin == "upload"
+    assert (workdir / "demo" / "app.py").read_text(encoding="utf-8") == "uploaded"
+
+
+def test_acquire_uploaded_source_fails_without_cache(tmp_path):
+    from app.contexts.project.source_acquire import acquire_uploaded_source
+
+    result = acquire_uploaded_source(str(tmp_path), cached=None)
+    assert result.ok is False
+    assert "未找到" in result.error
+

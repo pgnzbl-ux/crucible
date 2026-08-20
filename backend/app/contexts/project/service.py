@@ -1,8 +1,8 @@
+import json
 from datetime import datetime, timezone
 from typing import Any
-import json
 
-from .git_url import classify_ref, parse_git_url
+from .git_url import parse_git_url
 from .models import FRAMEWORK_SNAPSHOT_MAX, LANGUAGE_SNAPSHOT_MAX, Project
 from .repository import ProjectRepository
 from .schemas import (
@@ -13,7 +13,14 @@ from .schemas import (
     SourceArtifactResponse,
 )
 from .source_acquire import CachedSource, SourceAcquireResult
-from .source_cache import SOURCE_BUCKET
+from .source_cache import SOURCE_BUCKET, MinioSourceStore, object_access_url, source_object_key
+from .source_upload import (
+    UPLOAD_HOST,
+    UPLOAD_REF_NAME,
+    UPLOAD_REF_TYPE,
+    ingest_source_archive,
+    parse_source_locator,
+)
 
 
 def _snapshot_text(value: Any, max_len: int) -> str | None:
@@ -181,7 +188,12 @@ class ProjectService:
         """按 owner + host + space/project + 用户提交的 branch/tag/commit 查表。"""
         if not owner_id:
             return None
-        parsed = parse_git_url(git_url)
+        parsed = parse_source_locator(git_url)
+        if parsed.host == UPLOAD_HOST:
+            row = await self.repo.find_source_artifact(
+                owner_id, parsed.host, parsed.project_key, UPLOAD_REF_TYPE, UPLOAD_REF_NAME
+            )
+            return _cached_from_row(row) if row else None
         from app.contexts.project.git_url import resolve_ref_type
 
         resolved_type, ref_name = resolve_ref_type(ref_type, ref)
@@ -237,8 +249,100 @@ class ProjectService:
             "bucket": SOURCE_BUCKET,
             "object_key": result.object_key,
             "object_url": result.object_url or "",
-            "size_bytes": None,
+            "size_bytes": result.size_bytes,
         })
+
+    async def ingest_uploaded_source(
+        self,
+        *,
+        owner_id: str,
+        filename: str,
+        data: bytes,
+        name: str | None = None,
+        description: str | None = None,
+        store=None,
+    ) -> tuple[Project, SourceAcquireResult]:
+        """校验并入库本地源码包。相同内容（sha256）复用已有 Project / artifact。"""
+        import shutil
+        import tempfile
+
+        tmp = tempfile.mkdtemp(prefix="crucible-upload-")
+        try:
+            ingested = ingest_source_archive(
+                data, filename, display_name=name, workdir=tmp
+            )
+            existing = await self.repo.find_source_artifact_by_sha(owner_id, ingested.sha256)
+            if (
+                existing is not None
+                and existing.git_host == UPLOAD_HOST
+                and existing.commit_sha.lower() == ingested.sha256.lower()
+            ):
+                project = await self.repo.get_by_git_url(existing.git_url, owner_id)
+                if project is None:
+                    project = await self.repo.create(
+                        Project(
+                            name=ingested.display_name,
+                            git_url=existing.git_url,
+                            source_type="local_upload",
+                            owner_id=owner_id,
+                            description=description,
+                        )
+                    )
+                return project, SourceAcquireResult(
+                    ok=True,
+                    origin="upload",
+                    git_url_original=existing.git_url,
+                    git_url_normalized=existing.git_url,
+                    project_key=existing.project_key,
+                    git_host=existing.git_host,
+                    repo_dirname=existing.repo_dirname,
+                    ref_type=existing.ref_type,
+                    ref_name=existing.ref_name,
+                    commit_sha=existing.commit_sha,
+                    object_key=existing.object_key,
+                    object_url=existing.object_url,
+                    top_level=ingested.top_level,
+                    file_count=ingested.file_count,
+                    size_bytes=existing.size_bytes or ingested.size_bytes,
+                )
+
+            object_store = store or MinioSourceStore()
+            project_key = f"local/{ingested.slug}"
+            object_key = source_object_key(
+                owner_id, UPLOAD_HOST, project_key, ingested.sha256
+            )
+            object_store.upload(object_key, ingested.sha256, ingested.archive_path)
+            object_url = object_access_url(object_key)
+            project = await self.repo.create(
+                Project(
+                    name=ingested.display_name,
+                    git_url=ingested.locator,
+                    source_type="local_upload",
+                    owner_id=owner_id,
+                    description=description,
+                )
+            )
+            result = SourceAcquireResult(
+                ok=True,
+                origin="upload",
+                git_url_original=ingested.locator,
+                git_url_normalized=ingested.locator,
+                project_key=project_key,
+                git_host=UPLOAD_HOST,
+                repo_dirname=ingested.repo_dirname,
+                ref_type=UPLOAD_REF_TYPE,
+                ref_name=UPLOAD_REF_NAME,
+                commit_sha=ingested.sha256,
+                object_key=object_key,
+                object_url=object_url,
+                top_level=ingested.top_level,
+                file_count=ingested.file_count,
+                size_bytes=ingested.size_bytes,
+            )
+            await self.record_source_artifact(result, owner_id)
+            return project, result
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     async def list_artifacts(
         self, project_id: str, owner_id: str
@@ -248,7 +352,7 @@ class ProjectService:
         if not p or p.owner_id != owner_id:
             return None
         try:
-            key = parse_git_url(p.git_url).project_key
+            key = parse_source_locator(p.git_url, getattr(p, "source_type", None)).project_key
         except ValueError:
             return []
         rows = await self.repo.list_source_artifacts(key, owner_id)

@@ -79,7 +79,7 @@ export function summarizeNodeOutput(
   switch (nodeKey as NodeKey) {
     case 'source': {
       const repo = str(o.repo_dirname) || str(o.project_key)
-      const origin = str(o.origin) === 'minio' ? 'MinIO 缓存' : str(o.origin) === 'git' ? 'Git clone' : ''
+      const origin = str(o.origin) === 'minio' ? 'MinIO 缓存' : str(o.origin) === 'git' ? 'Git clone' : str(o.origin) === 'upload' ? '本地上传' : ''
       const ref = str(o.ref_name)
       const sha = sha7(o.commit_sha)
       const parts = [origin, repo, ref && `ref ${ref}`, sha && `@${sha}`].filter(Boolean)
@@ -152,7 +152,7 @@ export function compactNodeCaption(
     return [stack, web].filter(Boolean).join(' · ') || '画像完成'
   }
   if (nodeKey === 'source') {
-    const origin = str(o.origin) === 'minio' ? 'MinIO' : str(o.origin) === 'git' ? 'Git' : ''
+    const origin = str(o.origin) === 'minio' ? 'MinIO' : str(o.origin) === 'git' ? 'Git' : str(o.origin) === 'upload' ? '上传' : ''
     const repo = str(o.repo_dirname)
     return [origin, repo].filter(Boolean).join(' · ') || '源码已就绪'
   }

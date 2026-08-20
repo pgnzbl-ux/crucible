@@ -104,14 +104,30 @@ class TaskService:
         from app.contexts.project.git_url import parse_git_url
         from app.contexts.project.repository import ProjectRepository
         from app.contexts.project.service import ProjectService
+        from app.contexts.project.source_upload import parse_upload_locator
 
-        stored_address = parse_git_url(request.project_address).normalized
-        await self._require_platform_ready()
-        project = await ProjectService(ProjectRepository(self.repo.session)).upsert_by_git_url(
-            git_url=stored_address,
-            owner_id=owner_id,
-            default_ref=request.project_ref,
-        )
+        source_type = request.source_type or "git"
+        project_svc = ProjectService(ProjectRepository(self.repo.session))
+        if source_type == "local_upload":
+            parsed = parse_upload_locator(request.project_address)
+            stored_address = parsed.normalized
+            project = await project_svc.repo.get_by_git_url(stored_address, owner_id)
+            if project is None or getattr(project, "source_type", "git") != "local_upload":
+                raise ValueError("上传源码不存在，请重新上传源码包")
+            cached = await project_svc.find_cached_source(
+                stored_address, None, owner_id, ref_type="upload"
+            )
+            if cached is None:
+                raise ValueError("上传源码包尚未入库，请重新上传")
+            await self._require_platform_ready()
+        else:
+            stored_address = parse_git_url(request.project_address).normalized
+            await self._require_platform_ready()
+            project = await project_svc.upsert_by_git_url(
+                git_url=stored_address,
+                owner_id=owner_id,
+                default_ref=request.project_ref,
+            )
 
         task = Task(
             project_address=stored_address,
@@ -149,6 +165,48 @@ class TaskService:
             raise TaskDispatchError("任务已创建，但投递 Agent worker 失败") from exc
 
         return self._to_detail(task, [run])
+
+    async def create_task_from_upload(
+        self,
+        *,
+        owner_id: str,
+        filename: str,
+        data: bytes,
+        vulnerability_description: str,
+        name: str | None = None,
+        priority: str = "medium",
+        vulnerability_reasoning: str | None = None,
+        credential_refs: list[str] | None = None,
+    ) -> TaskDetail:
+        """上传源码包并创建验证任务。相同内容复用已入库的 Project。"""
+        from app.contexts.project.repository import ProjectRepository
+        from app.contexts.project.service import ProjectService
+
+        desc = (vulnerability_description or "").strip()
+        if len(desc) < 10:
+            raise ValueError("请至少输入 10 个字符的漏洞描述")
+        if priority not in ("low", "medium", "high", "critical"):
+            raise ValueError("非法优先级")
+
+        await self._require_platform_ready()
+        project, _result = await ProjectService(
+            ProjectRepository(self.repo.session)
+        ).ingest_uploaded_source(
+            owner_id=owner_id,
+            filename=filename,
+            data=data,
+            name=name,
+        )
+        request = TaskCreateRequest(
+            project_address=project.git_url,
+            source_type="local_upload",
+            vulnerability_description=desc,
+            vulnerability_reasoning=vulnerability_reasoning,
+            priority=priority,
+            credential_refs=credential_refs or [],
+            clone_depth=None,
+        )
+        return await self.create_task(request, owner_id)
 
     async def redispatch_stale_queued(
         self, *, min_age_seconds: int = 60, now: datetime | None = None

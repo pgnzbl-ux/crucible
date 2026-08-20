@@ -10,7 +10,7 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Callable
 
-from app.contexts.project.git_url import classify_ref, parse_git_url, resolve_ref_type
+from app.contexts.project.git_url import parse_git_url, resolve_ref_type
 from app.contexts.project.source_cache import (
     MinioSourceStore,
     extract_source_archive,
@@ -69,6 +69,7 @@ class SourceAcquireResult:
     object_url: str | None = None
     top_level: list[str] = field(default_factory=list)
     file_count: int = 0
+    size_bytes: int | None = None
 
 
 def _project_has_files(project_dir: str) -> bool:
@@ -475,3 +476,60 @@ def acquire_source(
         top_level=entries,
         file_count=len(entries),
     )
+
+
+def acquire_uploaded_source(
+    host_workdir: str,
+    *,
+    cached: CachedSource | None,
+    store=None,
+) -> SourceAcquireResult:
+    """从 MinIO 解开已上传的源码包。缓存缺失不得回退 git clone。"""
+    if cached is None:
+        return SourceAcquireResult(
+            ok=False,
+            error="源码解包失败: 未找到已上传的源码包",
+            origin="upload",
+        )
+    store = store or MinioSourceStore()
+    dest = os.path.join(host_workdir, cached.repo_dirname)
+    try:
+        if _restore_cached(cached, store, host_workdir):
+            entries = _list_top_level(dest)
+            return SourceAcquireResult(
+                ok=True,
+                origin="upload",
+                git_url_original=cached.git_url_normalized,
+                git_url_normalized=cached.git_url_normalized,
+                project_key=cached.project_key,
+                git_host=cached.git_host,
+                repo_dirname=cached.repo_dirname,
+                ref_type=cached.ref_type or "upload",
+                ref_name=cached.ref_name or "local",
+                commit_sha=cached.commit_sha,
+                project_path=dest,
+                object_key=cached.object_key,
+                object_url=cached.object_url,
+                top_level=entries,
+                file_count=len(entries),
+            )
+        return SourceAcquireResult(
+            ok=False,
+            error="源码解包失败: 解开后目录为空",
+            origin="upload",
+            git_url_normalized=cached.git_url_normalized,
+            project_key=cached.project_key,
+            git_host=cached.git_host,
+            repo_dirname=cached.repo_dirname,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("上传源码拉取失败: %s", e)
+        return SourceAcquireResult(
+            ok=False,
+            error=f"源码解包失败: {e}",
+            origin="upload",
+            git_url_normalized=cached.git_url_normalized,
+            project_key=cached.project_key,
+            git_host=cached.git_host,
+            repo_dirname=cached.repo_dirname,
+        )

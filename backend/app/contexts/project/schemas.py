@@ -24,6 +24,7 @@ class ProjectResponse(PydBase):
     id: str
     name: str
     git_url: str
+    source_type: str = "git"
     default_ref: str | None
     description: str | None
     owner_id: str

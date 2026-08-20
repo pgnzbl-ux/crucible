@@ -104,9 +104,19 @@ export function ProjectDetailPage() {
               items={[
                 {
                   key: 'git',
-                  label: 'Git 地址',
+                  label: project.source_type === 'local_upload' ? '源码标识' : 'Git 地址',
                   span: 2,
                   children: <Text code>{project.git_url}</Text>,
+                },
+                {
+                  key: 'source',
+                  label: '来源',
+                  children:
+                    project.source_type === 'local_upload' ? (
+                      <Tag>本地上传</Tag>
+                    ) : (
+                      <Tag>Git</Tag>
+                    ),
                 },
                 {
                   key: 'web',
@@ -145,7 +155,9 @@ export function ProjectDetailPage() {
                 locale={{
                   emptyText: isArtifactsError
                     ? '制品列表加载失败'
-                    : '还没有缓存。跑过一次源码节点后会出现在这里。',
+                    : project.source_type === 'local_upload'
+                      ? '还没有缓存。上传源码包创建任务后会出现在这里。'
+                      : '还没有缓存。跑过一次源码节点后会出现在这里。',
                 }}
               />
             </Card>
@@ -167,7 +179,11 @@ export function ProjectDetailPage() {
         onClose={() => setCreateOpen(false)}
         initialValues={
           project
-            ? { project_address: project.git_url, project_ref: project.default_ref ?? undefined }
+            ? {
+                project_address: project.git_url,
+                project_ref: project.default_ref ?? undefined,
+                source_type: project.source_type === 'local_upload' ? 'local_upload' : 'git',
+              }
             : undefined
         }
       />

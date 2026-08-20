@@ -31,9 +31,18 @@ def test_alembic_chain_from_baseline():
     )
     assert 'revision: str = "a1b8c3d049e4"' in timestamptz
     assert 'down_revision: Union[str, None] = "e8c3a1b047d2"' in timestamptz
+    git_ref = (versions / "f3a9c2d18e04_task_git_ref_type_clone_depth.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'revision: str = "f3a9c2d18e04"' in git_ref
+    upload = (versions / "d4b7e1c08a92_project_source_type_upload.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'revision: str = "d4b7e1c08a92"' in upload
+    assert 'down_revision: Union[str, None] = "f3a9c2d18e04"' in upload
     from app.core.database import _alembic_head
 
-    assert _alembic_head() == "a1b8c3d049e4"
+    assert _alembic_head() == "d4b7e1c08a92"
 
 
 @pytest.mark.asyncio
@@ -50,6 +59,8 @@ async def test_create_all_schema_matches_models():
             assert "is_default" in provider_cols
             task_cols = {c["name"] for c in insp.get_columns("tasks")}
             assert "lab_id" in task_cols
+            project_cols = {c["name"] for c in insp.get_columns("projects")}
+            assert "source_type" in project_cols
             task_indexes = {i["name"] for i in insp.get_indexes("tasks")}
             assert "ix_tasks_lab_id" in task_indexes
             uniques = {

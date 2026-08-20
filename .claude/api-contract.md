@@ -86,14 +86,27 @@
   "project_ref": "main",
   "project_ref_type": "branch | tag | commit（可选；省略则自动推断）",
   "clone_depth": 1,
+  "source_type": "git",
   "vulnerability_description": "漏洞描述（至少 10 字符）",
   "priority": "low | medium | high | critical"
 }
 ```
 
-`clone_depth`：浅克隆层数，默认 `1`；`0` 表示全量 clone（流量更大）。`project_ref_type` 显式指定可避免 tag 名被误判为 branch 导致缓存 SHA 对不上。
+`clone_depth`：浅克隆层数，默认 `1`；`0` 表示全量 clone（流量更大）。`project_ref_type` 显式指定可避免 tag 名被误判为 branch 导致缓存 SHA 对不上。`source_type` 默认 `git`；`local_upload` 时 `project_address` 必须是已入库的 `upload://local/{slug}`，节点 0 从 MinIO 解开，不再 clone。
 
 **响应 202**：`TaskDetail`（含首次 `runs[]`）。先提交 Task/TaskRun 再投 Celery；Broker 失败 → 任务/run 标 `failed`，接口 **503**。未配置默认 LLM Provider、默认项无 API Key、或 agent-runner 镜像不存在/Docker 不可用 → **400**，不落任务、不投递 worker。运行槽满不在创建时拒绝，任务入队后由 worker 按间隔重试。
+
+### POST `/api/v1/tasks/upload`
+
+上传本地源码包并创建任务（multipart）。字段：
+
+- `file`：zip / tar / tar.gz，≤200MB（解压后 ≤1GB、≤50000 文件）
+- `vulnerability_description`：至少 10 字符
+- `name` / `priority` / `vulnerability_reasoning` / `credential_refs`（JSON 数组字符串）可选
+
+非法压缩路径（zip-slip）、空包、不支持的格式 → **400**。超限 → **413**。MinIO 入库失败 → **503**。相同内容指纹（规范 tar.gz 的 sha256）复用已有 Project 与 `source_artifacts`。任务的 `project_address` 为 `upload://local/{slug}`，`source_type=local_upload`。
+
+**响应 202**：同 `POST /tasks` 的 `TaskDetail`。
 
 ### GET `/api/v1/tasks`
 
@@ -220,11 +233,11 @@ owner 校验：所有环境均要求 `report.owner_id` 匹配当前用户。报�
 
 ### GET `/api/v1/projects/`
 
-当前用户的项目列表：`{ items, total }`。任务创建时按 Git 地址自动登记。
+当前用户的项目列表：`{ items, total }`。任务创建时按 Git 地址自动登记，或通过上传源码包登记（`source_type=local_upload`）。
 
 ### GET `/api/v1/projects/{id}`
 
-项目元数据 + 画像快照（`detected_language` / `detected_framework` / `is_web` / `last_cloned_at`）。权威画像按 commit SHA 存在对应 `source_artifacts.profile_json`。`is_web=false` 时前端禁止从该项目开验证任务。非所有者或不存在 → 404。
+项目元数据 + 画像快照（`detected_language` / `detected_framework` / `is_web` / `last_cloned_at` / `source_type`）。权威画像按 commit SHA 或上传包 sha256 存在对应 `source_artifacts.profile_json`。`is_web=false` 时前端禁止从该项目开验证任务。非所有者或不存在 → 404。
 
 ### GET `/api/v1/projects/{id}/artifacts`
 

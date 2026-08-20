@@ -4,7 +4,7 @@ Agent 漏洞分析工作流（Celery 任务）。
 流程：
   1. 加载任务 → 创建/获取 TaskRun（running）
   2. 最小预检：LLM Provider / agent-runner 镜像 / 凭据
-  3. 准备 host 临时目录（源码由节点 0 按表/MinIO 或 git clone 落到 {workdir}/{仓库名}）
+  3. 准备 host 临时目录（源码由节点 0 按表/MinIO、git clone 或本地上传包落到 {workdir}/{仓库名}）
   4. 构造 .prompt.json + 注入凭据 env
   5. 拉起 agent-runner 容器 + 流式消费 stdout JSONL → 实时落 AgentEvent + 发 Redis Pub/Sub
   6. 容器结束 → 状态分流（completed / needs_review / failed / cancelled）

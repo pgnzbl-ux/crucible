@@ -18,6 +18,21 @@ describe('summarizeNodeOutput', () => {
     ).toBe('MinIO 缓存 · claudecodeui · ref main · @aaaaaaa')
   })
 
+  it('source: 本地上传写出仓库与内容指纹', () => {
+    expect(
+      summarizeNodeOutput(
+        'source',
+        {
+          origin: 'upload',
+          repo_dirname: 'demo',
+          ref_name: 'local',
+          commit_sha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        },
+        'completed',
+      ),
+    ).toBe('本地上传 · demo · ref local · @bbbbbbb')
+  })
+
   it('profile: 只展示架构与 Web 标签，丢掉 AI 长文', () => {
     expect(
       summarizeNodeOutput(

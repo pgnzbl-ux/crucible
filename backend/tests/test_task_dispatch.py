@@ -120,6 +120,65 @@ async def test_create_rejects_unsafe_git_url(session):
 
 
 @pytest.mark.asyncio
+async def test_create_rejects_local_upload_without_artifact(session):
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.schemas import TaskCreateRequest
+    from app.contexts.task.service import TaskService
+
+    req = TaskCreateRequest(
+        project_address="upload://local/missing-aaaaaaaaaaaa",
+        source_type="local_upload",
+        vulnerability_description="demonstration vulnerability",
+    )
+    with pytest.raises(ValueError, match="上传源码"):
+        await TaskService(TaskRepository(session)).create_task(req, "u1")
+
+
+@pytest.mark.asyncio
+async def test_create_task_from_upload_ingests_and_dispatches(session):
+    import io
+    import zipfile
+
+    from sqlalchemy import select
+
+    from app.contexts.project.models import Project, SourceArtifact
+    from app.contexts.project.source_cache import MemorySourceStore
+    from app.contexts.task.models import Task
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("demo/app.py", "print(1)\n")
+    data = buf.getvalue()
+    store = MemorySourceStore()
+    await _seed_default_llm(session)
+    with (
+        patch("app.core.celery_app.celery_app.send_task"),
+        patch(
+            "app.contexts.project.service.MinioSourceStore",
+            return_value=store,
+        ),
+    ):
+        detail = await TaskService(TaskRepository(session)).create_task_from_upload(
+            owner_id="u1",
+            filename="demo.zip",
+            data=data,
+            vulnerability_description="demonstration vulnerability",
+        )
+    assert detail.source_type == "local_upload"
+    assert detail.project_address.startswith("upload://local/")
+    task = (await session.execute(select(Task))).scalar_one()
+    assert task.source_type == "local_upload"
+    project = (await session.execute(select(Project))).scalar_one()
+    assert project.source_type == "local_upload"
+    artifact = (await session.execute(select(SourceArtifact))).scalar_one()
+    assert artifact.ref_type == "upload"
+    assert artifact.git_host == "upload"
+    assert store.get_bytes(artifact.object_key)
+
+
+@pytest.mark.asyncio
 async def test_redispatch_stale_queued_uses_original_run_id(session):
     from datetime import datetime, timedelta, timezone
 

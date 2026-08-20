@@ -43,6 +43,11 @@ export function ProjectsPage() {
           <Text type="secondary" style={{ fontSize: 12 }} code>
             {row.git_url}
           </Text>
+          {row.source_type === 'local_upload' ? (
+            <div>
+              <Tag>本地上传</Tag>
+            </div>
+          ) : null}
         </div>
       ),
     },
@@ -77,7 +82,7 @@ export function ProjectsPage() {
     <>
       <PageHeader
         title="源码管理"
-        subtitle="同一 Git 仓库只登记一次，后续任务优先从 MinIO 缓存取源码"
+        subtitle="Git 仓库与本地上传包都会登记；后续任务优先从 MinIO 取源码"
         extra={
           <Button icon={<ReloadOutlined />} loading={isFetching} onClick={() => refetch()}>
             刷新
@@ -107,7 +112,7 @@ export function ProjectsPage() {
             emptyText: (
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="还没有项目。提交任务时会按 Git 地址自动登记。"
+                description="还没有项目。提交任务时会按 Git 地址自动登记，也可以上传源码包。"
               >
                 <Button type="primary" icon={<CodeOutlined />} onClick={() => navigate('/tasks?create=1')}>
                   去新建任务

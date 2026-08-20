@@ -5,6 +5,7 @@ const RULES: [needle: string, title: string, hint: string][] = [
   ['output 校验失败', 'Agent 回传 JSON 缺必填字段', '对照该节点 schema（env_ready 要 target_url+compose_path，audit 要 gate_verdict，report 要 report_data+final_verdict）。'],
   ['output JSON 解析失败', '节点结果不是合法 JSON', 'submit_result 写出的内容损坏。看容器 stderr 或重跑该节点。'],
   ['超时', '节点执行超时被停止', '模型卡住或靶场过慢。可加大 AGENT_RUNNER_TIMEOUT_SECONDS，或检查 compose/健康检查。'],
+  ['源码解包失败', '上传源码解开失败', '核对源码包是否为 zip / tar.gz，以及任务是否仍能找到已上传的缓存。'],
   ['源码克隆失败', 'Git 克隆源码失败', '核对仓库地址、分支/tag，以及任务凭据是否有权限。'],
   ['agent-runner 镜像不存在', '缺少 agent-runner 镜像', '在项目根执行: docker build -f infrastructure/agent-runner/Dockerfile -t crucible-agent-runner:base .'],
   ['缺少 LLM 凭据', '没有可用的 LLM API Key', '到「设置」配置并激活默认 LLM Provider。'],

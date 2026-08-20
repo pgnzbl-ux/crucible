@@ -15,11 +15,17 @@ FRAMEWORK_SNAPSHOT_MAX = 100
 
 
 class Project(BaseModel):
-    """项目(Git 仓库)的元数据与画像。"""
+    """项目(Git 仓库或本地上传包)的元数据与画像。"""
     __tablename__ = "projects"
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    git_url: Mapped[str] = mapped_column(String(1024), nullable=False, index=True, comment="Git URL")
+    git_url: Mapped[str] = mapped_column(
+        String(1024), nullable=False, index=True,
+        comment="Git URL，或 upload://local/{slug}",
+    )
+    source_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="git", comment="git | local_upload",
+    )
     default_ref: Mapped[str | None] = mapped_column(String(255), comment="默认分支/tag")
     description: Mapped[str | None] = mapped_column(Text)
     owner_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), index=True)
@@ -54,9 +60,13 @@ class SourceArtifact(BaseModel):
         String(512), nullable=False, index=True, comment="space/project，如 siteboon/claudecodeui"
     )
     repo_dirname: Mapped[str] = mapped_column(String(255), nullable=False, comment="落地目录名")
-    ref_type: Mapped[str] = mapped_column(String(16), nullable=False, comment="branch|tag|commit")
-    ref_name: Mapped[str] = mapped_column(String(255), nullable=False, comment="main / v1.0.0 / sha")
-    commit_sha: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    ref_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="branch|tag|commit|upload",
+    )
+    ref_name: Mapped[str] = mapped_column(String(255), nullable=False, comment="main / v1.0.0 / sha / local")
+    commit_sha: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True, comment="git SHA-1 或上传包 sha256",
+    )
     profile_json: Mapped[str | None] = mapped_column(
         Text, comment="该 commit 的画像 JSON；commit_sha 变更时清空"
     )

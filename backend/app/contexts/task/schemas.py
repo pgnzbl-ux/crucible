@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 # ── 请求 ──
 
 class TaskCreateRequest(BaseModel):
-    project_address: str = Field(..., min_length=1, max_length=1024, description="项目 Git 地址")
+    project_address: str = Field(..., min_length=1, max_length=1024, description="Git 地址或 upload://local/{slug}")
     project_ref: str | None = Field(None, max_length=255, description="分支/commit/tag")
     project_ref_type: str | None = Field(
         None,

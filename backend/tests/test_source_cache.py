@@ -22,6 +22,13 @@ def test_source_object_key_uses_host_project_and_sha():
     )
 
 
+def test_source_object_key_for_local_upload():
+    sha = "b" * 64
+    assert source_object_key("owner-1", "upload", "local/demo-aaa", sha) == (
+        f"source/owner-1/upload/local/demo-aaa/{sha}.tar.gz"
+    )
+
+
 def test_pack_project_uses_repo_dirname_arcname(tmp_path):
     repo = tmp_path / "claudecodeui"
     repo.mkdir()

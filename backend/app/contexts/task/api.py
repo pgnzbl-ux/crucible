@@ -1,11 +1,12 @@
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
 from app.shared.deps import CurrentUserId
+from app.shared.object_store import ObjectStoreError
 from app.shared.sse import stream_task_events
 
 from .repository import TaskRepository
@@ -65,6 +66,64 @@ async def task_stats(
 ) -> TaskStatsResponse:
     """工作台状态计数（排除 archived）。必须声明在 /{task_id} 之前。"""
     return await svc.task_stats(user_id)
+
+
+_UPLOAD_MAX_BYTES = 200 * 1024 * 1024
+
+
+@router.post("/upload", response_model=TaskDetail, status_code=202)
+async def create_task_from_upload(
+    svc: Annotated[TaskService, Depends(get_task_service)],
+    user_id: CurrentUserId,
+    file: UploadFile = File(..., description="源码包 zip / tar / tar.gz，≤200MB"),
+    vulnerability_description: Annotated[str, Form(min_length=10)] = ...,
+    name: Annotated[str | None, Form()] = None,
+    priority: Annotated[str, Form()] = "medium",
+    vulnerability_reasoning: Annotated[str | None, Form()] = None,
+    credential_refs: Annotated[str | None, Form(description="JSON 数组，凭据 id 列表")] = None,
+) -> TaskDetail:
+    """上传本地源码包并创建验证任务。节点 0 从 MinIO 解开，不再 git clone。"""
+    import json as _json
+
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > _UPLOAD_MAX_BYTES:
+            raise HTTPException(413, "源码包超过 200MB 限制")
+        chunks.append(chunk)
+    data = b"".join(chunks)
+    if not data:
+        raise HTTPException(400, "源码包为空")
+
+    refs: list[str] = []
+    if credential_refs:
+        try:
+            parsed = _json.loads(credential_refs)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(400, "credential_refs 必须是 JSON 数组") from exc
+        if not isinstance(parsed, list) or not all(isinstance(x, str) for x in parsed):
+            raise HTTPException(400, "credential_refs 必须是 JSON 字符串数组")
+        refs = parsed
+
+    try:
+        return await svc.create_task_from_upload(
+            owner_id=user_id,
+            filename=file.filename or "source.zip",
+            data=data,
+            vulnerability_description=vulnerability_description,
+            name=name,
+            priority=priority,
+            vulnerability_reasoning=vulnerability_reasoning,
+            credential_refs=refs,
+        )
+    except TaskDispatchError as e:
+        raise HTTPException(503, str(e)) from e
+    except ObjectStoreError as e:
+        raise HTTPException(503, f"源码包入库失败: {e}") from e
 
 
 @router.get("/{task_id}", response_model=TaskDetail)

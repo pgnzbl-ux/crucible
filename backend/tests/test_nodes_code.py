@@ -72,6 +72,55 @@ async def test_source_node_fails_on_network_error(tmp_path):
             await SourceNode().execute(_ctx(tmp_path))
 
 
+@pytest.mark.asyncio
+async def test_source_node_upload_restores_without_clone(tmp_path):
+    dest = tmp_path / "demo"
+    dest.mkdir()
+    (dest / "app.py").write_text("uploaded\n")
+    result = SourceAcquireResult(
+        ok=True,
+        origin="upload",
+        git_url_normalized="upload://local/demo-aaa",
+        project_key="local/demo-aaa",
+        git_host="upload",
+        repo_dirname="demo",
+        ref_type="upload",
+        ref_name="local",
+        commit_sha="b" * 64,
+        project_path=str(dest),
+        top_level=["app.py"],
+        file_count=1,
+    )
+    ctx = _ctx(tmp_path, project_address="upload://local/demo-aaa")
+    ctx.source_type = "local_upload"
+    ctx.owner_id = "u1"
+    ctx.project_id = "p1"
+    svc = MagicMock()
+    svc.find_cached_source = AsyncMock(return_value=MagicMock())
+    svc.touch_cloned = AsyncMock()
+    svc.record_source_artifact = AsyncMock()
+    with (
+        patch("app.contexts.project.service.ProjectService", return_value=svc),
+        patch("app.contexts.project.repository.ProjectRepository"),
+        patch(
+            "app.contexts.project.source_acquire.acquire_uploaded_source",
+            return_value=result,
+        ) as acquire,
+        patch(
+            "app.contexts.project.source_acquire.acquire_source",
+            side_effect=AssertionError("upload must not git clone"),
+        ),
+    ):
+        ctx.db_session = object()
+        out = await SourceNode().execute(ctx)
+    acquire.assert_called_once()
+    assert out["origin"] == "upload"
+    assert out["source_type"] == "local_upload"
+    assert out["workspace_path"] == "/workspace/demo"
+    svc.record_source_artifact.assert_not_awaited()
+    svc.touch_cloned.assert_awaited_once()
+
+
 def test_profile_node_is_ai():
     assert ProfileNode().is_ai is True
 

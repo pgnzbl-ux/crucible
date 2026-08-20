@@ -23,6 +23,7 @@ from app.contexts.agent.errors import humanize_agent_error
         ("AI 节点 audit output 校验失败: 缺必需字段: gate_verdict", "缺必填字段"),
         ("源码克隆失败: Authentication failed", "克隆源码失败"),
         ("源码克隆失败: 网络错误（无法解析主机）: github.com", "Git 拉取网络失败"),
+        ("源码解包失败: 未找到已上传的源码包", "上传源码解开失败"),
         ("源码克隆失败: 仓库不存在或无权访问: 404", "仓库不存在或无权访问"),
         ("agent-runner 镜像不存在: crucible-agent-runner:base", "缺少 agent-runner 镜像"),
         ("agent-runner 镜像不存在或 Docker 不可用: crucible-agent-runner:base", "缺少 agent-runner 镜像"),
