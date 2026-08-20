@@ -287,7 +287,7 @@ Crucible/
 │   ├── agent-runner/        # Agent 沙箱镜像（node-skills 蒸馏方法论）
 │   └── deploy/              # systemd + Nginx 生产模板
 ├── plugins/                 # 桌面 Claude Code 方法论母本（不进运行镜像）
-├── docs/                    # 架构、节点设计、工程治理
+├── docs/assets/             # 界面截图（其余文档本地维护，不入库）
 └── CLAUDE.md                # 给协作 AI 的项目入口
 ```
 
@@ -298,23 +298,19 @@ Crucible/
 - CI/CD、OpenTelemetry / Sentry
 - OpenAPI 生成前端类型
 
-完整清单见 [docs/development-guide.md](docs/development-guide.md)。
-
 ## 文档
 
 | 文档 | 内容 |
 | --- | --- |
 | [backend/README.md](backend/README.md) | 后端启动、配置、测试 |
 | [frontend/README.md](frontend/README.md) | 前端启动、页面、代理 |
-| [docs/development-guide.md](docs/development-guide.md) | 架构决策与后续工作 |
-| [docs/agent-workflow.md](docs/agent-workflow.md) | 六节点如何协作 |
-| [docs/governance/](docs/governance/) | 开发约定 |
+| [infrastructure/deploy/README.md](infrastructure/deploy/README.md) | 生产部署（systemd + Nginx） |
 | [CLAUDE.md](CLAUDE.md) | 给协作 AI 的项目入口 |
 | [.claude/api-contract.md](.claude/api-contract.md) | HTTP API 契约 |
 
 ## 参与贡献
 
-欢迎 Issue / PR。提交前请读 [docs/governance/](docs/governance/) 了解工程约定：
+欢迎 Issue / PR。工程约定：
 
 - Commit 描述用简体中文，type/scope 用英文（Conventional Commits）
 - 新功能 / Bug 修复先写失败测试
