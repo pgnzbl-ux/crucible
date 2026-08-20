@@ -49,8 +49,15 @@ def _snapshot_text(value: Any, max_len: int) -> str | None:
 def _synthetic_git_refs(p: Project) -> list[SourceRefSummary]:
     if p.source_type == "local_upload":
         return []
-    ref_type, ref_name = classify_ref(p.default_ref)
-    return [SourceRefSummary(ref_type=ref_type, ref_name=ref_name)]
+    stored_type = p.default_ref_type
+    ref_name = (p.default_ref or "").strip()
+    if stored_type in ("branch", "tag", "commit"):
+        if stored_type == "branch" and (not ref_name or ref_name.upper() == "HEAD"):
+            return [SourceRefSummary(ref_type="branch", ref_name="HEAD")]
+        if ref_name:
+            return [SourceRefSummary(ref_type=stored_type, ref_name=ref_name)]
+    ref_type, inferred_name = classify_ref(p.default_ref)
+    return [SourceRefSummary(ref_type=ref_type, ref_name=inferred_name)]
 
 
 def _git_lookup_key(p: Project) -> tuple[str, str] | None:
@@ -121,11 +128,12 @@ class ProjectService:
             git_url=parsed.normalized,
             source_type="git",
             default_ref=request.default_ref,
+            default_ref_type=request.default_ref_type,
             description=request.description,
             owner_id=owner_id,
         )
         project = await self.repo.create(project)
-        return _to_response(project)
+        return (await self._responses_with_artifact_refs([project]))[0]
 
     async def upsert_by_git_url(
         self,
@@ -154,6 +162,7 @@ class ProjectService:
                 existing.default_ref = default_ref
                 await self.repo.session.flush()
             return existing
+        await self._require_unique_name(owner_id, fallback_name)
         project = Project(
             name=fallback_name,
             git_url=stored_url,
@@ -199,12 +208,12 @@ class ProjectService:
             return None
         if request.name is not None and request.name != p.name:
             await self._require_unique_name(owner_id, request.name)
-        for field in ("name", "default_ref", "description"):
+        for field in ("name", "default_ref", "default_ref_type", "description"):
             v = getattr(request, field)
             if v is not None:
                 setattr(p, field, v)
         await self.repo.session.flush()
-        return _to_response(p)
+        return (await self._responses_with_artifact_refs([p]))[0]
 
     async def delete_project(self, project_id: str, owner_id: str) -> bool:
         p = await self.repo.get_by_id(project_id)

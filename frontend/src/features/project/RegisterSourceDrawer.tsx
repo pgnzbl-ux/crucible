@@ -4,6 +4,11 @@ import { App, Button, Drawer, Form, Input, Space, Upload } from 'antd'
 import { InboxOutlined } from '@ant-design/icons'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 
+import {
+  GIT_REF_PLACEHOLDERS,
+  GitRefTypeBanners,
+  type GitRefType,
+} from '../../shared/components/GitRefTypeBanners'
 import { api } from '../../shared/lib/api'
 
 const ARCHIVE_ACCEPT = '.zip,.tar,.tar.gz,.tgz,application/zip,application/gzip,application/x-tar'
@@ -19,6 +24,7 @@ interface RegisterSourceDrawerProps {
 type GitForm = {
   name: string
   git_url: string
+  default_ref_type: GitRefType
   default_ref?: string
   description?: string
 }
@@ -34,6 +40,7 @@ export function RegisterSourceDrawer({ open, mode, onClose }: RegisterSourceDraw
   const qc = useQueryClient()
   const [gitForm] = Form.useForm<GitForm>()
   const [uploadForm] = Form.useForm<UploadForm>()
+  const refType = Form.useWatch('default_ref_type', gitForm) ?? 'branch'
 
   useEffect(() => {
     if (!open) return
@@ -47,6 +54,7 @@ export function RegisterSourceDrawer({ open, mode, onClose }: RegisterSourceDraw
         name: values.name,
         git_url: values.git_url,
         default_ref: values.default_ref,
+        default_ref_type: values.default_ref_type,
         description: values.description,
       }),
     onSuccess: () => {
@@ -87,7 +95,12 @@ export function RegisterSourceDrawer({ open, mode, onClose }: RegisterSourceDraw
       title={mode === 'git' ? '登记 Git 仓库' : '上传源码包'}
     >
       {mode === 'git' ? (
-        <Form form={gitForm} layout="vertical" onFinish={(v) => gitMutation.mutate(v)}>
+        <Form
+          form={gitForm}
+          layout="vertical"
+          onFinish={(v) => gitMutation.mutate(v)}
+          initialValues={{ default_ref_type: 'branch' }}
+        >
           <Form.Item name="name" label="项目名称" rules={[{ required: true, message: '请填写名称' }]}>
             <Input placeholder="例如 claudecodeui" />
           </Form.Item>
@@ -98,8 +111,16 @@ export function RegisterSourceDrawer({ open, mode, onClose }: RegisterSourceDraw
           >
             <Input placeholder="https://github.com/org/repo.git" />
           </Form.Item>
-          <Form.Item name="default_ref" label="默认引用">
-            <Input placeholder="main / v1.0.0，可留空" />
+          <Form.Item
+            name="default_ref_type"
+            label="默认引用类型"
+            rules={[{ required: true, message: '请选择引用类型' }]}
+            extra="点选分支 / 标签 / 提交；登记后创建任务时会沿用同一套选择方式。"
+          >
+            <GitRefTypeBanners />
+          </Form.Item>
+          <Form.Item name="default_ref" label="默认引用名称">
+            <Input placeholder={GIT_REF_PLACEHOLDERS[refType as GitRefType]} />
           </Form.Item>
           <Form.Item name="description" label="说明">
             <Input.TextArea rows={3} />

@@ -1,5 +1,10 @@
-/** 与 backend `app/contexts/agent/errors.py` 对齐：把原始错误翻成标题 + 下一步。 */
+/** 与 backend `app/contexts/agent/errors.py` + `llm_errors.py` 对齐。 */
 const RULES: [needle: string, title: string, hint: string][] = [
+  ['余额不足', 'LLM 账户余额不足', '到 LLM 服务商控制台充值或更换有余额的 API Key，再在「设置 → LLM Provider」更新后重试。'],
+  ['"code":"1004"', 'LLM 账户余额不足', '到 LLM 服务商控制台充值或更换有余额的 API Key。'],
+  ['LLM 调用失败', 'LLM 调用失败', '核对「设置 → LLM Provider」的 API Key、Base URL、模型名与账户余额。'],
+  ['error result: success', 'LLM 会话异常结束', '多为 LLM API 报错（余额不足、模型不存在），但被 SDK 误报。查看较早的 agent.failed。'],
+  ['HTTP 401', 'LLM 接口鉴权失败（401）', '检查 API Key、Base URL 与账户余额；401 也可能是余额不足。'],
   ['未产出 .node_output.json', 'Agent 没有提交节点结果就结束了', '模型未调用 submit_result。检查该节点 prompt、MCP 工具是否注入成功，或重建 agent-runner 镜像。'],
   ['未调用 submit_result', 'Agent 没有提交节点结果就结束了', '模型未调用 submit_result。检查该节点 prompt、MCP 工具是否注入成功，或重建 agent-runner 镜像。'],
   ['output 校验失败', 'Agent 回传 JSON 缺必填字段', '对照该节点 schema（env_ready 要 target_url+compose_path，audit 要 gate_verdict，report 要 report_data+final_verdict）。'],

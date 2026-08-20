@@ -14,7 +14,7 @@ paths: ["backend/app/contexts/**/*.py", "backend/app/shared/**/*.py", "backend/a
 - **禁止跨 Context 建 ORM relationship**（mapper 报错），只保留 `ForeignKey` + 整数/UUID ID，需要时手动查
 - 新表必须在其所属 Context 的 `models.py` 中定义；Celery worker 启动时 import 该 models 以注册 metadata（否则 FK 解析失败）。Alembic 基线 `c18a0e9b4d21`（`metadata.create_all`）与 `init_db()` 同源；索引/约束增量走后续 revision（如 `b7e4c2a19f08`）
 
-## 2. 六个 Context 的职责边界
+## 2. 七个 Context 的职责边界
 
 | Context | 核心模型 | 关键职责 |
 |---|---|---|
@@ -22,6 +22,7 @@ paths: ["backend/app/contexts/**/*.py", "backend/app/shared/**/*.py", "backend/a
 | `task` | tasks / task_runs / node_runs / agent_events | 任务 CRUD、状态机(含 retry/delete/archived)、6 节点断点续跑、事件查询 |
 | `agent` | （无自有表，消费 settings 与 task） | Agent 执行器抽象、Celery 工作流、沙箱编排 |
 | `project` | projects / source_artifacts | 项目元数据 + 按 SHA 的画像缓存；源码 tar.gz 按 owner+host 隔离缓存在 MinIO `crucible-durable`（agent 只调 `acquire_source()` / ProjectService） |
+| `lab` | labs | 靶场生命周期：复用 / TTL / stop / start / rebuild / destroy，按 compose project 名操作容器 |
 | `report` | reports / evidences | 报告生成 + 状态机 + MinIO 归档 |
 | `settings` | llm_providers / credentials | LLM Provider + 凭据后台 CRUD（**明文存取 + 响应掩码 + 激活唯一性**） |
 

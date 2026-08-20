@@ -41,6 +41,14 @@ def test_extract_thinking_ignores_empty():
     assert extract_thinking_text(SimpleNamespace(text="not thinking")) is None
 
 
+def test_humanize_container_balance_insufficient():
+    title, hint = humanize_container_error(
+        'HTTP 401: {"error":{"code":"1004","message":"余额不足"}}'
+    )
+    assert "余额不足" in title
+    assert "充值" in hint
+
+
 def test_humanize_container_submit_result():
     title, hint = humanize_container_error("节点 audit 未调用 submit_result(无 .node_output.json)")
     assert "提交节点结果" in title

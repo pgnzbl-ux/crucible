@@ -7,13 +7,13 @@ import {
   DashboardOutlined,
   FileProtectOutlined,
   LogoutOutlined,
-  SafetyCertificateOutlined,
   SettingOutlined,
 } from '@ant-design/icons'
 import { useQueryClient } from '@tanstack/react-query'
 import { useLocation } from 'wouter'
 
 import { BreadcrumbNav } from '../shared/components/BreadcrumbNav'
+import { CrucibleLogo } from '../shared/components/CrucibleLogo'
 import { SIDER_COLLAPSED_WIDTH, SIDER_WIDTH } from '../styles/theme'
 
 const { Header, Content, Sider } = Layout
@@ -107,9 +107,7 @@ export function AppLayout({ children, fill = false }: AppLayoutProps) {
         style={{ height: '100%' }}
       >
         <button type="button" className="crucible-brand" onClick={() => navigate('/')} title="返回工作台">
-          <span className="crucible-brand-mark">
-            <SafetyCertificateOutlined />
-          </span>
+          <CrucibleLogo size={32} className="crucible-brand-mark" />
           <span className="crucible-brand-text">
             <span className="crucible-brand-name">Crucible</span>
             <span className="crucible-brand-tagline">AI 漏洞验证平台</span>

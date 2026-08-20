@@ -648,7 +648,7 @@ class LabService:
     async def _ensure_rebuild_source(
         self, lab: Lab, workdir_root: str
     ) -> tuple[str | None, str | None]:
-        """lab.workdir/{repo} 没有源码时，按 projects 表 git_url shallow clone。"""
+        """lab.workdir/{repo} 没有源码时：Git shallow clone；上传项目从 MinIO 解开。"""
         import asyncio
 
         from sqlalchemy import select as sa_select
@@ -670,6 +670,27 @@ class LabService:
         ):
             return repo_dirname, None
 
+        if getattr(project, "source_type", "git") == "local_upload":
+            from app.contexts.project.repository import ProjectRepository
+            from app.contexts.project.service import ProjectService
+            from app.contexts.project.source_acquire import acquire_uploaded_source
+
+            proj_svc = ProjectService(ProjectRepository(self.session))
+            cached = await proj_svc.find_cached_source(
+                project.git_url, None, lab.owner_id, ref_type="upload"
+            )
+            acquired = await asyncio.to_thread(
+                acquire_uploaded_source,
+                workdir_root,
+                cached=cached,
+            )
+            if not acquired.ok:
+                return (
+                    repo_dirname,
+                    acquired.error or "源码解包失败: 未找到已上传的源码包",
+                )
+            return acquired.repo_dirname or repo_dirname, None
+
         ok, err = await asyncio.to_thread(
             git_clone_to_workdir,
             workdir_root,
@@ -687,9 +708,11 @@ class LabService:
 
         lab = await self._require_owned_lab(lab_id, owner_id)
         self._require_status(
-            lab, {"ready", "stopped", "failed", "expired", "creating"}, "destroy"
+            lab,
+            {"ready", "stopped", "failed", "expired", "creating", "rebuilding"},
+            "destroy",
         )
-        if lab.status == "creating":
+        if lab.status in {"creating", "rebuilding"}:
             for task_id in await self.live_task_ids(lab.id):
                 try:
                     await self._task_service().cancel_task(task_id, owner_id)

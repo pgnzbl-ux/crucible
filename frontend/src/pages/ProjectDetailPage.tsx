@@ -10,6 +10,7 @@ import { api, type SourceArtifact } from '../shared/lib/api'
 import { PageHeader } from '../shared/components/PageHeader'
 import { PageContainer } from '../shared/components/PageContainer'
 import { TaskCreateDrawer } from '../features/task/components/TaskCreateDrawer'
+import { classifyProjectRef, projectDefaultRefLabel } from '../features/task/lib/projectSelectOptions'
 import { useErrorToast } from '../shared/hooks/useErrorToast'
 
 const { Text } = Typography
@@ -134,7 +135,15 @@ export function ProjectDetailPage() {
                   children:
                     [project.detected_language, project.detected_framework].filter(Boolean).join(' / ') || '—',
                 },
-                { key: 'ref', label: '默认引用', children: project.default_ref ?? 'HEAD' },
+                ...(project.source_type === 'local_upload'
+                  ? []
+                  : [
+                      {
+                        key: 'ref',
+                        label: '默认引用',
+                        children: projectDefaultRefLabel(project),
+                      },
+                    ]),
                 {
                   key: 'cloned',
                   label: '最近落地',
@@ -180,12 +189,30 @@ export function ProjectDetailPage() {
       <TaskCreateDrawer
         open={createOpen}
         onClose={() => setCreateOpen(false)}
+        boundProject={
+          project
+            ? {
+                id: project.id,
+                name: project.name,
+                git_url: project.git_url,
+                default_ref: project.default_ref,
+                default_ref_type: project.default_ref_type ?? undefined,
+                source_refs: project.source_refs,
+                source_type: project.source_type,
+                artifacts: artifacts?.items,
+              }
+            : undefined
+        }
         initialValues={
           project
             ? {
-                project_address: project.git_url,
                 project_ref: project.default_ref ?? undefined,
-                source_type: project.source_type === 'local_upload' ? 'local_upload' : 'git',
+                project_ref_type: (project.default_ref_type ??
+                  classifyProjectRef(project.default_ref).ref_type) as
+                  | 'branch'
+                  | 'tag'
+                  | 'commit',
+                clone_depth: 1,
               }
             : undefined
         }

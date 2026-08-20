@@ -5,47 +5,55 @@ description: Alembic 迁移生成与执行
 
 # Database Migrate
 
-当前有一条 **基线** `alembic/versions/c18a0e9b4d21_baseline.py`（`upgrade()` = 当前 ORM `metadata.create_all`），以及后续增量 revision。开发启动时 `init_db()` 走同一套 metadata 并补缺失索引，再 stamp `alembic_version` 到 head。库地址只从 `.env` 的 `DATABASE_URL` 读（`alembic/env.py` 注入，不要把真实 URL 写进 `alembic.ini` / `config.py`）。
+规则摘要：`.cursor/rules/db-migrate.mdc`。命令一律用仓库根 `.venv`（见 `.cursor/rules/agent-env.mdc`）。
 
-## 1. 空库部署
+当前 **head**：`h1c4d8e05f26`（以 `alembic heads` / `_alembic_head()` 为准）。
 
-```bash
-cd backend
-alembic upgrade head
-```
-
-开发空库在 API 启动时按当前模型建表，也可：
+## 1. 空库 / 升级
 
 ```bash
 cd backend
-alembic upgrade head
+../.venv/bin/alembic upgrade head
 ```
 
-已有库（表已在）不要对基线再 `upgrade` 指望改列；启动时 `init_db()` 会按 metadata 补缺失索引（含 unique 标志不一致时重建）并 stamp 到当前 head。从旧多版本链过来的库 stamp 即可。增量约束变更优先跑 `alembic upgrade head`。
+开发空库 API 启动时 `init_db()` 会：PostgreSQL 先 `alembic upgrade head`，再 `create_all` + 补缺失列/索引/注释并 stamp head。已有库也依赖启动时 upgrade，但生产仍应显式 `upgrade head`。
 
-## 2. 模型变更后再出增量
+`DATABASE_URL` 只来自 `backend/.env`（`alembic/env.py` 注入），勿写进 `alembic.ini`。
 
-改 Context `models.py` 后：
+## 2. 模型变更 → 新 revision
 
 ```bash
 cd backend
-alembic revision --autogenerate -m "add xxx"
+../.venv/bin/alembic revision --autogenerate -m "add xxx"
+# 或 hand-written revision
 ```
 
-- **必须**人工 review autogenerate 输出，alembic 不能识别所有变更（如 enum rename / column type）
-- 跨 Context 新表必须放进对应 Context 的 `models.py`（worker import 注册 metadata，参考 `backend.md` §1）
-- 基线文件不要改历史、不要再叠旧链
+### 提交前清单（缺一项即不完整）
 
-## 3. 回滚
+- [ ] `down_revision` = 当前 head
+- [ ] 人工 review autogenerate（enum rename、列类型等常漏）
+- [ ] 更新 `tests/test_schema_baseline.py`（新文件 + `_alembic_head()` 断言）
+- [ ] 相关 model 测试列集合（如 `test_project_model.py`）
+- [ ] `../.venv/bin/pytest tests/test_schema_baseline.py -q`
+
+## 3. 链结构（勿改 baseline）
+
+```
+c18a0e9b4d21 (baseline)
+  → b7e4c2a19f08 → e8c3a1b047d2 → a1b8c3d049e4 → f3a9c2d18e04
+  → d4b7e1c08a92 → e7d2b4a10c95 → f8c2a1b03d14 → g7b3e9a02c15
+  → h1c4d8e05f26 (head)
+```
+
+## 4. 回滚
 
 ```bash
-alembic downgrade -1     # 回一版（目前基线的 -1 是 drop_all，会删全部表）
-alembic downgrade base   # 全回
+../.venv/bin/alembic downgrade -1
 ```
 
-生产回滚需用户确认（参考 `git-workflow.md` §5 不可逆操作）。
+生产 `downgrade` / `drop` 需用户确认。
 
-## 4. 注意事项
+## 5. 允许 / 禁止
 
-- 不要在迁移里塞业务代码 / 数据回填（用单独脚本）
-- 不要 drop 列只做 `server_default` 移除，迁移历史要可回滚
+- **允许**：DDL 增量；独立 revision 做小数据回填（如 `openai_compat` → `custom`）或列注释同步
+- **禁止**：改 baseline；migration 内调 Service；不可回滚的 destructive 变更未经确认

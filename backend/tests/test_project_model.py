@@ -16,7 +16,7 @@ def test_project_table_columns():
     Base.metadata.create_all(engine)
     cols = {c["name"] for c in inspect(engine).get_columns("projects")}
     expected = {
-        "id", "name", "git_url", "default_ref", "description", "owner_id",
+        "id", "name", "git_url", "default_ref", "default_ref_type", "description", "owner_id",
         "detected_language", "detected_framework", "is_web",
         "last_cloned_at", "source_type", "created_at", "updated_at",
     }

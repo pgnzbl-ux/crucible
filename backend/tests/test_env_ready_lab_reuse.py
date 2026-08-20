@@ -393,11 +393,12 @@ async def test_reproduce_touches_lab_when_lab_id_present():
     with patch("app.contexts.lab.service.LabService") as LS, \
          patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", new_callable=AsyncMock) as ai:
         LS.return_value.touch = AsyncMock()
-        LS.return_value.ensure_running = AsyncMock(return_value="ready")
+        LS.return_value.align_runtime_status = AsyncMock()
         ai.return_value = {"verdict": "confirmed"}
         await ReproduceNode().execute(ctx)
     LS.return_value.touch.assert_awaited_once_with("lab1")
-    LS.return_value.ensure_running.assert_awaited_once_with("lab1")
+    LS.return_value.align_runtime_status.assert_awaited_once_with("lab1")
+    LS.return_value.ensure_running.assert_not_called()
 
 
 @pytest.mark.asyncio

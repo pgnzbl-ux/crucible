@@ -256,6 +256,26 @@ async def test_destroy_creating_lab_cancels_live_tasks(session):
 
 
 @pytest.mark.asyncio
+async def test_destroy_rebuilding_lab(session):
+    from app.contexts.lab.models import Lab
+
+    svc, result, task = await ready_lab(session)
+    task.status = "completed"
+    lab = await session.get(Lab, result.lab_id)
+    lab.status = "rebuilding"
+    await session.commit()
+
+    with patch(
+        "app.contexts.lab.docker_ops.compose_down", new_callable=AsyncMock
+    ) as down:
+        status = await svc.destroy_lab(result.lab_id, owner_id="u1")
+
+    assert status == "destroyed"
+    down.assert_awaited_once_with(result.compose_project)
+    assert (await session.get(Lab, result.lab_id)).status == "destroyed"
+
+
+@pytest.mark.asyncio
 async def test_rebuild_creating_lab_when_idle(session, tmp_path):
     from app.contexts.lab.models import Lab
 
@@ -363,6 +383,93 @@ async def test_rebuild_uses_commit_sha_when_cloning(session, tmp_path):
     assert clone.call_args.args[2] == SHA
     assert clone.call_args.kwargs["ref_type"] == "commit"
     assert os.path.isdir(clone.call_args.args[0])
+
+
+@pytest.mark.asyncio
+async def test_rebuild_upload_project_uses_minio_not_git_clone(session, tmp_path):
+    import io
+    import zipfile
+
+    from app.contexts.identity.models import User
+    from app.contexts.lab.models import Lab
+    from app.contexts.lab.service import LabService
+    from app.contexts.project.models import Project
+    from app.contexts.project.repository import ProjectRepository
+    from app.contexts.project.service import ProjectService
+    from app.contexts.project.source_acquire import SourceAcquireResult
+    from app.contexts.project.source_cache import MemorySourceStore
+    from app.contexts.task.models import Task
+
+    upload_sha = "c" * 64
+    session.add(
+        User(id="u1", email="u1@x.test", password_hash="x", display_name="u1")
+    )
+    store = MemorySourceStore()
+    proj_svc = ProjectService(ProjectRepository(session))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("demo/app.py", "print(1)\n")
+    project, _artifact = await proj_svc.ingest_uploaded_source(
+        owner_id="u1",
+        filename="demo.zip",
+        data=buf.getvalue(),
+        name="upload-demo",
+        store=store,
+    )
+    session.add(
+        Task(
+            id="t-up",
+            project_address=project.git_url,
+            source_type="local_upload",
+            vulnerability_description="demonstration vulnerability",
+            owner_id="u1",
+            project_id=project.id,
+            status="completed",
+        )
+    )
+    lab_svc = LabService(session)
+    acquired = await lab_svc.acquire(
+        owner_id="u1",
+        project_id=project.id,
+        commit_sha=upload_sha,
+        task_id="t-up",
+    )
+    await lab_svc.mark_ready(
+        acquired.lab_id,
+        target_url="http://127.0.0.1:8080",
+        compose_path="demo/.vuln-env/docker-compose.yml",
+        transport_shape={"protocol": "http"},
+        initial_creds={},
+    )
+    lab = await session.get(Lab, acquired.lab_id)
+    lab.workdir = _posix_lab_workdir(acquired.lab_id)
+    await session.commit()
+
+    ok_result = SourceAcquireResult(
+        ok=True,
+        origin="upload",
+        git_url_normalized=project.git_url,
+        git_host="upload",
+        project_key=f"local/{project.id}",
+        repo_dirname="demo",
+        ref_type="upload",
+        ref_name="local",
+        commit_sha=upload_sha,
+        project_path=str(tmp_path / "demo"),
+    )
+
+    with _patch_lab_workdir_tmp(tmp_path), patch(
+        "app.contexts.project.source_acquire.acquire_uploaded_source",
+        return_value=ok_result,
+    ) as acquire_upload, patch(
+        "app.core.agent_runner.git_clone_to_workdir",
+    ) as clone:
+        repo_dirname, err = await lab_svc._ensure_rebuild_source(lab, str(tmp_path))
+
+    assert err is None
+    assert repo_dirname == "demo"
+    acquire_upload.assert_called_once()
+    clone.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -887,7 +994,18 @@ async def test_container_action_checks_owner_and_touches(session):
 
     with patch(
         "app.contexts.lab.docker_ops.container_restart", new_callable=AsyncMock
-    ) as restart:
+    ) as restart, patch(
+        "app.contexts.lab.docker_ops.list_containers",
+        new_callable=AsyncMock,
+        return_value=[
+            {
+                "name": "web",
+                "status": "Up 2 minutes",
+                "ports": "0.0.0.0:3001->3000/tcp",
+                "image": "nginx:latest",
+            }
+        ],
+    ):
         await svc.container_action(
             result.lab_id, "web", action="restart", owner_id="u1"
         )

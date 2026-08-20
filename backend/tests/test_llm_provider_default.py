@@ -81,6 +81,42 @@ def test_to_response_omits_enabled():
     assert dumped["is_default"] is True
 
 
+def test_normalize_provider_type_maps_legacy_openai_compat():
+    from app.contexts.settings.schemas import normalize_provider_type
+    from app.contexts.settings.service import to_response
+
+    now = datetime.now(timezone.utc)
+    provider = LlmProvider(
+        id="p2",
+        name="legacy",
+        provider_type="openai_compat",
+        base_url="https://proxy.example/anthropic",
+        api_key_encrypted="sk-test",
+        model="claude-sonnet-4",
+        timeout_ms=600000,
+        is_default=False,
+        created_at=now,
+        updated_at=now,
+    )
+    assert normalize_provider_type("openai_compat") == "custom"
+    assert to_response(provider).provider_type == "custom"
+
+
+def test_create_rejects_openai_compat_provider_type():
+    from pydantic import ValidationError
+
+    from app.contexts.settings.schemas import LlmProviderCreateRequest
+
+    with pytest.raises(ValidationError):
+        LlmProviderCreateRequest(
+            name="bad",
+            provider_type="openai_compat",
+            base_url="https://api.example.com/anthropic",
+            api_key="sk-test",
+            model="claude-sonnet-4",
+        )
+
+
 @pytest.mark.asyncio
 async def test_first_provider_becomes_default(session, skip_url_check):
     from app.contexts.settings.repository import SettingsRepository

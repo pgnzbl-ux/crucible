@@ -5,39 +5,43 @@ description: 跑后端 / 前端测试与冒烟脚本
 
 # Test
 
+环境：Python 命令用仓库根 **`.venv/bin/`**（见 `.cursor/rules/agent-env.mdc`）。勿用系统 `python3` 误判无 pytest。
+
 ## 1. 沙箱冒烟（最快反馈）
 
 ```bash
-cd backend && python tests/smoke_sandbox.py
+cd backend && ../.venv/bin/python tests/smoke_agent_runner.py
 ```
-
-覆盖：容器创建 / exec / OOM / 网络隔离 / 清理。
 
 ## 2. 后端单元测试
 
 ```bash
-cd backend && pytest -x
+cd backend && ../.venv/bin/pytest -x
+# 或 activate 后：source ../.venv/bin/activate && pytest -q
 ```
 
-pytest 进程覆盖 `DATABASE_URL` 为 sqlite（见 `tests/conftest.py`），不连 `.env` 的 PostgreSQL。
+pytest 覆盖 `DATABASE_URL` 为 sqlite（`tests/conftest.py`），不连 `.env` PostgreSQL。
 
-## 3. 前端类型检查 + 构建
+## 3. 前端
 
 ```bash
 cd frontend && npx tsc --noEmit
+cd frontend && npm run test -- --run
 cd frontend && npm run build
 ```
 
-## 4. 全链路冒烟（任意 P0 改动后跑一遍）
+## 4. 迁移相关
 
-1. `POST /api/v1/auth/register` → `POST /api/v1/auth/login` 取 token
-2. `POST /api/v1/tasks` 创建任务
-3. 轮询 `GET /api/v1/tasks/{id}` 看 status 推进
-4. `GET /api/v1/tasks/{id}/events` 看事件流
-5. `GET /api/v1/reports/{id}` 确认报告生成
+```bash
+cd backend && ../.venv/bin/pytest tests/test_schema_baseline.py -q
+```
 
-## 5. 注意事项
+## 5. 全链路冒烟（P0 改动）
 
-- 测试用 `ENVIRONMENT=test`（不走生产强校验）
-- 凭据一律测试 fixture，不复用 dev key
-- 沙箱容器 tag 加 `test-` 前缀避免与开发冲突
+见 `.claude/skills/smoke`。
+
+## 6. 注意
+
+- `ENVIRONMENT=test`
+- 凭据用 fixture，不复用 dev key
+- 沙箱容器 tag 加 `test-` 前缀

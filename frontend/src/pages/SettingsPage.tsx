@@ -44,9 +44,22 @@ const PROVIDER_TYPES: Record<string, { label: string; defaultUrl: string; defaul
     defaultUrl: 'https://api.deepseek.com/anthropic',
     defaultModel: 'deepseek-v4-flash',
   },
-  openai_compat: { label: 'OpenAI 兼容', defaultUrl: 'https://', defaultModel: '' },
-  anthropic: { label: 'Anthropic 官方', defaultUrl: 'https://api.anthropic.com', defaultModel: 'claude-sonnet-4' },
-  custom: { label: '自定义', defaultUrl: 'https://', defaultModel: '' },
+  anthropic: {
+    label: 'Anthropic 官方',
+    defaultUrl: 'https://api.anthropic.com',
+    defaultModel: 'claude-sonnet-4',
+  },
+  custom: {
+    label: 'Anthropic 兼容（其他）',
+    defaultUrl: 'https://',
+    defaultModel: '',
+  },
+}
+
+/** 列表展示：历史 openai_compat 与 custom 同为 Anthropic 兼容 */
+function providerTypeLabel(type: string): string {
+  if (type === 'openai_compat') return PROVIDER_TYPES.custom.label
+  return PROVIDER_TYPES[type]?.label ?? type
 }
 
 function ProviderFormDrawer({
@@ -141,7 +154,12 @@ function ProviderFormDrawer({
         layout="vertical"
         onFinish={(v) => saveMutation.mutate(v)}
       >
-        <Form.Item name="provider_type" label="服务商" rules={[{ required: true }]}>
+        <Form.Item
+          name="provider_type"
+          label="接入预设"
+          rules={[{ required: true }]}
+          extra="平台经 Claude Agent SDK 调用 Anthropic Messages API；DeepSeek 等也须填 Anthropic 兼容端点（如 …/anthropic）。"
+        >
           <Select
             options={Object.entries(PROVIDER_TYPES).map(([v, m]) => ({ value: v, label: m.label }))}
             onChange={handleTypeChange}
@@ -238,10 +256,10 @@ function ProviderPanel() {
       ),
     },
     {
-      title: '类型',
+      title: '预设',
       dataIndex: 'provider_type',
-      width: 140,
-      render: (v: string) => <Tag>{PROVIDER_TYPES[v]?.label ?? v}</Tag>,
+      width: 160,
+      render: (v: string) => <Tag>{providerTypeLabel(v)}</Tag>,
     },
     {
       title: '模型',
@@ -309,7 +327,7 @@ function ProviderPanel() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
         <Text type="secondary">
-          管理 AI 模型接入（DeepSeek 等 Anthropic 兼容端点）。真正启用某个接入点请点「设为默认」，新任务只使用默认 Provider。
+          管理 Anthropic 兼容 LLM 接入（DeepSeek / Anthropic 官方 / 其它代理）。启用某条请点「设为默认」；Agent 只读默认 Provider。
         </Text>
         <Space>
           <Button icon={<ReloadOutlined />} onClick={() => refetch()}>

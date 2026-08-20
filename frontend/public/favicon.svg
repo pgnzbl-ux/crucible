@@ -1,17 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Crucible">
   <defs>
     <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#1677ff" />
-      <stop offset="1" stop-color="#0958d9" />
+      <stop offset="0" stop-color="#1677ff"/>
+      <stop offset="1" stop-color="#0958d9"/>
+    </linearGradient>
+    <linearGradient id="f" x1="0.5" y1="1" x2="0.5" y2="0">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.92"/>
+      <stop offset="1" stop-color="#ffffff"/>
     </linearGradient>
   </defs>
-  <rect width="32" height="32" rx="9" fill="url(#g)" />
-  <path
-    d="M16 6.5l7 2.6v6.2c0 4.4-2.9 8-7 9.2-4.1-1.2-7-4.8-7-9.2V9.1l7-2.6z"
-    fill="none"
-    stroke="#fff"
-    stroke-width="2"
-    stroke-linejoin="round"
-  />
-  <path d="M12.6 16.2l2.6 2.6 4.4-4.8" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+  <rect width="64" height="64" rx="16" fill="url(#g)"/>
+  <path d="M18 34c0 10.5 6.2 16.5 14 16.5S46 44.5 46 34H18z" fill="none" stroke="#fff" stroke-width="3.2" stroke-linejoin="round"/>
+  <path d="M16 34h32" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round"/>
+  <path d="M32 12c4.2 5.2 7 9.2 7 13.2a7 7 0 1 1-14 0c0-4 2.8-8 7-13.2z" fill="url(#f)"/>
+  <path d="M32 18.5c2.2 3 3.6 5.2 3.6 7.4a3.6 3.6 0 1 1-7.2 0c0-2.2 1.4-4.4 3.6-7.4z" fill="#1677ff" opacity="0.35"/>
 </svg>

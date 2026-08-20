@@ -27,6 +27,9 @@ class Project(BaseModel):
         String(20), nullable=False, default="git", comment="git | local_upload",
     )
     default_ref: Mapped[str | None] = mapped_column(String(255), comment="默认分支/tag")
+    default_ref_type: Mapped[str | None] = mapped_column(
+        String(16), comment="branch|tag|commit",
+    )
     description: Mapped[str | None] = mapped_column(Text)
     owner_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), index=True)
 

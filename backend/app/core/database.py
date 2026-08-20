@@ -1,12 +1,16 @@
+import subprocess
+import sys
 from pathlib import Path
 
 from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.schema import CreateColumn
 from sqlalchemy.pool import StaticPool
 
 from .config import get_settings
 
 settings = get_settings()
+_BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _engine_kwargs(url: str) -> dict:
@@ -46,13 +50,21 @@ def _alembic_head() -> str:
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
-    backend_root = Path(__file__).resolve().parents[2]
-    cfg = Config(str(backend_root / "alembic.ini"))
-    cfg.set_main_option("script_location", str(backend_root / "alembic"))
+    cfg = Config(str(_BACKEND_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(_BACKEND_ROOT / "alembic"))
     head = ScriptDirectory.from_config(cfg).get_current_head()
     if not head:
         raise RuntimeError("Alembic 没有 head revision")
     return head
+
+
+def _run_alembic_upgrade_head() -> None:
+    """子进程跑 upgrade，避免在已有 asyncio loop 里嵌套 alembic 的 asyncio.run。"""
+    subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=_BACKEND_ROOT,
+        check=True,
+    )
 
 
 def _create_missing_indexes(connection) -> None:
@@ -132,8 +144,55 @@ def _align_string_column_lengths(connection) -> None:
             )
 
 
+def _align_missing_columns(connection) -> None:
+    """create_all 不给已存在的表补列；按 metadata 幂等 ADD COLUMN。
+
+    防 init_db 曾 stamp head 却未跑增量 migration 时漏列。
+    """
+    if connection.dialect.name != "postgresql":
+        return
+    from app.shared.base import Base
+
+    inspector = inspect(connection)
+    existing_tables = set(inspector.get_table_names())
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing_tables or not str(table.name).isidentifier():
+            continue
+        existing = {c["name"] for c in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name in existing or not str(column.name).isidentifier():
+                continue
+            col_ddl = str(CreateColumn(column).compile(dialect=connection.dialect))
+            connection.execute(text(f"ALTER TABLE {table.name} ADD COLUMN {col_ddl}"))
+
+
+def _align_column_comments(connection) -> None:
+    """把 ORM comment 同步到 PostgreSQL（幂等）。"""
+    if connection.dialect.name != "postgresql":
+        return
+    from app.shared.base import Base
+
+    inspector = inspect(connection)
+    existing_tables = set(inspector.get_table_names())
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing_tables or not str(table.name).isidentifier():
+            continue
+        db_comments = {
+            c["name"]: c.get("comment") for c in inspector.get_columns(table.name)
+        }
+        for column in table.columns:
+            if column.comment is None or not str(column.name).isidentifier():
+                continue
+            if db_comments.get(column.name) == column.comment:
+                continue
+            escaped = column.comment.replace("'", "''")
+            connection.execute(
+                text(f"COMMENT ON COLUMN {table.name}.{column.name} IS '{escaped}'")
+            )
+
+
 def _align_alembic_version(connection) -> None:
-    """create_all 之后把 alembic_version 钉到当前唯一基线，避免旧多 head 链残留。"""
+    """create_all / upgrade 之后把 alembic_version 钉到当前 head，避免旧多 head 链残留。"""
     head = _alembic_head()
     inspector = inspect(connection)
     if "alembic_version" not in inspector.get_table_names():
@@ -156,20 +215,24 @@ def _align_alembic_version(connection) -> None:
 
 
 async def init_db() -> None:
-    """按当前 ORM 建表，并与唯一 Alembic 基线对齐。
+    """对齐 schema：PostgreSQL 先 upgrade head，再按 ORM 补齐缺口并 stamp。
 
     运行时开发/生产都是 PostgreSQL（`.env` 的 DATABASE_URL）。
-    pytest 由 `tests/conftest.py` 覆盖为 sqlite。生产迁移用 `alembic upgrade head`。
+    pytest 由 `tests/conftest.py` 覆盖为 sqlite（跳过 alembic CLI）。
     """
     from app.shared.base import Base
     from app.shared.models import register_models
 
     register_models()
+    if engine.dialect.name == "postgresql":
+        _run_alembic_upgrade_head()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_align_missing_columns)
         await conn.run_sync(_create_missing_indexes)
         await conn.run_sync(_align_datetime_timezone)
         await conn.run_sync(_align_string_column_lengths)
+        await conn.run_sync(_align_column_comments)
         await conn.run_sync(_align_alembic_version)
 
 

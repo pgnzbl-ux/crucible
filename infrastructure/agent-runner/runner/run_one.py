@@ -233,19 +233,45 @@ def extract_thinking_text(block: Any) -> str | None:
 def humanize_container_error(raw: str) -> tuple[str, str]:
     """容器内失败 → (标题, 下一步)。与 worker 侧 errors.py 对齐。"""
     text = (raw or "").strip() or "未知错误"
+    low = text.lower()
+    if "余额不足" in text or '"code":"1004"' in text or '"code": "1004"' in text:
+        return (
+            "LLM 账户余额不足",
+            "到 LLM 服务商控制台充值或更换有余额的 API Key，再在「设置 → LLM Provider」更新后重试。",
+        )
+    if "http 401" in low:
+        return (
+            "LLM 接口鉴权失败（401）",
+            "检查 API Key、Base URL 与账户余额；401 也可能是余额不足。",
+        )
+    if "error result: success" in low:
+        return (
+            "LLM 会话异常结束",
+            "多为 LLM API 报错（余额不足、模型不存在），但被 SDK 误报。查看较早的 agent.failed。",
+        )
     rules = [
         ("未调用 submit_result", "Agent 没有提交节点结果就结束了", "模型未调用 submit_result。检查节点 prompt 或 MCP 工具注入。"),
         ("claude_agent_sdk 导入失败", "容器内缺少 Claude Agent SDK", "重新构建 agent-runner 镜像。"),
         ("NameError", "容器入口代码异常", "更新 run_one.py 后必须重建镜像。"),
         ("Authentication", "LLM 鉴权失败", "检查 API Key 与 Base URL。"),
-        ("401", "LLM 接口拒绝访问（401）", "API Key 无效或未注入容器。"),
         (".node.json 解析失败", "节点输入文件损坏", "worker 写入的 .node.json 不是合法 JSON。"),
         ("既无 .node.json 也无 .prompt.json", "容器没拿到任务输入", "检查 host_workdir 是否正确 bind mount 到 /workspace。"),
     ]
     for needle, title, hint in rules:
-        if needle.lower() in text.lower():
+        if needle.lower() in low:
             return title, hint
     return text[:240], "查看本条事件的原文与 traceback，对照失败发生在思考、工具还是收尾。"
+
+
+def _is_llm_api_failure(text: str) -> bool:
+    low = (text or "").lower()
+    if not low.strip():
+        return False
+    needles = (
+        "http 401", "http 403", "http 429", "余额不足", '"code":"1004"',
+        "error result: success", "model_not_found", "rate limit",
+    )
+    return any(n in low for n in needles)
 
 
 def _failed_event(raw: str, **extra: Any) -> dict[str, Any]:
@@ -725,6 +751,7 @@ async def _main() -> int:
     exit_code = 0
     saw_completion = False
     saw_failure = False
+    saw_llm_failure = False
     async for event in _stream_messages(options, prompt, node_key=node_key):
         print(json.dumps(event, ensure_ascii=False, default=str), flush=True)
         if event.get("type") == "agent.completed":
@@ -733,10 +760,12 @@ async def _main() -> int:
                 saw_failure = True
         elif event.get("type") == "agent.failed":
             saw_failure = True
+            if _is_llm_api_failure(str(event.get("error") or "")):
+                saw_llm_failure = True
 
     # 节点模式:校验 submit_result 是否被调用(.node_output.json 存在)
     if node_key and node_key in NODE_AI_KEYS:
-        if not Path("/workspace/.node_output.json").exists():
+        if not Path("/workspace/.node_output.json").exists() and not saw_llm_failure:
             print(json.dumps(_failed_event(
                 f"节点 {node_key} 未调用 submit_result(无 .node_output.json)",
                 sequence=999,

@@ -23,6 +23,7 @@ ERROR_CLASSES = (
     "compose_up.policy",
     "health_check",
     "runner.killed",
+    "runner.llm_error",
     "runner.no_submit",
     "runner.timeout",
     "docker.unavailable",
@@ -78,6 +79,8 @@ def classify_node_error(*, failed_stage: str | None, error_text: str) -> str:
     # 但成因是平台超时/巡检/OOM，不是模型没调 submit_result
     if "sigkill" in low or ("exit=137" in low) or ("exit code 137" in low):
         return "runner.killed"
+    if "llm 调用失败" in low or "余额不足" in text or "http 401" in low:
+        return "runner.llm_error"
     if "未产出" in text or ".node_output.json" in text or "submit_result" in low:
         return "runner.no_submit"
     if "timeout" in low:

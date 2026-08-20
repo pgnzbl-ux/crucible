@@ -10,7 +10,7 @@ paths: ["backend/app/**/*.py"]
 
 - 结构化 JSON 日志（`structlog` 或 `python-json-logger`）
 - 必带字段：`timestamp` / `level` / `logger` / `message` / `task_id` / `run_id` / `correlation_id`
-- 凭据一律掩码（参考 `security.md` §7）
+- 凭据一律掩码（参考 `security.md` §6）
 - 不要打印整个 payload，截前 256 字符
 
 ## 2. 追踪 ID 串联

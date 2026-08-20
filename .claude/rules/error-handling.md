@@ -46,7 +46,7 @@ paths: ["backend/app/**/*.py"]
 ## 5. 日志规范
 
 - 错误日志必须含 `task_id` / `run_id` / `correlation_id`（`shared/events.py` 提供）
-- 凭据相关一律掩码（参考 `security.md` §7）
+- 凭据相关一律掩码（参考 `security.md` §6）
 - 不要在异常信息里 dump 整个 payload，截前 256 字符
 
 ## 6. 与 validation / API 设计规则的边界

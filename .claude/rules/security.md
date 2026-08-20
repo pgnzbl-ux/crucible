@@ -46,18 +46,18 @@ Runner 的 reproduce 节点通过 `host.docker.internal` 访问宿主映射的 L
 - 列表接口只回显掩码(`***{last4}`)
 - 待办:如需恢复加密,重新接入 `core/crypto.py`;当前 `SETTINGS_ENCRYPT_KEY` 配置未生效
 
-## 5. 生产环境强校验（`core/config.py` validator）
+## 4. 生产环境强校验（`core/config.py` validator）
 
 当 `ENVIRONMENT=production`：
 
-- `AUTH_SECRET` 必须配置（≥32 字节）
+- `AUTH_SECRET` 必须配置
 - **禁止** SQLite（必须 PostgreSQL）
-- `SETTINGS_ENCRYPT_KEY` 必须显式配置（不接受派生）
-- CORS 白名单必须显式（不接受 `*`）
+
+仅此两项为代码强校验（与 `docs/development-guide.md` §5.3 一致）。`SETTINGS_ENCRYPT_KEY` 因 Fernet 未接入而不生效（见 §3）；CORS 无强制校验，但生产应显式配置白名单。
 
 dev 环境跳过这些校验，但提醒日志要打。
 
-## 6. Agent 零信任
+## 5. Agent 零信任
 
 - Agent（Claude Code CLI / 自研 Agent）输出视为**不可信**
 - Agent 写出的报告、证据、命令结果都要走 schema 校验才能落库
@@ -65,7 +65,7 @@ dev 环境跳过这些校验，但提醒日志要打。
 - Task、Report、Evidence 的详情和状态变更必须在 Repository 查询中绑定 owner；非 owner 与不存在统一 404
 - 取消任务必须先提交 cancelled 再返回；`revoke(terminate=True)` + 后台拆 agent-runner/靶场；编排器不得把 cancelled 写回 failed(已落地,task/service.py + orchestrator.py)
 
-## 7. 安全事件上报
+## 6. 安全事件上报
 
 - 沙箱逃逸迹象（异常 mount、`/proc`/`/sys` 访问）记 WARN 日志 + Prometheus 计数器
 - Fernet 解密失败记 ERROR（可能是配置错误或主动攻击）

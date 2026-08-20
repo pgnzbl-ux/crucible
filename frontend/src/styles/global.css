@@ -119,6 +119,91 @@ body,
   box-shadow: var(--crucible-shadow-md);
 }
 
+/* ── Git 引用类型三选一横幅 ── */
+.crucible-ref-banners {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  width: 100%;
+}
+.crucible-ref-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0;
+  padding: 12px 12px 14px;
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+  color: var(--crucible-text);
+  background: var(--crucible-surface);
+  border: 1px solid var(--crucible-border-strong);
+  border-radius: var(--crucible-radius);
+  box-shadow: var(--crucible-shadow-sm);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
+}
+.crucible-ref-banner:hover:not(:disabled) {
+  border-color: var(--crucible-primary-hover);
+  box-shadow: var(--crucible-shadow-md);
+}
+.crucible-ref-banner:focus-visible {
+  outline: 2px solid var(--crucible-primary);
+  outline-offset: 2px;
+}
+.crucible-ref-banner:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.crucible-ref-banner--selected {
+  border-color: var(--crucible-primary);
+  background: var(--crucible-primary-light);
+  box-shadow: var(--crucible-shadow-sm);
+}
+.crucible-ref-banner-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--crucible-radius-sm);
+  color: var(--crucible-primary);
+  background: var(--crucible-primary-light);
+  font-size: 15px;
+}
+.crucible-ref-banner--selected .crucible-ref-banner-icon {
+  color: #fff;
+  background: var(--crucible-primary);
+}
+.crucible-ref-banner-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.crucible-ref-banner-title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--crucible-text);
+}
+.crucible-ref-banner-code {
+  font-family: var(--crucible-font-mono);
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--crucible-text-secondary);
+}
+.crucible-ref-banner-hint {
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--crucible-text-disabled);
+}
+@media (max-width: 560px) {
+  .crucible-ref-banners {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ── 布局：品牌区（高度与顶栏严格一致，两侧底边对齐） ── */
 .crucible-brand {
   display: flex;
@@ -142,17 +227,12 @@ body,
   background: rgba(0, 0, 0, 0.02);
 }
 .crucible-brand-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  display: block;
   width: 32px;
   height: 32px;
-  border-radius: 9px;
-  background: linear-gradient(135deg, var(--crucible-primary), #0958d9);
-  color: #fff;
-  font-size: 16px;
   flex-shrink: 0;
   box-shadow: 0 2px 8px -2px rgba(22, 119, 255, 0.55);
+  border-radius: 9px;
 }
 .crucible-brand-text {
   display: flex;
@@ -446,21 +526,19 @@ body,
 }
 .crucible-login-hero-content {
   position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   text-align: center;
   max-width: 400px;
 }
 .crucible-login-hero-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  display: block;
   width: 64px;
   height: 64px;
   border-radius: 16px;
-  background: linear-gradient(135deg, var(--crucible-primary), #0958d9);
-  color: #fff;
-  font-size: 28px;
   box-shadow: 0 8px 24px rgba(22, 119, 255, 0.25);
-  margin-bottom: 24px;
+  margin: 0 0 24px;
 }
 .crucible-login-hero-title {
   font-size: 32px;

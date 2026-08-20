@@ -9,10 +9,9 @@ paths: ["backend/app/**/*.py"]
 ## 1. 路由风格
 
 - 前缀：`/api/v1`（v1 当前唯一版本）
-- 资源用复数名词：`/tasks`、`/reports`、`/users`、`/settings/providers`
-- 动作尽量用 HTTP 动词（GET/POST/PUT/PATCH/DELETE），避免 `/tasks/{id}/cancel` 这种 RPC 风
-  - 例外：取消 / 重跑 / 触发确实是动作语义时允许 POST `/tasks/{id}/actions/cancel`
-- 嵌套最多一层：`/tasks/{id}/runs` OK，`/tasks/{id}/runs/{run_id}/events` OK，更深请拆资源
+- 资源用复数名词：`/tasks`、`/reports`、`/projects`、`/labs`、`/settings/llm/providers`（auth 例外，走 `/auth/*`）
+- 动作尽量用 HTTP 动词（GET/POST/PUT/PATCH/DELETE）；纯动作语义允许动作子路径，现状两种风格并存：task 用扁平 `/tasks/{id}/cancel`、`/tasks/{id}/retry`，lab 用 `/labs/{id}/actions/stop|start|rebuild`——新端点跟随所在 Context 既有风格，不要引入第三种
+- 嵌套最多一层资源 + 一层子资源：`/tasks/{id}/runs` OK，`/tasks/{id}/runs/{run_id}/nodes` OK，更深请拆资源
 
 ## 2. 版本化
 

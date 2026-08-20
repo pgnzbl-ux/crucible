@@ -1,11 +1,12 @@
 import { Button, Card, Form, Input, Typography, Divider, App as AntApp } from 'antd'
-import { UserOutlined, LockOutlined, SafetyCertificateOutlined } from '@ant-design/icons'
+import { UserOutlined, LockOutlined } from '@ant-design/icons'
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useLocation, Redirect } from 'wouter'
 import { api } from '../shared/lib/api'
 import { errorToastText } from '../shared/lib/errorToast'
 import { useErrorToast } from '../shared/hooks/useErrorToast'
+import { CrucibleLogo } from '../shared/components/CrucibleLogo'
 
 const { Title, Text, Paragraph } = Typography
 
@@ -66,9 +67,7 @@ export function LoginPage() {
     <div className="crucible-login">
       <div className="crucible-login-hero">
         <div className="crucible-login-hero-content">
-          <span className="crucible-login-hero-mark">
-            <SafetyCertificateOutlined />
-          </span>
+          <CrucibleLogo size={64} className="crucible-login-hero-mark" />
           <div className="crucible-login-hero-title">Crucible</div>
           <Paragraph className="crucible-login-hero-desc">
             坩埚 · AI 驱动的漏洞自动验证平台

@@ -33,6 +33,7 @@ from .schemas import (
     LlmProviderTestResult,
     LlmProviderUpdateRequest,
     RuntimeSettingsResponse,
+    normalize_provider_type,
 )
 
 
@@ -43,7 +44,7 @@ def to_response(provider: LlmProvider, plain_key: str = "") -> LlmProviderRespon
     return LlmProviderResponse(
         id=provider.id,
         name=provider.name,
-        provider_type=provider.provider_type,
+        provider_type=normalize_provider_type(provider.provider_type),
         base_url=provider.base_url,
         api_key_masked=mask_secret(plain_key),
         has_api_key=bool(plain_key),

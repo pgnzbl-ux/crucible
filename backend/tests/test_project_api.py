@@ -77,6 +77,30 @@ async def test_upsert_name_fallback_from_url(session):
 
 
 @pytest.mark.asyncio
+async def test_upsert_by_git_url_rejects_name_used_by_upload(session):
+    """Git 自动建项与已登记上传项目不能同名。"""
+    from app.contexts.project.repository import ProjectRepository
+    from app.contexts.project.service import ProjectService
+    from app.contexts.project.source_cache import MemorySourceStore
+    from app.shared.exceptions import ConflictError
+
+    svc = ProjectService(ProjectRepository(session))
+    store = MemorySourceStore()
+    await svc.ingest_uploaded_source(
+        owner_id="u1",
+        filename="demo.zip",
+        data=_zip_bytes({"awesome-app/main.py": "print(1)\n"}),
+        name="awesome-app",
+        store=store,
+    )
+    with pytest.raises(ConflictError, match="项目名称已存在"):
+        await svc.upsert_by_git_url(
+            git_url="https://github.com/acme/awesome-app.git",
+            owner_id="u1",
+        )
+
+
+@pytest.mark.asyncio
 async def test_update_profile_backfills(session):
     """update_profile 回填画像字段(供编排器节点 1 调用)。"""
     from app.contexts.project.repository import ProjectRepository
@@ -380,3 +404,52 @@ async def test_list_projects_upload_has_empty_source_refs(session):
     listed = await svc.list_projects("u1")
     assert listed.items[0].source_type == "local_upload"
     assert listed.items[0].source_refs == []
+
+
+@pytest.mark.asyncio
+async def test_create_project_persists_default_ref_type(session):
+    from app.contexts.project.repository import ProjectRepository
+    from app.contexts.project.schemas import ProjectCreateRequest
+    from app.contexts.project.service import ProjectService
+
+    svc = ProjectService(ProjectRepository(session))
+    created = await svc.create_project(
+        ProjectCreateRequest(
+            name="feature-branch",
+            git_url="https://github.com/acme/app.git",
+            default_ref="release-2.0",
+            default_ref_type="branch",
+        ),
+        owner_id="u1",
+    )
+    assert created.default_ref_type == "branch"
+    refs = [(r.ref_type, r.ref_name) for r in created.source_refs]
+    assert refs == [("branch", "release-2.0")]
+
+
+@pytest.mark.asyncio
+async def test_update_project_returns_artifact_source_refs(session):
+    from app.contexts.project.repository import ProjectRepository
+    from app.contexts.project.schemas import ProjectUpdateRequest
+    from app.contexts.project.service import ProjectService
+
+    svc = ProjectService(ProjectRepository(session))
+    p = await svc.upsert_by_git_url(
+        git_url="https://github.com/siteboon/claudecodeui.git",
+        owner_id="u1",
+        name="claudecodeui",
+    )
+    await svc.record_source_artifact(
+        _artifact_result(
+            ref_type="branch",
+            ref_name="main",
+            sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
+        owner_id="u1",
+    )
+    updated = await svc.update_project(
+        p.id, ProjectUpdateRequest(description="updated"), owner_id="u1"
+    )
+    assert updated is not None
+    refs = [(r.ref_type, r.ref_name) for r in updated.source_refs]
+    assert ("branch", "main") in refs

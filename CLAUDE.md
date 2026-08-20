@@ -9,7 +9,7 @@ Crucible 是一个 AI 驱动的漏洞自动验证平台。安全研究员提交�
 ## 技术栈
 
 - **后端**: Python 3.11+ / FastAPI / SQLAlchemy 2.0 Async / Celery / Redis
-- **前端**: React 19 / TypeScript / Vite 6 / Ant Design 6 / Zustand / TanStack Query
+- **前端**: React 19 / TypeScript / Vite 6 / Ant Design 6 / TanStack Query（依赖里的 Zustand 未使用，勿新增引用）
 - **数据库**: PostgreSQL 16（开发连 Docker `localhost:5433`；生产同引擎）
 - **对象存储**: MinIO (S3 兼容)
 - **Agent**: Claude Agent SDK (Python 0.2.134) — 跑在独立 Docker 容器 `crucible-agent-runner:base`
@@ -17,7 +17,7 @@ Crucible 是一个 AI 驱动的漏洞自动验证平台。安全研究员提交�
 
 ## 架构原则
 
-- **模块化单体** — Bounded Context 组织代码（task / agent / report / identity），不盲目微服务
+- **模块化单体** — Bounded Context 组织代码（task / agent / lab / project / report / settings / identity），不盲目微服务
 - **事件驱动** — Context 间通过 Redis Pub/Sub 异步通信
 - **Agent GateWay** — Agent 执行抽象为平台能力而非胶水代码
 - **Agent 平台 6 节点编排** — Celery worker 的 `orchestrator.py` 驱动 6 节点(source/profile/env_ready/audit/reproduce/report),AI 节点用独立 agent-runner 容器 + `submit_result` 工具回传结构化 output;分支出口:非 web→skip 2-5、audit gate_fail→skip 4 判误报、env_ready 5 轮失败→task failed(2026-08-12 重塑,替代旧插件单次大调用)

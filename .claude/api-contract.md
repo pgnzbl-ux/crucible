@@ -133,7 +133,7 @@
 
 取消任务(已实现):先把任务/run/未完成节点标 `cancelled` 并 **提交后立刻返回**。`revoke(terminate=True)` 停 worker；后台 `schedule_teardown_task_runtime` 只按 `crucible.task_id` 强拆该任务的 agent-runner（停 AI），不 `compose down` 可复用靶场。编排器每节点刷新库状态，已取消则停后续节点，且 execute 失败不得把 cancelled 改成 failed。靶场在静默满 TTL 1 小时且无 live 任务后由巡检销毁。
 
-### POST `/api/v1/tasks/{id}/retry`  *(阶段 1 新增；P1.1 支持 from_node)*
+### POST `/api/v1/tasks/{id}/retry`  *(已实现，含 from_node 断点续跑)*
 
 重试任务(202 返 `{task_id, run_id, status:retrying, from_node}`)。任务不存在或非 owner → **404** `TASK_NOT_FOUND`（不是 400）。非法状态 / 非法 `from_node` / 前置节点未完成 → **400**。未配置默认 LLM Provider、默认项无 API Key、或 agent-runner 镜像不存在/Docker 不可用 → **400**，不改任务状态、不新建 run。
 
@@ -354,6 +354,14 @@ Provider **没有独立启用/停用字段**。Agent 运行时只读取唯一的
 
 请求：`{ "max_concurrent_tasks": 2 }`（`extra=forbid`）。必须 `1 <= n <= max_allowed`，否则 422 `VALIDATION_FAILED`。改完立即作用于新抢槽；不取消已 running 的任务。Worker 先抢 Redis 槽 `crucible:running_run_ids` 再 claim；无槽保持 `queued` 并 `retry(countdown=15)`。
 
+### Credentials（任务级凭据，P1-6 已实现）
+
+`GET /api/v1/settings/credentials`（列表，`{items,total}`）、`POST`（新建，201）、`PUT /api/v1/settings/credentials/{id}`、`DELETE .../{id}`（204）。
+
+- 字段：`name` / `kind`（`env_var|file`）/ `target`（env_var→大写下划线变量名；file→`.secrets/<target>` 文件名）/ `secret`（明文）/ `description`
+- **明文存取**（存 `secret_encrypted` 列，列名为历史遗留；响应只回 `secret_masked` + `has_secret`），与 LLM Provider Key 同策略
+- 注入：任务引用凭据后由 Credential Proxy 按 kind 注入 agent-runner（env → 容器环境变量；file → `/workspace/.secrets/` 600），任务结束销毁
+
 ---
 
 ## 健康检查 / 监控
@@ -382,10 +390,10 @@ Provider **没有独立启用/停用字段**。Agent 运行时只读取唯一的
 
 - ~~P0-0: Agent 编排~~ ✅ 平台 6 节点编排(见 docs/agent-workflow.md)
 - ~~P0-1: `GET /tasks/{id}/events/stream` SSE 端点~~ ✅
-- ~~P0-2: `POST /tasks/{id}/actions/cancel` 真正生效~~ ✅（revoke + 容器销毁）
+- ~~P0-2: `POST /tasks/{id}/cancel` 真正生效~~ ✅（revoke + 容器销毁）
 - ~~P0-3: JWT 闭环 + SSE `?token=` 鉴权~~ ✅
 - ~~P0-4: `POST /reports/{id}/evidences` 上传~~ ✅
-- P1-6: Credential Proxy（补齐插件 `credential_store` 能力）
+- ~~P1-6: Credential Proxy（补齐插件 `credential_store` 能力）~~ ✅（`/settings/credentials` CRUD，见上文 Credentials 节）
 - P1-7: `Authorization: ApiKey xxx` 鉴权依赖
 - P1-8: OIDC 回调 `/auth/oauth/{provider}/callback`
 - P1-9: RBAC 权限矩阵

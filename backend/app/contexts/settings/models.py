@@ -14,8 +14,8 @@ class LlmProvider(BaseModel):
 
     name: Mapped[str] = mapped_column(String(100), nullable=False, comment="显示名，如 DeepSeek 官方")
     provider_type: Mapped[str] = mapped_column(
-        String(30), default="custom",
-        comment="deepseek | openai_compat | anthropic | custom"
+        String(30), default="deepseek",
+        comment="deepseek | anthropic | custom（均为 Anthropic Messages 兼容端点）",
     )
     base_url: Mapped[str] = mapped_column(String(512), nullable=False, comment="Anthropic 兼容端点")
     api_key_encrypted: Mapped[str] = mapped_column(Text, default="", comment="明文 API Key(响应层掩码)")

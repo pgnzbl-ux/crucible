@@ -1,6 +1,8 @@
 """把 Agent/编排异常翻成人类可读的短句 + 排错提示。"""
 from __future__ import annotations
 
+from app.contexts.agent.llm_errors import classify_llm_api_error
+
 # (子串匹配, 标题, 下一步) — 更具体的规则必须排在前面
 _RULES: list[tuple[str, str, str]] = [
     (
@@ -13,6 +15,16 @@ _RULES: list[tuple[str, str, str]] = [
         "Agent 容器被平台强杀",
         "exit=137 多为超过 run 硬顶（agent_run_hard_timeout_seconds）被巡检拆掉、单容器超时或 OOM。"
         "看该节点事件流最后几条确认执行到哪一步。",
+    ),
+    (
+        "LLM 调用失败",
+        "LLM 调用失败",
+        "核对「设置 → LLM Provider」的 API Key、Base URL、模型名与账户余额。",
+    ),
+    (
+        "error result: success",
+        "LLM 会话异常结束",
+        "多为 LLM API 报错（余额不足、模型不存在等），但被 SDK 误报。查看事件流中较早的 agent.failed。",
     ),
     (
         "未产出 .node_output.json",
@@ -140,6 +152,9 @@ _RULES: list[tuple[str, str, str]] = [
 def humanize_agent_error(raw: str | None) -> tuple[str, str]:
     """返回 (人类可读标题, 排错提示)。匹配不到则标题=原文截断，提示给通用建议。"""
     text = (raw or "").strip() or "未知错误"
+    llm = classify_llm_api_error(text)
+    if llm is not None:
+        return llm
     for needle, title, hint in _RULES:
         if needle.lower() in text.lower():
             return title, hint

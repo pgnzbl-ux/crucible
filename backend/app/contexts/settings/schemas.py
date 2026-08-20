@@ -5,11 +5,21 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.core.url_security import normalize_https_domain_url
 
+_PROVIDER_TYPES = frozenset({"deepseek", "anthropic", "custom"})
+
+
+def normalize_provider_type(value: str) -> str:
+    """历史 openai_compat 实为 Anthropic 兼容端点，对外统一为 custom。"""
+    if value == "openai_compat":
+        return "custom"
+    return value
+
+
 # ── 请求 ──
 
 class LlmProviderCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
-    provider_type: str = Field("custom", pattern=r"^(deepseek|openai_compat|anthropic|custom)$")
+    provider_type: str = Field("deepseek", pattern=r"^(deepseek|anthropic|custom)$")
     base_url: str = Field(..., min_length=5, max_length=512)
     api_key: str = Field("", max_length=2048, description="明文 API Key，服务端加密存储")
     model: str = Field(..., min_length=1, max_length=100)
@@ -25,7 +35,7 @@ class LlmProviderCreateRequest(BaseModel):
 
 class LlmProviderUpdateRequest(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=100)
-    provider_type: str | None = Field(None, pattern=r"^(deepseek|openai_compat|anthropic|custom)$")
+    provider_type: str | None = Field(None, pattern=r"^(deepseek|anthropic|custom)$")
     base_url: str | None = Field(None, min_length=5, max_length=512)
     api_key: str | None = Field(None, max_length=2048, description="留空表示不修改")
     model: str | None = Field(None, min_length=1, max_length=100)
@@ -90,7 +100,7 @@ class CredentialCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     kind: str = Field("env_var", pattern=r"^(env_var|file)$")
     target: str = Field(..., min_length=1, max_length=255, description="env_var→环境变量名(大写下划线) / file→文件名")
-    secret: str = Field(..., min_length=1, max_length=8192, description="明文凭据，服务端加密存储")
+    secret: str = Field(..., min_length=1, max_length=8192, description="明文凭据，明文存储（响应层掩码）")
     description: str | None = Field(None, max_length=500)
 
     @field_validator("target")

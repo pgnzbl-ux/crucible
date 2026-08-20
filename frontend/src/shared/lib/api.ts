@@ -238,6 +238,7 @@ export interface Project {
   git_url: string
   source_type?: 'git' | 'local_upload' | string
   default_ref: string | null
+  default_ref_type?: 'branch' | 'tag' | 'commit' | null
   description: string | null
   owner_id: string
   detected_language: string | null
@@ -530,7 +531,13 @@ export const api = {
     const qs = params ? '?' + new URLSearchParams(params).toString() : ''
     return request<{ items: Project[]; total: number }>(`/projects/${qs}`)
   },
-  createProject: (data: { name: string; git_url: string; default_ref?: string; description?: string }) =>
+  createProject: (data: {
+    name: string
+    git_url: string
+    default_ref?: string
+    default_ref_type?: 'branch' | 'tag' | 'commit'
+    description?: string
+  }) =>
     request<Project>('/projects/', { method: 'POST', body: JSON.stringify(data) }),
   uploadProject: (data: { file: File; name: string; description?: string }) => {
     const form = new FormData()
@@ -551,7 +558,15 @@ export const api = {
     })
   },
   getProject: (id: string) => request<Project>(`/projects/${id}`),
-  updateProject: (id: string, data: Partial<{ name: string; default_ref: string; description: string }>) =>
+  updateProject: (
+    id: string,
+    data: Partial<{
+      name: string
+      default_ref: string
+      default_ref_type: 'branch' | 'tag' | 'commit'
+      description: string
+    }>,
+  ) =>
     request<Project>(`/projects/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteProject: (id: string) => request<void>(`/projects/${id}`, { method: 'DELETE' }),
   listProjectArtifacts: (id: string) =>

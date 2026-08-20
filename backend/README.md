@@ -59,7 +59,7 @@ backend/
 │   ├── core/                # 配置、数据库、JWT、Celery、agent-runner
 │   ├── contexts/            # identity / task / agent / lab / project / report / settings
 │   └── shared/              # 鉴权、事件、SSE、对象存储
-├── alembic/                 # 唯一基线迁移
+├── alembic/                 # 迁移链：基线 c18a0e9b4d21 + 增量 revision（head 见 .claude/skills/db-migrate）
 ├── tests/
 ├── pyproject.toml           # 依赖与产品版本
 ├── run_worker.py

@@ -23,6 +23,7 @@ from app.core.agent_runner import (
     AgentRunnerSpec,
     agent_runner_manager,
 )
+from app.contexts.agent.llm_errors import classify_llm_api_error, is_llm_api_failure
 
 logger = logging.getLogger(__name__)
 
@@ -600,17 +601,21 @@ async def _run_one_container(
     )
 
     last_fail = ""
+    llm_fail = ""
 
     def _on_event(event: dict) -> None:
-        nonlocal last_fail
+        nonlocal last_fail, llm_fail
         et = event.get("type")
         if et in ("agent.failed", "raw"):
-            last_fail = (
+            err = (
                 event.get("error")
                 or event.get("content")
                 or event.get("message")
                 or ""
             )
+            last_fail = err
+            if is_llm_api_failure(err) and not llm_fail:
+                llm_fail = err
         if on_event:
             on_event(event)
 
@@ -625,16 +630,18 @@ async def _run_one_container(
     output_path = Path(host_workdir) / ".node_output.json"
     if not output_path.exists():
         stderr_tail = summary.get("stderr_tail", "") if summary else ""
-        detail = (stderr_tail or last_fail or "").strip()
-        # 取尾部：JSONL 末尾才是 agent.failed 等真实死因，
-        # 头部是 init/thinking 等常规事件（2026-08-19 audit 教训：截头 300
-        # 字符恰好全是 thinking，真实错误一字不露）
-        detail = detail[-600:]
+        combined = (stderr_tail or last_fail or "").strip()
+        # LLM 网关错误（如 401 余额不足）常出现在较早的 agent.failed；
+        # 末尾可能是 SDK 误报或「未调用 submit_result」次生事件，须优先保留 llm_fail。
+        primary = (llm_fail or combined).strip()
+        detail = primary[-600:]
         if exit_code == 137:
             raise AgentRunnerError(
                 f"AI 节点 {node_key} 容器被 SIGKILL 终止(exit=137，"
                 f"多为平台超时/巡检强杀或 OOM): {detail}"
             )
+        if llm_fail or classify_llm_api_error(detail):
+            raise AgentRunnerError(f"AI 节点 {node_key} LLM 调用失败: {detail}")
         raise AgentRunnerError(
             f"AI 节点 {node_key} 未产出 .node_output.json (exit={exit_code}): {detail}"
         )

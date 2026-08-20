@@ -45,9 +45,24 @@ def test_alembic_chain_from_baseline():
     )
     assert 'revision: str = "e7d2b4a10c95"' in lab_sha
     assert 'down_revision: Union[str, None] = "d4b7e1c08a92"' in lab_sha
+    ref_type = (versions / "f8c2a1b03d14_project_default_ref_type.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'revision: str = "f8c2a1b03d14"' in ref_type
+    assert 'down_revision: Union[str, None] = "e7d2b4a10c95"' in ref_type
+    llm_compat = (versions / "g7b3e9a02c15_llm_provider_drop_openai_compat.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'revision: str = "g7b3e9a02c15"' in llm_compat
+    assert 'down_revision: Union[str, None] = "f8c2a1b03d14"' in llm_compat
+    comments = (versions / "h1c4d8e05f26_sync_orm_column_comments.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'revision: str = "h1c4d8e05f26"' in comments
+    assert 'down_revision: Union[str, None] = "g7b3e9a02c15"' in comments
     from app.core.database import _alembic_head
 
-    assert _alembic_head() == "e7d2b4a10c95"
+    assert _alembic_head() == "h1c4d8e05f26"
 
 
 @pytest.mark.asyncio
@@ -66,6 +81,7 @@ async def test_create_all_schema_matches_models():
             assert "lab_id" in task_cols
             project_cols = {c["name"] for c in insp.get_columns("projects")}
             assert "source_type" in project_cols
+            assert "default_ref_type" in project_cols
             lab_sha = next(c for c in insp.get_columns("labs") if c["name"] == "commit_sha")
             assert lab_sha["type"].length == 64
             task_indexes = {i["name"] for i in insp.get_indexes("tasks")}
@@ -109,6 +125,30 @@ async def test_align_string_column_lengths_skips_sqlite():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_align_string_column_lengths)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_align_missing_columns_skips_sqlite():
+    from app.core.database import _align_missing_columns
+
+    register_models()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_align_missing_columns)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_align_column_comments_skips_sqlite():
+    from app.core.database import _align_column_comments
+
+    register_models()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_align_column_comments)
     await engine.dispose()
 
 
