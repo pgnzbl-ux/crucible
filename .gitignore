@@ -102,3 +102,7 @@ $RECYCLE.BIN/
 .wiscode/
 .zcode/
 .ipynb_checkpoints/
+
+# docs：只纳入截图等静态资源，其余本地文档不进仓库
+docs/*
+!docs/assets/
