@@ -100,7 +100,7 @@ def test_runtime_put_returns_max_allowed():
             return RuntimeSettingsResponse(
                 max_concurrent_tasks=n,
                 max_allowed=4,
-                worker_pool="solo",
+                worker_pool="prefork",
             )
 
     app = FastAPI()
@@ -113,4 +113,4 @@ def test_runtime_put_returns_max_allowed():
     body = response.json()
     assert body["max_concurrent_tasks"] == 2
     assert body["max_allowed"] == 4
-    assert body["worker_pool"] in ("solo", "prefork")
+    assert body["worker_pool"] == "prefork"

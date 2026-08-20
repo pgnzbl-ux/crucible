@@ -18,6 +18,17 @@ from app.shared.base import Base
 SHA = "a" * 40
 
 
+def _posix_lab_workdir(lab_id: str) -> str:
+    return f"/tmp/crucible/audit/labs/{lab_id}"
+
+
+def _patch_lab_workdir_tmp(tmp_path: Path):
+    return patch(
+        "app.core.agent_runner.normalize_host_workdir",
+        lambda _path: str(tmp_path),
+    )
+
+
 @pytest_asyncio.fixture
 async def session():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -252,13 +263,13 @@ async def test_rebuild_creating_lab_when_idle(session, tmp_path):
     task.status = "completed"
     lab = await session.get(Lab, result.lab_id)
     lab.status = "creating"
-    lab.workdir = str(tmp_path).replace("\\", "/")
+    lab.workdir = _posix_lab_workdir(result.lab_id)
     compose_file = tmp_path / ".vuln-env" / "docker-compose.yml"
     compose_file.parent.mkdir()
     compose_file.write_text("services: {}", encoding="utf-8")
     await session.commit()
 
-    with patch(
+    with _patch_lab_workdir_tmp(tmp_path), patch(
         "app.contexts.lab.docker_ops.compose_up_build", new_callable=AsyncMock
     ) as rebuild:
         status = await svc.rebuild_lab(result.lab_id, owner_id="u1")
@@ -300,7 +311,7 @@ async def test_rebuild_restores_status_when_task_binds_after_creating_commit(
     svc, result, task = await ready_lab(session)
     task.status = "completed"
     lab = await session.get(Lab, result.lab_id)
-    lab.workdir = str(tmp_path).replace("\\", "/")
+    lab.workdir = _posix_lab_workdir(result.lab_id)
     compose_file = tmp_path / ".vuln-env" / "docker-compose.yml"
     compose_file.parent.mkdir()
     compose_file.write_text("services: {}", encoding="utf-8")
@@ -311,7 +322,7 @@ async def test_rebuild_restores_status_when_task_binds_after_creating_commit(
         "live_task_ids",
         new_callable=AsyncMock,
         side_effect=[[], [], ["t1"]],
-    ), patch(
+    ), _patch_lab_workdir_tmp(tmp_path), patch(
         "app.contexts.lab.docker_ops.compose_up_build", new_callable=AsyncMock
     ) as rebuild:
         with pytest.raises(LabBusyError) as exc_info:
@@ -320,6 +331,148 @@ async def test_rebuild_restores_status_when_task_binds_after_creating_commit(
     assert exc_info.value.task_ids == ["t1"]
     assert lab.status == "ready"
     rebuild.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rebuild_uses_commit_sha_when_cloning(session, tmp_path):
+    from app.contexts.lab.models import Lab
+
+    svc, result, task = await ready_lab(session)
+    task.status = "completed"
+    lab = await session.get(Lab, result.lab_id)
+    lab.workdir = _posix_lab_workdir(result.lab_id)
+    await session.commit()
+
+    async def fake_download(**kwargs):
+        dest = kwargs["dest_workdir"]
+        os.makedirs(os.path.join(dest, ".vuln-env"), exist_ok=True)
+        path = os.path.join(dest, ".vuln-env", "docker-compose.yml")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("services: {}\n")
+        return {"compose_path": ".vuln-env/docker-compose.yml"}
+
+    svc.download_recipe = fake_download
+    with _patch_lab_workdir_tmp(tmp_path), patch(
+        "app.contexts.lab.docker_ops.compose_up_build", new_callable=AsyncMock
+    ), patch(
+        "app.core.agent_runner.git_clone_to_workdir", return_value=(True, "")
+    ) as clone:
+        await svc.rebuild_lab(result.lab_id, owner_id="u1")
+
+    clone.assert_called_once()
+    assert clone.call_args.args[2] == SHA
+    assert clone.call_args.kwargs["ref_type"] == "commit"
+    assert os.path.isdir(clone.call_args.args[0])
+
+
+@pytest.mark.asyncio
+async def test_rebuild_accepts_posix_workdir_path(session, tmp_path, monkeypatch):
+    from app.contexts.lab.models import Lab
+
+    svc, result, task = await ready_lab(session)
+    task.status = "completed"
+    lab = await session.get(Lab, result.lab_id)
+    resolved = tmp_path / "labs" / result.lab_id
+    lab.workdir = f"/tmp/crucible/audit/labs/{result.lab_id}"
+    await session.commit()
+
+    monkeypatch.setattr(
+        "app.core.agent_runner.normalize_host_workdir",
+        lambda _path: str(resolved),
+    )
+
+    async def fake_download(**kwargs):
+        dest = kwargs["dest_workdir"]
+        os.makedirs(os.path.join(dest, ".vuln-env"), exist_ok=True)
+        path = os.path.join(dest, ".vuln-env", "docker-compose.yml")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("services: {}\n")
+        return {"compose_path": ".vuln-env/docker-compose.yml"}
+
+    svc.download_recipe = fake_download
+    with patch("app.contexts.lab.docker_ops.compose_up_build", new_callable=AsyncMock) as up, patch(
+        "app.core.agent_runner.git_clone_to_workdir", return_value=(True, "")
+    ) as clone:
+        status = await svc.rebuild_lab(result.lab_id, owner_id="u1")
+
+    assert status == "ready"
+    assert resolved.is_dir()
+    clone.assert_called_once()
+    assert clone.call_args.args[0] == str(resolved)
+    up.assert_awaited_once()
+    assert up.await_args.args[2] == str(resolved)
+
+
+def test_normalize_host_workdir_rejects_non_posix():
+    from app.core.agent_runner import normalize_host_workdir
+
+    with pytest.raises(ValueError, match="POSIX"):
+        normalize_host_workdir("D:/tmp/crucible/audit")
+    with pytest.raises(ValueError, match="POSIX"):
+        normalize_host_workdir("relative/workdir")
+
+
+def test_normalize_host_workdir_returns_absolute_path():
+    from app.core.agent_runner import normalize_host_workdir
+
+    resolved = normalize_host_workdir("/tmp/crucible/audit/labs/lab-1")
+    assert os.path.isabs(resolved)
+    assert resolved.replace("\\", "/").endswith("tmp/crucible/audit/labs/lab-1")
+
+
+@pytest.mark.asyncio
+async def test_fail_stale_rebuilding_skips_recent_manual_rebuild(session):
+    from app.contexts.lab.models import Lab
+    from app.contexts.lab.service import LabService, _MANUAL_REBUILD_STALE_SECONDS
+
+    await seed(session)
+    svc = LabService(session)
+    result = await svc.acquire(
+        owner_id="u1", project_id="p1", commit_sha=SHA, task_id="t1"
+    )
+    lab = await session.get(Lab, result.lab_id)
+    lab.status = "rebuilding"
+    lab.last_seen_at = datetime.now(timezone.utc)
+    await session.commit()
+
+    with patch(
+        "app.contexts.lab.docker_ops.compose_down", new_callable=AsyncMock
+    ) as down:
+        failed = await svc.fail_stale_rebuilding()
+
+    assert failed == []
+    down.assert_not_awaited()
+    assert (await session.get(Lab, result.lab_id)).status == "rebuilding"
+
+
+@pytest.mark.asyncio
+async def test_fail_stale_rebuilding_marks_timeout_lab_failed(session):
+    from app.contexts.lab.models import Lab
+    from app.contexts.lab.service import LabService, _MANUAL_REBUILD_STALE_SECONDS
+
+    await seed(session)
+    svc = LabService(session)
+    result = await svc.acquire(
+        owner_id="u1", project_id="p1", commit_sha=SHA, task_id="t1"
+    )
+    lab = await session.get(Lab, result.lab_id)
+    lab.status = "rebuilding"
+    lab.last_seen_at = datetime.now(timezone.utc) - timedelta(
+        seconds=_MANUAL_REBUILD_STALE_SECONDS + 60
+    )
+    (await session.get(__import__("app.contexts.task.models", fromlist=["Task"]).Task, "t1")).status = "completed"
+    await session.commit()
+
+    with patch(
+        "app.contexts.lab.docker_ops.compose_down", new_callable=AsyncMock
+    ) as down:
+        failed = await svc.fail_stale_rebuilding()
+
+    assert failed == [result.lab_id]
+    down.assert_awaited_once()
+    refreshed = await session.get(Lab, result.lab_id)
+    assert refreshed.status == "failed"
+    assert refreshed.error_message == "手动重建超时"
 
 
 @pytest.mark.asyncio
@@ -399,9 +552,10 @@ async def test_list_grouped_by_project(session):
         ("ready", "none", 0, "expired"),
         ("stopped", "none", 0, "expired"),
         ("expired", "exited", 0, "stopped"),
-        ("ready", "none", 1, "expired"),
-        ("ready", "exited", 1, "stopped"),
+        ("ready", "none", 1, None),
+        ("ready", "exited", 1, None),
         ("creating", "running", 1, None),
+        ("rebuilding", "running", 0, None),
         ("failed", "running", 0, None),
         ("destroyed", "running", 0, None),
         ("expired", "none", 0, None),
@@ -573,41 +727,6 @@ async def test_start_lab_is_noop_when_containers_already_running(session):
 
 
 @pytest.mark.asyncio
-async def test_ensure_running_starts_exited_lab_for_live_task(session):
-    from app.contexts.lab.models import Lab
-
-    svc, result, _task = await ready_lab(session, task_status="running")
-    lab = await session.get(Lab, result.lab_id)
-    lab.status = "expired"
-    await session.commit()
-
-    exited = [
-        {
-            "name": "web",
-            "status": "exited",
-            "state": "exited",
-            "ports": "",
-            "image": "x",
-        }
-    ]
-    with patch(
-        "app.contexts.lab.docker_ops.list_containers",
-        new_callable=AsyncMock,
-        return_value=exited,
-    ), patch(
-        "app.contexts.lab.docker_ops.compose_start",
-        new_callable=AsyncMock,
-        return_value=True,
-    ) as start:
-        status = await svc.ensure_running(result.lab_id)
-
-    assert status == "ready"
-    start.assert_awaited_once()
-    await session.refresh(lab)
-    assert lab.status == "ready"
-
-
-@pytest.mark.asyncio
 async def test_other_owner_lab_is_not_found(session):
     from app.contexts.lab.errors import LabNotFoundError
 
@@ -623,14 +742,14 @@ async def test_management_writes_update_state_and_touch(session, tmp_path):
     svc, result, task = await ready_lab(session)
     task.status = "completed"
     lab = await session.get(Lab, result.lab_id)
-    lab.workdir = str(tmp_path).replace("\\", "/")
+    lab.workdir = _posix_lab_workdir(result.lab_id)
     lab.last_seen_at = datetime(2000, 1, 1, tzinfo=timezone.utc)
     compose_file = tmp_path / ".vuln-env" / "docker-compose.yml"
     compose_file.parent.mkdir()
     compose_file.write_text("services: {}", encoding="utf-8")
     await session.commit()
 
-    with patch(
+    with _patch_lab_workdir_tmp(tmp_path), patch(
         "app.contexts.lab.docker_ops.compose_stop", new_callable=AsyncMock
     ) as stop, patch(
         "app.contexts.lab.docker_ops.list_containers",
@@ -667,8 +786,8 @@ async def test_management_writes_update_state_and_touch(session, tmp_path):
     start.assert_awaited_once_with(result.compose_project)
     rebuild.assert_awaited_once_with(
         result.compose_project,
-        str(compose_file).replace("\\", "/"),
-        str(tmp_path).replace("\\", "/"),
+        str(compose_file.resolve()),
+        str(Path(tmp_path).resolve()),
     )
     down.assert_awaited_once_with(result.compose_project)
 
@@ -706,11 +825,11 @@ async def test_rebuild_without_recipe_has_exact_message(session, tmp_path):
     svc, result, task = await ready_lab(session)
     task.status = "completed"
     lab = await session.get(__import__("app.contexts.lab.models", fromlist=["Lab"]).Lab, result.lab_id)
-    lab.workdir = str(tmp_path).replace("\\", "/")
+    lab.workdir = _posix_lab_workdir(result.lab_id)
     await session.commit()
     svc.download_recipe = AsyncMock(return_value=None)
 
-    with patch(
+    with _patch_lab_workdir_tmp(tmp_path), patch(
         "app.core.agent_runner.git_clone_to_workdir",
         return_value=(True, ""),
     ) as clone:
@@ -724,10 +843,10 @@ async def test_rebuild_downloads_recipe_when_file_missing(session, tmp_path):
     svc, result, task = await ready_lab(session)
     task.status = "completed"
     lab = await session.get(__import__("app.contexts.lab.models", fromlist=["Lab"]).Lab, result.lab_id)
-    lab.workdir = str(tmp_path).replace("\\", "/")
+    lab.workdir = _posix_lab_workdir(result.lab_id)
     await session.commit()
 
-    def fake_clone(workdir, git_url, ref, dest_dirname):
+    def fake_clone(workdir, git_url, ref, dest_dirname, **kwargs):
         dest = os.path.join(workdir, dest_dirname)
         os.makedirs(dest, exist_ok=True)
         (Path(dest) / "pom.xml").write_text("<project/>", encoding="utf-8")
@@ -742,14 +861,18 @@ async def test_rebuild_downloads_recipe_when_file_missing(session, tmp_path):
         return {"compose_path": ".vuln-env/docker-compose.yml"}
 
     svc.download_recipe = fake_download
-    with patch("app.contexts.lab.docker_ops.compose_up_build", new_callable=AsyncMock) as up, \
-         patch("app.core.agent_runner.git_clone_to_workdir", side_effect=fake_clone):
+    with _patch_lab_workdir_tmp(tmp_path), patch(
+        "app.contexts.lab.docker_ops.compose_up_build", new_callable=AsyncMock
+    ) as up, patch(
+        "app.core.agent_runner.git_clone_to_workdir", side_effect=fake_clone
+    ):
         status = await svc.rebuild_lab(result.lab_id, owner_id="u1")
     assert status == "ready"
     up.assert_awaited_once()
-    up_file = up.await_args.args[1]
-    assert up_file.endswith("/b/.vuln-env/docker-compose.yml".replace("/", os.sep).replace(os.sep, "/"))
-    assert up_file.startswith(str(tmp_path).replace("\\", "/"))
+    up_file = Path(up.await_args.args[1])
+    workdir_root = Path(up.await_args.args[2])
+    assert up_file == workdir_root / "b" / ".vuln-env" / "docker-compose.yml"
+    assert workdir_root == Path(tmp_path).resolve()
 
 
 @pytest.mark.asyncio
@@ -780,7 +903,7 @@ async def test_docker_container_listing_and_membership():
         list_containers,
     )
 
-    output = "web\trunning\tUp 2 minutes\t0.0.0.0:3001->3000/tcp\tnginx:latest\n"
+    output = "web\tUp 2 minutes\t0.0.0.0:3001->3000/tcp\tnginx:latest\n"
     completed = MagicMock(returncode=0, stdout=output, stderr="")
     with patch("app.contexts.lab.docker_ops.subprocess.run", return_value=completed):
         containers = await list_containers("crucible-lab-abc")
@@ -789,8 +912,7 @@ async def test_docker_container_listing_and_membership():
     assert containers == [
         {
             "name": "web",
-            "status": "running",
-            "state": "running",
+            "status": "Up 2 minutes",
             "ports": "0.0.0.0:3001->3000/tcp",
             "image": "nginx:latest",
         }

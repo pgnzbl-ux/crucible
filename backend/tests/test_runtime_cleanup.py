@@ -61,12 +61,12 @@ async def test_teardown_task_runtime_only_removes_agent_runner():
         "app.contexts.agent.nodes.env_ready.docker_compose_down",
         new_callable=AsyncMock,
     ) as mock_down:
-        mock_mgr.host_workdir_path.return_value = r"D:\tmp\crucible\audit-abc"
+        mock_mgr.host_workdir_path.return_value = "/tmp/crucible/audit-abc"
         await teardown_task_runtime("abc")
 
     mock_mgr.host_workdir_path.assert_called_once_with("abc")
     mock_down.assert_not_awaited()
-    mock_mgr.remove_for_task.assert_called_once_with("abc", r"D:\tmp\crucible\audit-abc")
+    mock_mgr.remove_for_task.assert_called_once_with("abc", "/tmp/crucible/audit-abc")
 
 
 def test_new_run_does_not_compose_down_shared_lab():
@@ -96,7 +96,7 @@ async def test_teardown_only_kills_runner():
         "app.contexts.agent.nodes.env_ready.docker_compose_down",
         new_callable=AsyncMock,
     ) as mock_down:
-        mock_mgr.host_workdir_path.return_value = r"D:\tmp\crucible\audit-abc"
+        mock_mgr.host_workdir_path.return_value = "/tmp/crucible/audit-abc"
         mock_mgr.remove_for_task.side_effect = remove_for_task
         await teardown_task_runtime("abc")
 
@@ -162,12 +162,12 @@ def test_remove_for_workdir_only_touches_matching_mount():
     mine = MagicMock()
     mine.id = "cid-mine"
     mine.attrs = {
-        "Mounts": [{"Source": r"D:\tmp\crucible\audit-abc", "Destination": "/workspace"}]
+        "Mounts": [{"Source": "/tmp/crucible/audit-abc", "Destination": "/workspace"}]
     }
     other = MagicMock()
     other.id = "cid-other"
     other.attrs = {
-        "Mounts": [{"Source": r"D:\tmp\crucible\audit-zzz", "Destination": "/workspace"}]
+        "Mounts": [{"Source": "/tmp/crucible/audit-zzz", "Destination": "/workspace"}]
     }
 
     mgr = AgentRunnerManager.__new__(AgentRunnerManager)
@@ -176,7 +176,7 @@ def test_remove_for_workdir_only_touches_matching_mount():
     mgr._active_ids = {"cid-mine", "cid-other"}
 
     with patch.object(mgr, "remove_by_id") as mock_rm:
-        removed = mgr.remove_for_workdir(r"D:\tmp\crucible\audit-abc")
+        removed = mgr.remove_for_workdir("/tmp/crucible/audit-abc")
 
     assert removed == 1
     mock_rm.assert_called_once_with("cid-mine")
@@ -199,7 +199,7 @@ def test_remove_for_task_matches_label_or_workdir():
     with patch.object(mgr, "remove_by_id") as mock_rm, patch.object(
         mgr, "remove_for_workdir", return_value=0
     ):
-        removed = mgr.remove_for_task("abc", r"D:\tmp\crucible\audit-abc")
+        removed = mgr.remove_for_task("abc", "/tmp/crucible/audit-abc")
     assert removed >= 1
     mock_rm.assert_called_once_with("cid-label")
 
@@ -207,10 +207,9 @@ def test_remove_for_task_matches_label_or_workdir():
 @pytest.mark.parametrize(
     "path,base,expected",
     [
-        (r"D:\tmp\crucible\audit-abc-123", "/tmp/crucible/audit", "abc-123"),
         ("/tmp/crucible/audit-abc-123", "/tmp/crucible/audit", "abc-123"),
         (
-            r"D:\tmp\crucible\audit-abc-123\claudecodeui",
+            "/tmp/crucible/audit-abc-123/claudecodeui",
             "/tmp/crucible/audit",
             "abc-123",
         ),
@@ -242,7 +241,7 @@ def test_collect_task_ids_from_docker_not_yaml():
             _container(labels={"com.docker.compose.project": "crucible-lab-task-b"}),
             _container(
                 labels={"com.docker.compose.project": "vuln-env"},
-                mounts=[r"D:\tmp\crucible\audit-task-c\claudecodeui"],
+                mounts=["/tmp/crucible/audit-task-c/claudecodeui"],
             ),
             _container(labels={"com.docker.compose.project": "crucible-infra"}),
         ],
@@ -321,6 +320,7 @@ async def test_lab_sweep_phases_continue_after_expire_failure():
     service = MagicMock()
     service.expire_silent_labs = AsyncMock(side_effect=RuntimeError("ttl failed"))
     service.fail_stale_creating = AsyncMock()
+    service.fail_stale_rebuilding = AsyncMock()
     service.cleanup_terminal_runtimes = AsyncMock()
     service.known_lab_ids = AsyncMock(return_value={"known"})
     service.session.rollback = AsyncMock()
@@ -336,5 +336,6 @@ async def test_lab_sweep_phases_continue_after_expire_failure():
         await run_lab_lifecycle_phases(service)
 
     service.fail_stale_creating.assert_awaited_once()
+    service.fail_stale_rebuilding.assert_awaited_once()
     service.cleanup_terminal_runtimes.assert_awaited_once()
     cleanup.assert_awaited_once_with({"crucible-lab-legacy"}, {"known"})

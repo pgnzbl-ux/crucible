@@ -60,7 +60,7 @@ Crucible 按研究员的方法论自动走完这条链路：
 - **自己选模型** —— 通过 Anthropic 兼容端点接入 DeepSeek 等；后台配置，设为默认即启用
 - **任务可取消、可从失败处续跑** —— 取消会停 Worker 并回收容器；重试复用已完成步骤
 - **登录隔离** —— JWT 认证，数据按用户隔离
-- **并行任务（仅 Linux）** —— 设置里指定同时运行上限；Windows 单进程一次一个任务
+- **并行任务** —— 设置里指定同时运行上限（Celery prefork，默认上限 4）
 
 ## 界面预览
 
@@ -128,6 +128,7 @@ Celery Worker
 
 ### 前置
 
+- Linux 宿主（含 WSL）；不支持在 Windows 本机直接跑后端 / Worker
 - Docker 20+ 与 Docker Compose v2+
 - Python 3.11+
 - Node.js 18+
@@ -228,7 +229,7 @@ CLAUDE_AGENT_SDK_ENABLED=true
 **进程与端口**
 
 - 必须同时跑 **API + Worker + 前端**。只开 API 时任务会停在队列里
-- **同时运行几个任务**：只在 **Linux** 的控制台「设置」里可改（默认 1）。Windows 上该项不可配置；即便把数字调到 2，同一时刻也只跑 1 个任务
+- **同时运行几个任务**：控制台「设置」里可改（默认 1，硬顶见 `AGENT_RUNNER_CONCURRENCY_LIMIT`）。Worker 用 `python run_worker.py`（固定 prefork）
 - 端口刻意避开本机常见占用：API `8010`、前端 `5173`、Postgres `5433`、Redis `6380`、MinIO `9000/9001`
 - `python app/main.py` 默认不是 8010，请用快速开始里的 uvicorn 命令
 

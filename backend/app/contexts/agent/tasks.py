@@ -404,13 +404,12 @@ def _on_sigterm(_signum, _frame):  # noqa: ANN001
     os.kill(os.getpid(), signal.SIGTERM)
 
 
-# 仅 Linux/Mac 注册；Windows 用 CTRL_BREAK_EVENT（run_worker.py 单独处理）
-if os.name != "nt":
-    try:
-        signal.signal(signal.SIGTERM, _on_sigterm)
-    except (ValueError, OSError):
-        # 主线程外注册会抛 ValueError
-        pass
+# Celery prefork worker 注册 SIGTERM，便于 revoke(terminate=True) 优雅收尾
+try:
+    signal.signal(signal.SIGTERM, _on_sigterm)
+except (ValueError, OSError):
+    # 主线程外注册会抛 ValueError
+    pass
 
 
 from celery.signals import worker_ready

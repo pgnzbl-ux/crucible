@@ -9,8 +9,7 @@
 返回 secret_files 描述列表，供 prompt 告知 agent 有哪些凭据可用（env 名 / 文件路径）。
 
 安全：
-- file 凭据目录 0o700、文件 0o600（Linux host 生效；Windows host 无 Unix 权限，容器内
-  受 user=1000 约束，权限位 best-effort）
+- file 凭据目录 0o700、文件 0o600（宿主机生效；容器内受 user=1000 约束）
 - 凭据值从不进镜像层 / 不落 git，只在运行时注入
 """
 

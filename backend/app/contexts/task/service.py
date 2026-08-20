@@ -270,8 +270,7 @@ class TaskService:
 
         HTTP 不能等 `docker compose down`（build 中可能卡住数分钟），否则前端取消按钮
         一直转圈，且 cancelled 未提交时 worker 会把状态写回 running/failed。
-        revoke(terminate=True) 在 Windows solo pool 上经常杀不掉正在跑的 worker；
-        后台 teardown 先拆 agent-runner 停 AI，编排器刷新到 cancelled 后停后续节点。
+        revoke(terminate=True) 发送 SIGTERM；后台 teardown 先拆 agent-runner 停 AI，编排器刷新到 cancelled 后停后续节点。
         """
         task = await self.repo.get_by_id_with_runs(task_id, owner_id)
         if not task:

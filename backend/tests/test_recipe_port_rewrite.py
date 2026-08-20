@@ -28,7 +28,7 @@ def test_rewrite_returns_none_when_no_ports():
 
 def test_docker_unavailable_detects_daemon():
     assert is_docker_unavailable("Cannot connect to the Docker daemon at unix:///var/run/docker.sock")
-    assert is_docker_unavailable("docker compose 异常: [WinError 2] ...")
+    assert is_docker_unavailable("docker compose 异常: Cannot connect to the Docker daemon")
     assert not is_docker_unavailable("failed to build: npm ci exited 1")
 
 

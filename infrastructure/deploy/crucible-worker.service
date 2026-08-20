@@ -3,7 +3,7 @@
 # 启用: systemctl enable --now crucible-worker
 #
 # 前置: 同 crucible-api.service；且 AGENT_RUNNER_CONCURRENCY_LIMIT 与
-#       run_worker.py 推导的 prefork 进程数一致（Linux 下进程数=并发上限）
+#       run_worker.py 推导的 prefork 进程数一致（进程数=并发上限）
 #
 # 注意: 本服务是沙箱/靶场编排的主体，必须在宿主机运行（禁止容器化），
 #       且 docker 组权限必需（docker.from_env + subprocess docker compose）。

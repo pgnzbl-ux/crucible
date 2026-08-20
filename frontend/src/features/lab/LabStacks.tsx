@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { App, Button, Collapse, Empty, Popconfirm, Space, Table, Tag, Tooltip, Typography } from 'antd'
+import { App, Button, Collapse, Empty, Space, Table, Tag, Tooltip, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
@@ -12,13 +12,17 @@ import {
 } from '../../shared/lib/api'
 import { safeHttpUrl } from '../../shared/lib/safeUrl'
 import { useErrorToast } from '../../shared/hooks/useErrorToast'
-import { canDestroyLab, canMutateLab, canRebuildLab, canStartLab, canStopLab, shouldPollLabs } from './labUi'
+import { canDestroyLab, canMutateLab, canRebuildLab, canStartLab, canStopLab, shouldPollLabs, showDestroyLab, showRebuildLab, showStartLab, showStopLab } from './labUi'
 
 const { Link, Text } = Typography
 const OCCUPIED_TIP = '有验证任务占用，请先取消任务'
 
 function canMutateContainer(status: string, liveTaskCount: number): boolean {
   return (status === 'ready' || status === 'stopped') && canMutateLab(liveTaskCount)
+}
+
+function showMutateContainer(status: string, liveTaskCount: number): boolean {
+  return canMutateContainer(status, liveTaskCount)
 }
 
 function statusColor(status: string) {
@@ -82,7 +86,7 @@ function mutationActionKey(input: MutationInput) {
 }
 
 export function LabStacks() {
-  const { message } = App.useApp()
+  const { message, modal } = App.useApp()
   const queryClient = useQueryClient()
   const { data, error, isError, isLoading } = useQuery({
     queryKey: ['labs'],
@@ -100,8 +104,12 @@ export function LabStacks() {
       }
       return api.deleteLabContainer(input.labId, input.containerName)
     },
-    onSuccess: async () => {
-      message.success('操作已提交')
+    onSuccess: async (_data, input) => {
+      if (input.kind === 'lab-action' && input.action === 'rebuild') {
+        message.success('靶场重建完成')
+      } else {
+        message.success('操作已提交')
+      }
       await queryClient.invalidateQueries({ queryKey: ['labs'] })
     },
     onError: (error) => message.error(error.message),
@@ -112,10 +120,12 @@ export function LabStacks() {
     label: string,
     input: MutationInput,
     canAct: (status: string, liveTaskCount: number) => boolean,
+    show: (status: string, liveTaskCount: number) => boolean,
     danger = false,
     confirmation?: string,
   ) => {
     const live = lab.live_task_count ?? 0
+    if (!show(lab.status, live)) return null
     const allowed = canAct(lab.status, live)
     const statusOk = canAct(lab.status, 0)
     const occupiedTip = !allowed && statusOk
@@ -127,25 +137,37 @@ export function LabStacks() {
       mutation.isPending &&
       mutation.variables !== undefined &&
       mutationActionKey(mutation.variables) === mutationActionKey(input)
+    const runAction = () => mutation.mutateAsync(input)
+    const handleClick = () => {
+      if (!allowed || pendingSameRow) return
+      if (confirmation) {
+        modal.confirm({
+          title: confirmation,
+          content:
+            input.kind === 'lab-action' && input.action === 'rebuild'
+              ? '将重新拉取源码与配方并执行 docker compose up --build，可能需要数分钟。'
+              : undefined,
+          okText: '确定',
+          cancelText: '取消',
+          okButtonProps: danger ? { danger: true } : undefined,
+          onOk: runAction,
+        })
+        return
+      }
+      void runAction()
+    }
     const button = (
       <Button
         size="small"
         danger={danger}
         disabled={!allowed || pendingSameRow}
         loading={loading}
-        onClick={confirmation ? undefined : () => mutation.mutate(input)}
+        onClick={handleClick}
       >
         {label}
       </Button>
     )
-    const guarded = <GuardedAction disabled={occupiedTip}>{button}</GuardedAction>
-    return confirmation && allowed ? (
-      <Popconfirm title={confirmation} onConfirm={() => mutation.mutate(input)}>
-        {guarded}
-      </Popconfirm>
-    ) : (
-      guarded
-    )
+    return <GuardedAction disabled={occupiedTip}>{button}</GuardedAction>
   }
 
   const containerColumns = (lab: Lab): ColumnsType<LabContainer> => [
@@ -167,7 +189,7 @@ export function LabStacks() {
       title: '操作',
       width: 260,
       render: (_, container) => (
-        <Space size={4}>
+        <Space size={4} onClick={(event) => event.stopPropagation()}>
           {actionButton(
             lab,
             '停止',
@@ -178,6 +200,7 @@ export function LabStacks() {
               action: 'stop',
             },
             canMutateContainer,
+            showMutateContainer,
           )}
           {actionButton(
             lab,
@@ -189,6 +212,7 @@ export function LabStacks() {
               action: 'start',
             },
             canMutateContainer,
+            showMutateContainer,
           )}
           {actionButton(
             lab,
@@ -200,12 +224,14 @@ export function LabStacks() {
               action: 'restart',
             },
             canMutateContainer,
+            showMutateContainer,
           )}
           {actionButton(
             lab,
             '删除',
             { kind: 'container-delete', labId: lab.id, containerName: container.name },
             canMutateContainer,
+            showMutateContainer,
             true,
             `确定删除容器 ${container.name}？`,
           )}
@@ -259,14 +285,15 @@ export function LabStacks() {
       title: '操作',
       width: 280,
       render: (_, lab) => (
-        <Space size={4}>
-          {actionButton(lab, '停止', { kind: 'lab-action', labId: lab.id, action: 'stop' }, canStopLab)}
-          {actionButton(lab, '启动', { kind: 'lab-action', labId: lab.id, action: 'start' }, canStartLab)}
+        <Space size={4} onClick={(event) => event.stopPropagation()}>
+          {actionButton(lab, '停止', { kind: 'lab-action', labId: lab.id, action: 'stop' }, canStopLab, showStopLab)}
+          {actionButton(lab, '启动', { kind: 'lab-action', labId: lab.id, action: 'start' }, canStartLab, showStartLab)}
           {actionButton(
             lab,
             '重建',
             { kind: 'lab-action', labId: lab.id, action: 'rebuild' },
             canRebuildLab,
+            showRebuildLab,
             false,
             '确定重建该靶场？',
           )}
@@ -275,6 +302,7 @@ export function LabStacks() {
             '销毁',
             { kind: 'lab-delete', labId: lab.id },
             canDestroyLab,
+            showDestroyLab,
             true,
             '确定销毁该靶场？',
           )}

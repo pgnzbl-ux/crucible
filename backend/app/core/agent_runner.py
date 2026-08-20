@@ -426,8 +426,7 @@ class AgentRunnerManager:
                         stderr_tail = raw.decode("utf-8", errors="replace")
                     else:
                         stderr_tail = str(raw)
-                    # Windows Docker 上 stderr-only 常为空；python -m 的 ModuleNotFound
-                    # 也可能落在未分离的 stdout。stderr 空则回退抓双流。
+                    # stderr-only 常为空；python -m 的 ModuleNotFound 也可能落在未分离的 stdout
                     if not stderr_tail.strip():
                         raw = runner.container.logs(tail=80)
                         if isinstance(raw, bytes):
@@ -576,8 +575,7 @@ class AgentRunnerManager:
     def host_workdir_path(self, task_id: str) -> str:
         """根据 task_id 计算 host 临时目录路径(规范化为 OS 绝对路径)。
 
-        settings.agent_runner_workdir_base 可能是 POSIX 风格(/tmp/...),
-        Windows 下 os.path.abspath 会解析为当前盘符根(D:\\tmp\\...)。
+        settings.agent_runner_workdir_base 为 POSIX 路径（如 /tmp/crucible/audit）。
         """
         base = settings.agent_runner_workdir_base.rstrip("/")
         return os.path.abspath(f"{base}-{task_id}")
@@ -657,6 +655,16 @@ def _git_subprocess_env() -> dict[str, str]:
     return env
 
 
+def normalize_host_workdir(path: str) -> str:
+    """把 settings/DB 中的 POSIX workdir（/tmp/...）规范化为 Linux 绝对路径。"""
+    cleaned = (path or "").strip().replace("\\", "/")
+    if not cleaned:
+        raise ValueError("workdir 不能为空")
+    if not cleaned.startswith("/"):
+        raise ValueError(f"workdir 必须是 POSIX 绝对路径（以 / 开头）: {path!r}")
+    return os.path.abspath(cleaned)
+
+
 def git_clone_to_workdir(
     workdir: str,
     project_address: str,
@@ -672,6 +680,12 @@ def git_clone_to_workdir(
     返回 (ok, error_or_empty)。失败信息带「源码克隆失败」前缀，便于节点 0 展示。
     """
     from app.contexts.project.git_url import resolve_ref_type
+
+    workdir = normalize_host_workdir(workdir)
+    try:
+        os.makedirs(workdir, exist_ok=True)
+    except OSError as exc:
+        return False, f"源码克隆失败: {exc}"
 
     name = dest_dirname or _dirname_from_url(project_address)
     project_dir = os.path.join(workdir, name)

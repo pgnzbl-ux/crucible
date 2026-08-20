@@ -90,7 +90,7 @@ def test_runner_uses_public_dns_servers():
 
 
 def test_create_passes_dns_and_keeps_egress():
-    """Windows 自定义网的 127.0.0.11 经常不能解析公网，必须注入公共 DNS。"""
+    """自定义 bridge 网须注入公共 DNS，否则 127.0.0.11 可能无法解析公网。"""
     from app.core.agent_runner import AGENT_RUNNER_DNS, AgentRunnerManager, AgentRunnerSpec
 
     fake_container = MagicMock()
@@ -205,7 +205,7 @@ def test_timeout_stops_container():
 
 
 def test_failed_container_combined_logs_when_stderr_stream_empty():
-    """Windows Docker 上 stdout=False/stderr=True 可能空，必须回退抓 stdout+stderr。"""
+    """stdout=False/stderr=True 可能空，必须回退抓 stdout+stderr。"""
     fake_container = MagicMock()
     fake_container.logs.side_effect = [
         iter([]),

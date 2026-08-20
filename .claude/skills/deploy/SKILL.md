@@ -32,7 +32,7 @@ description: 启动基础设施 + 后端 API + Celery worker + 前端 dev server
    ```bash
    cd backend && python run_worker.py
    ```
-   Windows `--pool=solo`（并行=1）；Linux `--pool=prefork`。
+   `--pool=prefork`，进程数 = `AGENT_RUNNER_CONCURRENCY_LIMIT`。
 
 5. **前端**
    ```bash

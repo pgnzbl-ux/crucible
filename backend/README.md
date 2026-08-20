@@ -20,8 +20,7 @@ pip install -e ".[dev]"
 # 终端 1：API
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8010
 
-# 终端 2：Worker（必须用这个入口）
-# Windows 同一时刻只跑 1 个任务；同时跑多个只在 Linux 上可配
+# 终端 2：Worker（必须用这个入口，固定 prefork）
 python run_worker.py
 ```
 
@@ -47,7 +46,7 @@ alembic upgrade head
 
 LLM 端点、Key、模型只在控制台「设置 → LLM Provider」配置，不要加 `LLM_*` 环境变量。
 
-同时运行几个任务只在 **Linux** 上于控制台「设置」里可改。Windows 上该项不可配置；Worker 一次只处理一个任务，把上限调到 2 也不会并行。
+同时运行几个任务于控制台「设置」里可改（`python run_worker.py` 固定 prefork）。
 
 产品版本只写在 `pyproject.toml` 的 `[project].version`。`GET /health` 读取该字段。
 

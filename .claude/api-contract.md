@@ -129,7 +129,7 @@
 
 ### POST `/api/v1/tasks/{id}/cancel`
 
-取消任务(已实现):先把任务/run/未完成节点标 `cancelled` 并 **提交后立刻返回**。`revoke(terminate=True)` 停 worker（Windows solo 经常杀不掉）；后台 `schedule_teardown_task_runtime` 只按 `crucible.task_id` 强拆该任务的 agent-runner（停 AI），不 `compose down` 可复用靶场。编排器每节点刷新库状态，已取消则停后续节点，且 execute 失败不得把 cancelled 改成 failed。靶场在静默满 TTL 1 小时且无 live 任务后由巡检销毁。
+取消任务(已实现):先把任务/run/未完成节点标 `cancelled` 并 **提交后立刻返回**。`revoke(terminate=True)` 停 worker；后台 `schedule_teardown_task_runtime` 只按 `crucible.task_id` 强拆该任务的 agent-runner（停 AI），不 `compose down` 可复用靶场。编排器每节点刷新库状态，已取消则停后续节点，且 execute 失败不得把 cancelled 改成 failed。靶场在静默满 TTL 1 小时且无 live 任务后由巡检销毁。
 
 ### POST `/api/v1/tasks/{id}/retry`  *(阶段 1 新增；P1.1 支持 from_node)*
 
@@ -326,15 +326,15 @@ Provider **没有独立启用/停用字段**。Agent 运行时只读取唯一的
 {
   "max_concurrent_tasks": 1,
   "max_allowed": 4,
-  "worker_pool": "solo"
+  "worker_pool": "prefork"
 }
 ```
 
-`max_allowed` 来自 `AGENT_RUNNER_CONCURRENCY_LIMIT`（1–8，默认 4）。`worker_pool` 按 API 进程 `sys.platform` 提示：`win32`→`solo`，否则 `prefork`（不是探测正在跑的 worker）。
+`max_allowed` 来自 `AGENT_RUNNER_CONCURRENCY_LIMIT`（1–8，默认 4）。`worker_pool` 固定为 `prefork`（Celery worker 由 `run_worker.py` 启动）。
 
 ### PUT `/api/v1/settings/runtime`
 
-请求：`{ "max_concurrent_tasks": 2 }`（`extra=forbid`）。必须 `1 <= n <= max_allowed`，否则 422 `VALIDATION_FAILED`。改完立即作用于新抢槽；不取消已 running 的任务。Worker 先抢 Redis 槽 `crucible:running_run_ids` 再 claim；无槽保持 `queued` 并 `retry(countdown=15)`。设置页仅在 `worker_pool=prefork`（Linux）可改；`solo`（Windows）控件禁用。Windows Worker 实际并行恒为 1，写库为 2 也不会同时跑两个任务。
+请求：`{ "max_concurrent_tasks": 2 }`（`extra=forbid`）。必须 `1 <= n <= max_allowed`，否则 422 `VALIDATION_FAILED`。改完立即作用于新抢槽；不取消已 running 的任务。Worker 先抢 Redis 槽 `crucible:running_run_ids` 再 claim；无槽保持 `queued` 并 `retry(countdown=15)`。
 
 ---
 

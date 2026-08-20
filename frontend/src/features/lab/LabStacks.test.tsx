@@ -7,6 +7,10 @@ import {
   canStopLab,
   isLabTtlActive,
   shouldPollLabs,
+  showDestroyLab,
+  showRebuildLab,
+  showStartLab,
+  showStopLab,
 } from './labUi'
 
 describe('canMutateLab', () => {
@@ -31,9 +35,9 @@ describe('shouldPollLabs', () => {
 })
 
 describe('lab action gates', () => {
-  it('only starts stopped labs and only stops ready labs', () => {
+  it('only starts stopped or expired labs and only stops ready labs', () => {
     expect(canStartLab('stopped', 0)).toBe(true)
-    expect(canStartLab('expired', 0)).toBe(false)
+    expect(canStartLab('expired', 0)).toBe(true)
     expect(canStartLab('ready', 0)).toBe(false)
     expect(canStopLab('ready', 0)).toBe(true)
     expect(canStopLab('stopped', 0)).toBe(false)
@@ -53,6 +57,36 @@ describe('lab action gates', () => {
     expect(canDestroyLab('ready', 0)).toBe(true)
     expect(canDestroyLab('destroyed', 0)).toBe(false)
   })
+
+  it('blocks manual actions while rebuilding', () => {
+    expect(canRebuildLab('rebuilding', 0)).toBe(false)
+    expect(canDestroyLab('rebuilding', 0)).toBe(false)
+    expect(canStartLab('rebuilding', 0)).toBe(false)
+    expect(canStopLab('rebuilding', 0)).toBe(false)
+  })
+})
+
+describe('lab action visibility', () => {
+  it('hides irrelevant buttons per lifecycle state', () => {
+    expect(showStopLab('ready', 0)).toBe(true)
+    expect(showStartLab('ready', 0)).toBe(false)
+    expect(showStartLab('stopped', 0)).toBe(true)
+    expect(showStopLab('stopped', 0)).toBe(false)
+    expect(showRebuildLab('expired', 0)).toBe(true)
+    expect(showStartLab('expired', 0)).toBe(true)
+    expect(showStopLab('expired', 0)).toBe(false)
+    expect(showRebuildLab('destroyed', 0)).toBe(true)
+    expect(showDestroyLab('destroyed', 0)).toBe(false)
+    expect(showDestroyLab('rebuilding', 0)).toBe(false)
+    expect(showRebuildLab('rebuilding', 0)).toBe(false)
+  })
+
+  it('hides most actions when a live task occupies a ready lab', () => {
+    expect(showStopLab('ready', 1)).toBe(false)
+    expect(showRebuildLab('ready', 1)).toBe(false)
+    expect(showDestroyLab('ready', 1)).toBe(false)
+    expect(showDestroyLab('creating', 1)).toBe(true)
+  })
 })
 
 describe('isLabTtlActive', () => {
@@ -63,5 +97,6 @@ describe('isLabTtlActive', () => {
     expect(isLabTtlActive('failed')).toBe(false)
     expect(isLabTtlActive('expired')).toBe(false)
     expect(isLabTtlActive('destroyed')).toBe(false)
+    expect(isLabTtlActive('rebuilding')).toBe(false)
   })
 })

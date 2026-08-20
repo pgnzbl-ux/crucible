@@ -214,6 +214,12 @@ async def run_lab_lifecycle_phases(service) -> None:
         await service.session.rollback()
 
     try:
+        await service.fail_stale_rebuilding()
+    except Exception:  # noqa: BLE001
+        logger.exception("Lab rebuilding 巡检失败")
+        await service.session.rollback()
+
+    try:
         await service.cleanup_terminal_runtimes()
     except Exception:  # noqa: BLE001
         logger.exception("Lab 终态运行时巡检失败")

@@ -24,7 +24,8 @@ from .repository import LabRepository
 logger = logging.getLogger(__name__)
 
 RECLAIMABLE_LAB_STATUSES = frozenset({"failed", "expired", "destroyed"})
-_ALIGN_FROZEN_STATUSES = frozenset({"creating", "destroyed", "failed"})
+_ALIGN_FROZEN_STATUSES = frozenset({"creating", "rebuilding", "destroyed", "failed"})
+_MANUAL_REBUILD_STALE_SECONDS = 1800
 _ALIGN_TO_READY = frozenset({"expired", "stopped"})
 TTL_ACTIVE_STATUSES = frozenset({"ready", "stopped"})
 
@@ -48,14 +49,20 @@ def container_runtime_kind(containers: list[dict[str, str]]) -> str:
     """把 docker ps 摘要收成 none / running / exited。"""
     if not containers:
         return "none"
-    if any(_container_is_running(item.get("status", "")) for item in containers):
+    if any(
+        _container_is_running(item.get("status", ""), state=item.get("state", ""))
+        for item in containers
+    ):
         return "running"
     return "exited"
 
 
-def _container_is_running(status: str) -> bool:
+def _container_is_running(status: str, *, state: str = "") -> bool:
     text = (status or "").strip().lower()
-    return text.startswith("up") or text.startswith("restarting")
+    state_text = (state or "").strip().lower()
+    if state_text == "running":
+        return True
+    return text.startswith("up") or text.startswith("restarting") or text == "running"
 
 
 def next_aligned_lab_status(
@@ -63,7 +70,7 @@ def next_aligned_lab_status(
 ) -> str | None:
     """按容器实际状态校正 labs.status；无需改动则返回 None。
 
-    creating / failed / destroyed 不校正（进行中或用户终态）。
+    creating / rebuilding / failed / destroyed 不校正（进行中或用户终态）。
     容器已在跑而库仍是 expired/stopped → ready（复现拉起后管理页不再卡 expired）。
     无 live 任务时才降级，避免 env_ready 重建窗口被误标过期。
     """
@@ -233,9 +240,12 @@ class LabService:
         lab = await self.repository.get_by_key(owner_id, project_id, commit_sha)
         if lab is None:
             lab_id = str(uuid.uuid4())
-            workdir_base = (
-                get_settings().agent_runner_workdir_base.rstrip("/\\").replace("\\", "/")
+            workdir_base = Path(
+                get_settings().agent_runner_workdir_base.rstrip("/\\")
             )
+            from app.core.agent_runner import normalize_host_workdir
+
+            lab_root = Path(normalize_host_workdir(str(workdir_base))) / "labs"
             lab = Lab(
                 id=lab_id,
                 owner_id=owner_id,
@@ -243,7 +253,7 @@ class LabService:
                 commit_sha=commit_sha,
                 status="creating",
                 compose_project=f"crucible-lab-{lab_id.lower()}",
-                workdir=f"{workdir_base}/labs/{lab_id}",
+                workdir=str(lab_root / lab_id),
                 creator_task_id=task_id,
                 last_seen_at=self._now(),
             )
@@ -481,13 +491,21 @@ class LabService:
         from . import docker_ops
 
         lab = await self._require_writable_lab(lab_id, owner_id)
-        self._require_status(lab, {"stopped"}, "start")
+        self._require_status(lab, {"stopped", "expired"}, "start")
         await self._confirm_not_busy(lab.id)
-        if not await docker_ops.list_containers(lab.compose_project):
-            claimed = await self.repository.cas_status(lab.id, {"stopped"}, "expired")
-            if claimed:
-                lab.status = "expired"
+        containers = await docker_ops.list_containers(lab.compose_project)
+        if containers:
+            runtime = container_runtime_kind(containers)
+            if runtime == "running" and lab.status in {"expired", "stopped"}:
+                lab.status = "ready"
                 await self._touch_and_commit(lab)
+                return lab.status
+        if not containers:
+            if lab.status == "stopped":
+                claimed = await self.repository.cas_status(lab.id, {"stopped"}, "expired")
+                if claimed:
+                    lab.status = "expired"
+                    await self._touch_and_commit(lab)
             raise ValueError("靶场容器已不存在，请重建")
         if not await docker_ops.compose_start(lab.compose_project):
             raise RuntimeError("靶场 compose start 失败")
@@ -514,9 +532,11 @@ class LabService:
             raise ValueError("缺少配方，请从验证任务重新创建")
         await self._confirm_not_busy(lab.id)
 
-        compose_file = self._locate_rebuild_compose(lab)
+        workdir_root = str(self._resolve_lab_workdir(lab.workdir))
+
+        compose_file = self._locate_rebuild_compose(lab, workdir_root)
         if compose_file is None:
-            compose_file, error = await self._rebuild_fetch_missing(lab)
+            compose_file, error = await self._rebuild_fetch_missing(lab, workdir_root)
             if error:
                 lab.status = "failed"
                 lab.error_message = error
@@ -524,7 +544,9 @@ class LabService:
                 raise ValueError(error)
 
         previous_status = lab.status
-        lab.status = "creating"
+        lab.status = "rebuilding"
+        lab.error_message = None
+        lab.last_seen_at = self._now()
         await self.session.commit()
         try:
             await self._confirm_not_busy(lab.id)
@@ -534,7 +556,7 @@ class LabService:
             raise
         try:
             await docker_ops.compose_up_build(
-                lab.compose_project, compose_file, lab.workdir
+                lab.compose_project, compose_file, workdir_root
             )
         except Exception as exc:
             lab.status = "failed"
@@ -547,21 +569,57 @@ class LabService:
         return lab.status
 
     @staticmethod
-    def _locate_rebuild_compose(lab: Lab) -> str | None:
+    def _resolve_lab_workdir(workdir: str) -> Path:
+        from app.core.agent_runner import normalize_host_workdir
+
+        root = Path(normalize_host_workdir(workdir))
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    @staticmethod
+    def _is_safe_repo_dirname(name: str) -> bool:
+        if not name or name in {".", ".."}:
+            return False
+        if name.endswith(":"):
+            return False
+        if any(ch in name for ch in '<>:"|?*/\\'):
+            return False
+        return True
+
+    @staticmethod
+    def _rebuild_repo_dirname(lab: Lab, git_url: str) -> str:
+        from app.core.agent_runner import _dirname_from_url
+
+        rel = (lab.compose_path or "").replace("\\", "/").strip("/")
+        first_seg = rel.split("/", 1)[0] if rel else ""
+        if (
+            rel
+            and "/" in rel
+            and not first_seg.startswith(".")
+            and LabService._is_safe_repo_dirname(first_seg)
+        ):
+            return first_seg
+        return _dirname_from_url(git_url)
+
+    @staticmethod
+    def _locate_rebuild_compose(lab: Lab, workdir_root: str) -> str | None:
         """按新（{repo}/.vuln-env）→ 旧（workdir 直下）顺序找现成 compose 文件。"""
         rel = (lab.compose_path or "").replace("\\", "/").lstrip("/")
         candidates = [rel]
         if "/" in rel:
             candidates.append(rel.split("/", 1)[1])
+        root = Path(workdir_root)
         for cand in candidates:
-            path = f"{lab.workdir.rstrip('/')}/{cand}".replace("\\", "/")
-            if os.path.isfile(path):
-                return path
+            path = root / cand
+            if path.is_file():
+                return str(path)
         return None
 
-    async def _rebuild_fetch_missing(self, lab: Lab) -> tuple[str, str | None]:
+    async def _rebuild_fetch_missing(
+        self, lab: Lab, workdir_root: str
+    ) -> tuple[str, str | None]:
         """compose 文件缺失：clone 源码 + MinIO 拉配方，返回 (compose_file, error)。"""
-        repo_dirname, clone_error = await self._ensure_rebuild_source(lab)
+        repo_dirname, clone_error = await self._ensure_rebuild_source(lab, workdir_root)
         if clone_error:
             return "", clone_error
 
@@ -569,9 +627,8 @@ class LabService:
         repo_prefix = f"{repo_dirname}/" if repo_dirname else ""
         if repo_prefix and compose_rel.startswith(repo_prefix):
             compose_rel = compose_rel[len(repo_prefix):]
-        compose_file = (
-            f"{lab.workdir.rstrip('/')}/"
-            f"{(repo_prefix + compose_rel).lstrip('/')}".replace("\\", "/")
+        compose_file = str(
+            Path(workdir_root) / repo_prefix / compose_rel.lstrip("/")
         )
         if os.path.isfile(compose_file):
             return compose_file, None
@@ -580,13 +637,17 @@ class LabService:
             owner_id=lab.owner_id,
             project_id=lab.project_id,
             commit_sha=lab.commit_sha,
-            dest_workdir=str(Path(lab.workdir) / repo_dirname) if repo_dirname else lab.workdir,
+            dest_workdir=str(Path(workdir_root) / repo_dirname)
+            if repo_dirname
+            else workdir_root,
         )
         if recipe_hit is None or not os.path.isfile(compose_file):
             return "", "缺少配方，请从验证任务重新创建"
         return compose_file, None
 
-    async def _ensure_rebuild_source(self, lab: Lab) -> tuple[str | None, str | None]:
+    async def _ensure_rebuild_source(
+        self, lab: Lab, workdir_root: str
+    ) -> tuple[str | None, str | None]:
         """lab.workdir/{repo} 没有源码时，按 projects 表 git_url shallow clone。"""
         import asyncio
 
@@ -602,16 +663,8 @@ class LabService:
         if project is None:
             return None, "项目记录不存在，无法重建源码，请从验证任务重新创建"
 
-        rel = (lab.compose_path or "").replace("\\", "/").strip("/")
-        first_seg = rel.split("/", 1)[0] if rel else ""
-        # 新布局 compose_path 形如 {repo}/.vuln-env/...；首段是隐藏目录则无 repo 前缀
-        if rel and "/" in rel and not first_seg.startswith("."):
-            repo_dirname = first_seg
-        else:
-            from app.core.agent_runner import _dirname_from_url
-
-            repo_dirname = _dirname_from_url(project.git_url)
-        repo_dir = Path(lab.workdir) / repo_dirname
+        repo_dirname = self._rebuild_repo_dirname(lab, project.git_url)
+        repo_dir = Path(workdir_root) / repo_dirname
         if repo_dir.is_dir() and any(
             p for p in repo_dir.iterdir() if p.name != ".vuln-env"
         ):
@@ -619,13 +672,14 @@ class LabService:
 
         ok, err = await asyncio.to_thread(
             git_clone_to_workdir,
-            lab.workdir,
+            workdir_root,
             project.git_url,
-            None,
+            lab.commit_sha,
             repo_dirname,
+            ref_type="commit",
         )
         if not ok:
-            return repo_dirname, f"源码克隆失败: {err}"
+            return repo_dirname, err
         return repo_dirname, None
 
     async def destroy_lab(self, lab_id: str, *, owner_id: str) -> str:
@@ -722,6 +776,51 @@ class LabService:
             expired.append(lab.id)
         return expired
 
+    async def fail_stale_rebuilding(
+        self, *, now: datetime | None = None
+    ) -> list[str]:
+        """标记长时间未完成的手动 rebuilding Lab 失败，并 best-effort 清理 compose。"""
+        from . import docker_ops
+
+        clock = self._as_utc(now or self._now())
+        result = await self.session.execute(
+            select(Lab).where(Lab.status == "rebuilding")
+        )
+        failed: list[str] = []
+        for lab in result.scalars().all():
+            if await self.live_task_ids(lab.id):
+                continue
+            last_seen = (
+                self._as_utc(lab.last_seen_at) if lab.last_seen_at is not None else None
+            )
+            if (
+                last_seen is not None
+                and clock < last_seen + timedelta(seconds=_MANUAL_REBUILD_STALE_SECONDS)
+            ):
+                continue
+            claimed = await self.repository.cas_status(lab.id, {"rebuilding"}, "failed")
+            if not claimed:
+                continue
+            lab.error_message = "手动重建超时"
+            await self.session.commit()
+            if await self.live_task_ids(lab.id):
+                await self.repository.cas_status(lab.id, {"failed"}, "rebuilding")
+                await self.session.commit()
+                continue
+            await self.session.refresh(lab)
+            if lab.status != "failed":
+                continue
+            try:
+                await docker_ops.compose_down(lab.compose_project)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "清理超时 rebuilding Lab 失败(best-effort) lab=%s",
+                    lab.id,
+                    exc_info=True,
+                )
+            failed.append(lab.id)
+        return failed
+
     async def fail_stale_creating(self) -> list[str]:
         """标记无 live 任务的 creating Lab 失败，并 best-effort 清理 compose。"""
         from . import docker_ops
@@ -763,6 +862,8 @@ class LabService:
         cleaned: list[str] = []
         for lab in result.scalars().all():
             if await self.live_task_ids(lab.id):
+                continue
+            if lab.status == "rebuilding":
                 continue
             if lab.status == "expired":
                 try:

@@ -152,4 +152,4 @@ class RuntimeSettingsUpdateRequest(BaseModel):
 class RuntimeSettingsResponse(BaseModel):
     max_concurrent_tasks: int
     max_allowed: int
-    worker_pool: Literal["solo", "prefork"]
+    worker_pool: Literal["prefork"]

@@ -36,6 +36,8 @@ async def _execute(operation: Awaitable[Any]) -> Any:
         raise HTTPException(404, detail="靶场不存在") from exc
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
 
 
 @router.get("", response_model=LabListResponse)

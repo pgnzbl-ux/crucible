@@ -357,7 +357,7 @@ export interface CredentialInput {
 export interface RuntimeSettings {
   max_concurrent_tasks: number
   max_allowed: number
-  worker_pool: 'solo' | 'prefork'
+  worker_pool: 'prefork'
 }
 
 export const api = {

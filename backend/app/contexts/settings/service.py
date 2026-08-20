@@ -11,7 +11,6 @@ LLM Provider 管理服务。
 from __future__ import annotations
 
 import json
-import sys
 import time
 from typing import Any
 
@@ -57,7 +56,7 @@ def to_response(provider: LlmProvider, plain_key: str = "") -> LlmProviderRespon
 
 
 def worker_pool_hint() -> str:
-    return "solo" if sys.platform == "win32" else "prefork"
+    return "prefork"
 
 
 class SettingsService:
