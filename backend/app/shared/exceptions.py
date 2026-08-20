@@ -32,3 +32,14 @@ class NotFoundError(CrucibleError):
         details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message, code=code, http_status=404, details=details)
+
+
+class ConflictError(CrucibleError):
+    def __init__(
+        self,
+        message: str = "资源冲突",
+        *,
+        code: str = "CONFLICT",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, code=code, http_status=409, details=details)

@@ -28,6 +28,12 @@ class ProjectRepository:
         )
         return {project_id: name for project_id, name in result.all()}
 
+    async def get_by_name(self, owner_id: str, name: str) -> Project | None:
+        result = await self.session.execute(
+            select(Project).where(Project.owner_id == owner_id, Project.name == name)
+        )
+        return result.scalar_one_or_none()
+
     async def get_by_git_url(self, git_url: str, owner_id: str) -> Project | None:
         from .git_url import git_url_lookup_candidates
 
@@ -124,6 +130,14 @@ class ProjectRepository:
                 SourceArtifact.project_key == project_key,
                 SourceArtifact.owner_id == owner_id,
             )
+            .order_by(SourceArtifact.updated_at.desc())
+        )
+        return list(result.scalars().all())
+
+    async def list_source_artifacts_by_owner(self, owner_id: str) -> list[SourceArtifact]:
+        result = await self.session.execute(
+            select(SourceArtifact)
+            .where(SourceArtifact.owner_id == owner_id)
             .order_by(SourceArtifact.updated_at.desc())
         )
         return list(result.scalars().all())

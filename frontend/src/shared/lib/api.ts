@@ -246,6 +246,7 @@ export interface Project {
   last_cloned_at: string | null
   created_at: string
   updated_at: string
+  source_refs?: { ref_type: string; ref_name: string }[]
 }
 
 export interface SourceArtifact {
@@ -531,6 +532,24 @@ export const api = {
   },
   createProject: (data: { name: string; git_url: string; default_ref?: string; description?: string }) =>
     request<Project>('/projects/', { method: 'POST', body: JSON.stringify(data) }),
+  uploadProject: (data: { file: File; name: string; description?: string }) => {
+    const form = new FormData()
+    form.append('file', data.file)
+    form.append('name', data.name)
+    if (data.description) form.append('description', data.description)
+    const token = localStorage.getItem('crucible_token')
+    return fetch(`${API_BASE}/projects/upload`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: form,
+    }).then(async (res): Promise<Project> => {
+      if (res.status === 413) {
+        throw new ApiError('源码包超过 200MB 限制', 413)
+      }
+      await rejectIfNotOk(res, Boolean(token))
+      return res.json() as Promise<Project>
+    })
+  },
   getProject: (id: string) => request<Project>(`/projects/${id}`),
   updateProject: (id: string, data: Partial<{ name: string; default_ref: string; description: string }>) =>
     request<Project>(`/projects/${id}`, { method: 'PUT', body: JSON.stringify(data) }),

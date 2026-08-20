@@ -178,7 +178,7 @@ class TaskService:
         vulnerability_reasoning: str | None = None,
         credential_refs: list[str] | None = None,
     ) -> TaskDetail:
-        """上传源码包并创建验证任务。相同内容复用已入库的 Project。"""
+        """上传源码包并创建验证任务。同名项目已存在则 409。"""
         from app.contexts.project.repository import ProjectRepository
         from app.contexts.project.service import ProjectService
 

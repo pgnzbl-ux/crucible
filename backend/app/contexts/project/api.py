@@ -1,10 +1,12 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
 from app.shared.deps import CurrentUserId
+from app.shared.object_store import ObjectStoreError
+
 from .repository import ProjectRepository
 from .schemas import (
     ProjectCreateRequest,
@@ -41,6 +43,44 @@ async def create_project(
     user_id: CurrentUserId,
 ) -> ProjectResponse:
     return await svc.create_project(request, user_id)
+
+
+_UPLOAD_MAX_BYTES = 200 * 1024 * 1024
+
+
+@router.post("/upload", response_model=ProjectResponse, status_code=201)
+async def upload_project(
+    svc: Annotated[ProjectService, Depends(get_project_service)],
+    user_id: CurrentUserId,
+    file: UploadFile = File(..., description="源码包 zip / tar / tar.gz，≤200MB"),
+    name: Annotated[str, Form(min_length=1, max_length=255)] = ...,
+    description: Annotated[str | None, Form()] = None,
+) -> ProjectResponse:
+    """登记本地源码包为项目，不创建验证任务。"""
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > _UPLOAD_MAX_BYTES:
+            raise HTTPException(413, "源码包超过 200MB 限制")
+        chunks.append(chunk)
+    data = b"".join(chunks)
+    if not data:
+        raise HTTPException(400, "源码包为空")
+    try:
+        project, _result = await svc.ingest_uploaded_source(
+            owner_id=user_id,
+            filename=file.filename or "source.zip",
+            data=data,
+            name=name,
+            description=description,
+        )
+    except ObjectStoreError as e:
+        raise HTTPException(503, f"源码包入库失败: {e}") from e
+    return ProjectResponse.model_validate(project)
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)

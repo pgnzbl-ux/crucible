@@ -175,7 +175,48 @@ async def test_create_task_from_upload_ingests_and_dispatches(session):
     artifact = (await session.execute(select(SourceArtifact))).scalar_one()
     assert artifact.ref_type == "upload"
     assert artifact.git_host == "upload"
+    assert artifact.object_key.endswith("/original.tar.gz")
+    assert project.id in artifact.object_key
+    assert project.git_url == f"upload://local/{project.id}"
     assert store.get_bytes(artifact.object_key)
+
+
+@pytest.mark.asyncio
+async def test_create_task_from_upload_rejects_duplicate_name(session):
+    import io
+    import zipfile
+
+    from app.contexts.project.source_cache import MemorySourceStore
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+    from app.shared.exceptions import ConflictError
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("demo/app.py", "print(1)\n")
+    data = buf.getvalue()
+    store = MemorySourceStore()
+    await _seed_default_llm(session)
+    svc = TaskService(TaskRepository(session))
+    with (
+        patch("app.core.celery_app.celery_app.send_task"),
+        patch("app.contexts.project.service.MinioSourceStore", return_value=store),
+    ):
+        await svc.create_task_from_upload(
+            owner_id="u1",
+            filename="demo.zip",
+            data=data,
+            name="same-app",
+            vulnerability_description="demonstration vulnerability",
+        )
+        with pytest.raises(ConflictError, match="项目名称已存在"):
+            await svc.create_task_from_upload(
+                owner_id="u1",
+                filename="demo.zip",
+                data=data,
+                name="same-app",
+                vulnerability_description="demonstration vulnerability",
+            )
 
 
 @pytest.mark.asyncio

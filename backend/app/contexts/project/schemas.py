@@ -19,6 +19,12 @@ class ProjectUpdateRequest(PydBase):
     description: str | None = None
 
 
+class SourceRefSummary(PydBase):
+    """列表/详情里给任务下拉用的版本摘要：branch|tag|commit + 名称。"""
+    ref_type: str
+    ref_name: str
+
+
 class ProjectResponse(PydBase):
     model_config = ConfigDict(from_attributes=True)
     id: str
@@ -34,6 +40,7 @@ class ProjectResponse(PydBase):
     last_cloned_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+    source_refs: list[SourceRefSummary] = Field(default_factory=list)
 
 
 class ProjectListResponse(PydBase):

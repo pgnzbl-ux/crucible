@@ -18,7 +18,7 @@ async def session():
         # 触发全部 model 注册(FK 链完整)
         from app.contexts.identity.models import User  # noqa: F401
         from app.contexts.lab.models import Lab  # noqa: F401
-        from app.contexts.project.models import Project  # noqa: F401
+        from app.contexts.project.models import Project, SourceArtifact  # noqa: F401
         from app.contexts.task.models import Task, TaskRun, NodeRun, AgentEvent  # noqa: F401
         from app.contexts.report.models import Report  # noqa: F401
         from app.contexts.settings.models import LlmProvider  # noqa: F401
@@ -173,9 +173,210 @@ async def test_create_and_delete(session):
         ProjectCreateRequest(name="x", git_url="https://github.com/a/c.git"),
         owner_id="u1",
     )
-    assert created.id
-    assert created.name == "x"
+    assert created.source_type == "git"
+    assert created.git_url == "https://github.com/a/c"
 
     ok = await svc.delete_project(created.id, owner_id="u1")
     assert ok is True
     assert await svc.get_project(created.id, owner_id="u1") is None
+
+
+@pytest.mark.asyncio
+async def test_create_project_rejects_invalid_git_url(session):
+    from app.contexts.project.repository import ProjectRepository
+    from app.contexts.project.schemas import ProjectCreateRequest
+    from app.contexts.project.service import ProjectService
+
+    svc = ProjectService(ProjectRepository(session))
+    with pytest.raises(ValueError, match="Git"):
+        await svc.create_project(
+            ProjectCreateRequest(name="bad", git_url="not-a-git-url"),
+            owner_id="u1",
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_project_rejects_duplicate_name(session):
+    from app.contexts.project.repository import ProjectRepository
+    from app.contexts.project.schemas import ProjectCreateRequest
+    from app.contexts.project.service import ProjectService
+    from app.shared.exceptions import ConflictError
+
+    svc = ProjectService(ProjectRepository(session))
+    await svc.create_project(
+        ProjectCreateRequest(name="same", git_url="https://github.com/a/one.git"),
+        owner_id="u1",
+    )
+    with pytest.raises(ConflictError, match="项目名称已存在"):
+        await svc.create_project(
+            ProjectCreateRequest(name="same", git_url="https://github.com/a/two.git"),
+            owner_id="u1",
+        )
+
+
+def _zip_bytes(files: dict[str, str]) -> bytes:
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, content in files.items():
+            zf.writestr(name, content)
+    return buf.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_ingest_upload_rejects_duplicate_name(session):
+    from sqlalchemy import select
+
+    from app.contexts.project.models import Project
+    from app.contexts.project.repository import ProjectRepository
+    from app.contexts.project.service import ProjectService
+    from app.contexts.project.source_cache import MemorySourceStore
+    from app.shared.exceptions import ConflictError
+
+    svc = ProjectService(ProjectRepository(session))
+    store = MemorySourceStore()
+    data = _zip_bytes({"demo/app.py": "print(1)\n"})
+    await svc.ingest_uploaded_source(
+        owner_id="u1",
+        filename="demo.zip",
+        data=data,
+        name="demo-app",
+        store=store,
+    )
+    with pytest.raises(ConflictError, match="项目名称已存在"):
+        await svc.ingest_uploaded_source(
+            owner_id="u1",
+            filename="other.zip",
+            data=_zip_bytes({"other/app.py": "print(2)\n"}),
+            name="demo-app",
+            store=store,
+        )
+    rows = list((await session.execute(select(Project))).scalars().all())
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_ingest_upload_allows_same_content_different_names(session):
+    from sqlalchemy import select
+
+    from app.contexts.project.models import Project, SourceArtifact
+    from app.contexts.project.repository import ProjectRepository
+    from app.contexts.project.service import ProjectService
+    from app.contexts.project.source_cache import MemorySourceStore
+    from app.contexts.task.models import Task
+
+    svc = ProjectService(ProjectRepository(session))
+    store = MemorySourceStore()
+    data = _zip_bytes({"demo/app.py": "print(1)\n"})
+    p1, r1 = await svc.ingest_uploaded_source(
+        owner_id="u1", filename="demo.zip", data=data, name="alpha", store=store,
+    )
+    p2, r2 = await svc.ingest_uploaded_source(
+        owner_id="u1", filename="demo.zip", data=data, name="beta", store=store,
+    )
+    assert p1.id != p2.id
+    assert r1.object_key != r2.object_key
+    assert r1.object_key.endswith("/original.tar.gz")
+    assert p1.id in r1.object_key
+    assert p1.git_url == f"upload://local/{p1.id}"
+    projects = list((await session.execute(select(Project))).scalars().all())
+    assert len(projects) == 2
+    artifacts = list((await session.execute(select(SourceArtifact))).scalars().all())
+    assert len(artifacts) == 2
+    tasks = list((await session.execute(select(Task))).scalars().all())
+    assert tasks == []
+    assert store.get_bytes(r1.object_key)
+    assert store.get_bytes(r2.object_key)
+
+
+def _artifact_result(*, ref_type: str, ref_name: str, sha: str):
+    from app.contexts.project.source_acquire import SourceAcquireResult
+
+    return SourceAcquireResult(
+        ok=True,
+        origin="git",
+        git_url_normalized="https://github.com/siteboon/claudecodeui",
+        git_host="github.com",
+        project_key="siteboon/claudecodeui",
+        repo_dirname="claudecodeui",
+        ref_type=ref_type,
+        ref_name=ref_name,
+        commit_sha=sha,
+        object_key=f"source/siteboon/claudecodeui/{sha}.tar.gz",
+        object_url=f"http://localhost:9000/crucible-durable/source/{sha}.tar.gz",
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_projects_uses_default_ref_when_no_artifacts(session):
+    from app.contexts.project.repository import ProjectRepository
+    from app.contexts.project.schemas import ProjectCreateRequest
+    from app.contexts.project.service import ProjectService
+
+    svc = ProjectService(ProjectRepository(session))
+    await svc.create_project(
+        ProjectCreateRequest(
+            name="禅道",
+            git_url="https://github.com/easysoft/zentaopms.git",
+            default_ref="zentaopms_22.4_20260730",
+        ),
+        owner_id="u1",
+    )
+    listed = await svc.list_projects("u1")
+    assert listed.total == 1
+    refs = [(r.ref_type, r.ref_name) for r in listed.items[0].source_refs]
+    assert refs == [("tag", "zentaopms_22.4_20260730")]
+
+
+@pytest.mark.asyncio
+async def test_list_projects_source_refs_from_cached_artifacts(session):
+    from app.contexts.project.repository import ProjectRepository
+    from app.contexts.project.service import ProjectService
+
+    svc = ProjectService(ProjectRepository(session))
+    await svc.upsert_by_git_url(
+        git_url="https://github.com/siteboon/claudecodeui.git",
+        owner_id="u1",
+        name="claudecodeui",
+    )
+    await svc.record_source_artifact(
+        _artifact_result(
+            ref_type="branch",
+            ref_name="main",
+            sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
+        owner_id="u1",
+    )
+    await svc.record_source_artifact(
+        _artifact_result(
+            ref_type="tag",
+            ref_name="v1.2.0",
+            sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ),
+        owner_id="u1",
+    )
+    listed = await svc.list_projects("u1")
+    refs = [(r.ref_type, r.ref_name) for r in listed.items[0].source_refs]
+    assert ("branch", "main") in refs
+    assert ("tag", "v1.2.0") in refs
+
+
+@pytest.mark.asyncio
+async def test_list_projects_upload_has_empty_source_refs(session):
+    from app.contexts.project.repository import ProjectRepository
+    from app.contexts.project.service import ProjectService
+    from app.contexts.project.source_cache import MemorySourceStore
+
+    svc = ProjectService(ProjectRepository(session))
+    await svc.ingest_uploaded_source(
+        owner_id="u1",
+        filename="demo.zip",
+        data=_zip_bytes({"demo/app.py": "print(1)\n"}),
+        name="local-demo",
+        store=MemorySourceStore(),
+    )
+    listed = await svc.list_projects("u1")
+    assert listed.items[0].source_type == "local_upload"
+    assert listed.items[0].source_refs == []

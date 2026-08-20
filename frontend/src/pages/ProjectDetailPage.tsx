@@ -43,7 +43,7 @@ export function ProjectDetailPage() {
       ),
     },
     {
-      title: 'Commit',
+              title: 'Commit / 指纹',
       dataIndex: 'commit_sha',
       width: 120,
       render: (v: string) => <Text code>{v.slice(0, 7)}</Text>,
@@ -144,7 +144,10 @@ export function ProjectDetailPage() {
                 },
               ]}
             />
-            <Card title="已缓存源码包" variant="borderless">
+            <Card
+              title={project.source_type === 'local_upload' ? '原始源码包' : '已缓存源码包'}
+              variant="borderless"
+            >
               <Table
                 rowKey="id"
                 size="small"
@@ -156,7 +159,7 @@ export function ProjectDetailPage() {
                   emptyText: isArtifactsError
                     ? '制品列表加载失败'
                     : project.source_type === 'local_upload'
-                      ? '还没有缓存。上传源码包创建任务后会出现在这里。'
+                      ? '尚未入库原始包。请从源码管理重新上传。'
                       : '还没有缓存。跑过一次源码节点后会出现在这里。',
                 }}
               />

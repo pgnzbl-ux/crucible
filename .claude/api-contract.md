@@ -92,7 +92,7 @@
 }
 ```
 
-`clone_depth`：浅克隆层数，默认 `1`；`0` 表示全量 clone（流量更大）。`project_ref_type` 显式指定可避免 tag 名被误判为 branch 导致缓存 SHA 对不上。`source_type` 默认 `git`；`local_upload` 时 `project_address` 必须是已入库的 `upload://local/{slug}`，节点 0 从 MinIO 解开，不再 clone。
+`clone_depth`：浅克隆层数，默认 `1`；`0` 表示全量 clone（流量更大）。`project_ref_type` 显式指定可避免 tag 名被误判为 branch 导致缓存 SHA 对不上。`source_type` 默认 `git`；`local_upload` 时 `project_address` 必须是已登记的 `upload://local/{project_id}`，节点 0 从 MinIO 解开原始包，不再 clone。
 
 **响应 202**：`TaskDetail`（含首次 `runs[]`）。先提交 Task/TaskRun 再投 Celery；Broker 失败 → 任务/run 标 `failed`，接口 **503**。未配置默认 LLM Provider、默认项无 API Key、或 agent-runner 镜像不存在/Docker 不可用 → **400**，不落任务、不投递 worker。运行槽满不在创建时拒绝，任务入队后由 worker 按间隔重试。
 
@@ -104,9 +104,11 @@
 - `vulnerability_description`：至少 10 字符
 - `name` / `priority` / `vulnerability_reasoning` / `credential_refs`（JSON 数组字符串）可选
 
-非法压缩路径（zip-slip）、空包、不支持的格式 → **400**。超限 → **413**。MinIO 入库失败 → **503**。相同内容指纹（规范 tar.gz 的 sha256）复用已有 Project 与 `source_artifacts`。任务的 `project_address` 为 `upload://local/{slug}`，`source_type=local_upload`。
+非法压缩路径（zip-slip）、空包、不支持的格式 → **400**。超限 → **413**。MinIO 入库失败 → **503**。同 owner 下**项目名称已存在** → **409** `CONFLICT`（不按内容 sha256 复用）。任务的 `project_address` 为 `upload://local/{project_id}`，`source_type=local_upload`。原始包写入 MinIO `source/{owner}/upload/{project_id}/original.tar.gz`，`.vuln-env` 配方不回写该对象。
 
 **响应 202**：同 `POST /tasks` 的 `TaskDetail`。
+
+日常请先在源码管理 `POST /projects/upload` 登记，再用 `POST /tasks` + `source_type=local_upload` 开任务。本接口是快捷路径，登记规则相同。
 
 ### GET `/api/v1/tasks`
 
@@ -233,15 +235,17 @@ owner 校验：所有环境均要求 `report.owner_id` 匹配当前用户。报�
 
 ### GET `/api/v1/projects/`
 
-当前用户的项目列表：`{ items, total }`。任务创建时按 Git 地址自动登记，或通过上传源码包登记（`source_type=local_upload`）。
+当前用户的项目列表：`{ items, total }`。Git 任务创建时按地址自动登记；本地包请在源码管理上传登记（`source_type=local_upload`），也可从任务页快捷上传（同名 409）。
+
+Git 项目的 `source_refs` 为已缓存制品的 `{ ref_type, ref_name }`（`branch` / `tag` / `commit`）；尚无制品时回退为 `default_ref` 的推断结果（空则 `branch/HEAD`）。上传项目 `source_refs` 为空。任务新建下拉用 `项目名称：{ref_type}/{ref_name}  <git_url>` 展示。
 
 ### GET `/api/v1/projects/{id}`
 
-项目元数据 + 画像快照（`detected_language` / `detected_framework` / `is_web` / `last_cloned_at` / `source_type`）。权威画像按 commit SHA 或上传包 sha256 存在对应 `source_artifacts.profile_json`。`is_web=false` 时前端禁止从该项目开验证任务。非所有者或不存在 → 404。
+项目元数据 + 画像快照（`detected_language` / `detected_framework` / `is_web` / `last_cloned_at` / `source_type`）。Git 项目同样返回 `source_refs`（见列表接口）。权威画像按 commit SHA 或上传包 sha256 存在对应 `source_artifacts.profile_json`。`is_web=false` 时前端禁止从该项目开验证任务。非所有者或不存在 → 404。
 
 ### GET `/api/v1/projects/{id}/artifacts`
 
-当前用户在该仓库已缓存的 MinIO 源码包（按 owner + host + `project_key` 匹配，`.git` 后缀不区分）。
+Git 项目：该仓库已缓存的 MinIO 源码包（按 owner + host + `project_key`，`.git` 后缀不区分）。上传项目：入库时的**原始包**（一项目一份，不按内容指纹复用）。
 
 ```json
 { "items": [{ "ref_type": "branch", "ref_name": "main", "commit_sha": "...", "object_url": "...", "repo_dirname": "claudecodeui" }], "total": 1 }
@@ -249,9 +253,23 @@ owner 校验：所有环境均要求 `report.owner_id` 匹配当前用户。报�
 
 非所有者或不存在 → 404。
 
-### POST `/api/v1/projects/` / PUT `/api/v1/projects/{id}` / DELETE `/api/v1/projects/{id}`
+### POST `/api/v1/projects/`
 
-手工登记/改备注/删除。日常用任务创建自动 upsert 即可。GET/PUT/DELETE 均校验 owner；非所有者或不存在 → 404。
+手工登记 **Git** 仓库。`git_url` 必须是合法 Git 地址（非法 → 400）。同 owner **名称已存在** → 409 `CONFLICT`。`source_type=git`。
+
+### POST `/api/v1/projects/upload`
+
+登记本地源码包，**不创建任务**（multipart）：
+
+- `file`：zip / tar / tar.gz，≤200MB
+- `name`：必填，同 owner 重名 → 409 `CONFLICT`
+- `description`：可选
+
+对象键 `source/{owner}/upload/{project_id}/original.tar.gz`。`git_url` 为 `upload://local/{project_id}`。MinIO 失败 → 503。
+
+### PUT `/api/v1/projects/{id}` / DELETE `/api/v1/projects/{id}`
+
+改名称/备注/默认引用/删除。改名若与同 owner 其他项目冲突 → 409。GET/PUT/DELETE 均校验 owner；非所有者或不存在 → 404。
 
 ---
 
@@ -353,7 +371,7 @@ Provider **没有独立启用/停用字段**。Agent 运行时只读取唯一的
 | 401 | `UNAUTHENTICATED` | 缺 / 错 token |
 | 403 | `FORBIDDEN` | 权限不足（待 P1-9 RBAC） |
 | 404 | `NOT_FOUND` / `TASK_NOT_FOUND` / `REPORT_NOT_FOUND` | 资源不存在 |
-| 409 | `CONFLICT` / `STATE_INVALID` / `LAB_IN_USE` | 状态机非法转换 / email 重名 / 靶场正被 live 任务占用 |
+| 409 | `CONFLICT` / `STATE_INVALID` / `LAB_IN_USE` | 状态机非法转换 / email 重名 / 项目名称冲突 / 靶场正被 live 任务占用 |
 | 422 | `VALIDATION_FAILED` | Pydantic 字段错误 |
 | 429 | `RATE_LIMITED` | （待补） |
 | 503 | `SERVICE_UNAVAILABLE` | Docker / Redis / MinIO 不可用；Celery 投递失败 |

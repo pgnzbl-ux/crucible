@@ -5,9 +5,14 @@ import { InboxOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation } from 'wouter'
 
-import { api, type Project } from '../../../shared/lib/api'
+import { api } from '../../../shared/lib/api'
 import { tryLockTaskAction, unlockTaskAction } from '../../../shared/lib/taskActionLock'
 import { TASK_CREATE_LOCK_ID } from '../../../shared/lib/taskCache'
+import {
+  buildGitProjectOptions,
+  filterGitProjectOption,
+  type GitProjectOption,
+} from '../lib/projectSelectOptions'
 
 const REF_PLACEHOLDERS: Record<string, string> = {
   branch: 'main / master / develop（留空=默认分支）',
@@ -49,6 +54,7 @@ export function TaskCreateDrawer({ open, onClose, initialValues }: TaskCreateDra
   const [, navigate] = useLocation()
   const refType = Form.useWatch('project_ref_type', form)
   const sourceType = Form.useWatch('source_type', form) ?? 'git'
+  const sourceLocked = Boolean(initialValues?.project_address)
 
   const { data: credentialsData } = useQuery({
     queryKey: ['credentials'],
@@ -142,10 +148,7 @@ export function TaskCreateDrawer({ open, onClose, initialValues }: TaskCreateDra
   const gitProjects = (projectsData?.items ?? []).filter((p) => p.source_type !== 'local_upload')
   const uploadProjects = (projectsData?.items ?? []).filter((p) => p.source_type === 'local_upload')
 
-  const projectOptions = gitProjects.map((p: Project) => ({
-    value: p.git_url,
-    label: `${p.name}  ${p.git_url}`,
-  }))
+  const projectOptions = buildGitProjectOptions(gitProjects)
 
   const refPlaceholder =
     REF_PLACEHOLDERS[refType as string] ?? '默认分支（留空）；可下方选择引用类型'
@@ -161,7 +164,7 @@ export function TaskCreateDrawer({ open, onClose, initialValues }: TaskCreateDra
         }}
         initialValues={{ priority: 'medium', clone_depth: 1, source_type: 'git' }}
       >
-        <Form.Item name="source_type" label="源码来源">
+        <Form.Item name="source_type" label="源码来源" hidden={sourceLocked}>
           <Radio.Group
             options={[
               { value: 'git', label: 'Git 仓库' },
@@ -169,21 +172,42 @@ export function TaskCreateDrawer({ open, onClose, initialValues }: TaskCreateDra
             ]}
           />
         </Form.Item>
+        {sourceLocked ? (
+          <>
+            <Form.Item label="已绑定源码">
+              <Input value={initialValues?.project_address} disabled />
+            </Form.Item>
+            <Form.Item name="project_address" hidden>
+              <Input />
+            </Form.Item>
+            <Form.Item name="existing_upload_url" hidden>
+              <Input />
+            </Form.Item>
+          </>
+        ) : null}
 
-        {sourceType === 'git' ? (
+        {!sourceLocked && sourceType === 'git' ? (
           <>
             <Form.Item
               name="project_address"
               label="项目地址 (Git URL)"
               rules={[{ required: true, message: '请输入项目 Git 地址' }]}
-              extra="可直接粘贴，或从已登记仓库里选。同一地址会复用源码缓存。"
+              extra="可直接粘贴，或从已登记仓库里选。选项格式：项目名称：tag/commit/branch  <Git 地址>。"
+              getValueFromEvent={(value) => {
+                const hit = projectOptions.find((o) => o.value === value)
+                return hit?.git_url ?? value
+              }}
             >
               <AutoComplete
                 options={projectOptions}
                 placeholder="https://github.com/org/repo.git"
-                onSelect={(url) => {
-                  const hit = gitProjects.find((p) => p.git_url === url)
-                  if (hit?.default_ref) form.setFieldValue('project_ref', hit.default_ref)
+                filterOption={filterGitProjectOption}
+                onSelect={(_value, option) => {
+                  const hit = option as GitProjectOption
+                  form.setFieldsValue({
+                    project_ref_type: hit.ref_type,
+                    project_ref: hit.ref_name ?? '',
+                  })
                 }}
               >
                 <Input />
@@ -223,20 +247,20 @@ export function TaskCreateDrawer({ open, onClose, initialValues }: TaskCreateDra
               />
             </Form.Item>
           </>
-        ) : (
+        ) : !sourceLocked ? (
           <>
             <Form.Item
               name="archive"
               label="源码包"
               valuePropName="fileList"
               getValueFromEvent={(e) => (Array.isArray(e) ? e : e?.fileList)}
-              extra="支持 zip / tar / tar.gz，不超过 200MB。单层目录会作为项目根。"
+              extra="支持 zip / tar / tar.gz，不超过 200MB。同名项目会拒绝；建议先在源码管理登记。"
               rules={[
                 {
                   validator: async (_, fileList) => {
                     const hasFile = Array.isArray(fileList) && fileList[0]?.originFileObj
                     const existing = form.getFieldValue('existing_upload_url')
-                    if (hasFile || existing) return
+                    if (hasFile || existing || sourceLocked) return
                     throw new Error('请上传源码包，或选择已入库的上传项目')
                   },
                 },
@@ -258,7 +282,7 @@ export function TaskCreateDrawer({ open, onClose, initialValues }: TaskCreateDra
               <Form.Item
                 name="existing_upload_url"
                 label="或选择已上传项目"
-                extra="同一内容指纹会复用 MinIO 里的源码包。"
+                extra="选择已登记的上传项目。同名不能重复登记，请换名称。"
               >
                 <Select
                   allowClear
@@ -271,7 +295,7 @@ export function TaskCreateDrawer({ open, onClose, initialValues }: TaskCreateDra
               </Form.Item>
             ) : null}
           </>
-        )}
+        ) : null}
 
         <Form.Item name="priority" label="优先级">
           <Select

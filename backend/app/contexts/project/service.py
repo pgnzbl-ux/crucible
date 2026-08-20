@@ -2,7 +2,9 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from .git_url import parse_git_url
+from app.shared.exceptions import ConflictError
+
+from .git_url import classify_ref, parse_git_url
 from .models import FRAMEWORK_SNAPSHOT_MAX, LANGUAGE_SNAPSHOT_MAX, Project
 from .repository import ProjectRepository
 from .schemas import (
@@ -11,15 +13,22 @@ from .schemas import (
     ProjectResponse,
     ProjectUpdateRequest,
     SourceArtifactResponse,
+    SourceRefSummary,
 )
 from .source_acquire import CachedSource, SourceAcquireResult
-from .source_cache import SOURCE_BUCKET, MinioSourceStore, object_access_url, source_object_key
+from .source_cache import (
+    SOURCE_BUCKET,
+    MinioSourceStore,
+    object_access_url,
+    upload_source_object_key,
+)
 from .source_upload import (
     UPLOAD_HOST,
     UPLOAD_REF_NAME,
     UPLOAD_REF_TYPE,
     ingest_source_archive,
     parse_source_locator,
+    upload_locator,
 )
 
 
@@ -37,8 +46,44 @@ def _snapshot_text(value: Any, max_len: int) -> str | None:
     return text[:max_len]
 
 
-def _to_response(p: Project) -> ProjectResponse:
-    return ProjectResponse.model_validate(p)
+def _synthetic_git_refs(p: Project) -> list[SourceRefSummary]:
+    if p.source_type == "local_upload":
+        return []
+    ref_type, ref_name = classify_ref(p.default_ref)
+    return [SourceRefSummary(ref_type=ref_type, ref_name=ref_name)]
+
+
+def _git_lookup_key(p: Project) -> tuple[str, str] | None:
+    if p.source_type == "local_upload":
+        return None
+    try:
+        parsed = parse_git_url(p.git_url)
+    except ValueError:
+        return None
+    return parsed.host, parsed.project_key
+
+
+def _refs_for_project(
+    p: Project, artifacts_by_key: dict[tuple[str, str], list[Any]]
+) -> list[SourceRefSummary]:
+    key = _git_lookup_key(p)
+    rows = artifacts_by_key.get(key, []) if key else []
+    seen: set[tuple[str, str]] = set()
+    refs: list[SourceRefSummary] = []
+    for row in rows:
+        pair = (row.ref_type, row.ref_name)
+        if pair in seen:
+            continue
+        seen.add(pair)
+        refs.append(SourceRefSummary(ref_type=row.ref_type, ref_name=row.ref_name))
+    return refs or _synthetic_git_refs(p)
+
+
+def _to_response(
+    p: Project, source_refs: list[SourceRefSummary] | None = None
+) -> ProjectResponse:
+    data = ProjectResponse.model_validate(p)
+    return data.model_copy(update={"source_refs": source_refs if source_refs is not None else _synthetic_git_refs(p)})
 
 
 def _to_artifact(row: Any) -> SourceArtifactResponse:
@@ -63,15 +108,18 @@ class ProjectService:
     def __init__(self, repo: ProjectRepository):
         self.repo = repo
 
+    async def _require_unique_name(self, owner_id: str, name: str) -> None:
+        existing = await self.repo.get_by_name(owner_id, name)
+        if existing:
+            raise ConflictError(f"项目名称已存在: {name}，请换一个名称")
+
     async def create_project(self, request: ProjectCreateRequest, owner_id: str) -> ProjectResponse:
-        git_url = request.git_url
-        try:
-            git_url = parse_git_url(request.git_url).normalized
-        except ValueError:
-            pass
+        parsed = parse_git_url(request.git_url)
+        await self._require_unique_name(owner_id, request.name)
         project = Project(
             name=request.name,
-            git_url=git_url,
+            git_url=parsed.normalized,
+            source_type="git",
             default_ref=request.default_ref,
             description=request.description,
             owner_id=owner_id,
@@ -114,11 +162,22 @@ class ProjectService:
         )
         return await self.repo.create(project)
 
+    async def _responses_with_artifact_refs(self, projects: list[Project]) -> list[ProjectResponse]:
+        if not projects:
+            return []
+        artifacts = await self.repo.list_source_artifacts_by_owner(projects[0].owner_id)
+        by_key: dict[tuple[str, str], list[Any]] = {}
+        for row in artifacts:
+            if row.git_host == UPLOAD_HOST:
+                continue
+            by_key.setdefault((row.git_host, row.project_key), []).append(row)
+        return [_to_response(p, _refs_for_project(p, by_key)) for p in projects]
+
     async def get_project(self, project_id: str, owner_id: str) -> ProjectResponse | None:
         p = await self.repo.get_by_id(project_id)
         if not p or p.owner_id != owner_id:
             return None
-        return _to_response(p)
+        return (await self._responses_with_artifact_refs([p]))[0]
 
     async def names_by_ids(self, project_ids: list[str], owner_id: str) -> dict[str, str]:
         return await self.repo.names_by_ids(project_ids, owner_id)
@@ -127,7 +186,10 @@ class ProjectService:
         self, owner_id: str, limit: int = 50, offset: int = 0
     ) -> ProjectListResponse:
         items, total = await self.repo.list_by_owner(owner_id, limit, offset)
-        return ProjectListResponse(items=[_to_response(i) for i in items], total=total)
+        return ProjectListResponse(
+            items=await self._responses_with_artifact_refs(items),
+            total=total,
+        )
 
     async def update_project(
         self, project_id: str, request: ProjectUpdateRequest, owner_id: str
@@ -135,6 +197,8 @@ class ProjectService:
         p = await self.repo.get_by_id(project_id)
         if not p or p.owner_id != owner_id:
             return None
+        if request.name is not None and request.name != p.name:
+            await self._require_unique_name(owner_id, request.name)
         for field in ("name", "default_ref", "description"):
             v = getattr(request, field)
             if v is not None:
@@ -262,7 +326,7 @@ class ProjectService:
         description: str | None = None,
         store=None,
     ) -> tuple[Project, SourceAcquireResult]:
-        """校验并入库本地源码包。相同内容（sha256）复用已有 Project / artifact。"""
+        """校验并入库本地源码包。同 owner 项目名冲突则 409；不按内容指纹复用。"""
         import shutil
         import tempfile
 
@@ -271,62 +335,33 @@ class ProjectService:
             ingested = ingest_source_archive(
                 data, filename, display_name=name, workdir=tmp
             )
-            existing = await self.repo.find_source_artifact_by_sha(owner_id, ingested.sha256)
-            if (
-                existing is not None
-                and existing.git_host == UPLOAD_HOST
-                and existing.commit_sha.lower() == ingested.sha256.lower()
-            ):
-                project = await self.repo.get_by_git_url(existing.git_url, owner_id)
-                if project is None:
-                    project = await self.repo.create(
-                        Project(
-                            name=ingested.display_name,
-                            git_url=existing.git_url,
-                            source_type="local_upload",
-                            owner_id=owner_id,
-                            description=description,
-                        )
-                    )
-                return project, SourceAcquireResult(
-                    ok=True,
-                    origin="upload",
-                    git_url_original=existing.git_url,
-                    git_url_normalized=existing.git_url,
-                    project_key=existing.project_key,
-                    git_host=existing.git_host,
-                    repo_dirname=existing.repo_dirname,
-                    ref_type=existing.ref_type,
-                    ref_name=existing.ref_name,
-                    commit_sha=existing.commit_sha,
-                    object_key=existing.object_key,
-                    object_url=existing.object_url,
-                    top_level=ingested.top_level,
-                    file_count=ingested.file_count,
-                    size_bytes=existing.size_bytes or ingested.size_bytes,
-                )
+            project_name = (name or "").strip() or ingested.display_name
+            await self._require_unique_name(owner_id, project_name)
+
+            import uuid
 
             object_store = store or MinioSourceStore()
-            project_key = f"local/{ingested.slug}"
-            object_key = source_object_key(
-                owner_id, UPLOAD_HOST, project_key, ingested.sha256
-            )
-            object_store.upload(object_key, ingested.sha256, ingested.archive_path)
-            object_url = object_access_url(object_key)
+            project_id = str(uuid.uuid4())
+            locator = upload_locator(project_id)
             project = await self.repo.create(
                 Project(
-                    name=ingested.display_name,
-                    git_url=ingested.locator,
+                    id=project_id,
+                    name=project_name,
+                    git_url=locator,
                     source_type="local_upload",
                     owner_id=owner_id,
                     description=description,
                 )
             )
+            project_key = f"local/{project.id}"
+            object_key = upload_source_object_key(owner_id, project.id)
+            object_store.upload(object_key, ingested.sha256, ingested.archive_path)
+            object_url = object_access_url(object_key)
             result = SourceAcquireResult(
                 ok=True,
                 origin="upload",
-                git_url_original=ingested.locator,
-                git_url_normalized=ingested.locator,
+                git_url_original=locator,
+                git_url_normalized=locator,
                 project_key=project_key,
                 git_host=UPLOAD_HOST,
                 repo_dirname=ingested.repo_dirname,
@@ -340,6 +375,7 @@ class ProjectService:
                 size_bytes=ingested.size_bytes,
             )
             await self.record_source_artifact(result, owner_id)
+            await self.repo.session.flush()
             return project, result
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -347,7 +383,7 @@ class ProjectService:
     async def list_artifacts(
         self, project_id: str, owner_id: str
     ) -> list[SourceArtifactResponse] | None:
-        """按项目 space/project 列出已缓存的 MinIO 源码包；无权或不存在返回 None。"""
+        """列出该项目的 Git 缓存包或上传原始包；无权或不存在返回 None。"""
         p = await self.repo.get_by_id(project_id)
         if not p or p.owner_id != owner_id:
             return None

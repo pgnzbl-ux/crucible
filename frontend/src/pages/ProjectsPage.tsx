@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Button, Empty, Space, Table, Tag, Typography } from 'antd'
-import { CodeOutlined, ReloadOutlined } from '@ant-design/icons'
+import { CloudUploadOutlined, GithubOutlined, ReloadOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import dayjs from 'dayjs'
@@ -11,6 +11,7 @@ import { useErrorToast } from '../shared/hooks/useErrorToast'
 import { PageHeader } from '../shared/components/PageHeader'
 import { PageContainer } from '../shared/components/PageContainer'
 import { tableRowNavigateProps } from '../shared/lib/tableRowNavigate'
+import { RegisterSourceDrawer } from '../features/project/RegisterSourceDrawer'
 
 const { Text } = Typography
 
@@ -24,6 +25,7 @@ export function ProjectsPage() {
   const [, navigate] = useLocation()
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
+  const [registerMode, setRegisterMode] = useState<'git' | 'upload' | null>(null)
 
   const { data, error, isError, isLoading, isFetching, refetch } = useQuery({
     queryKey: ['projects', { page, pageSize }],
@@ -82,11 +84,19 @@ export function ProjectsPage() {
     <>
       <PageHeader
         title="源码管理"
-        subtitle="Git 仓库与本地上传包都会登记；后续任务优先从 MinIO 取源码"
+        subtitle="登记 Git 仓库或上传源码包；Git 按 commit 缓存，上传包按名称唯一保存原始文件"
         extra={
-          <Button icon={<ReloadOutlined />} loading={isFetching} onClick={() => refetch()}>
-            刷新
-          </Button>
+          <Space>
+            <Button icon={<GithubOutlined />} onClick={() => setRegisterMode('git')}>
+              登记 Git
+            </Button>
+            <Button icon={<CloudUploadOutlined />} onClick={() => setRegisterMode('upload')}>
+              上传源码包
+            </Button>
+            <Button icon={<ReloadOutlined />} loading={isFetching} onClick={() => refetch()}>
+              刷新
+            </Button>
+          </Space>
         }
       />
       <PageContainer>
@@ -112,16 +122,26 @@ export function ProjectsPage() {
             emptyText: (
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="还没有项目。提交任务时会按 Git 地址自动登记，也可以上传源码包。"
+                description="还没有项目。先登记 Git 仓库或上传源码包，再从项目详情开验证任务。"
               >
-                <Button type="primary" icon={<CodeOutlined />} onClick={() => navigate('/tasks?create=1')}>
-                  去新建任务
-                </Button>
+                <Space>
+                  <Button icon={<GithubOutlined />} onClick={() => setRegisterMode('git')}>
+                    登记 Git
+                  </Button>
+                  <Button type="primary" icon={<CloudUploadOutlined />} onClick={() => setRegisterMode('upload')}>
+                    上传源码包
+                  </Button>
+                </Space>
               </Empty>
             ),
           }}
         />
       </PageContainer>
+      <RegisterSourceDrawer
+        open={registerMode !== null}
+        mode={registerMode ?? 'git'}
+        onClose={() => setRegisterMode(null)}
+      />
     </>
   )
 }

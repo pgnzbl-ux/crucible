@@ -6,6 +6,7 @@ from app.contexts.project.source_cache import (
     SOURCE_BUCKET,
     pack_project_dir,
     source_object_key,
+    upload_source_object_key,
 )
 
 
@@ -26,6 +27,12 @@ def test_source_object_key_for_local_upload():
     sha = "b" * 64
     assert source_object_key("owner-1", "upload", "local/demo-aaa", sha) == (
         f"source/owner-1/upload/local/demo-aaa/{sha}.tar.gz"
+    )
+
+
+def test_upload_source_object_key_uses_project_id_not_sha():
+    assert upload_source_object_key("owner-1", "proj-uuid") == (
+        "source/owner-1/upload/proj-uuid/original.tar.gz"
     )
 
 

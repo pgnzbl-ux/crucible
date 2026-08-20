@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from app.contexts.task.api import get_task_service, router
 from app.shared.deps import get_current_user_id
 from app.shared.exception_handlers import register_exception_handlers
-from app.shared.exceptions import NotFoundError
+from app.shared.exceptions import ConflictError, NotFoundError
 
 
 def _app_with_handlers() -> FastAPI:
@@ -69,3 +69,18 @@ def test_retry_missing_task_returns_404_envelope():
     assert body["error"]["code"] == "TASK_NOT_FOUND"
     assert body["error"]["message"] == "任务不存在"
     assert body["detail"] == "任务不存在"
+
+
+def test_conflict_error_uses_error_envelope():
+    app = _app_with_handlers()
+
+    @app.post("/projects")
+    def dup():
+        raise ConflictError("项目名称已存在: demo，请换一个名称")
+
+    response = TestClient(app).post("/projects")
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error"]["code"] == "CONFLICT"
+    assert "项目名称已存在" in body["error"]["message"]
+    assert body["detail"] == body["error"]["message"]

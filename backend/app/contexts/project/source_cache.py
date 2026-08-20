@@ -23,6 +23,11 @@ def source_object_key(owner_id: str, git_host: str, project_key: str, commit_sha
     ).key
 
 
+def upload_source_object_key(owner_id: str, project_id: str) -> str:
+    """上传包原始对象：一项目一份，不按内容 SHA 复用。"""
+    return source_object_key(owner_id, "upload", project_id, "original")
+
+
 def object_access_url(object_key: str) -> str:
     base = get_settings().s3_endpoint.rstrip("/")
     return f"{base}/{SOURCE_BUCKET}/{object_key}"

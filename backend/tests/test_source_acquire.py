@@ -509,6 +509,34 @@ def test_acquire_uploaded_source_restores_from_cache(tmp_path):
     assert (workdir / "demo" / "app.py").read_text(encoding="utf-8") == "uploaded"
 
 
+def test_acquire_uploaded_source_does_not_reupload(tmp_path):
+    from app.contexts.project.source_acquire import acquire_uploaded_source
+
+    repo = _write_repo(tmp_path / "cached", "demo", "app.py", "uploaded")
+    archive = tmp_path / "src.tar.gz"
+    pack_project_dir(str(repo), str(archive), arcname="demo")
+    store = MemorySourceStore()
+    object_key = "source/u1/upload/proj-1/original.tar.gz"
+    store.upload(object_key, "a" * 64, str(archive))
+    store.upload = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("upload must not rewrite original blob"))
+    cached = CachedSource(
+        object_key=object_key,
+        object_url="s3://crucible-durable/" + object_key,
+        repo_dirname="demo",
+        commit_sha="a" * 64,
+        ref_type="upload",
+        ref_name="local",
+        git_url_normalized="upload://local/proj-1",
+        project_key="local/proj-1",
+        git_host="upload",
+    )
+    workdir = tmp_path / "wd"
+    workdir.mkdir()
+    result = acquire_uploaded_source(str(workdir), cached=cached, store=store)
+    assert result.ok is True
+    assert result.origin == "upload"
+
+
 def test_acquire_uploaded_source_fails_without_cache(tmp_path):
     from app.contexts.project.source_acquire import acquire_uploaded_source
 
