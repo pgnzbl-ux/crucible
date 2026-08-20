@@ -28,6 +28,8 @@ def test_labs_table_columns():
     assert expected.issubset(cols), f"缺字段: {expected - cols}"
     task_cols = {c["name"] for c in inspect(engine).get_columns("tasks")}
     assert "lab_id" in task_cols
+    sha_col = next(c for c in inspect(engine).get_columns("labs") if c["name"] == "commit_sha")
+    assert sha_col["type"].length == 64, "labs.commit_sha 须容纳 git SHA-256 / 上传包 sha256"
 
 
 def test_labs_unique_owner_project_sha():

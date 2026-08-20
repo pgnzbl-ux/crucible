@@ -40,9 +40,14 @@ def test_alembic_chain_from_baseline():
     )
     assert 'revision: str = "d4b7e1c08a92"' in upload
     assert 'down_revision: Union[str, None] = "f3a9c2d18e04"' in upload
+    lab_sha = (versions / "e7d2b4a10c95_lab_commit_sha_length.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'revision: str = "e7d2b4a10c95"' in lab_sha
+    assert 'down_revision: Union[str, None] = "d4b7e1c08a92"' in lab_sha
     from app.core.database import _alembic_head
 
-    assert _alembic_head() == "d4b7e1c08a92"
+    assert _alembic_head() == "e7d2b4a10c95"
 
 
 @pytest.mark.asyncio
@@ -61,6 +66,8 @@ async def test_create_all_schema_matches_models():
             assert "lab_id" in task_cols
             project_cols = {c["name"] for c in insp.get_columns("projects")}
             assert "source_type" in project_cols
+            lab_sha = next(c for c in insp.get_columns("labs") if c["name"] == "commit_sha")
+            assert lab_sha["type"].length == 64
             task_indexes = {i["name"] for i in insp.get_indexes("tasks")}
             assert "ix_tasks_lab_id" in task_indexes
             uniques = {
@@ -90,6 +97,18 @@ async def test_align_datetime_timezone_skips_sqlite():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_align_datetime_timezone)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_align_string_column_lengths_skips_sqlite():
+    from app.core.database import _align_string_column_lengths
+
+    register_models()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_align_string_column_lengths)
     await engine.dispose()
 
 

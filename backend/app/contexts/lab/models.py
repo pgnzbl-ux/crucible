@@ -13,7 +13,9 @@ class Lab(BaseModel):
 
     owner_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"))
     project_id: Mapped[str] = mapped_column(String(36), ForeignKey("projects.id"))
-    commit_sha: Mapped[str] = mapped_column(String(40))
+    commit_sha: Mapped[str] = mapped_column(
+        String(64), comment="git SHA-1 或上传包 sha256"
+    )
     status: Mapped[str] = mapped_column(String(20), default="creating")
     compose_project: Mapped[str] = mapped_column(String(255))
     workdir: Mapped[str] = mapped_column(String(1024))

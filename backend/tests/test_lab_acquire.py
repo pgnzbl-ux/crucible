@@ -25,6 +25,7 @@ def assume_compose_project_present():
         yield
 
 SHA = "a" * 40
+SHA256 = "b" * 64
 
 
 @pytest_asyncio.fixture
@@ -348,3 +349,18 @@ async def test_cas_reclaim_second_session_loses(tmp_path):
         assert lab.status == "creating"
         assert lab.creator_task_id == "t1"
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_acquire_accepts_uploaded_sha256(session):
+    from app.contexts.lab.models import Lab
+    from app.contexts.lab.service import LabService
+
+    await seed(session, task_id="t1")
+    svc = LabService(session)
+    result = await svc.acquire(
+        owner_id="u1", project_id="p1", commit_sha=SHA256, task_id="t1"
+    )
+    lab = await session.get(Lab, result.lab_id)
+    assert result.role == "create"
+    assert lab.commit_sha == SHA256

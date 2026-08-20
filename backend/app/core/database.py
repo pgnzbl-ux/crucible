@@ -100,6 +100,38 @@ def _align_datetime_timezone(connection) -> None:
         )
 
 
+def _align_string_column_lengths(connection) -> None:
+    """create_all 不改已有列长度。把短于当前模型的 varchar 加宽（只加长，不缩短）。"""
+    if connection.dialect.name != "postgresql":
+        return
+    from sqlalchemy import String
+
+    from app.shared.base import Base
+
+    inspector = inspect(connection)
+    existing_tables = set(inspector.get_table_names())
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing_tables or not str(table.name).isidentifier():
+            continue
+        existing = {c["name"]: c for c in inspector.get_columns(table.name)}
+        for column in table.columns:
+            wanted = getattr(column.type, "length", None)
+            if wanted is None or not isinstance(column.type, String):
+                continue
+            current = existing.get(column.name)
+            if current is None or not str(column.name).isidentifier():
+                continue
+            actual = getattr(current.get("type"), "length", None)
+            if actual is None or actual >= wanted:
+                continue
+            connection.execute(
+                text(
+                    f"ALTER TABLE {table.name} ALTER COLUMN {column.name} "
+                    f"TYPE VARCHAR({int(wanted)})"
+                )
+            )
+
+
 def _align_alembic_version(connection) -> None:
     """create_all 之后把 alembic_version 钉到当前唯一基线，避免旧多 head 链残留。"""
     head = _alembic_head()
@@ -137,6 +169,7 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_create_missing_indexes)
         await conn.run_sync(_align_datetime_timezone)
+        await conn.run_sync(_align_string_column_lengths)
         await conn.run_sync(_align_alembic_version)
 
 
