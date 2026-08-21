@@ -8,6 +8,8 @@ import asyncio
 from dataclasses import asdict
 from typing import Any
 
+from app.contexts.agent.contracts import SourceInput
+
 from .base import NodeContext, workspace_repo_path
 
 
@@ -19,8 +21,31 @@ class SourceNode:
     def is_ai(self) -> bool:
         return False
 
-    async def execute(self, ctx: NodeContext) -> dict[str, Any]:
-        source_type = getattr(ctx, "source_type", None) or "git"
+    def _resolve_input(self, ctx: NodeContext, node_input: SourceInput | None) -> SourceInput:
+        if node_input is not None:
+            return node_input
+        return SourceInput(
+            project_address=ctx.project_address,
+            project_ref=ctx.project_ref,
+            project_ref_type=ctx.project_ref_type,
+            clone_depth=ctx.clone_depth,
+            source_type=ctx.source_type or "git",
+            host_workdir=ctx.host_workdir,
+            source_path=ctx.source_path,
+        )
+
+    async def execute(self, ctx: NodeContext, node_input: SourceInput | None = None) -> dict[str, Any]:
+        inp = self._resolve_input(ctx, node_input)
+        # 与 Input 对齐，供 _acquire_* 走 ctx 字段
+        ctx.project_address = inp.project_address
+        ctx.project_ref = inp.project_ref
+        ctx.project_ref_type = inp.project_ref_type
+        ctx.clone_depth = inp.clone_depth
+        ctx.source_type = inp.source_type
+        ctx.host_workdir = inp.host_workdir
+        ctx.source_path = inp.source_path
+
+        source_type = inp.source_type or "git"
         if source_type == "local_upload":
             result = await self._acquire_upload(ctx)
             fail_prefix = "源码解包失败"

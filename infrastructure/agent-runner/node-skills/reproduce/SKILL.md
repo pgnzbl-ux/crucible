@@ -9,7 +9,23 @@ description: Crucible 节点 reproduce。对注入的 target_url 发 HTTP，只�
 
 **禁止写 `report_data`。** 报告由下一节点撰写。本节点只交测试事实。
 
-本轮原料只在 user message 的 JSON 里。必须原样使用 `target_url` / `initial_creds` / `transport_shape`，不要自己猜地址或账号。`target_url` 中的 `host.docker.internal` 指向宿主机上的靶场，不要改成 localhost。
+## 本轮输入（平台已裁剪）
+
+原料只在 user message 的 JSON 里。平台交接契约见 `docs/agent-node-contracts.md`：`audit` **不是审计节点全量 output**，只含下游复现所需子集。
+
+| 字段 | 用途 |
+|---|---|
+| `source_path` | 容器内源码根 |
+| `target_url` / `initial_creds` / `transport_shape` | **必须原样使用**；不要猜地址或账号。`target_url` 中的 `host.docker.internal` 指向宿主机靶场，不要改成 localhost |
+| `compose_path` / `started_containers` | 只读参考；禁止 docker / compose |
+| `vulnerability_description` | 题面上下文 |
+| `audit.gate_verdict` / `gate_reason` | 门禁结论与理由（本节点仅在 pass 后执行） |
+| `audit.core_claim` | 必须锁死的危害主张，禁止换题 |
+| `audit.payloads[]` | HTTP 模板；第一枪强制 `payloads[0]` |
+| `audit.runtime_dependent` / `unresolved_facts` | 为 true 时先补齐运行时事实再攻击 |
+| `audit.kill_chain` | 可选参考，帮助对齐利用链 |
+
+不要假设还有 `defense_layers` 或其他未列出的 audit 字段。
 
 若 JSON 里带 `previous_error`，说明你上一轮的 `submit_result` 未通过平台 schema 校验：读错误信息补齐/修正对应字段后重新提交完整 output（`previous_submit_summary` 是上轮提交摘要，工作区里还有上轮验证产物与证据可参考）。判定结论不要变，只修形状。
 

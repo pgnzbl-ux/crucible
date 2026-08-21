@@ -48,7 +48,7 @@ _ATTEMPT_KEYS = (
 )
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
-# 各 AI 节点的 output schema(校验最小必需字段,spec §1.3)
+# 各 AI 节点的 output schema(校验最小必需字段,见 docs/agent-node-contracts.md)
 NODE_OUTPUT_SCHEMAS: dict[str, dict] = {
     "profile": {
         "required": ["is_web"],

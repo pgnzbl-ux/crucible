@@ -1,7 +1,9 @@
 """节点执行单元基类。
 
-每个节点是一个 NodeExecutor,吃 NodeContext,产出 output_json dict。
+每个节点是一个 NodeExecutor：吃 NodeContext + 声明的 NodeInput，产出 output_json dict。
 代码节点(0 source)在 worker 进程内执行;AI 节点(1-5)由 ai_runner 起容器。
+
+交接契约见 docs/agent-node-contracts.md 与 app.contexts.agent.contracts。
 """
 from __future__ import annotations
 
@@ -56,7 +58,7 @@ def source_tree_present(host_workdir: str, source_output: dict | None = None) ->
 
 @dataclass
 class NodeContext:
-    """节点执行上下文 — 持有任务信息 + 前序节点 output 累积。"""
+    """节点执行上下文 — 平台能力（DB / lab / runner）；交接数据走 typed Input。"""
     task_id: str
     run_id: str
     host_workdir: str
@@ -67,6 +69,7 @@ class NodeContext:
     project_ref_type: str | None = None
     clone_depth: int | None = 1
     source_type: str = "git"
+    # 仅供 env_ready 内部桥接与失败打包；新节点代码不得再抠此 dict
     previous_outputs: dict[str, dict] = field(default_factory=dict)
     runner_env: dict[str, str] = field(default_factory=dict)
     on_event: Callable[[dict], None] | None = None
@@ -81,8 +84,8 @@ class NodeExecutor(Protocol):
     node_index: int
     node_key: str
 
-    async def execute(self, ctx: NodeContext) -> dict[str, Any]:
-        """执行节点,返回 output_json(按 spec §1.3 schema)。"""
+    async def execute(self, ctx: NodeContext, node_input: Any = None) -> dict[str, Any]:
+        """执行节点,返回 output_json（公开字段见 docs/agent-node-contracts.md）。"""
         ...
 
     @property

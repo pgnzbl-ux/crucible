@@ -1420,7 +1420,29 @@ class EnvReadyNode:
     def is_ai(self) -> bool:
         return True
 
-    async def execute(self, ctx: NodeContext) -> dict[str, Any]:
+    def _resolve_input(self, ctx: NodeContext, node_input):
+        from app.contexts.agent.contracts import EnvReadyInput, InputAssembler
+
+        if node_input is not None:
+            return node_input
+        return InputAssembler.from_previous_outputs(
+            "env_ready",
+            ctx.previous_outputs,
+            host_workdir=ctx.host_workdir,
+            source_path=ctx.source_path,
+        )
+
+    def _bridge_previous(self, ctx: NodeContext, node_input) -> None:
+        """边界投影：typed Input → previous_outputs，内部 Lab/compose 本阶段仍读此桥。"""
+        ctx.previous_outputs = {
+            "source": node_input.source.model_dump(exclude_none=True),
+            "profile": node_input.profile.model_dump(exclude_none=True),
+        }
+
+    async def execute(self, ctx: NodeContext, node_input=None) -> dict[str, Any]:
+        inp = self._resolve_input(ctx, node_input)
+        self._bridge_previous(ctx, inp)
+
         # Mock 模式:SDK 未启用时跳过真实 AI + docker compose,直接返回模拟靶场
         from app.core.config import get_settings
         if not get_settings().claude_agent_sdk_enabled:
@@ -1434,7 +1456,7 @@ class EnvReadyNode:
                 "started_containers": ["mock-app"],
             }
 
-        sha = (ctx.previous_outputs.get("source") or {}).get("commit_sha")
+        sha = inp.source.commit_sha
         if not sha:
             raise RuntimeError("env_ready 缺少 source.commit_sha，不能 acquire 靶场")
         project_id = await _resolve_project_id(ctx)

@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.contexts.agent.contracts import InputAssembler, ProfileInput, SourceHandoff
 from app.contexts.agent.profile_detector import detect_profile, profile_needs_ai
 
-from .base import NodeContext, repo_dirname_from_outputs, workspace_repo_path
+from .base import NodeContext, workspace_repo_path
 
 # 规则引擎可补的缺口字段；is_web 仅接受真正的 bool
 _HINT_FILL_KEYS = (
@@ -128,9 +129,20 @@ class ProfileNode:
     def is_ai(self) -> bool:
         return True
 
-    async def execute(self, ctx: NodeContext) -> dict[str, Any]:
-        src = ctx.previous_outputs.get("source") or {}
-        commit_sha = src.get("commit_sha")
+    def _resolve_input(self, ctx: NodeContext, node_input: ProfileInput | None) -> ProfileInput:
+        if node_input is not None:
+            return node_input
+        return InputAssembler.from_previous_outputs(
+            "profile",
+            ctx.previous_outputs,
+            host_workdir=ctx.host_workdir,
+            source_path=ctx.source_path,
+        )
+
+    async def execute(self, ctx: NodeContext, node_input: ProfileInput | None = None) -> dict[str, Any]:
+        inp = self._resolve_input(ctx, node_input)
+        src: SourceHandoff = inp.source
+        commit_sha = src.commit_sha
 
         cached = await _load_cached_profile(ctx, commit_sha)
         if cached:
@@ -139,7 +151,7 @@ class ProfileNode:
                 await _persist_profile(ctx, commit_sha, facts)
             return facts
 
-        root = src.get("project_path") or ctx.source_path
+        root = src.project_path or inp.source_path or ctx.source_path
         hints = detect_profile(root)
 
         from app.core.config import get_settings
@@ -152,9 +164,9 @@ class ProfileNode:
 
         from app.contexts.agent.ai_runner import run_ai_node
 
-        repo = src.get("repo_dirname") or repo_dirname_from_outputs(ctx.previous_outputs)
+        repo = src.repo_dirname
         input_json = {
-            "source_path": src.get("workspace_path") or workspace_repo_path(repo),
+            "source_path": src.workspace_path or workspace_repo_path(repo),
             "hints": hints,
         }
         output = await run_ai_node(

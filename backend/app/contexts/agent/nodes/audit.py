@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import NodeContext, repo_dirname_from_outputs, workspace_repo_path
+from app.contexts.agent.contracts import AuditInput, InputAssembler
+
+from .base import NodeContext, workspace_repo_path
 
 
 class AuditNode:
@@ -14,15 +16,26 @@ class AuditNode:
     def is_ai(self) -> bool:
         return True
 
-    async def execute(self, ctx: NodeContext) -> dict[str, Any]:
+    def _resolve_input(self, ctx: NodeContext, node_input: AuditInput | None) -> AuditInput:
+        if node_input is not None:
+            return node_input
+        return InputAssembler.from_previous_outputs(
+            "audit",
+            ctx.previous_outputs,
+            vulnerability_description=ctx.vulnerability_description,
+            host_workdir=ctx.host_workdir,
+            source_path=ctx.source_path,
+        )
+
+    async def execute(self, ctx: NodeContext, node_input: AuditInput | None = None) -> dict[str, Any]:
         from app.contexts.agent.ai_runner import run_ai_node_with_shape_retry
 
-        src = ctx.previous_outputs.get("source", {})
-        repo = src.get("repo_dirname") or repo_dirname_from_outputs(ctx.previous_outputs)
+        inp = self._resolve_input(ctx, node_input)
+        src = inp.source
         input_json = {
-            "source_path": src.get("workspace_path") or workspace_repo_path(repo),
-            "vulnerability_description": ctx.vulnerability_description,
-            "profile": ctx.previous_outputs.get("profile", {}),
+            "source_path": src.workspace_path or workspace_repo_path(src.repo_dirname),
+            "vulnerability_description": inp.vulnerability_description,
+            "profile": inp.profile.model_dump(exclude_none=True),
         }
         return await run_ai_node_with_shape_retry(
             node_key="audit",

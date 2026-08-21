@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.contexts.agent.contracts import InputAssembler, ReportInput
+
 from .base import NodeContext
 
 
@@ -14,28 +16,41 @@ class ReportNode:
     def is_ai(self) -> bool:
         return True
 
-    async def execute(self, ctx: NodeContext) -> dict[str, Any]:
+    def _resolve_input(self, ctx: NodeContext, node_input: ReportInput | None) -> ReportInput:
+        if node_input is not None:
+            return node_input
+        return InputAssembler.from_previous_outputs(
+            "report",
+            ctx.previous_outputs,
+            vulnerability_description=ctx.vulnerability_description,
+            project_address=ctx.project_address,
+            host_workdir=ctx.host_workdir,
+            source_path=ctx.source_path,
+        )
+
+    async def execute(self, ctx: NodeContext, node_input: ReportInput | None = None) -> dict[str, Any]:
         from app.contexts.agent.ai_runner import (
             authoritative_verdict,
             document_kind_for_verdict,
             run_ai_node_with_shape_retry,
         )
 
-        repro = dict(ctx.previous_outputs.get("reproduce") or {})
+        inp = self._resolve_input(ctx, node_input)
+        repro = inp.reproduce.model_dump(exclude_none=True)
         repro.pop("report_data", None)
-        audit = ctx.previous_outputs.get("audit") or {}
-        expected = authoritative_verdict(repro, audit)
+        audit = inp.audit.model_dump(exclude_none=True)
+        expected = inp.expected_verdict or authoritative_verdict(repro, audit)
         if expected is None:
             raise RuntimeError("report 节点缺少权威 verdict")
-        kind = document_kind_for_verdict(expected)
+        kind = inp.document_kind or document_kind_for_verdict(expected)
 
         input_json = {
-            "profile": ctx.previous_outputs.get("profile", {}),
-            "env_ready": ctx.previous_outputs.get("env_ready", {}),
+            "profile": inp.profile.model_dump(exclude_none=True),
+            "env_ready": inp.env_ready.model_dump(exclude_none=True),
             "audit": audit,
             "reproduce": repro,
-            "vulnerability_description": ctx.vulnerability_description,
-            "project_address": ctx.project_address,
+            "vulnerability_description": inp.vulnerability_description,
+            "project_address": inp.project_address,
             "expected_verdict": expected,
             "document_kind": kind,
         }
