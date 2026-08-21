@@ -58,7 +58,7 @@ async def test_teardown_task_runtime_only_removes_agent_runner():
     with patch(
         "app.contexts.agent.runtime_cleanup.agent_runner_manager"
     ) as mock_mgr, patch(
-        "app.contexts.agent.nodes.env_ready.docker_compose_down",
+        "app.contexts.agent.nodes.env_ready.compose_host.docker_compose_down",
         new_callable=AsyncMock,
     ) as mock_down:
         mock_mgr.host_workdir_path.return_value = "/tmp/crucible/audit-abc"
@@ -93,7 +93,7 @@ async def test_teardown_only_kills_runner():
     with patch(
         "app.contexts.agent.runtime_cleanup.agent_runner_manager"
     ) as mock_mgr, patch(
-        "app.contexts.agent.nodes.env_ready.docker_compose_down",
+        "app.contexts.agent.nodes.env_ready.compose_host.docker_compose_down",
         new_callable=AsyncMock,
     ) as mock_down:
         mock_mgr.host_workdir_path.return_value = "/tmp/crucible/audit-abc"

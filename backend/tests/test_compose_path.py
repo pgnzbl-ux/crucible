@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.contexts.agent.nodes.env_ready import resolve_compose_host_path
+from app.contexts.agent.nodes.env_ready.compose_host import resolve_compose_host_path
 
 
 def test_relative_path_uses_repo_dirname(tmp_path):
@@ -49,7 +49,7 @@ def test_empty_repo_dirname_uses_workdir_root(tmp_path):
 
 def test_compose_progress_throttle_emits_first_urgent_and_flush():
     """构建日志很多，只把首行、失败、以及节流窗口末行推给前端。"""
-    from app.contexts.agent.nodes.env_ready import ComposeProgressThrottle
+    from app.contexts.agent.nodes.env_ready.compose_host import ComposeProgressThrottle
 
     emitted: list[str] = []
     t = ComposeProgressThrottle(emitted.append, min_interval=10.0)
@@ -66,7 +66,7 @@ def test_compose_progress_throttle_emits_first_urgent_and_flush():
 @pytest.mark.asyncio
 async def test_compose_up_uses_lab_project_name(tmp_path):
     """up 必须带 -p crucible-lab-{lab_id}，否则巡检扫不到历史靶场。"""
-    from app.contexts.agent.nodes.env_ready import docker_compose_up
+    from app.contexts.agent.nodes.env_ready.compose_host import docker_compose_up
     from app.contexts.agent.runtime_cleanup import lab_project_name
 
     compose = tmp_path / "repo" / ".vuln-env"
@@ -76,7 +76,7 @@ async def test_compose_up_uses_lab_project_name(tmp_path):
     fake = MagicMock()
     fake.stdout = StringIO("Started\n")
     fake.wait.return_value = 0
-    with patch("app.contexts.agent.nodes.env_ready.subprocess.Popen", return_value=fake) as popen:
+    with patch("app.contexts.agent.nodes.env_ready.compose_host.subprocess.Popen", return_value=fake) as popen:
         ok, err = await docker_compose_up(
             ".vuln-env/docker-compose.yml", str(tmp_path), "repo", lab_id="Lab-1"
         )
@@ -90,7 +90,7 @@ async def test_compose_up_uses_lab_project_name(tmp_path):
 @pytest.mark.asyncio
 async def test_compose_up_rebuilds_with_global_plain_progress(tmp_path):
     """AI 改配方后必须 --build；--progress 只能挂在 compose 全局（Compose v5）。"""
-    from app.contexts.agent.nodes.env_ready import docker_compose_up
+    from app.contexts.agent.nodes.env_ready.compose_host import docker_compose_up
 
     compose = tmp_path / "repo" / ".vuln-env"
     compose.mkdir(parents=True)
@@ -100,7 +100,7 @@ async def test_compose_up_rebuilds_with_global_plain_progress(tmp_path):
     fake.stdout = StringIO("Building app\nContainer app Started\n")
     fake.wait.return_value = 0
     lines: list[str] = []
-    with patch("app.contexts.agent.nodes.env_ready.subprocess.Popen", return_value=fake) as popen:
+    with patch("app.contexts.agent.nodes.env_ready.compose_host.subprocess.Popen", return_value=fake) as popen:
         ok, err = await docker_compose_up(
             ".vuln-env/docker-compose.yml",
             str(tmp_path),
@@ -122,11 +122,11 @@ async def test_compose_up_rebuilds_with_global_plain_progress(tmp_path):
 @pytest.mark.asyncio
 async def test_compose_down_by_project_without_yaml(tmp_path):
     """workdir 已删时仍能按项目名 down。"""
-    from app.contexts.agent.nodes.env_ready import docker_compose_down
+    from app.contexts.agent.nodes.env_ready.compose_host import docker_compose_down
 
     fake = MagicMock()
     fake.returncode = 0
-    with patch("app.contexts.agent.nodes.env_ready.subprocess.run", return_value=fake) as run:
+    with patch("app.contexts.agent.nodes.env_ready.compose_host.subprocess.run", return_value=fake) as run:
         await docker_compose_down(str(tmp_path / "missing"), lab_id="abc")
     cmd = run.call_args.args[0]
     assert cmd[:4] == ["docker", "compose", "-p", "crucible-lab-abc"]

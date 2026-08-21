@@ -85,7 +85,7 @@ def _mock_lab_acquire(tmp_path):
 def _free_docker_ports():
     """默认假定宿主机没有被其他容器占用的映射口，避免测试机 docker ps 干扰。"""
     with patch(
-        "app.contexts.agent.nodes.env_ready.list_docker_occupied_host_ports",
+        "app.contexts.agent.nodes.env_ready.ports.list_docker_occupied_host_ports",
         return_value=set(),
         create=True,
     ):
@@ -96,14 +96,21 @@ def _free_docker_ports():
 async def test_env_ready_first_attempt_success(tmp_path):
     """AI 首轮产 compose,worker 起来健康检查通过 → 成功。"""
     from app.contexts.agent.nodes import env_ready as mod
+    from app.contexts.agent.nodes.env_ready import (
+        ai_recipe,
+        compose_host,
+        create_loop,
+        health,
+        ports,
+    )
 
     ctx = _exec_ctx(tmp_path, {"is_web": True, "language": "python", "port": 8000})
     _write_compose(tmp_path)
 
-    with patch.object(mod, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
-         patch.object(mod, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
-         patch.object(mod, "health_check", new_callable=AsyncMock) as mock_hc, \
-         patch.object(mod, "host_advertise_ip", return_value="192.168.1.8"):
+    with patch.object(ai_recipe, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
+         patch.object(compose_host, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
+         patch.object(health, "health_check", new_callable=AsyncMock) as mock_hc, \
+         patch("app.contexts.agent.target_url.host_advertise_ip", return_value="192.168.1.8"):
         mock_ai.return_value = _recipe(
             ".vuln-env/docker-compose.yml",
             "http://localhost:8000",
@@ -124,18 +131,25 @@ async def test_env_ready_first_attempt_success(tmp_path):
 async def test_env_ready_retry_until_success(tmp_path):
     """前 2 轮起容器失败,第 3 轮 AI 改对 → 成功。"""
     from app.contexts.agent.nodes import env_ready as mod
+    from app.contexts.agent.nodes.env_ready import (
+        ai_recipe,
+        compose_host,
+        create_loop,
+        health,
+        ports,
+    )
 
     ctx = _exec_ctx(tmp_path, {"is_web": True, "port": 8000})
     _write_compose(tmp_path, filename="1.yml")
     _write_compose(tmp_path, filename="2.yml")
     _write_compose(tmp_path, filename="3.yml")
 
-    with patch.object(mod, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
-         patch.object(mod, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
-         patch.object(mod, "collect_compose_logs", new_callable=AsyncMock) as mock_logs, \
-         patch.object(mod, "health_check", new_callable=AsyncMock) as mock_hc, \
-         patch.object(mod, "docker_compose_down", new_callable=AsyncMock), \
-         patch.object(mod, "host_advertise_ip", return_value="192.168.1.8"):
+    with patch.object(ai_recipe, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
+         patch.object(compose_host, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
+         patch.object(compose_host, "collect_compose_logs", new_callable=AsyncMock) as mock_logs, \
+         patch.object(health, "health_check", new_callable=AsyncMock) as mock_hc, \
+         patch.object(compose_host, "docker_compose_down", new_callable=AsyncMock), \
+         patch("app.contexts.agent.target_url.host_advertise_ip", return_value="192.168.1.8"):
         mock_ai.side_effect = [
             _recipe(".vuln-env/1.yml", "http://localhost:8000"),
             _recipe(".vuln-env/2.yml", "http://localhost:8000"),
@@ -160,13 +174,20 @@ async def test_env_ready_retry_until_success(tmp_path):
 async def test_env_ready_5_fails_then_node_fails(tmp_path):
     """5 轮全失败 → 节点 failed(分支出口 C)。"""
     from app.contexts.agent.nodes import env_ready as mod
+    from app.contexts.agent.nodes.env_ready import (
+        ai_recipe,
+        compose_host,
+        create_loop,
+        health,
+        ports,
+    )
 
     ctx = _exec_ctx(tmp_path, {"is_web": True, "port": 8000})
 
-    with patch.object(mod, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
-         patch.object(mod, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
-         patch.object(mod, "collect_compose_logs", new_callable=AsyncMock) as mock_logs, \
-         patch.object(mod, "docker_compose_down", new_callable=AsyncMock):
+    with patch.object(ai_recipe, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
+         patch.object(compose_host, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
+         patch.object(compose_host, "collect_compose_logs", new_callable=AsyncMock) as mock_logs, \
+         patch.object(compose_host, "docker_compose_down", new_callable=AsyncMock):
         mock_ai.return_value = _recipe(".vuln-env/x.yml", "http://localhost:8000")
         mock_up.return_value = (False, "persistent fail")
         mock_logs.return_value = ""
@@ -182,16 +203,23 @@ async def test_env_ready_5_fails_then_node_fails(tmp_path):
 async def test_env_ready_health_fail_retries_ai_with_logs(tmp_path):
     """compose 起来但探活失败 → 收日志回喂 AI，下一轮成功则返回局域网地址。"""
     from app.contexts.agent.nodes import env_ready as mod
+    from app.contexts.agent.nodes.env_ready import (
+        ai_recipe,
+        compose_host,
+        create_loop,
+        health,
+        ports,
+    )
 
     ctx = _exec_ctx(tmp_path, {"is_web": True, "port": 3001})
     _write_compose(tmp_path, mapping="3001:3001")
 
-    with patch.object(mod, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
-         patch.object(mod, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
-         patch.object(mod, "collect_compose_logs", new_callable=AsyncMock) as mock_logs, \
-         patch.object(mod, "health_check", new_callable=AsyncMock) as mock_hc, \
-         patch.object(mod, "docker_compose_down", new_callable=AsyncMock) as mock_down, \
-         patch.object(mod, "host_advertise_ip", return_value="192.168.1.8"):
+    with patch.object(ai_recipe, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
+         patch.object(compose_host, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
+         patch.object(compose_host, "collect_compose_logs", new_callable=AsyncMock) as mock_logs, \
+         patch.object(health, "health_check", new_callable=AsyncMock) as mock_hc, \
+         patch.object(compose_host, "docker_compose_down", new_callable=AsyncMock) as mock_down, \
+         patch("app.contexts.agent.target_url.host_advertise_ip", return_value="192.168.1.8"):
         mock_ai.side_effect = [
             _recipe(".vuln-env/docker-compose.yml", "http://localhost:3001"),
             _recipe(".vuln-env/docker-compose.yml", "http://127.0.0.1:3001"),
@@ -212,7 +240,7 @@ async def test_env_ready_health_fail_retries_ai_with_logs(tmp_path):
 
 
 def test_parse_compose_host_ports_short_and_long():
-    from app.contexts.agent.nodes.env_ready import parse_compose_port_mappings, web_host_ports
+    from app.contexts.agent.nodes.env_ready.ports import parse_compose_port_mappings, web_host_ports
 
     text = """
 services:
@@ -271,15 +299,29 @@ _ZENTAO_FATAL = (
 def test_http_alive_rejects_crash_homepage(body, expect_alive):
     """探活必须读首页正文：HTTP 200 但 Fatal/缺表不能当就绪。"""
     from app.contexts.agent.nodes import env_ready as mod
+    from app.contexts.agent.nodes.env_ready import (
+        ai_recipe,
+        compose_host,
+        create_loop,
+        health,
+        ports,
+    )
 
     with patch("urllib.request.urlopen", return_value=_urlopen_cm(body)):
-        assert mod._http_alive("http://127.0.0.1:8080") is expect_alive
+        assert health._http_alive("http://127.0.0.1:8080") is expect_alive
 
 
 @pytest.mark.asyncio
 async def test_health_check_settles_before_first_probe():
     """compose up 后端口未立刻 bind，先等 3s 再探。"""
     from app.contexts.agent.nodes import env_ready as mod
+    from app.contexts.agent.nodes.env_ready import (
+        ai_recipe,
+        compose_host,
+        create_loop,
+        health,
+        ports,
+    )
 
     events: list[tuple] = []
 
@@ -291,13 +333,13 @@ async def test_health_check_settles_before_first_probe():
         return True
 
     with (
-        patch.object(mod, "_http_alive", fake_alive),
-        patch.object(mod, "HEALTH_SETTLE_SECONDS", 3),
-        patch.object(mod, "HEALTH_RETRIES", 1),
-        patch.object(mod, "HEALTH_RETRY_SECONDS", 0),
+        patch.object(health, "_http_alive", fake_alive),
+        patch.object(health, "HEALTH_SETTLE_SECONDS", 3),
+        patch.object(health, "HEALTH_RETRIES", 1),
+        patch.object(health, "HEALTH_RETRY_SECONDS", 0),
         patch.object(mod.asyncio, "sleep", fake_sleep),
     ):
-        ok, port, scheme = await mod.health_check([3001])
+        ok, port, scheme = await health.health_check([3001])
     assert ok is True
     assert port == 3001
     assert scheme == "http"
@@ -308,22 +350,36 @@ async def test_health_check_settles_before_first_probe():
 @pytest.mark.asyncio
 async def test_health_check_records_crash_body_for_ai_feedback():
     from app.contexts.agent.nodes import env_ready as mod
+    from app.contexts.agent.nodes.env_ready import (
+        ai_recipe,
+        compose_host,
+        create_loop,
+        health,
+        ports,
+    )
 
     with (
         patch("urllib.request.urlopen", return_value=_urlopen_cm(_ZENTAO_FATAL)),
-        patch.object(mod, "HEALTH_SETTLE_SECONDS", 0),
-        patch.object(mod, "HEALTH_RETRIES", 1),
-        patch.object(mod, "HEALTH_RETRY_SECONDS", 0),
+        patch.object(health, "HEALTH_SETTLE_SECONDS", 0),
+        patch.object(health, "HEALTH_RETRIES", 1),
+        patch.object(health, "HEALTH_RETRY_SECONDS", 0),
     ):
-        ok, port, scheme = await mod.health_check([8080])
+        ok, port, scheme = await health.health_check([8080])
     assert ok is False
     assert port is None
-    assert "zt_config" in (getattr(mod.health_check, "last_error", "") or "")
+    assert "zt_config" in (getattr(health.health_check, "last_error", "") or "")
 
 
 @pytest.mark.asyncio
 async def test_health_check_does_not_scan_host_common_ports():
     from app.contexts.agent.nodes import env_ready as mod
+    from app.contexts.agent.nodes.env_ready import (
+        ai_recipe,
+        compose_host,
+        create_loop,
+        health,
+        ports,
+    )
 
     seen: list[str] = []
 
@@ -332,12 +388,12 @@ async def test_health_check_does_not_scan_host_common_ports():
         return False
 
     with (
-        patch.object(mod, "_http_alive", fake_alive),
-        patch.object(mod, "HEALTH_SETTLE_SECONDS", 0),
-        patch.object(mod, "HEALTH_RETRIES", 1),
-        patch.object(mod, "HEALTH_RETRY_SECONDS", 0),
+        patch.object(health, "_http_alive", fake_alive),
+        patch.object(health, "HEALTH_SETTLE_SECONDS", 0),
+        patch.object(health, "HEALTH_RETRIES", 1),
+        patch.object(health, "HEALTH_RETRY_SECONDS", 0),
     ):
-        ok, port, scheme = await mod.health_check([3001])
+        ok, port, scheme = await health.health_check([3001])
     assert ok is False
     assert port is None
     assert scheme == "http"
@@ -347,6 +403,13 @@ async def test_health_check_does_not_scan_host_common_ports():
 @pytest.mark.asyncio
 async def test_health_check_probes_https_for_tls_container_port():
     from app.contexts.agent.nodes import env_ready as mod
+    from app.contexts.agent.nodes.env_ready import (
+        ai_recipe,
+        compose_host,
+        create_loop,
+        health,
+        ports,
+    )
 
     seen: list[str] = []
 
@@ -355,12 +418,12 @@ async def test_health_check_probes_https_for_tls_container_port():
         return "https" in url
 
     with (
-        patch.object(mod, "_http_alive", fake_alive),
-        patch.object(mod, "HEALTH_SETTLE_SECONDS", 0),
-        patch.object(mod, "HEALTH_RETRIES", 1),
-        patch.object(mod, "HEALTH_RETRY_SECONDS", 0),
+        patch.object(health, "_http_alive", fake_alive),
+        patch.object(health, "HEALTH_SETTLE_SECONDS", 0),
+        patch.object(health, "HEALTH_RETRIES", 1),
+        patch.object(health, "HEALTH_RETRY_SECONDS", 0),
     ):
-        ok, port, scheme = await mod.health_check(
+        ok, port, scheme = await health.health_check(
             [8443, 3001], container_ports=[8443, 3000]
         )
     assert ok is True
@@ -370,7 +433,7 @@ async def test_health_check_probes_https_for_tls_container_port():
 
 
 def test_web_container_ports_keeps_alignment_with_host_ports():
-    from app.contexts.agent.nodes.env_ready import web_container_ports, web_host_ports
+    from app.contexts.agent.nodes.env_ready.ports import web_container_ports, web_host_ports
 
     mappings = [(3001, 3000), (8443, 8443), (3306, 3306), (3001, 3000)]
     assert web_host_ports(mappings) == [3001, 8443]
@@ -389,10 +452,10 @@ def test_publish_target_url_supports_https_scheme():
 def test_reused_lab_alive_uses_target_url_scheme():
     from types import SimpleNamespace
 
-    from app.contexts.agent.nodes.env_ready import _reused_lab_alive
+    from app.contexts.agent.nodes.env_ready.reuse import _reused_lab_alive
 
     with patch(
-        "app.contexts.agent.nodes.env_ready._http_alive", return_value=True
+        "app.contexts.agent.nodes.env_ready.health._http_alive", return_value=True
     ) as alive:
         ok = _reused_lab_alive(
             SimpleNamespace(target_url="https://10.0.0.8:8443")
@@ -402,7 +465,7 @@ def test_reused_lab_alive_uses_target_url_scheme():
 
 
 def test_health_check_budget_covers_slow_jvm():
-    from app.contexts.agent.nodes.env_ready import HEALTH_RETRIES, HEALTH_RETRY_SECONDS
+    from app.contexts.agent.nodes.env_ready.health import HEALTH_RETRIES, HEALTH_RETRY_SECONDS
 
     assert HEALTH_RETRIES * HEALTH_RETRY_SECONDS >= 90
 
@@ -440,7 +503,7 @@ def test_health_check_budget_covers_slow_jvm():
     ],
 )
 def test_summarize_compose_failure_keeps_root_cause(log, must_keep, must_drop):
-    from app.contexts.agent.nodes.env_ready import summarize_compose_failure
+    from app.contexts.agent.nodes.env_ready.compose_host import summarize_compose_failure
 
     summary = summarize_compose_failure(log)
     assert must_keep in summary
@@ -452,13 +515,20 @@ def test_summarize_compose_failure_keeps_root_cause(log, must_keep, must_drop):
 async def test_env_ready_url_uses_mapped_host_port_not_container_port(tmp_path):
     """AI 写了 3001:3000 却把 target_url 写成容器端口 3000 → 对外仍用宿主机映射口。"""
     from app.contexts.agent.nodes import env_ready as mod
+    from app.contexts.agent.nodes.env_ready import (
+        ai_recipe,
+        compose_host,
+        create_loop,
+        health,
+        ports,
+    )
 
     _write_compose(tmp_path, mapping="3001:3000")
     ctx = _exec_ctx(tmp_path, {"is_web": True, "port": 3000})
-    with patch.object(mod, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
-         patch.object(mod, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
-         patch.object(mod, "health_check", new_callable=AsyncMock) as mock_hc, \
-         patch.object(mod, "host_advertise_ip", return_value="10.0.0.8"):
+    with patch.object(ai_recipe, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
+         patch.object(compose_host, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
+         patch.object(health, "health_check", new_callable=AsyncMock) as mock_hc, \
+         patch("app.contexts.agent.target_url.host_advertise_ip", return_value="10.0.0.8"):
         mock_ai.return_value = _recipe(
             ".vuln-env/docker-compose.yml",
             "http://localhost:3000",
@@ -473,13 +543,20 @@ async def test_env_ready_url_uses_mapped_host_port_not_container_port(tmp_path):
 @pytest.mark.asyncio
 async def test_env_ready_rejects_db_only_port_mapping(tmp_path):
     from app.contexts.agent.nodes import env_ready as mod
+    from app.contexts.agent.nodes.env_ready import (
+        ai_recipe,
+        compose_host,
+        create_loop,
+        health,
+        ports,
+    )
 
     _write_compose(tmp_path, mapping="5432:5432")
     ctx = _exec_ctx(tmp_path, {"is_web": True})
-    with patch.object(mod, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
-         patch.object(mod, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
-         patch.object(mod, "collect_compose_logs", new_callable=AsyncMock, return_value=""), \
-         patch.object(mod, "docker_compose_down", new_callable=AsyncMock) as mock_down:
+    with patch.object(ai_recipe, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
+         patch.object(compose_host, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
+         patch.object(compose_host, "collect_compose_logs", new_callable=AsyncMock, return_value=""), \
+         patch.object(compose_host, "docker_compose_down", new_callable=AsyncMock) as mock_down:
         mock_ai.return_value = _recipe(
             ".vuln-env/docker-compose.yml",
             "http://localhost:5432",
@@ -493,7 +570,7 @@ async def test_env_ready_rejects_db_only_port_mapping(tmp_path):
 
 
 def test_parse_docker_ps_published_ports_and_exclude_own_lab():
-    from app.contexts.agent.nodes.env_ready import parse_docker_ps_published_ports
+    from app.contexts.agent.nodes.env_ready.ports import parse_docker_ps_published_ports
 
     text = (
         "other-app\t0.0.0.0:3001->3000/tcp, [::]:3001->3000/tcp\n"
@@ -511,13 +588,18 @@ def test_parse_docker_ps_published_ports_and_exclude_own_lab():
 @pytest.mark.asyncio
 async def test_run_ai_turn_passes_structured_retry_context():
     """下一轮只接收平台错误、失败阶段和端口状态，不依赖历史会话。"""
-    from app.contexts.agent.nodes.env_ready import run_ai_turn
+    from app.contexts.agent.contracts import EnvReadyInput
+    from app.contexts.agent.contracts.outputs import ProfileHandoff, SourceHandoff
+    from app.contexts.agent.nodes.env_ready.ai_recipe import run_ai_turn
 
     ctx = NodeContext(
         task_id="t1", run_id="r1", host_workdir="/tmp",
         source_path="/tmp", vulnerability_description="d",
         project_address="x", project_ref=None,
-        previous_outputs={"source": {"repo_dirname": "demo", "workspace_path": "/workspace/demo"}},
+        node_input=EnvReadyInput(
+            source=SourceHandoff(repo_dirname="demo", workspace_path="/workspace/demo"),
+            profile=ProfileHandoff(is_web=True),
+        ),
     )
     with patch("app.contexts.agent.ai_runner.run_ai_node", new_callable=AsyncMock) as mock_run:
         mock_run.return_value = {
@@ -539,13 +621,18 @@ async def test_run_ai_turn_passes_structured_retry_context():
 
 @pytest.mark.asyncio
 async def test_run_ai_turn_passes_credential_lookup_context():
-    from app.contexts.agent.nodes.env_ready import run_ai_turn
+    from app.contexts.agent.contracts import EnvReadyInput
+    from app.contexts.agent.contracts.outputs import ProfileHandoff, SourceHandoff
+    from app.contexts.agent.nodes.env_ready.ai_recipe import run_ai_turn
 
     ctx = NodeContext(
         task_id="t1", run_id="r1", host_workdir="/tmp",
         source_path="/tmp", vulnerability_description="d",
         project_address="x", project_ref=None,
-        previous_outputs={"source": {"repo_dirname": "demo", "workspace_path": "/workspace/demo"}},
+        node_input=EnvReadyInput(
+            source=SourceHandoff(repo_dirname="demo", workspace_path="/workspace/demo"),
+            profile=ProfileHandoff(is_web=True),
+        ),
     )
     with patch("app.contexts.agent.ai_runner.run_ai_node", new_callable=AsyncMock) as mock_run:
         mock_run.return_value = {
@@ -572,13 +659,20 @@ async def test_run_ai_turn_passes_credential_lookup_context():
 async def test_env_ready_rejects_empty_initial_creds_before_compose_up(tmp_path):
     """AI 交空 initial_creds → 不起 compose，回喂补查。"""
     from app.contexts.agent.nodes import env_ready as mod
+    from app.contexts.agent.nodes.env_ready import (
+        ai_recipe,
+        compose_host,
+        create_loop,
+        health,
+        ports,
+    )
 
     ctx = _exec_ctx(tmp_path, {"is_web": True, "port": 8000})
     _write_compose(tmp_path)
 
-    with patch.object(mod, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
-         patch.object(mod, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
-         patch.object(mod, "health_check", new_callable=AsyncMock) as mock_hc:
+    with patch.object(ai_recipe, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
+         patch.object(compose_host, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
+         patch.object(health, "health_check", new_callable=AsyncMock) as mock_hc:
         mock_ai.return_value = {
             "compose_path": ".vuln-env/docker-compose.yml",
             "target_url": "http://localhost:8000",
@@ -598,13 +692,20 @@ async def test_env_ready_rejects_empty_initial_creds_before_compose_up(tmp_path)
 async def test_env_ready_occupied_host_port_skips_compose_up(tmp_path):
     """配方里的宿主映射口已被其他容器占用 → 不起 compose，回喂 AI 改宿主侧端口。"""
     from app.contexts.agent.nodes import env_ready as mod
+    from app.contexts.agent.nodes.env_ready import (
+        ai_recipe,
+        compose_host,
+        create_loop,
+        health,
+        ports,
+    )
 
     _write_compose(tmp_path, mapping="3001:3000")
     ctx = _exec_ctx(tmp_path, {"is_web": True, "port": 3000})
-    with patch.object(mod, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
-         patch.object(mod, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
-         patch.object(mod, "health_check", new_callable=AsyncMock) as mock_hc, \
-         patch.object(mod, "list_docker_occupied_host_ports", return_value={3001}):
+    with patch.object(ai_recipe, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
+         patch.object(compose_host, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
+         patch.object(health, "health_check", new_callable=AsyncMock) as mock_hc, \
+         patch.object(ports, "list_docker_occupied_host_ports", return_value={3001}):
         mock_ai.return_value = _recipe(
             ".vuln-env/docker-compose.yml",
             "http://localhost:3001",
@@ -638,6 +739,13 @@ def test_ai_nodes_import_ok():
 async def test_bump_node_attempt_writes_node_runs_attempt():
     """第 2 轮起把 attempt 写进 NodeRun；DB 异常只告警不炸排障循环。"""
     from app.contexts.agent.nodes import env_ready as mod
+    from app.contexts.agent.nodes.env_ready import (
+        ai_recipe,
+        compose_host,
+        create_loop,
+        health,
+        ports,
+    )
 
     session = MagicMock()
     session.execute = AsyncMock()
@@ -645,7 +753,7 @@ async def test_bump_node_attempt_writes_node_runs_attempt():
     ctx = _exec_ctx("/tmp/w", {"is_web": True})
     ctx.db_session = session
 
-    await mod._bump_node_attempt(ctx, 3)
+    await create_loop._bump_node_attempt(ctx, 3)
 
     stmt = session.execute.await_args.args[0]
     compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
@@ -653,25 +761,32 @@ async def test_bump_node_attempt_writes_node_runs_attempt():
     session.commit.assert_awaited_once()
 
     session.execute.side_effect = RuntimeError("db down")
-    await mod._bump_node_attempt(ctx, 4)  # 不抛
+    await create_loop._bump_node_attempt(ctx, 4)  # 不抛
 
 
 @pytest.mark.asyncio
 async def test_env_ready_retry_bumps_attempt_per_round(tmp_path):
     """排障循环从第 2 轮起调用 _bump_node_attempt（attempt 随轮次递增）。"""
     from app.contexts.agent.nodes import env_ready as mod
+    from app.contexts.agent.nodes.env_ready import (
+        ai_recipe,
+        compose_host,
+        create_loop,
+        health,
+        ports,
+    )
 
     ctx = _exec_ctx(tmp_path, {"is_web": True, "port": 8000})
     _write_compose(tmp_path, filename="1.yml")
     _write_compose(tmp_path, filename="2.yml")
 
-    with patch.object(mod, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
-         patch.object(mod, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
-         patch.object(mod, "collect_compose_logs", new_callable=AsyncMock) as mock_logs, \
-         patch.object(mod, "health_check", new_callable=AsyncMock) as mock_hc, \
-         patch.object(mod, "docker_compose_down", new_callable=AsyncMock), \
-         patch.object(mod, "_bump_node_attempt", new_callable=AsyncMock) as bump, \
-         patch.object(mod, "host_advertise_ip", return_value="192.168.1.8"):
+    with patch.object(ai_recipe, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
+         patch.object(compose_host, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
+         patch.object(compose_host, "collect_compose_logs", new_callable=AsyncMock) as mock_logs, \
+         patch.object(health, "health_check", new_callable=AsyncMock) as mock_hc, \
+         patch.object(compose_host, "docker_compose_down", new_callable=AsyncMock), \
+         patch.object(create_loop, "_bump_node_attempt", new_callable=AsyncMock) as bump, \
+         patch("app.contexts.agent.target_url.host_advertise_ip", return_value="192.168.1.8"):
         mock_ai.side_effect = [
             _recipe(".vuln-env/1.yml", "http://localhost:8000"),
             _recipe(".vuln-env/2.yml", "http://localhost:8000"),

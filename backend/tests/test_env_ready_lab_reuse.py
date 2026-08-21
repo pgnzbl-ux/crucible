@@ -65,9 +65,9 @@ async def test_env_ready_backfills_missing_creds_without_compose_up(tmp_path):
     )
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
-         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=True), \
-         patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
-         patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up:
+         patch("app.contexts.agent.nodes.env_ready.reuse._reused_lab_alive", return_value=True), \
+         patch("app.contexts.agent.nodes.env_ready.ai_recipe.run_ai_turn", new_callable=AsyncMock) as ai, \
+         patch("app.contexts.agent.nodes.env_ready.compose_host.docker_compose_up", new_callable=AsyncMock) as up:
         gs.return_value.claude_agent_sdk_enabled = True
         LS.return_value.acquire = AsyncMock(return_value=lab)
         LS.return_value.touch = AsyncMock()
@@ -99,9 +99,9 @@ async def test_env_ready_reuses_existing_creds_without_ai_or_compose_up(tmp_path
     ctx = _ctx(tmp_path)
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
-         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=True), \
-         patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
-         patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up:
+         patch("app.contexts.agent.nodes.env_ready.reuse._reused_lab_alive", return_value=True), \
+         patch("app.contexts.agent.nodes.env_ready.ai_recipe.run_ai_turn", new_callable=AsyncMock) as ai, \
+         patch("app.contexts.agent.nodes.env_ready.compose_host.docker_compose_up", new_callable=AsyncMock) as up:
         gs.return_value.claude_agent_sdk_enabled = True
         LS.return_value.acquire = AsyncMock(return_value=lab)
         out = await EnvReadyNode().execute(ctx)
@@ -128,9 +128,9 @@ async def test_env_ready_waits_then_reuses(tmp_path):
     ctx = _ctx(tmp_path)
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
-         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=True), \
-         patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
-         patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
+         patch("app.contexts.agent.nodes.env_ready.reuse._reused_lab_alive", return_value=True), \
+         patch("app.contexts.agent.nodes.env_ready.ai_recipe.run_ai_turn", new_callable=AsyncMock) as ai, \
+         patch("app.contexts.agent.nodes.env_ready.compose_host.docker_compose_up", new_callable=AsyncMock) as up, \
          patch("app.contexts.agent.nodes.env_ready.asyncio.sleep", new_callable=AsyncMock) as sleep:
         gs.return_value.claude_agent_sdk_enabled = True
         gs.return_value.agent_runner_timeout_seconds = 1800
@@ -162,12 +162,12 @@ async def test_env_ready_create_compose_up_uses_lab_id(tmp_path):
     ctx = _ctx(tmp_path)
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
-         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=True), \
-         patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
-         patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
-         patch("app.contexts.agent.nodes.env_ready.health_check", new_callable=AsyncMock) as hc, \
-         patch("app.contexts.agent.nodes.env_ready.host_advertise_ip", return_value="10.0.0.8"), \
-         patch("app.contexts.agent.nodes.env_ready.list_docker_occupied_host_ports", return_value=set()):
+         patch("app.contexts.agent.nodes.env_ready.reuse._reused_lab_alive", return_value=True), \
+         patch("app.contexts.agent.nodes.env_ready.ai_recipe.run_ai_turn", new_callable=AsyncMock) as ai, \
+         patch("app.contexts.agent.nodes.env_ready.compose_host.docker_compose_up", new_callable=AsyncMock) as up, \
+         patch("app.contexts.agent.nodes.env_ready.health.health_check", new_callable=AsyncMock) as hc, \
+         patch("app.contexts.agent.target_url.host_advertise_ip", return_value="10.0.0.8"), \
+         patch("app.contexts.agent.nodes.env_ready.ports.list_docker_occupied_host_ports", return_value=set()):
         gs.return_value.claude_agent_sdk_enabled = True
         LS.return_value.acquire = AsyncMock(return_value=lab)
         LS.return_value.download_recipe = AsyncMock(return_value=None)
@@ -209,13 +209,13 @@ async def test_env_ready_upload_failure_cleans_started_compose(tmp_path):
     ctx = _ctx(tmp_path)
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
-         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=True), \
-         patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
-         patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
-         patch("app.contexts.agent.nodes.env_ready.docker_compose_down", new_callable=AsyncMock) as down, \
-         patch("app.contexts.agent.nodes.env_ready.health_check", new_callable=AsyncMock) as hc, \
-         patch("app.contexts.agent.nodes.env_ready.host_advertise_ip", return_value="10.0.0.8"), \
-         patch("app.contexts.agent.nodes.env_ready.list_docker_occupied_host_ports", return_value=set()):
+         patch("app.contexts.agent.nodes.env_ready.reuse._reused_lab_alive", return_value=True), \
+         patch("app.contexts.agent.nodes.env_ready.ai_recipe.run_ai_turn", new_callable=AsyncMock) as ai, \
+         patch("app.contexts.agent.nodes.env_ready.compose_host.docker_compose_up", new_callable=AsyncMock) as up, \
+         patch("app.contexts.agent.nodes.env_ready.compose_host.docker_compose_down", new_callable=AsyncMock) as down, \
+         patch("app.contexts.agent.nodes.env_ready.health.health_check", new_callable=AsyncMock) as hc, \
+         patch("app.contexts.agent.target_url.host_advertise_ip", return_value="10.0.0.8"), \
+         patch("app.contexts.agent.nodes.env_ready.ports.list_docker_occupied_host_ports", return_value=set()):
         gs.return_value.claude_agent_sdk_enabled = True
         LS.return_value.acquire = AsyncMock(return_value=lab)
         LS.return_value.download_recipe = AsyncMock(return_value=None)
@@ -256,12 +256,12 @@ async def test_env_ready_create_strips_workspace_compose_path(tmp_path):
     ctx = _ctx(tmp_path)
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
-         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=True), \
-         patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
-         patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
-         patch("app.contexts.agent.nodes.env_ready.health_check", new_callable=AsyncMock) as hc, \
-         patch("app.contexts.agent.nodes.env_ready.host_advertise_ip", return_value="10.0.0.8"), \
-         patch("app.contexts.agent.nodes.env_ready.list_docker_occupied_host_ports", return_value=set()):
+         patch("app.contexts.agent.nodes.env_ready.reuse._reused_lab_alive", return_value=True), \
+         patch("app.contexts.agent.nodes.env_ready.ai_recipe.run_ai_turn", new_callable=AsyncMock) as ai, \
+         patch("app.contexts.agent.nodes.env_ready.compose_host.docker_compose_up", new_callable=AsyncMock) as up, \
+         patch("app.contexts.agent.nodes.env_ready.health.health_check", new_callable=AsyncMock) as hc, \
+         patch("app.contexts.agent.target_url.host_advertise_ip", return_value="10.0.0.8"), \
+         patch("app.contexts.agent.nodes.env_ready.ports.list_docker_occupied_host_ports", return_value=set()):
         gs.return_value.claude_agent_sdk_enabled = True
         LS.return_value.acquire = AsyncMock(return_value=lab)
         LS.return_value.download_recipe = AsyncMock(return_value=None)
@@ -295,10 +295,10 @@ async def test_env_ready_start_stopped_lab_without_ai(tmp_path):
     ctx = _ctx(tmp_path)
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
-         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=True), \
+         patch("app.contexts.agent.nodes.env_ready.reuse._reused_lab_alive", return_value=True), \
          patch("app.contexts.lab.docker_ops.compose_start", new_callable=AsyncMock) as start, \
-         patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
-         patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up:
+         patch("app.contexts.agent.nodes.env_ready.ai_recipe.run_ai_turn", new_callable=AsyncMock) as ai, \
+         patch("app.contexts.agent.nodes.env_ready.compose_host.docker_compose_up", new_callable=AsyncMock) as up:
         gs.return_value.claude_agent_sdk_enabled = True
         LS.return_value.acquire = AsyncMock(return_value=lab)
         LS.return_value.mark_ready = AsyncMock()
@@ -334,11 +334,11 @@ async def test_env_ready_start_gone_runtime_falls_back_to_create(tmp_path):
          patch("app.contexts.lab.service.LabService") as LS, \
          patch("app.contexts.lab.docker_ops.compose_start", new_callable=AsyncMock) as start, \
          patch("app.contexts.lab.docker_ops.list_containers", new_callable=AsyncMock, return_value=[]) as listed, \
-         patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
-         patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
-         patch("app.contexts.agent.nodes.env_ready.health_check", new_callable=AsyncMock) as hc, \
-         patch("app.contexts.agent.nodes.env_ready.host_advertise_ip", return_value="10.0.0.8"), \
-         patch("app.contexts.agent.nodes.env_ready.list_docker_occupied_host_ports", return_value=set()):
+         patch("app.contexts.agent.nodes.env_ready.ai_recipe.run_ai_turn", new_callable=AsyncMock) as ai, \
+         patch("app.contexts.agent.nodes.env_ready.compose_host.docker_compose_up", new_callable=AsyncMock) as up, \
+         patch("app.contexts.agent.nodes.env_ready.health.health_check", new_callable=AsyncMock) as hc, \
+         patch("app.contexts.agent.target_url.host_advertise_ip", return_value="10.0.0.8"), \
+         patch("app.contexts.agent.nodes.env_ready.ports.list_docker_occupied_host_ports", return_value=set()):
         gs.return_value.claude_agent_sdk_enabled = True
         LS.return_value.acquire = AsyncMock(return_value=lab)
         LS.return_value.download_recipe = AsyncMock(return_value=None)
@@ -424,12 +424,12 @@ async def test_create_recipe_hit_backfills_creds_without_rebuilding(tmp_path):
     }
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
-         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=True), \
-         patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
-         patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
-         patch("app.contexts.agent.nodes.env_ready.health_check", new_callable=AsyncMock) as hc, \
-         patch("app.contexts.agent.nodes.env_ready.host_advertise_ip", return_value="10.0.0.8"), \
-         patch("app.contexts.agent.nodes.env_ready.list_docker_occupied_host_ports", return_value=set()):
+         patch("app.contexts.agent.nodes.env_ready.reuse._reused_lab_alive", return_value=True), \
+         patch("app.contexts.agent.nodes.env_ready.ai_recipe.run_ai_turn", new_callable=AsyncMock) as ai, \
+         patch("app.contexts.agent.nodes.env_ready.compose_host.docker_compose_up", new_callable=AsyncMock) as up, \
+         patch("app.contexts.agent.nodes.env_ready.health.health_check", new_callable=AsyncMock) as hc, \
+         patch("app.contexts.agent.target_url.host_advertise_ip", return_value="10.0.0.8"), \
+         patch("app.contexts.agent.nodes.env_ready.ports.list_docker_occupied_host_ports", return_value=set()):
         gs.return_value.claude_agent_sdk_enabled = True
         LS.return_value.acquire = AsyncMock(return_value=lab)
         LS.return_value.download_recipe = AsyncMock(return_value=hit)
@@ -480,17 +480,17 @@ async def test_create_recipe_uses_live_container_names_not_ai_guess(tmp_path):
     }
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
-         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=True), \
-         patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
-         patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
-         patch("app.contexts.agent.nodes.env_ready.health_check", new_callable=AsyncMock) as hc, \
+         patch("app.contexts.agent.nodes.env_ready.reuse._reused_lab_alive", return_value=True), \
+         patch("app.contexts.agent.nodes.env_ready.ai_recipe.run_ai_turn", new_callable=AsyncMock) as ai, \
+         patch("app.contexts.agent.nodes.env_ready.compose_host.docker_compose_up", new_callable=AsyncMock) as up, \
+         patch("app.contexts.agent.nodes.env_ready.health.health_check", new_callable=AsyncMock) as hc, \
          patch(
              "app.contexts.lab.docker_ops.list_containers",
              new_callable=AsyncMock,
              return_value=[{"name": "crucible-lab-lab1-web-1", "status": "Up"}],
          ), \
-         patch("app.contexts.agent.nodes.env_ready.host_advertise_ip", return_value="10.0.0.8"), \
-         patch("app.contexts.agent.nodes.env_ready.list_docker_occupied_host_ports", return_value=set()):
+         patch("app.contexts.agent.target_url.host_advertise_ip", return_value="10.0.0.8"), \
+         patch("app.contexts.agent.nodes.env_ready.ports.list_docker_occupied_host_ports", return_value=set()):
         gs.return_value.claude_agent_sdk_enabled = True
         LS.return_value.acquire = AsyncMock(return_value=lab)
         LS.return_value.download_recipe = AsyncMock(return_value=hit)
@@ -533,14 +533,14 @@ async def test_create_recipe_hit_up_fail_goes_ai_once(tmp_path):
     }
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
-         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=True), \
-         patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
-         patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
-         patch("app.contexts.agent.nodes.env_ready.docker_compose_down", new_callable=AsyncMock), \
-         patch("app.contexts.agent.nodes.env_ready.health_check", new_callable=AsyncMock) as hc, \
-         patch("app.contexts.agent.nodes.env_ready.host_advertise_ip", return_value="10.0.0.8"), \
-         patch("app.contexts.agent.nodes.env_ready.list_docker_occupied_host_ports", return_value=set()), \
-         patch("app.contexts.agent.nodes.env_ready.collect_compose_logs", new_callable=AsyncMock, return_value="boom"):
+         patch("app.contexts.agent.nodes.env_ready.reuse._reused_lab_alive", return_value=True), \
+         patch("app.contexts.agent.nodes.env_ready.ai_recipe.run_ai_turn", new_callable=AsyncMock) as ai, \
+         patch("app.contexts.agent.nodes.env_ready.compose_host.docker_compose_up", new_callable=AsyncMock) as up, \
+         patch("app.contexts.agent.nodes.env_ready.compose_host.docker_compose_down", new_callable=AsyncMock), \
+         patch("app.contexts.agent.nodes.env_ready.health.health_check", new_callable=AsyncMock) as hc, \
+         patch("app.contexts.agent.target_url.host_advertise_ip", return_value="10.0.0.8"), \
+         patch("app.contexts.agent.nodes.env_ready.ports.list_docker_occupied_host_ports", return_value=set()), \
+         patch("app.contexts.agent.nodes.env_ready.compose_host.collect_compose_logs", new_callable=AsyncMock, return_value="boom"):
         gs.return_value.claude_agent_sdk_enabled = True
         LS.return_value.acquire = AsyncMock(return_value=lab)
         LS.return_value.download_recipe = AsyncMock(return_value=hit)
@@ -581,10 +581,10 @@ async def test_create_recipe_hit_docker_unavailable_marks_failed_with_daemon_err
     daemon_err = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
-         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=True), \
-         patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
-         patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
-         patch("app.contexts.agent.nodes.env_ready.list_docker_occupied_host_ports", return_value=set()):
+         patch("app.contexts.agent.nodes.env_ready.reuse._reused_lab_alive", return_value=True), \
+         patch("app.contexts.agent.nodes.env_ready.ai_recipe.run_ai_turn", new_callable=AsyncMock) as ai, \
+         patch("app.contexts.agent.nodes.env_ready.compose_host.docker_compose_up", new_callable=AsyncMock) as up, \
+         patch("app.contexts.agent.nodes.env_ready.ports.list_docker_occupied_host_ports", return_value=set()):
         gs.return_value.claude_agent_sdk_enabled = True
         LS.return_value.acquire = AsyncMock(return_value=lab)
         LS.return_value.download_recipe = AsyncMock(return_value=hit)
@@ -618,12 +618,12 @@ async def test_reuse_dead_lab_degrades_to_rebuild_without_ai(tmp_path):
     )
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
-         patch("app.contexts.agent.nodes.env_ready._reused_lab_alive", return_value=False), \
-         patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
-         patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
-         patch("app.contexts.agent.nodes.env_ready.health_check", new_callable=AsyncMock) as hc, \
-         patch("app.contexts.agent.nodes.env_ready.host_advertise_ip", return_value="10.0.0.8"), \
-         patch("app.contexts.agent.nodes.env_ready.list_docker_occupied_host_ports", return_value=set()):
+         patch("app.contexts.agent.nodes.env_ready.reuse._reused_lab_alive", return_value=False), \
+         patch("app.contexts.agent.nodes.env_ready.ai_recipe.run_ai_turn", new_callable=AsyncMock) as ai, \
+         patch("app.contexts.agent.nodes.env_ready.compose_host.docker_compose_up", new_callable=AsyncMock) as up, \
+         patch("app.contexts.agent.nodes.env_ready.health.health_check", new_callable=AsyncMock) as hc, \
+         patch("app.contexts.agent.target_url.host_advertise_ip", return_value="10.0.0.8"), \
+         patch("app.contexts.agent.nodes.env_ready.ports.list_docker_occupied_host_ports", return_value=set()):
         gs.return_value.claude_agent_sdk_enabled = True
         LS.return_value.acquire = AsyncMock(return_value=lab)
         LS.return_value.download_recipe = AsyncMock(return_value=None)
@@ -665,12 +665,12 @@ async def test_cached_recipe_cred_lookup_failure_tears_down_compose(tmp_path):
     ctx = _ctx(tmp_path)
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
-         patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
-         patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
-         patch("app.contexts.agent.nodes.env_ready.docker_compose_down", new_callable=AsyncMock) as down, \
-         patch("app.contexts.agent.nodes.env_ready.health_check", new_callable=AsyncMock) as hc, \
-         patch("app.contexts.agent.nodes.env_ready.host_advertise_ip", return_value="10.0.0.8"), \
-         patch("app.contexts.agent.nodes.env_ready.list_docker_occupied_host_ports", return_value=set()):
+         patch("app.contexts.agent.nodes.env_ready.ai_recipe.run_ai_turn", new_callable=AsyncMock) as ai, \
+         patch("app.contexts.agent.nodes.env_ready.compose_host.docker_compose_up", new_callable=AsyncMock) as up, \
+         patch("app.contexts.agent.nodes.env_ready.compose_host.docker_compose_down", new_callable=AsyncMock) as down, \
+         patch("app.contexts.agent.nodes.env_ready.health.health_check", new_callable=AsyncMock) as hc, \
+         patch("app.contexts.agent.target_url.host_advertise_ip", return_value="10.0.0.8"), \
+         patch("app.contexts.agent.nodes.env_ready.ports.list_docker_occupied_host_ports", return_value=set()):
         gs.return_value.claude_agent_sdk_enabled = True
         LS.return_value.acquire = AsyncMock(return_value=lab)
         LS.return_value.download_recipe = AsyncMock(return_value=hit)
@@ -704,11 +704,11 @@ async def test_upload_recipe_failure_emits_warning_event(tmp_path):
     ctx.on_event = events.append
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
-         patch("app.contexts.agent.nodes.env_ready.run_ai_turn", new_callable=AsyncMock) as ai, \
-         patch("app.contexts.agent.nodes.env_ready.docker_compose_up", new_callable=AsyncMock) as up, \
-         patch("app.contexts.agent.nodes.env_ready.health_check", new_callable=AsyncMock) as hc, \
-         patch("app.contexts.agent.nodes.env_ready.host_advertise_ip", return_value="10.0.0.8"), \
-         patch("app.contexts.agent.nodes.env_ready.list_docker_occupied_host_ports", return_value=set()):
+         patch("app.contexts.agent.nodes.env_ready.ai_recipe.run_ai_turn", new_callable=AsyncMock) as ai, \
+         patch("app.contexts.agent.nodes.env_ready.compose_host.docker_compose_up", new_callable=AsyncMock) as up, \
+         patch("app.contexts.agent.nodes.env_ready.health.health_check", new_callable=AsyncMock) as hc, \
+         patch("app.contexts.agent.target_url.host_advertise_ip", return_value="10.0.0.8"), \
+         patch("app.contexts.agent.nodes.env_ready.ports.list_docker_occupied_host_ports", return_value=set()):
         gs.return_value.claude_agent_sdk_enabled = True
         LS.return_value.acquire = AsyncMock(return_value=lab)
         LS.return_value.download_recipe = AsyncMock(return_value=None)

@@ -3,10 +3,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.contexts.agent.nodes.env_ready import (
-    is_docker_unavailable,
-    rewrite_compose_host_ports,
-)
+from app.contexts.agent.nodes.env_ready.compose_host import is_docker_unavailable
+from app.contexts.agent.nodes.env_ready.ports import rewrite_compose_host_ports
 
 
 def test_rewrite_skips_when_free():
@@ -27,8 +25,12 @@ def test_rewrite_returns_none_when_no_ports():
 
 
 def test_docker_unavailable_detects_daemon():
-    assert is_docker_unavailable("Cannot connect to the Docker daemon at unix:///var/run/docker.sock")
-    assert is_docker_unavailable("docker compose 异常: Cannot connect to the Docker daemon")
+    assert is_docker_unavailable(
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+    )
+    assert is_docker_unavailable(
+        "docker compose 异常: Cannot connect to the Docker daemon"
+    )
     assert not is_docker_unavailable("failed to build: npm ci exited 1")
 
 

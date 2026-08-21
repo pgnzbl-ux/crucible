@@ -69,8 +69,9 @@ class NodeContext:
     project_ref_type: str | None = None
     clone_depth: int | None = 1
     source_type: str = "git"
-    # 仅供 env_ready 内部桥接与失败打包；新节点代码不得再抠此 dict
+    # 编排失败打包等仍可能带；节点业务路径应读 typed Input（ctx.node_input）
     previous_outputs: dict[str, dict] = field(default_factory=dict)
+    node_input: Any = None  # 当前节点 typed Input（env_ready 等在 execute 入口赋值）
     runner_env: dict[str, str] = field(default_factory=dict)
     on_event: Callable[[dict], None] | None = None
     db_session: Any = None
