@@ -16,12 +16,9 @@ from app.shared.base import Base
 async def session_factory():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
-        from app.contexts.identity.models import User  # noqa: F401
-        from app.contexts.project.models import Project  # noqa: F401
-        from app.contexts.lab.models import Lab  # noqa: F401
-        from app.contexts.task.models import Task, TaskRun, NodeRun, AgentEvent  # noqa: F401
-        from app.contexts.report.models import Report  # noqa: F401
-        from app.contexts.settings.models import LlmProvider  # noqa: F401
+        from app.shared.models import register_models
+
+        register_models()
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     yield factory
@@ -45,9 +42,19 @@ async def _seed_task_run(session, is_web=True, status="running"):
     return task, run
 
 
+def _legacy_order(orch):
+    """旧六节点顺序的执行器引用(source/profile/env_ready/audit/reproduce/report)。
+
+    DEFAULT_PIPELINE 扩为 12 节点后(discovery-spec §4.2.4)，测试统一按键取执行器，
+    位置索引不再稳定。
+    """
+    keys = ("source", "profile", "env_ready", "audit", "reproduce", "report")
+    return [orch._NODE_EXECUTORS[k] for k in keys]
+
+
 @pytest.mark.asyncio
-async def test_non_web_exits_after_profile(session_factory):
-    """节点 1 判 is_web=False → 节点 2-5 skipped,task completed 无 verdict。"""
+async def test_non_web_keeps_whitebox_audit_and_report(session_factory):
+    """非 Web 定向验证跳过动态节点，但继续白盒审计并生成报告。"""
     from app.contexts.agent import orchestrator as orch
     from app.contexts.task.models import NodeRun
     from sqlalchemy import select
@@ -56,7 +63,7 @@ async def test_non_web_exits_after_profile(session_factory):
         task, run = await _seed_task_run(session)
 
         # mock:节点 0/1 真跑,节点 1 返回 is_web=False
-        real_nodes = orch.NODE_ORDER
+        real_nodes = _legacy_order(orch)
 
         async def fake_source(ctx, node_input=None):
             return {"source_path": ctx.source_path}
@@ -64,11 +71,21 @@ async def test_non_web_exits_after_profile(session_factory):
         async def fake_profile(ctx, node_input=None):
             return {"is_web": False, "language": "python"}
 
-        with patch.object(real_nodes[0], "execute", fake_source), \
-             patch.object(real_nodes[1], "execute", fake_profile):
-            # 节点 2-5 即使被调也不应执行(分支跳过);mock 它们以便检测
-            for n in real_nodes[2:]:
-                patch.object(n, "execute", AsyncMock(side_effect=AssertionError("不该执行"))).__enter__()
+        async def fake_audit(ctx, node_input=None):
+            return {"gate_verdict": "pass", "core_claim": "代码路径可达"}
+
+        async def fake_report(ctx, node_input=None):
+            return {
+                "final_verdict": "code_reachable",
+                "report_data": {"document_kind": "verification_record"},
+            }
+
+        with (
+            patch.object(real_nodes[0], "execute", fake_source),
+            patch.object(real_nodes[1], "execute", fake_profile),
+            patch.object(real_nodes[3], "execute", fake_audit),
+            patch.object(real_nodes[5], "execute", fake_report),
+        ):
 
             result = await orch.run_orchestration(
                 task_id=task.id, run_id=run.id, session=session,
@@ -77,17 +94,21 @@ async def test_non_web_exits_after_profile(session_factory):
 
         assert result["status"] == "completed"
         assert result["non_web"] is True
-        assert result["verdict"] is None
+        assert result["verdict"] == "code_reachable"
 
-        # 节点 2-5 应 skipped
         nodes = (await session.execute(
             select(NodeRun).where(NodeRun.run_id == run.id).order_by(NodeRun.node_index)
         )).scalars().all()
-        statuses = [n.status for n in nodes]
-        assert statuses[0] == "completed"  # source
-        assert statuses[1] == "completed"  # profile
-        for s in statuses[2:]:
-            assert s == "skipped"
+        by_key = {n.node_key: n.status for n in nodes}
+        assert by_key["source"] == "completed"
+        assert by_key["profile"] == "completed"
+        assert by_key["audit"] == "completed"
+        assert by_key["report"] == "completed"
+        for key in (
+            "scan_gitleaks", "scan_osv", "scan_semgrep", "env_ready",
+            "cluster", "triage", "dispatch", "reproduce",
+        ):
+            assert by_key[key] == "skipped"
 
 
 @pytest.mark.asyncio
@@ -101,7 +122,7 @@ async def test_orchestrator_persists_handoff_input_json(session_factory):
 
     async with session_factory() as session:
         task, run = await _seed_task_run(session)
-        real_nodes = orch.NODE_ORDER
+        real_nodes = _legacy_order(orch)
 
         async def fake_source(ctx, node_input=None):
             return {"source_path": ctx.source_path, "repo_dirname": "demo", "commit_sha": "abc"}
@@ -173,7 +194,7 @@ async def test_ai_event_callback_is_stamped_with_node_run(session_factory):
 
     async with session_factory() as session:
         task, run = await _seed_task_run(session)
-        real_nodes = orch.NODE_ORDER
+        real_nodes = _legacy_order(orch)
 
         async def fake_source(ctx, node_input=None):
             if ctx.on_event:
@@ -204,14 +225,14 @@ async def test_ai_event_callback_is_stamped_with_node_run(session_factory):
 
 @pytest.mark.asyncio
 async def test_missing_is_web_does_not_enter_env_ready(session_factory):
-    """画像未给出显式 is_web=True 时 fail-closed，不得当 web 继续搭靶场。"""
+    """画像缺少 is_web 时 fail-closed 跳过靶场，但白盒审计和报告仍继续。"""
     from app.contexts.agent import orchestrator as orch
     from app.contexts.task.models import NodeRun
     from sqlalchemy import select
 
     async with session_factory() as session:
         task, run = await _seed_task_run(session)
-        real_nodes = orch.NODE_ORDER
+        real_nodes = _legacy_order(orch)
 
         async def fake_source(ctx, node_input=None):
             return {"source_path": ctx.source_path}
@@ -219,10 +240,21 @@ async def test_missing_is_web_does_not_enter_env_ready(session_factory):
         async def fake_profile(ctx, node_input=None):
             return {"language": "python"}
 
-        with patch.object(real_nodes[0], "execute", fake_source), \
-             patch.object(real_nodes[1], "execute", fake_profile):
-            for n in real_nodes[2:]:
-                patch.object(n, "execute", AsyncMock(side_effect=AssertionError("不该执行"))).__enter__()
+        async def fake_audit(ctx, node_input=None):
+            return {"gate_verdict": "pass", "core_claim": "代码路径可达"}
+
+        async def fake_report(ctx, node_input=None):
+            return {
+                "final_verdict": "code_reachable",
+                "report_data": {"document_kind": "verification_record"},
+            }
+
+        with (
+            patch.object(real_nodes[0], "execute", fake_source),
+            patch.object(real_nodes[1], "execute", fake_profile),
+            patch.object(real_nodes[3], "execute", fake_audit),
+            patch.object(real_nodes[5], "execute", fake_report),
+        ):
 
             result = await orch.run_orchestration(
                 task_id=task.id, run_id=run.id, session=session,
@@ -234,8 +266,11 @@ async def test_missing_is_web_does_not_enter_env_ready(session_factory):
         nodes = (await session.execute(
             select(NodeRun).where(NodeRun.run_id == run.id).order_by(NodeRun.node_index)
         )).scalars().all()
-        for n in nodes[2:]:
-            assert n.status == "skipped"
+        by_key = {n.node_key: n.status for n in nodes}
+        assert by_key["env_ready"] == "skipped"
+        assert by_key["reproduce"] == "skipped"
+        assert by_key["audit"] == "completed"
+        assert by_key["report"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -285,7 +320,7 @@ async def test_reproduce_node_run_input_uses_audit_subset(session_factory):
         async def fake_report(ctx, node_input=None):
             return {"report_data": {"x": 1}, "final_verdict": "confirmed"}
 
-        real_nodes = orch.NODE_ORDER
+        real_nodes = _legacy_order(orch)
         with (
             patch.object(real_nodes[0], "execute", fake_source),
             patch.object(real_nodes[1], "execute", fake_profile),
@@ -337,7 +372,7 @@ async def test_gate_fail_skips_reproduce_and_sets_false_positive(session_factory
         async def fake_report(ctx, node_input=None):
             return {"report_data": {"x": 1}, "final_verdict": "false_positive"}
 
-        real_nodes = orch.NODE_ORDER
+        real_nodes = _legacy_order(orch)
         patches = [
             patch.object(real_nodes[0], "execute", fake_source),
             patch.object(real_nodes[1], "execute", fake_profile),
@@ -360,13 +395,13 @@ async def test_gate_fail_skips_reproduce_and_sets_false_positive(session_factory
         nodes = (await session.execute(
             select(NodeRun).where(NodeRun.run_id == run.id).order_by(NodeRun.node_index)
         )).scalars().all()
-        statuses = [n.status for n in nodes]
-        assert statuses[0] == "completed"  # source
-        assert statuses[1] == "completed"  # profile
-        assert statuses[2] == "completed"  # env_ready
-        assert statuses[3] == "completed"  # audit
-        assert statuses[4] == "skipped"  # reproduce(gate fail 跳过)
-        assert statuses[5] == "completed"  # report
+        by_key = {n.node_key: n.status for n in nodes}
+        assert by_key["source"] == "completed"
+        assert by_key["profile"] == "completed"
+        assert by_key["env_ready"] == "completed"
+        assert by_key["audit"] == "completed"
+        assert by_key["reproduce"] == "skipped"  # gate fail 跳过
+        assert by_key["report"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -391,7 +426,7 @@ async def test_report_fail_after_gate_fail_keeps_false_positive(session_factory)
         async def fake_audit(ctx, node_input=None):
             return {"gate_verdict": "fail", "gate_reason": "链路不通"}
 
-        real_nodes = orch.NODE_ORDER
+        real_nodes = _legacy_order(orch)
         patches = [
             patch.object(real_nodes[0], "execute", fake_source),
             patch.object(real_nodes[1], "execute", fake_profile),
@@ -442,7 +477,7 @@ async def test_report_fail_after_uncertain_keeps_needs_review(session_factory):
         async def fake_audit(ctx, node_input=None):
             return {"gate_verdict": "uncertain", "gate_reason": "描述对不上"}
 
-        real_nodes = orch.NODE_ORDER
+        real_nodes = _legacy_order(orch)
         patches = [
             patch.object(real_nodes[0], "execute", fake_source),
             patch.object(real_nodes[1], "execute", fake_profile),
@@ -495,7 +530,7 @@ async def test_breakpoint_resume_skips_completed_nodes(session_factory):
             call_count["profile"] += 1
             return {}
 
-        real_nodes = orch.NODE_ORDER
+        real_nodes = _legacy_order(orch)
         # 后续节点 mock(避免真起容器)
         async def fake_env(ctx, node_input=None):
             return {"target_url": "http://x:8080", "compose_path": "y.yml"}
@@ -571,7 +606,7 @@ async def test_resume_reruns_source_when_workdir_has_no_repo(session_factory, tm
         async def fake_report(ctx, node_input=None):
             return {"report_data": {"x": 1}, "final_verdict": "confirmed"}
 
-        real_nodes = orch.NODE_ORDER
+        real_nodes = _legacy_order(orch)
         with patch.object(real_nodes[0], "execute", counting_source), \
              patch.object(real_nodes[2], "execute", fake_env), \
              patch.object(real_nodes[3], "execute", fake_audit), \
@@ -604,11 +639,11 @@ async def test_resume_reuses_audit_gate_fail_skips_reproduce(session_factory):
             status="completed", output_json='{"is_web": true, "language": "python"}',
         ))
         session.add(NodeRun(
-            run_id=run.id, task_id=task.id, node_index=2, node_key="env_ready",
+            run_id=run.id, task_id=task.id, node_index=5, node_key="env_ready",
             status="completed", output_json='{"target_url": "http://localhost:5000", "compose_path": "x.yml"}',
         ))
         session.add(NodeRun(
-            run_id=run.id, task_id=task.id, node_index=3, node_key="audit",
+            run_id=run.id, task_id=task.id, node_index=9, node_key="audit",
             status="completed", output_json='{"gate_verdict": "fail", "gate_reason": "链路不通"}',
         ))
         await session.flush()
@@ -616,7 +651,7 @@ async def test_resume_reuses_audit_gate_fail_skips_reproduce(session_factory):
         async def fake_report(ctx, node_input=None):
             return {"report_data": {"x": 1}, "final_verdict": "false_positive"}
 
-        real_nodes = orch.NODE_ORDER
+        real_nodes = _legacy_order(orch)
         with patch.object(real_nodes[4], "execute", AsyncMock(side_effect=AssertionError("续跑不得执行 reproduce"))), \
              patch.object(real_nodes[5], "execute", fake_report):
             result = await orch.run_orchestration(
@@ -657,7 +692,7 @@ async def test_orchestration_stops_after_cancel(session_factory):
             profile_calls["n"] += 1
             return {"is_web": True}
 
-        real_nodes = orch.NODE_ORDER
+        real_nodes = _legacy_order(orch)
         with patch.object(real_nodes[0], "execute", fake_source), \
              patch.object(real_nodes[1], "execute", fake_profile):
             result = await orch.run_orchestration(
@@ -700,7 +735,7 @@ async def test_orchestration_flush_error_marks_node_failed(session_factory):
             )
             await ctx.db_session.flush()
 
-        real_nodes = orch.NODE_ORDER
+        real_nodes = _legacy_order(orch)
         with patch.object(real_nodes[0], "execute", fake_source), patch.object(
             real_nodes[1], "execute", fake_profile
         ):
@@ -738,7 +773,7 @@ async def test_orchestration_killed_node_does_not_overwrite_cancelled(session_fa
             await ctx.db_session.commit()
             raise RuntimeError("container killed")
 
-        real_nodes = orch.NODE_ORDER
+        real_nodes = _legacy_order(orch)
         with patch.object(real_nodes[0], "execute", fake_source):
             result = await orch.run_orchestration(
                 task_id=task.id, run_id=run.id, session=session,
@@ -781,7 +816,7 @@ async def test_gate_uncertain_skips_reproduce_but_runs_report(session_factory):
                 "authored_by": "reporter",
             }
 
-        real_nodes = orch.NODE_ORDER
+        real_nodes = _legacy_order(orch)
         patches = [
             patch.object(real_nodes[0], "execute", fake_source),
             patch.object(real_nodes[1], "execute", fake_profile),
@@ -834,12 +869,12 @@ async def test_resume_reuses_audit_uncertain_skips_reproduce_but_runs_report(ses
             status="completed", output_json='{"is_web": true}',
         ))
         session.add(NodeRun(
-            run_id=run.id, task_id=task.id, node_index=2, node_key="env_ready",
+            run_id=run.id, task_id=task.id, node_index=5, node_key="env_ready",
             status="completed",
             output_json='{"target_url": "http://localhost:5000", "compose_path": "x.yml"}',
         ))
         session.add(NodeRun(
-            run_id=run.id, task_id=task.id, node_index=3, node_key="audit",
+            run_id=run.id, task_id=task.id, node_index=9, node_key="audit",
             status="completed",
             output_json='{"gate_verdict": "uncertain", "gate_reason": "对不上"}',
         ))
@@ -852,7 +887,7 @@ async def test_resume_reuses_audit_uncertain_skips_reproduce_but_runs_report(ses
                 "authored_by": "reporter",
             }
 
-        real_nodes = orch.NODE_ORDER
+        real_nodes = _legacy_order(orch)
         with patch.object(real_nodes[4], "execute", AsyncMock(side_effect=AssertionError("续跑不得 reproduce"))), \
              patch.object(real_nodes[5], "execute", fake_report):
             result = await orch.run_orchestration(

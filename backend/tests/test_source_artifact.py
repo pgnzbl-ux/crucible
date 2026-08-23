@@ -253,3 +253,90 @@ async def test_same_sha_keeps_profile_on_reclone(session_factory):
         await svc.record_source_artifact(_artifact_result(commit_sha=sha), owner_id="u1")
         await session.commit()
         assert await svc.find_cached_profile(owner_id="u1", commit_sha=sha) == profile
+
+
+@pytest.mark.asyncio
+async def test_delete_artifact_removes_exclusive_object(session_factory):
+    """独享 object_key：删行且删 MinIO。"""
+    from app.contexts.project.repository import ProjectRepository
+    from app.contexts.project.service import ProjectService
+    from app.contexts.project.source_cache import MemorySourceStore
+
+    key = "source/github.com/acme/app/aaa.tar.gz"
+    store = MemorySourceStore()
+    store._data[key] = ("aaa", b"tar-bytes")
+
+    async with session_factory() as session:
+        svc = ProjectService(ProjectRepository(session))
+        p = await svc.upsert_by_git_url(
+            git_url="https://github.com/acme/app.git", owner_id="u1", name="app"
+        )
+        await svc.record_source_artifact(_artifact_result(), owner_id="u1")
+        items = await svc.list_artifacts(p.id, "u1")
+        assert items is not None and len(items) == 1
+
+        assert await svc.delete_artifact(p.id, items[0].id, "u2", store=store) is False
+        assert store.get_bytes(key) == b"tar-bytes"
+
+        assert await svc.delete_artifact(p.id, items[0].id, "u1", store=store) is True
+        assert await svc.list_artifacts(p.id, "u1") == []
+        assert store.get_bytes(key) is None
+        assert await svc.find_cached_source(
+            "https://github.com/acme/app.git", "main", owner_id="u1"
+        ) is None
+
+
+@pytest.mark.asyncio
+async def test_delete_artifact_keeps_shared_object_key(session_factory):
+    """同一 object_key 被 branch/tag 两行共用时，只删本行、对象保留。"""
+    from app.contexts.project.repository import ProjectRepository
+    from app.contexts.project.service import ProjectService
+    from app.contexts.project.source_cache import MemorySourceStore
+
+    key = "source/github.com/acme/app/aaa.tar.gz"
+    store = MemorySourceStore()
+    store._data[key] = ("aaa", b"tar-bytes")
+
+    async with session_factory() as session:
+        svc = ProjectService(ProjectRepository(session))
+        p = await svc.upsert_by_git_url(
+            git_url="https://github.com/acme/app.git", owner_id="u1", name="app"
+        )
+        await svc.record_source_artifact(_artifact_result(ref_type="branch", ref_name="main"), owner_id="u1")
+        await svc.record_source_artifact(
+            _artifact_result(ref_type="tag", ref_name="v1.0.0"), owner_id="u1"
+        )
+        items = await svc.list_artifacts(p.id, "u1")
+        assert items is not None and len(items) == 2
+        branch = next(i for i in items if i.ref_type == "branch")
+
+        assert await svc.delete_artifact(p.id, branch.id, "u1", store=store) is True
+        left = await svc.list_artifacts(p.id, "u1")
+        assert left is not None
+        assert [(i.ref_type, i.ref_name) for i in left] == [("tag", "v1.0.0")]
+        assert store.get_bytes(key) == b"tar-bytes"
+
+
+@pytest.mark.asyncio
+async def test_delete_project_purges_exclusive_artifacts(session_factory):
+    """删项目时清该仓库制品；独享对象从 MinIO 去掉。"""
+    from app.contexts.project.repository import ProjectRepository
+    from app.contexts.project.service import ProjectService
+    from app.contexts.project.source_cache import MemorySourceStore
+
+    key = "source/github.com/acme/app/aaa.tar.gz"
+    store = MemorySourceStore()
+    store._data[key] = ("aaa", b"tar-bytes")
+
+    async with session_factory() as session:
+        svc = ProjectService(ProjectRepository(session))
+        p = await svc.upsert_by_git_url(
+            git_url="https://github.com/acme/app.git", owner_id="u1", name="app"
+        )
+        await svc.record_source_artifact(_artifact_result(), owner_id="u1")
+        assert await svc.delete_project(p.id, "u1", store=store) is True
+        assert await svc.get_project(p.id, "u1") is None
+        assert await svc.find_cached_source(
+            "https://github.com/acme/app.git", "main", owner_id="u1"
+        ) is None
+        assert store.get_bytes(key) is None

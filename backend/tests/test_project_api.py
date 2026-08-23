@@ -453,3 +453,28 @@ async def test_update_project_returns_artifact_source_refs(session):
     assert updated is not None
     refs = [(r.ref_type, r.ref_name) for r in updated.source_refs]
     assert ("branch", "main") in refs
+
+
+@pytest.mark.asyncio
+async def test_delete_upload_artifact_removes_original_package(session):
+    from app.contexts.project.repository import ProjectRepository
+    from app.contexts.project.service import ProjectService
+    from app.contexts.project.source_cache import MemorySourceStore
+
+    svc = ProjectService(ProjectRepository(session))
+    store = MemorySourceStore()
+    project, result = await svc.ingest_uploaded_source(
+        owner_id="u1",
+        filename="demo.zip",
+        data=_zip_bytes({"demo/app.py": "print(1)\n"}),
+        name="local-demo",
+        store=store,
+    )
+    assert store.get_bytes(result.object_key)
+    items = await svc.list_artifacts(project.id, "u1")
+    assert items is not None and len(items) == 1
+
+    assert await svc.delete_artifact(project.id, items[0].id, "u1", store=store) is True
+    assert await svc.list_artifacts(project.id, "u1") == []
+    assert store.get_bytes(result.object_key) is None
+    assert await svc.get_project(project.id, "u1") is not None

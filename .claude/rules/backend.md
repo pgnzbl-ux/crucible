@@ -14,17 +14,21 @@ paths: ["backend/app/contexts/**/*.py", "backend/app/shared/**/*.py", "backend/a
 - **禁止跨 Context 建 ORM relationship**（mapper 报错），只保留 `ForeignKey` + 整数/UUID ID，需要时手动查
 - 新表必须在其所属 Context 的 `models.py` 中定义；Celery worker 启动时 import 该 models 以注册 metadata（否则 FK 解析失败）。Alembic 基线 `c18a0e9b4d21`（`metadata.create_all`）与 `init_db()` 同源；索引/约束增量走后续 revision（如 `b7e4c2a19f08`）
 
-## 2. 七个 Context 的职责边界
+## 2. 九个 Context 的职责边界
 
 | Context | 核心模型 | 关键职责 |
 |---|---|---|
 | `identity` | users | 注册、登录、JWT、bcrypt（**锁 bcrypt==4.0.1**） |
-| `task` | tasks / task_runs / node_runs / agent_events | 任务 CRUD、状态机(含 retry/delete/archived)、6 节点断点续跑、事件查询 |
+| `task` | tasks / task_runs / node_runs / agent_events | 任务 CRUD、状态机(含 retry/delete/archived)、12 节点断点续跑、事件查询 |
 | `agent` | （无自有表，消费 settings 与 task） | Agent 执行器抽象、Celery 工作流、沙箱编排 |
 | `project` | projects / source_artifacts | 项目元数据 + 按 SHA 的画像缓存；源码 tar.gz 按 owner+host 隔离缓存在 MinIO `crucible-durable`（agent 只调 `acquire_source()` / ProjectService） |
 | `lab` | labs | 靶场生命周期：复用 / TTL / stop / start / rebuild / destroy，按 compose project 名操作容器 |
 | `report` | reports / evidences | 报告生成 + 状态机 + MinIO 归档 |
+| `finding` | raw_findings / alert_groups / adjudications / review_actions | 告警复核台：归一化告警、指纹分组、AI 二审、人工复核、revive、人工 dispatch |
+| `discovery` | scan_runs | 扫描运行登记：一引擎一节点一 ScanRun，SARIF 归档 |
 | `settings` | llm_providers / credentials | LLM Provider + 凭据后台 CRUD（**明文存取 + 响应掩码 + 激活唯一性**） |
+
+`finding` 与 `task` 只走逻辑指针（`Task.source_alert_group_id`，**无 FK 无 relationship**）；判决回流经领域事件 + 惰性对账，禁止 task/report 直写 `alert_groups`。
 
 新增 Context 时单独评审，避免膨胀为"通用业务包"。
 
@@ -50,7 +54,7 @@ paths: ["backend/app/contexts/**/*.py", "backend/app/shared/**/*.py", "backend/a
 
 ## 5. Agent 执行（`orchestrator` + `ai_runner`）
 
-6 节点由 `orchestrator.py` 驱动；AI 节点经 `ai_runner.py` 拉起 agent-runner 容器。LLM 凭据由 `sdk_adapter.build_runner_env()` 注入 `ANTHROPIC_*`（容器销毁即消失）。
+12 节点由 `orchestrator.py` 驱动；AI 节点经 `ai_runner.py` 拉起 agent-runner 容器。LLM 凭据由 `sdk_adapter.build_runner_env()` 注入 `ANTHROPIC_*`（容器销毁即消失）。
 
 事件流：容器内 `runner/run_one.py` 把 SDK Message 翻译为统一事件（`phase.updated` / `agent.thinking` / `agent.message` / `tool.call.*` / `agent.completed` / `agent.failed`），stdout JSONL 推给 worker。`agent.failed` 带 `title`/`hint`；编排失败文案见 `contexts/agent/errors.py`。
 

@@ -5,6 +5,9 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+BACKEND_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+
+
 def read_app_version() -> str:
     """产品版本唯一入口：backend/pyproject.toml [project].version。"""
     import tomllib
@@ -30,6 +33,9 @@ class Settings(BaseSettings):
     app_name: str = "Crucible API"
     environment: str = "development"
     debug: bool = False
+    # SQLAlchemy SQL echo 独立开关（默认关）：echo 会把含明文密钥的
+    # INSERT 打进日志，不能跟随 debug 联动
+    database_echo: bool = False
 
     database_url: str
     redis_url: str
@@ -51,21 +57,55 @@ class Settings(BaseSettings):
     agent_runner_network: str = "crucible-sandbox-net"
     agent_runner_workdir_base: str = "/tmp/crucible/audit"
     agent_runner_concurrency_limit: int = Field(4, ge=1, le=8)
-    agent_runner_timeout_seconds: int = 1800
-    # run 级巡检硬顶：live run 超过才被孤儿巡检强拆（与单容器 1800s 解耦，
-    # 避免多轮排障的长任务被按 run 总年龄误杀，见 troubleshooting/2026-08-18 诊断根因 B）
-    agent_run_hard_timeout_seconds: int = 7200
+
+    # ── 扫描引擎(discovery-spec §6.1)：宿主 subprocess，不占 agent-runner 槽 ──
+    # 空 = 当前 Python 前缀的 bin（.venv/bin）。生产可指 /opt/crucible/bin
+    scanner_bin_dir: str = ""
+    scanner_auto_install: bool = True  # worker 缺二进制时按锁定版本下载；测试关
+    scanner_semgrep_enabled: bool = True
+    scanner_gitleaks_enabled: bool = True
+    scanner_osv_enabled: bool = True  # 需出网访问 api.osv.dev；离线部署置 false
+    scanner_semgrep_timeout_seconds: int = 1200
+    scanner_gitleaks_timeout_seconds: int = 600
+    scanner_osv_timeout_seconds: int = 300
+    scanner_output_max_bytes: int = 64 * 1024 * 1024  # 子进程输出上限(防超大仓库)
+    # 空 = worker git clone 到当前前缀 share/crucible-semgrep-rules。可指你 clone 的 semgrep-rules 仓库根
+    scanner_semgrep_rules_dir: str = ""
+
+    # ── 轻量 LLM 网关 / triage(discovery-spec §7 / §2.4) ──
+    llm_gateway_enabled: bool = True  # False = mock 固定判决(链路联调)
+    triage_hide_sast_conclusion: bool = True  # 结论信号默认不注入(§2.2 反锚定)
+    triage_high_confidence: float = 0.8  # dispatch HIGH 阈值
+    triage_medium_confidence: float = 0.5
+    # 仅用于首次创建 PlatformSetting / 旧调用方兜底；运行时以设置页 DB 值为准。
+    lead_verify_per_task: int = 2
+
+    # ── triage 分级收敛管线：逐层过滤，只有少数不确定项走到全价 agent 二审 ──
+    triage_cascade_enabled: bool = True  # 总开关；False = 逐组全价 agent（旧路径）
+    triage_carryover_enabled: bool = True  # T0 同项目同指纹历史判决携带
+    triage_carryover_min_confidence: float = 0.7
+    triage_rule_enabled: bool = True  # T1 规则历史 FP 率前置判决
+    triage_rule_fp_rate_min: float = 0.95
+    triage_rule_min_samples: int = 20
+    triage_fast_model_enabled: bool = True  # T2 快模型首审（llm_gateway screening 角色）
+    triage_fast_confidence: float = 0.75  # 达到即定案，否则升级 agent
+    triage_family_enabled: bool = True  # T3 同根因族代表审议 + 判决传播
+    triage_propagate_min_confidence: float = 0.6  # 代表判决低于此值时成员转人工
+    triage_propagate_confidence_factor: float = 0.85  # 传播判决置信度折扣(无验证数据时的默认)
+    triage_concurrency: int = 4  # agent 审议并发（受 runner 并发上限约束）
+    # ── 验证结果回流：lead 终态(resolution)是真值，反哺级联先验 ──
+    # 一条已验证判决的证据权重（相对 agent 亲审的 1.0）
+    triage_feedback_resolved_weight: float = 3.0
+    # 验证样本少于此数时不覆盖默认传播折扣（避免小样本过拟合）
+    triage_feedback_min_verified: int = 10
+    # ── 流式派单：triage 判完达门槛的组立即入终认队列并后台排空，
+    # 不再等整个 triage 跑完（首批确认漏洞的到达时间大幅提前）──
+    triage_stream_dispatch_enabled: bool = True
 
     @property
-    def celery_task_time_limit(self) -> int:
-        """Celery 对整个 6 节点任务的硬限。
-
-        必须从 run 硬顶推导而非复用单容器超时（2026-08-19 修复：曾直接绑
-        agent_runner_timeout_seconds=1800s，全链正常路径必超 30 分钟，任务
-        被 Celery SIGKILL 且报错面目模糊）。与孤儿巡检同用 agent_run_hard_timeout_seconds
-        这一单一真相，并加 5 分钟余量覆盖 clone/落库等平台开销。
-        """
-        return self.agent_run_hard_timeout_seconds + 300
+    def celery_task_time_limit(self) -> None:
+        """Agent 任务不按总运行时长强制终止；取消操作仍会主动拆容器。"""
+        return None
 
     cors_origins: str = "http://localhost:5173,http://localhost:4173,http://localhost:3000"
 
@@ -77,7 +117,8 @@ class Settings(BaseSettings):
     sentry_dsn: str = ""
     sentry_traces_sample_rate: float = 0.1
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # 固定读取 backend/.env，避免从仓库根或服务管理器启动时相对 cwd 失效。
+    model_config = SettingsConfigDict(env_file=BACKEND_ENV_FILE, extra="ignore")
 
     @model_validator(mode="after")
     def _enforce_production_security(self) -> "Settings":

@@ -40,7 +40,8 @@ async def run_ai_turn(
         "existing_target_url": existing_target_url,
         "existing_compose_path": existing_compose_path,
     }
-    return await run_ai_node(
+    meta: dict = {}
+    output = await run_ai_node(
         node_key="env_ready",
         input_json=input_json,
         host_workdir=ctx.host_workdir,
@@ -48,7 +49,12 @@ async def run_ai_turn(
         on_event=ctx.on_event,
         task_id=ctx.task_id,
         validate=False,  # 排障环自带逐项校验 + 回喂重试；平台先斩后奏会废掉回喂分支
+        meta_out=meta,
     )
+    from app.contexts.agent.usage_ledger import record_node_usage
+
+    await record_node_usage(ctx, "env_ready", meta)
+    return output
 
 
 async def _lookup_initial_creds(

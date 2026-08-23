@@ -4,7 +4,7 @@ React 控制台。产品说明与全仓启动见仓库根目录 [README.md](../R
 
 ## 职责
 
-登录后的工作台：任务、源码、靶场、报告、设置。开发服务器把 `/api` 代理到后端 `http://localhost:8010`。
+登录后的 AI 代码审计工作台：项目资产、代码审计、漏洞线索、审计报告、验证环境与设置。开发服务器把 `/api` 代理到后端 `http://localhost:8010`。
 
 ## 启动
 
@@ -23,11 +23,12 @@ npm run dev
 | 路径 | 内容 |
 | --- | --- |
 | `/` | 工作台 |
-| `/tasks`、`/tasks/:id` | 任务列表与详情（节点进度、Agent 过程） |
-| `/projects`、`/projects/:id` | 源码项目 |
-| `/labs` | 靶场 |
-| `/reports`、`/reports/:id` | 验证报告 |
-| `/settings` | LLM Provider、凭据、同时运行任务数 |
+| `/projects`、`/projects/:id` | 项目资产与审计入口 |
+| `/tasks`、`/tasks/:id` | 代码审计与定向验证运行详情 |
+| `/findings`、`/findings/:id` | 漏洞线索工作台与人工确认 |
+| `/reports`、`/reports/:id` | 代码审计报告与定向验证记录 |
+| `/labs` | 可选的动态验证环境 |
+| `/settings` | 个人凭据；管理员可配置 LLM Provider 与运行并发数 |
 | `/login` | 登录 |
 
 ## 目录

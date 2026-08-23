@@ -30,7 +30,16 @@ paths: ["backend/app/**/*.py", "backend/tests/**/*.py"]
 
 Runner 的 reproduce 节点通过 `host.docker.internal` 访问宿主映射的 Lab 端口，因此本阶段保留 host-gateway。通用 Agent 工具访问宿主端口属于已接受的剩余风险；彻底隔离需先改为 Runner 动态加入当前 Lab Compose 网络或引入出站代理，禁止只删别名造成生产复现链路失效。
 
-## 2.1 LLM Base URL 与 Compose 准入
+## 2.1 Agent 工具权限（双层：工具白名单 + Bash 黑名单 hook）
+
+运行在容器内 `runner/run_one.py`，`permission_mode="bypassPermissions"` + `allowed_tools` + `PreToolUse` hook：
+
+1. **工具类型白名单**（`allowed_tools`，按节点裁剪）—— 白名单外的工具一律不可用
+2. **Bash 命令黑名单**（`PreToolUse` hook，`matcher: "Bash"`）—— 拦截 `rm`/`mv`/`cp`/`chmod`/`chown`/`dd`/`mkfs`/`|bash`/`>/etc/`/`/proc/`/`/sys/` 等破坏性命令，其余放开（插件工作流需要 `docker compose`/`git`/`curl`/`python`）
+
+**为什么用 hook 而非 `can_use_tool`**：SDK 的 `permission_mode="bypassPermissions"` 会 shadow `can_use_tool`（`CanUseToolShadowedWarning`，自动批准发生在回调之前）；而 `PreToolUse` hook 在**所有** permission_mode 下都执行，`permissionDecision: "deny"` 由 `_bundled/claude` CLI 原生消费，在 bypassPermissions 之前拦截。hooks 字段直接接受 async Python 回调（`HookCallback`），非 shell command。deny 时同步输出 `tool.call.denied` 审计事件。
+
+## 2.2 LLM Base URL 与 Compose 准入
 
 - Provider Base URL 必须是 HTTPS 域名，不允许 IP 字面量、userinfo 或 fragment
 - create/update/test 和注入 Runner 前均解析 DNS；结果须为公网地址，或 TUN fake-ip 网段 `198.18.0.0/15`（Clash/Surge 等，不路由到真实内网）

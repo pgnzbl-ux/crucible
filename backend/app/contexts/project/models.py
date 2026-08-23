@@ -1,4 +1,4 @@
-"""项目源码管理 — 一次注册、多任务复用。
+"""项目资产管理 — 一次注册、多次代码审计复用。
 
 Project 记录项目元数据 + 画像缓存。
 SourceArtifact 记录每次落到 MinIO 的源码包（访问地址、规范化 Git URL、space/project、ref）。

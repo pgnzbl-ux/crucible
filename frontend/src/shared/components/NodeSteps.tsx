@@ -1,21 +1,23 @@
-import { useMemo } from 'react'
-import { Button, Steps, Typography } from 'antd'
+import { useMemo, useState } from 'react'
+import { Button, Typography } from 'antd'
 import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   LoadingOutlined,
   MinusCircleOutlined,
   ClockCircleOutlined,
-  StopOutlined,
+  ExpandOutlined,
+  CompressOutlined,
   RedoOutlined,
+  StopOutlined,
+  WarningOutlined,
 } from '@ant-design/icons'
 import { useQuery } from '@tanstack/react-query'
 import { api, type NodeRun } from '../lib/api'
 import type { SSEEvent, SSEStatus } from '../hooks/useTaskEvents'
-import { NODE_LABELS, NODE_STATUS_META } from '../lib/meta'
+import { NODE_LABELS, PIPELINE_NODE_ORDER, VERIFY_MODE_SKIPPED_KEYS } from '../lib/meta'
 import {
   applyNodeOverlay,
-  compactNodeCaption,
   displayNodeStatus,
   isNodeListLoading,
   isNodeSelectable,
@@ -23,37 +25,44 @@ import {
   summarizeNodeOutput,
   nodeStepsPollMs,
 } from '../lib/nodeOutput'
+import {
+  DAG_STATUS_TEXT,
+  dagVisualStatus,
+  DISCOVERY_REPLACED_NODE_KEYS,
+  pipelineOverviewStages,
+  type DagVisualStatus,
+  type PipelineMode,
+} from '../lib/pipelineDag'
 import { AuditDetail } from './AuditDetail'
 import { EnvReadyDetail } from './EnvReadyDetail'
+import { NodeDag } from './NodeDag'
 import { canRetryFromNode } from '../lib/taskActions'
 
 const { Text } = Typography
-
-const NODE_ORDER: NodeRun['node_key'][] = ['source', 'profile', 'env_ready', 'audit', 'reproduce', 'report']
 
 interface NodeStepsProps {
   taskId: string
   runId: string | null | undefined
   taskStatus?: string
+  taskType?: 'verify' | 'discovery'
   sseEvents?: SSEEvent[]
   sseStatus?: SSEStatus
   compact?: boolean
+  expanded?: boolean
+  onToggleExpand?: () => void
   selectedNode?: string | null
   onSelectNode?: (nodeKey: NodeRun['node_key']) => void
   onRetryFromNode?: (nodeKey: NodeRun['node_key']) => void
 }
 
-function nodeIcon(status: NodeRun['status']) {
-  if (status === 'completed') return <CheckCircleOutlined style={{ color: 'var(--crucible-success)' }} />
-  if (status === 'failed') return <CloseCircleOutlined style={{ color: 'var(--crucible-error)' }} />
-  if (status === 'cancelled') return <StopOutlined style={{ color: 'var(--crucible-text-disabled)' }} />
-  if (status === 'running') return <LoadingOutlined />
-  if (status === 'skipped') return <MinusCircleOutlined style={{ color: 'var(--crucible-text-disabled)' }} />
-  return <ClockCircleOutlined />
-}
-
 function nodeSummary(n: Pick<NodeRun, 'node_key' | 'status' | 'output' | 'error_message'>): string {
-  if (n.status === 'failed' && n.error_message) return n.error_message
+  if (n.error_message) return n.error_message
+  if (n.node_key === 'lead_verify') {
+    const count = typeof n.output?.queued_count === 'number' ? n.output.queued_count : null
+    if (n.status === 'running') return count == null ? '正在逐条终认线索' : `正在终认 ${count} 条线索`
+    if (n.status === 'completed') return count == null ? '线索终认完成' : `${count} 条线索终认完成`
+    if (n.status === 'skipped') return '没有高置信线索，已跳过终认'
+  }
   return summarizeNodeOutput(n.node_key, n.output, n.status)
 }
 
@@ -65,13 +74,64 @@ function nodeDetail(n: Pick<NodeRun, 'node_key' | 'status' | 'output'>) {
   return null
 }
 
+function listIcon(status: DagVisualStatus) {
+  if (status === 'completed') return <CheckCircleOutlined />
+  if (status === 'failed') return <CloseCircleOutlined />
+  if (status === 'degraded') return <WarningOutlined />
+  if (status === 'cancelled') return <StopOutlined />
+  if (status === 'running') return <LoadingOutlined />
+  if (status === 'skipped' || status === 'blocked') return <MinusCircleOutlined />
+  return <ClockCircleOutlined />
+}
+
+/** 失败任务中仍 pending 的节点没有执行：用独立灰态表达依赖阻断。 */
+function nodeVisualStatus(
+  node: Pick<NodeRun, 'status' | 'output' | 'error_message'>,
+  taskStatus?: string,
+): DagVisualStatus {
+  if (taskStatus === 'failed' && node.status === 'pending') return 'blocked'
+  return dagVisualStatus(node)
+}
+
+function presentationStatus(node: Pick<NodeRun, 'status'>, taskStatus?: string): string {
+  return taskStatus === 'failed' && node.status === 'pending' ? 'blocked' : node.status
+}
+
+function discoveryLeadStatus(
+  dispatch: Pick<NodeRun, 'status' | 'output'> | undefined,
+  report: Pick<NodeRun, 'status'> | undefined,
+  taskStatus?: string,
+): NodeRun['status'] {
+  if (!dispatch || dispatch.status === 'pending' || dispatch.status === 'running') return 'pending'
+  if (dispatch.status === 'failed') return 'pending'
+  if (dispatch.status === 'cancelled') return 'cancelled'
+  if (dispatch.status === 'skipped') return 'skipped'
+
+  const hasLead = dispatch.output?.has_lead
+  const queuedCount = dispatch.output?.queued_count
+  if (typeof hasLead !== 'boolean' && typeof queuedCount !== 'number') return 'pending'
+  if (hasLead !== true && !(typeof queuedCount === 'number' && queuedCount > 0)) return 'skipped'
+
+  if (!report || report.status === 'pending') {
+    if (taskStatus === 'cancelled') return 'cancelled'
+    if (taskStatus === 'failed') return 'pending'
+    return 'running'
+  }
+  if (report.status === 'cancelled') return 'cancelled'
+  // report 只有在 LeadWorker 排空队列后才会进入 running/terminal。
+  return 'completed'
+}
+
 export function NodeSteps({
   taskId,
   runId,
   taskStatus,
+  taskType = 'verify',
   sseEvents = [],
   sseStatus,
   compact = false,
+  expanded = false,
+  onToggleExpand,
   selectedNode = null,
   onSelectNode,
   onRetryFromNode,
@@ -89,6 +149,7 @@ export function NodeSteps({
   })
 
   const sseOverlay = useMemo(() => overlayFromSseEvents(sseEvents), [sseEvents])
+  const [showSkipped, setShowSkipped] = useState(false)
 
   if (!runId) {
     return <Text type="secondary">尚无运行记录</Text>
@@ -99,7 +160,14 @@ export function NodeSteps({
   }
 
   const nodeMap = new Map(nodes.map((n) => [n.node_key, n]))
-  const ordered = NODE_ORDER.map((key, idx) => {
+  const renderOrder = [...PIPELINE_NODE_ORDER]
+  const hiddenCount =
+    taskType === 'verify' ? renderOrder.filter((key) => VERIFY_MODE_SKIPPED_KEYS.has(key)).length : 0
+  const visibleOrder =
+    taskType === 'verify' && !showSkipped
+      ? renderOrder.filter((key) => !VERIFY_MODE_SKIPPED_KEYS.has(key))
+      : renderOrder
+  const ordered = visibleOrder.map((key, idx) => {
     const n = nodeMap.get(key)
     const base: NodeRun = n ?? {
       id: `pending-${key}`,
@@ -125,150 +193,210 @@ export function NodeSteps({
     const status = displayNodeStatus(merged.status, taskStatus) as NodeRun['status']
     return { ...merged, status }
   })
+  const mode: PipelineMode = taskType === 'discovery' ? 'discovery' : 'verify'
+  const dispatchNode = ordered.find((n) => n.node_key === 'dispatch')
+  const reportNode = ordered.find((n) => n.node_key === 'report')
+  const progressOrdered: NodeRun[] = mode === 'discovery'
+    ? ordered
+        .filter((n) => !DISCOVERY_REPLACED_NODE_KEYS.has(n.node_key))
+        .flatMap((n) => n.node_key === 'report'
+          ? [{
+              id: 'synthetic-lead-verify',
+              node_index: n.node_index - 0.5,
+              node_key: 'lead_verify',
+              status: discoveryLeadStatus(dispatchNode, reportNode, taskStatus),
+              attempt: 0,
+              error_message: null,
+              started_at: null,
+              finished_at: null,
+              output: { queued_count: dispatchNode?.output?.queued_count },
+            }, n]
+          : [n])
+    : ordered
 
-  const currentIdx = ordered.findIndex((n) => n.status === 'running')
-  const firstFailed = ordered.findIndex((n) => n.status === 'failed')
+  const skipToggle =
+    hiddenCount > 0 ? (
+      <Button
+        size="small"
+        type="link"
+        style={{ paddingLeft: 0, alignSelf: 'flex-start' }}
+        onClick={() => setShowSkipped((v) => !v)}
+      >
+        {showSkipped ? '收起跳过的节点' : `显示跳过的节点(${hiddenCount})`}
+      </Button>
+    ) : null
 
   if (compact) {
-    const items = ordered.map((n) => {
-      const meta = NODE_STATUS_META[n.status] ?? NODE_STATUS_META.pending
-      const caption = compactNodeCaption(n.node_key, n.output, n.status)
-      const selected = selectedNode === n.node_key
-      const label = NODE_LABELS[n.node_key] ?? n.node_key
-      const selectable = !!onSelectNode && isNodeSelectable(n.status)
-      return {
-        title: onSelectNode ? (
-          <span
-            className={[
-              'crucible-node-steps-select',
-              `crucible-node-step--${n.node_key}`,
-              selected ? 'is-selected' : '',
-            ]
-              .filter(Boolean)
-              .join(' ')}
-            data-node-key={n.node_key}
-            aria-pressed={selected}
-            aria-disabled={!selectable}
-          >
-            {label}
-          </span>
-        ) : (
-          label
-        ),
-        content: caption ? (
-          <span
-            className="crucible-node-steps-compact__caption"
-            data-node-caption={n.node_key}
-            onClick={(e) => e.stopPropagation()}
-          >
-            {caption}
-          </span>
-        ) : undefined,
-        status: meta.status as 'wait' | 'process' | 'finish' | 'error',
-        icon: nodeIcon(n.status),
-        className: [
-          `crucible-node-step--${n.node_key}`,
-          selected ? 'is-selected' : '',
-          selectable ? 'is-selectable' : 'is-pending',
-        ]
-          .filter(Boolean)
-          .join(' '),
-        onClick: selectable ? () => onSelectNode?.(n.node_key) : undefined,
-      }
+    const dagNodes = progressOrdered
+      .map((n) => ({
+        key: n.node_key,
+        status: presentationStatus(n, taskStatus),
+        error_message: n.error_message,
+        output: n.output,
+        selectable: !!onSelectNode && isNodeSelectable(n.status),
+        selected: selectedNode === n.node_key,
+      }))
+    const overStatus: NodeRun['status'] =
+      reportNode && ['completed', 'failed', 'cancelled'].includes(reportNode.status)
+        ? reportNode.status
+        : taskStatus === 'failed' || taskStatus === 'cancelled'
+          ? taskStatus
+          : 'pending'
+    dagNodes.push({
+      key: 'over',
+      status: overStatus,
+      error_message: null,
+      output: {},
+      selectable: false,
+      selected: false,
     })
     return (
-      <Steps
-        size="small"
-        ellipsis
-        className={[
-          'crucible-node-steps-compact',
-          onSelectNode ? 'is-clickable' : '',
-        ]
-          .filter(Boolean)
-          .join(' ')}
-        classNames={{
-          itemTitle: 'crucible-node-steps-compact__title',
-          itemContent: 'crucible-node-steps-compact__content',
-        }}
-        current={currentIdx >= 0 ? currentIdx : firstFailed >= 0 ? firstFailed : ordered.length}
-        items={items}
-        orientation="horizontal"
-        // 空 onChange 只为让步骤可点；选中必须走 item.onClick，否则当前 running 节点点了没反应。
-        onChange={onSelectNode ? () => undefined : undefined}
-      />
+      <div className="crucible-node-flow is-compact">
+        <div className="crucible-flow-canvas__toolbar">
+          {skipToggle}
+          {onToggleExpand ? (
+            <Button
+              size="small"
+              type="link"
+              icon={expanded ? <CompressOutlined /> : <ExpandOutlined />}
+              onClick={onToggleExpand}
+            >
+              {expanded ? '收起流程图' : '展开流程图'}
+            </Button>
+          ) : null}
+        </div>
+        <div className="crucible-node-flow__dag">
+          <NodeDag
+            nodes={dagNodes}
+            contain={!expanded}
+            overview={!expanded}
+            mode={mode}
+            onSelect={onSelectNode}
+          />
+        </div>
+      </div>
     )
   }
 
+  const stages = pipelineOverviewStages(mode)
+  const terminalCount = progressOrdered.filter((n) => {
+    const status = nodeVisualStatus(n, taskStatus)
+    return status !== 'pending' && status !== 'running' && status !== 'blocked'
+  }).length
+  const progressPercent = progressOrdered.length > 0
+    ? Math.round((terminalCount / progressOrdered.length) * 100)
+    : 0
+  const activeNode = progressOrdered.find((n) => nodeVisualStatus(n, taskStatus) === 'running')
+  const blockedNode = progressOrdered.find((n) => {
+    const status = nodeVisualStatus(n, taskStatus)
+    return status === 'failed' || status === 'degraded' || status === 'cancelled'
+  })
+  const progressMessage = activeNode
+    ? `正在执行：${NODE_LABELS[activeNode.node_key] ?? activeNode.node_key}`
+    : blockedNode
+      ? `流程停在：${NODE_LABELS[blockedNode.node_key] ?? blockedNode.node_key}`
+      : taskStatus === 'failed'
+        ? '流程已终止，下游节点未执行'
+        : terminalCount === progressOrdered.length && progressOrdered.length > 0
+          ? '全部节点已结束'
+          : '等待下一节点就绪'
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
-      {ordered.map((n) => {
-        const detail = nodeDetail(n)
-        const summary = nodeSummary(n)
-        const failed = n.status === 'failed'
-        const showRetry = !!onRetryFromNode && canRetryFromNode(taskStatus ?? '', n.node_key, n.status)
-        const selectable = !!onSelectNode && isNodeSelectable(n.status)
-        const selected = selectedNode === n.node_key
-        return (
-          <div
-            key={n.id}
-            data-node-key={n.node_key}
-            className={[
-              selectable ? 'crucible-node-row is-selectable' : 'crucible-node-row',
-              selected ? 'is-selected' : '',
-            ]
-              .filter(Boolean)
-              .join(' ')}
-            onClick={selectable ? () => onSelectNode?.(n.node_key) : undefined}
-            style={{
-              display: 'grid',
-              gridTemplateColumns: '24px 96px 1fr',
-              gap: 12,
-              alignItems: 'start',
-              padding: '10px 12px',
-              border: '1px solid var(--crucible-border)',
-              borderRadius: 8,
-              background:
-                selected || n.status === 'running' ? 'var(--crucible-bg)' : undefined,
-              cursor: selectable ? 'pointer' : undefined,
-            }}
-          >
-            <span style={{ lineHeight: '22px' }}>{nodeIcon(n.status)}</span>
-            <Text strong>
-              {NODE_LABELS[n.node_key] ?? n.node_key}
-              {n.attempt > 1 && (
-                <Text type="secondary" style={{ fontSize: 11 }}>
-                  {' '}
-                  · 第 {n.attempt} 次
-                </Text>
-              )}
-            </Text>
-            <div>
-              {detail ?? (
-                <Text
-                  type={failed ? 'danger' : 'secondary'}
-                  style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}
-                >
-                  {summary}
-                </Text>
-              )}
-              {showRetry && (
-                <Button
-                  size="small"
-                  type="link"
-                  icon={<RedoOutlined />}
-                  style={{ paddingLeft: 0, marginTop: 4 }}
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    onRetryFromNode?.(n.node_key)
-                  }}
-                >
-                  从本节点重试
-                </Button>
-              )}
+    <div className="crucible-node-flow crucible-node-progress">
+      <div className="crucible-node-progress__summary">
+        <div className="crucible-node-progress__summary-copy">
+          <span className="crucible-node-progress__eyebrow">
+            {mode === 'discovery' ? '仓库审计执行链' : '定向验证执行链'}
+          </span>
+          <strong>{progressMessage}</strong>
+          <small>已结束 {terminalCount} / {progressOrdered.length} 个节点</small>
+        </div>
+        <span className="crucible-node-progress__percent">{progressPercent}%</span>
+        <div
+          className="crucible-node-progress__bar"
+          role="progressbar"
+          aria-label="审计节点进度"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={progressPercent}
+        >
+          <span style={{ width: `${progressPercent}%` }} />
+        </div>
+      </div>
+      <div className="crucible-node-progress__toolbar">{skipToggle}</div>
+      <div className="crucible-node-list">
+        {progressOrdered.map((n, index) => {
+          const visual = nodeVisualStatus(n, taskStatus)
+          const selectable = Boolean(onSelectNode && isNodeSelectable(n.status) && visual !== 'blocked')
+          const stageIndex = stages.findIndex((stage) => stage.nodeKeys.includes(n.node_key))
+          const stage = stageIndex >= 0 ? stages[stageIndex] : null
+          const parallel = Boolean(stage?.parallel)
+          return (
+            <div
+              key={n.node_key}
+              className={[
+                'crucible-node-list__item',
+                `is-${visual}`,
+                selectedNode === n.node_key ? 'is-selected' : '',
+                selectable ? 'is-selectable' : '',
+              ].filter(Boolean).join(' ')}
+              data-node-key={n.node_key}
+              role={selectable ? 'button' : undefined}
+              tabIndex={selectable ? 0 : undefined}
+              aria-label={selectable ? `查看${NODE_LABELS[n.node_key] ?? n.node_key}运行日志` : undefined}
+              onClick={selectable ? () => onSelectNode?.(n.node_key) : undefined}
+              onKeyDown={selectable ? (event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  onSelectNode?.(n.node_key)
+                }
+              } : undefined}
+            >
+              <div className="crucible-node-list__rail" aria-hidden>
+                <span className="crucible-node-list__icon">{listIcon(visual)}</span>
+              </div>
+              <div className="crucible-node-list__card">
+                <div className="crucible-node-list__head">
+                  <div className="crucible-node-list__title">
+                    <span className="crucible-node-list__stage">
+                      {stage ? `阶段 ${String(stageIndex + 1).padStart(2, '0')} · ${stage.label}` : '内部跳过链'}
+                      {parallel ? <em>并行</em> : null}
+                    </span>
+                    <strong>{NODE_LABELS[n.node_key] ?? n.node_key}</strong>
+                  </div>
+                  <div className="crucible-node-list__meta">
+                    {n.attempt > 1 ? <span>第 {n.attempt} 次</span> : null}
+                    <span className={`crucible-node-list__status is-${visual}`}>{DAG_STATUS_TEXT[visual]}</span>
+                  </div>
+                </div>
+                {visual === 'blocked' ? (
+                  <p className="crucible-node-list__summary">上游必要节点失败，本节点未执行</p>
+                ) : n.error_message ? (
+                  <pre className="crucible-node-error-log">{n.error_message}</pre>
+                ) : (
+                  (nodeDetail(n) ?? <p className="crucible-node-list__summary">{nodeSummary(n)}</p>)
+                )}
+                {!!onRetryFromNode && canRetryFromNode(taskStatus ?? '', n.node_key, n.status) && (
+                  <Button
+                    size="small"
+                    type="link"
+                    icon={<RedoOutlined />}
+                    className="crucible-node-list__retry"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      onRetryFromNode(n.node_key)
+                    }}
+                    onKeyDown={(event) => event.stopPropagation()}
+                  >
+                    从本节点重试
+                  </Button>
+                )}
+              </div>
+              {index < progressOrdered.length - 1 ? <span className="crucible-node-list__connector" aria-hidden /> : null}
             </div>
-          </div>
-        )
-      })}
+          )
+        })}
+      </div>
     </div>
   )
 }

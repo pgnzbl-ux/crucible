@@ -111,12 +111,64 @@ async def test_compose_up_rebuilds_with_global_plain_progress(tmp_path):
     assert ok and err == ""
     cmd = popen.call_args.args[0]
     assert cmd[:4] == ["docker", "compose", "--progress", "plain"]
-    assert cmd[-3:] == ["up", "-d", "--build"]
+    assert cmd[cmd.index("up"):] == [
+        "up",
+        "-d",
+        "--build",
+        "--wait",
+        "--wait-timeout",
+        "300",
+    ]
     # 禁止再挂到 up 子命令后：Compose v5 会 unknown flag
     up_idx = cmd.index("up")
     assert "--progress" not in cmd[up_idx:]
     assert lines[0] == "Building app"
     assert "Container app Started" in lines
+
+
+@pytest.mark.asyncio
+async def test_collect_compose_logs_keeps_late_web_error_and_health_state(tmp_path):
+    """多服务日志不能先截断；同时补充 inspect 的 healthcheck 根因。"""
+    from app.contexts.agent.nodes.env_ready.compose_host import collect_compose_logs
+
+    compose = tmp_path / "repo" / ".vuln-env"
+    compose.mkdir(parents=True)
+    (compose / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+
+    log_result = MagicMock(
+        stdout=("db | initialization progress\n" * 120)
+        + "web | Fatal error: database connection refused\n",
+        stderr="",
+    )
+    ps_result = MagicMock(stdout="container-id\n", stderr="")
+    inspect_result = MagicMock(
+        stdout="""[{
+          "Name": "/project-web-1",
+          "Config": {"Labels": {"com.docker.compose.service": "web"}},
+          "State": {
+            "Status": "running", "ExitCode": 0, "OOMKilled": false,
+            "Health": {"Status": "unhealthy", "Log": [
+              {"ExitCode": 1, "Output": "curl: connection refused"}
+            ]}
+          }
+        }]"""
+    )
+    with patch(
+        "app.contexts.agent.nodes.env_ready.compose_host.subprocess.run",
+        side_effect=[log_result, ps_result, inspect_result],
+    ) as run:
+        result = await collect_compose_logs(
+            str(tmp_path),
+            ".vuln-env/docker-compose.yml",
+            "repo",
+            lab_id="Lab-1",
+        )
+
+    assert len(result) > 2000
+    assert "Fatal error: database connection refused" in result
+    assert "health=unhealthy" in result
+    assert "curl: connection refused" in result
+    assert run.call_args_list[2].args[0] == ["docker", "inspect", "container-id"]
 
 
 @pytest.mark.asyncio

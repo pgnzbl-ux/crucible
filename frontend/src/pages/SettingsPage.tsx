@@ -246,42 +246,39 @@ function ProviderPanel() {
 
   const columns: ColumnsType<LlmProvider> = [
     {
-      title: '名称',
+      title: 'Provider',
       dataIndex: 'name',
       render: (v: string, row) => (
-        <Space>
-          {v}
-          {row.is_default && <StarFilled style={{ color: 'var(--crucible-warning)' }} />}
-        </Space>
+        <div>
+          <Space>{v}{row.is_default && <StarFilled style={{ color: 'var(--crucible-warning)' }} />}</Space>
+          <div><Tag bordered={false}>{providerTypeLabel(row.provider_type)}</Tag></div>
+        </div>
       ),
     },
     {
-      title: '预设',
-      dataIndex: 'provider_type',
-      width: 160,
-      render: (v: string) => <Tag>{providerTypeLabel(v)}</Tag>,
-    },
-    {
-      title: '模型',
+      title: '模型 / 接口',
       dataIndex: 'model',
-      width: 160,
-      render: (v: string) => <Text code>{v}</Text>,
-    },
-    {
-      title: 'Base URL',
-      dataIndex: 'base_url',
       ellipsis: true,
-      render: (v: string) => <Text code style={{ fontSize: 12 }}>{v}</Text>,
+      render: (v: string, row) => (
+        <div>
+          <Text code>{v}</Text>
+          <div><Text type="secondary" style={{ fontSize: 12 }}>{row.base_url}</Text></div>
+        </div>
+      ),
     },
     {
-      title: 'API Key',
-      dataIndex: 'api_key_masked',
-      width: 130,
-      render: (v: string, row) =>
-        row.has_api_key ? <Text code>{v}</Text> : <Text type="secondary">未配置</Text>,
+      title: '连接配置',
+      dataIndex: 'has_api_key',
+      width: 140,
+      render: (v: boolean, row) => (
+        <div>
+          <Tag color={v ? 'green' : 'red'}>{v ? '凭据已配置' : '凭据未配置'}</Tag>
+          <div><Text type="secondary" style={{ fontSize: 12 }}>超时 {Math.round(row.timeout_ms / 1000)} 秒</Text></div>
+        </div>
+      ),
     },
     {
-      title: '状态',
+      title: '使用状态',
       dataIndex: 'is_default',
       width: 90,
       render: (v: boolean) => (v ? <Tag color="gold">默认</Tag> : <Tag>备用</Tag>),
@@ -403,22 +400,28 @@ function CredentialsPanel() {
   })
 
   const columns: ColumnsType<Credential> = [
-    { title: '名称', dataIndex: 'name', render: (v: string) => <Space><KeyOutlined />{v}</Space> },
     {
-      title: '注入方式', dataIndex: 'kind', width: 110,
-      render: (v: string) => <Tag color={v === 'env_var' ? 'blue' : 'purple'}>{v === 'env_var' ? '环境变量' : '文件'}</Tag>,
-    },
-    {
-      title: '目标', dataIndex: 'target', width: 180,
-      render: (v: string) => (
-        <Text code style={{ fontSize: 12 }}>{v}</Text>
+      title: '凭据 / 用途', dataIndex: 'name',
+      render: (v: string, row) => (
+        <div>
+          <Space><KeyOutlined />{v}</Space>
+          <div><Text type="secondary" style={{ fontSize: 12 }}>{row.description || '未填写用途说明'}</Text></div>
+        </div>
       ),
     },
     {
-      title: '值', dataIndex: 'secret_masked', width: 130,
-      render: (v: string, row) => (row.has_secret ? <Text code>{v}</Text> : <Text type="secondary">未配置</Text>),
+      title: '注入位置', dataIndex: 'kind', width: 240,
+      render: (v: string, row) => (
+        <div>
+          <Tag color={v === 'env_var' ? 'blue' : 'purple'}>{v === 'env_var' ? '环境变量' : '安全文件'}</Tag>
+          <Text code style={{ fontSize: 12 }}>{row.target}</Text>
+        </div>
+      ),
     },
-    { title: '描述', dataIndex: 'description', ellipsis: true, render: (v: string | null) => v ?? '-' },
+    {
+      title: '配置状态', dataIndex: 'has_secret', width: 120,
+      render: (v: boolean) => <Tag color={v ? 'green' : 'red'}>{v ? '已配置' : '未配置'}</Tag>,
+    },
     {
       title: '操作', key: 'actions', width: 110,
       render: (_, row) => (
@@ -513,21 +516,30 @@ function CredentialsPanel() {
 }
 
 export function SettingsPage() {
+  let isAdmin = false
+  try {
+    const user = JSON.parse(localStorage.getItem('crucible_user') || '{}') as { is_admin?: boolean; role?: string }
+    isAdmin = user.is_admin === true || user.role === 'admin'
+  } catch {
+    isAdmin = false
+  }
+  const items = [
+    ...(isAdmin ? [{ key: 'providers', label: 'LLM Provider', children: <ProviderPanel /> }] : []),
+    { key: 'credentials', label: '审计凭据', children: <CredentialsPanel /> },
+    ...(isAdmin ? [{ key: 'runtime', label: '并发与资源', children: <RuntimePanel /> }] : []),
+  ]
+
   return (
     <>
       <PageHeader
         title="设置"
-        subtitle="管理 AI 模型接入、任务凭据与任务并行"
+        subtitle={isAdmin ? '管理 AI 模型、审计凭据与运行并发' : '管理当前账号的审计凭据'}
       />
       <PageContainer>
       <Tabs
         type="card"
         destroyOnHidden
-        items={[
-          { key: 'providers', label: 'LLM Provider', children: <ProviderPanel /> },
-          { key: 'credentials', label: '任务凭据', children: <CredentialsPanel /> },
-          { key: 'runtime', label: '运行', children: <RuntimePanel /> },
-        ]}
+        items={items}
       />
       </PageContainer>
     </>

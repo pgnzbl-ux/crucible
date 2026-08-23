@@ -1,8 +1,17 @@
 """源码获取：MinIO 优先，落地目录用真实仓库名，clone 失败要分类。"""
+import io
+import os
+import stat
+import tarfile
 from pathlib import Path
+from unittest.mock import patch
 
 from app.contexts.project.git_url import parse_git_url
-from app.contexts.project.source_cache import MemorySourceStore, pack_project_dir
+from app.contexts.project.source_cache import (
+    MemorySourceStore,
+    extract_source_archive,
+    pack_project_dir,
+)
 from app.contexts.project.source_acquire import CachedSource, acquire_source
 
 
@@ -114,6 +123,119 @@ def test_clone_network_error_does_not_succeed(tmp_path):
     assert not (workdir / "project").exists()
 
 
+def test_minio_failure_clears_partial_destination_before_clone(tmp_path):
+    """缓存解包半失败留下目录时，clone 必须看到一个不存在的目标目录。"""
+    parsed = parse_git_url(URL)
+    workdir = tmp_path / "audit-uuid"
+    workdir.mkdir()
+    cached = CachedSource(
+        object_key="source/broken.tar.gz",
+        object_url="s3://broken",
+        repo_dirname=parsed.repo_dirname,
+        commit_sha=SHA,
+        ref_type="branch",
+        ref_name="main",
+        git_url_normalized=parsed.normalized,
+        project_key=parsed.project_key,
+        git_host=parsed.host,
+    )
+
+    def broken_restore(*_args, **_kwargs):
+        dest = workdir / parsed.repo_dirname
+        dest.mkdir()
+        (dest / ".htaccess").write_text("partial", encoding="utf-8")
+        raise PermissionError("simulated partial extraction")
+
+    def clone(workdir_s, _url, _ref, dirname):
+        dest = Path(workdir_s) / dirname
+        assert not dest.exists()
+        _write_repo(Path(workdir_s), dirname, "README.md", "fresh clone")
+        return True, ""
+
+    with patch("app.contexts.project.source_acquire._restore_cached", side_effect=broken_restore):
+        result = acquire_source(
+            host_workdir=str(workdir),
+            git_url=URL,
+            ref="main",
+            cached=cached,
+            store=MemorySourceStore(),
+            clone_fn=clone,
+            local_sha_fn=lambda _path: SHA,
+            remote_sha_fn=lambda _url, _ref: SHA,
+        )
+
+    assert result.ok is True
+    assert result.origin == "git"
+    assert (workdir / parsed.repo_dirname / "README.md").read_text() == "fresh clone"
+
+
+def test_destination_that_cannot_be_removed_is_quarantined_before_clone(tmp_path):
+    """模拟异主目录无法递归删除：平台应隔离旧目录，而不是让 git 报非空。"""
+    from app.contexts.project import source_acquire as sa
+
+    parsed = parse_git_url(URL)
+    workdir = tmp_path / "audit-uuid"
+    old = _write_repo(workdir, parsed.repo_dirname, ".htaccess", "old")
+
+    def clone(workdir_s, _url, _ref, dirname):
+        assert not (Path(workdir_s) / dirname).exists()
+        _write_repo(Path(workdir_s), dirname, "app.py", "new")
+        return True, ""
+
+    real_rmtree = sa._rmtree
+
+    def cannot_remove(path: str) -> bool:
+        candidate = Path(path)
+        if candidate == old or candidate.name.startswith(".crucible-stale-"):
+            return False
+        return real_rmtree(path)
+
+    with patch.object(sa, "_rmtree", side_effect=cannot_remove):
+        result = acquire_source(
+            host_workdir=str(workdir),
+            git_url=URL,
+            ref="main",
+            store=MemorySourceStore(),
+            clone_fn=clone,
+            local_sha_fn=lambda _path: SHA,
+        )
+
+    assert result.ok is True
+    assert (workdir / parsed.repo_dirname / "app.py").read_text() == "new"
+    stale = list(workdir.glob(f".crucible-stale-{parsed.repo_dirname}-*"))
+    assert len(stale) == 1
+    assert (stale[0] / ".htaccess").read_text() == "old"
+
+
+def test_extract_source_archive_normalizes_owner_write_permissions(tmp_path):
+    """缓存中的只读/异主元数据不得生成 worker 无法再次覆盖的目录。"""
+    archive = tmp_path / "source.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        directory = tarfile.TarInfo("repo/www")
+        directory.type = tarfile.DIRTYPE
+        directory.mode = 0o555
+        directory.uid = directory.gid = 65534
+        tar.addfile(directory)
+        payload = b"deny from all\n"
+        member = tarfile.TarInfo("repo/www/.htaccess")
+        member.size = len(payload)
+        member.mode = 0o444
+        member.uid = member.gid = 65534
+        tar.addfile(member, io.BytesIO(payload))
+
+    dest = tmp_path / "extract"
+    dest.mkdir()
+    extract_source_archive(str(archive), str(dest))
+
+    extracted_dir = dest / "repo" / "www"
+    extracted_file = extracted_dir / ".htaccess"
+    assert extracted_file.read_bytes() == payload
+    assert extracted_file.stat().st_uid == os.getuid()
+    assert extracted_dir.stat().st_uid == os.getuid()
+    assert extracted_file.stat().st_mode & stat.S_IWUSR
+    assert extracted_dir.stat().st_mode & stat.S_IWUSR
+
+
 def test_invalid_git_url_does_not_succeed(tmp_path):
     workdir = tmp_path / "audit-uuid"
     workdir.mkdir()
@@ -221,7 +343,8 @@ def test_resolve_remote_ref_finds_zentao_tag():
     )
     assert ref_type == "tag"
     assert ref_name == ZENTAO_TAG
-    assert sha.startswith(ZENTAO_TAG_SHA[:12])
+    # annotated tag 必须落 peeled commit，不能用 tag object SHA
+    assert sha.startswith(ZENTAO_MAIN[:12])
 
 
 def test_resolve_remote_ref_explicit_tag_skips_branch(monkeypatch):
@@ -290,9 +413,19 @@ def test_acquire_source_forwards_ref_type_and_depth(tmp_path, monkeypatch):
     assert captured["clone_depth"] == 5
 
 
+def test_parse_ls_remote_tag_prefers_peeled_commit():
+    from app.contexts.project.source_acquire import _parse_ls_remote_tag_stdout
+
+    stdout = (
+        f"{ZENTAO_TAG_SHA}\trefs/tags/{ZENTAO_TAG}\n"
+        f"{ZENTAO_MAIN}\trefs/tags/{ZENTAO_TAG}^{{}}\n"
+    )
+    assert _parse_ls_remote_tag_stdout(stdout) == ZENTAO_MAIN
+
+
 def test_tag_ref_uses_minio_when_commit_matches(tmp_path):
     cached, store, parsed = _cached_and_store(
-        tmp_path, ZENTAO_TAG_SHA, ref_name=ZENTAO_TAG, ref_type="tag"
+        tmp_path, ZENTAO_MAIN, ref_name=ZENTAO_TAG, ref_type="tag"
     )
     workdir = tmp_path / "audit-uuid"
     workdir.mkdir()
@@ -310,7 +443,36 @@ def test_tag_ref_uses_minio_when_commit_matches(tmp_path):
     )
     assert result.ok is True
     assert result.origin == "minio"
-    assert result.commit_sha.startswith(ZENTAO_TAG_SHA[:12])
+    assert result.commit_sha.startswith(ZENTAO_MAIN[:12])
+
+
+def test_annotated_tag_reuses_minio_when_ls_remote_returns_tag_object(tmp_path, monkeypatch):
+    """人指定 tag：库里按 commit SHA 缓存；ls-remote 若只给出 tag object，仍走 MinIO，不得重 clone。"""
+    cached, store, _ = _cached_and_store(
+        tmp_path, ZENTAO_MAIN, ref_name=ZENTAO_TAG, ref_type="tag"
+    )
+    workdir = tmp_path / "audit-uuid"
+    workdir.mkdir()
+
+    def boom_clone(*_a, **_k):
+        raise RuntimeError("不应 clone")
+
+    monkeypatch.setattr(
+        "app.contexts.project.source_acquire._ls_remote_tag_sha",
+        lambda *_a, **_k: ZENTAO_TAG_SHA,
+    )
+    result = acquire_source(
+        host_workdir=str(workdir),
+        git_url="https://github.com/easysoft/zentaopms.git",
+        ref=ZENTAO_TAG,
+        ref_type_hint="tag",
+        cached=cached,
+        store=store,
+        clone_fn=boom_clone,
+    )
+    assert result.ok is True
+    assert result.origin == "minio"
+    assert result.commit_sha == ZENTAO_MAIN
 
 
 def test_branch_cache_reuses_minio_object_for_remote_commit(tmp_path):
@@ -543,4 +705,3 @@ def test_acquire_uploaded_source_fails_without_cache(tmp_path):
     result = acquire_uploaded_source(str(tmp_path), cached=None)
     assert result.ok is False
     assert "未找到" in result.error
-

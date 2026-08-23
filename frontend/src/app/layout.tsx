@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import { App, Avatar, Dropdown, Layout, Menu, Space, Typography } from 'antd'
 import {
+  AlertOutlined,
   BugOutlined,
   CloudServerOutlined,
   CodeOutlined,
@@ -31,10 +32,11 @@ const NAV_ITEMS = [
     label: '业务',
     type: 'group' as const,
     children: [
-      { key: '/tasks', icon: <BugOutlined />, label: '任务管理' },
-      { key: '/projects', icon: <CodeOutlined />, label: '源码管理' },
-      { key: '/labs', icon: <CloudServerOutlined />, label: '靶场管理' },
-      { key: '/reports', icon: <FileProtectOutlined />, label: '验证报告' },
+      { key: '/projects', icon: <CodeOutlined />, label: '项目资产' },
+      { key: '/tasks', icon: <BugOutlined />, label: '代码审计' },
+      { key: '/findings', icon: <AlertOutlined />, label: '漏洞线索' },
+      { key: '/reports', icon: <FileProtectOutlined />, label: '审计报告' },
+      { key: '/labs', icon: <CloudServerOutlined />, label: '验证环境' },
     ],
   },
   {
@@ -74,7 +76,9 @@ export function AppLayout({ children, fill = false }: AppLayoutProps) {
 
   const selectedKey = location.startsWith('/tasks')
     ? '/tasks'
-    : location.startsWith('/projects')
+    : location.startsWith('/findings')
+      ? '/findings'
+      : location.startsWith('/projects')
       ? '/projects'
       : location.startsWith('/labs')
         ? '/labs'
@@ -110,7 +114,7 @@ export function AppLayout({ children, fill = false }: AppLayoutProps) {
           <CrucibleLogo size={32} className="crucible-brand-mark" />
           <span className="crucible-brand-text">
             <span className="crucible-brand-name">Crucible</span>
-            <span className="crucible-brand-tagline">AI 漏洞验证平台</span>
+            <span className="crucible-brand-tagline">AI 代码审计平台</span>
           </span>
         </button>
         <Menu

@@ -11,7 +11,7 @@ description: Crucible 节点 reproduce。对注入的 target_url 发 HTTP，只�
 
 ## 本轮输入（平台已裁剪）
 
-原料只在 user message 的 JSON 里。平台交接契约见 `docs/agent-node-contracts.md`：`audit` **不是审计节点全量 output**，只含下游复现所需子集。
+原料只在 user message 的 JSON 里。`audit` **不是审计节点全量 output**，只含下游复现所需子集（平台投影契约见 `docs/discovery-spec.md` §4.4，代码 SSOT 为 `contracts/outputs.py::AuditForReproduce`）。
 
 | 字段 | 用途 |
 |---|---|

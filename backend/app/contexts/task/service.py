@@ -18,12 +18,19 @@ class TaskDispatchError(RuntimeError):
     """任务已落库，但无法投递给 Agent worker。"""
 
 
-# 6 节点顺序 → 索引。单节点重试只允许从 AI 阶段起步；source/profile 便宜且确定性,
-# 想重跑它们直接整轮 retry(from_node=None)。
-_NODE_INDEX = {
-    "source": 0, "profile": 1, "env_ready": 2, "audit": 3, "reproduce": 4, "report": 5,
-}
-_RETRYABLE_FROM_NODES = ("env_ready", "audit", "reproduce", "report")
+# 节点顺序 → 索引(从 registry 派生，discovery-spec §4.2.4 后 DEFAULT_PIPELINE 是 12 节点)。
+# 单节点重试不允许从 source/profile 起步——它们便宜且确定性，想重跑直接整轮 retry(from_node=None)。
+from app.contexts.agent.contracts import DEFAULT_PIPELINE as _PIPELINE
+from app.contexts.agent.contracts import SkipWhen as _SkipWhen
+
+_NODE_INDEX = {spec.key: spec.index for spec in _PIPELINE}
+_RETRYABLE_FROM_NODES = tuple(
+    spec.key for spec in _PIPELINE if spec.key not in ("source", "profile")
+)
+# verify 任务会被 VERIFY_MODE skip 的节点：旧 run 缺行可容忍(新 run 重新 skip)
+_VERIFY_MODE_SKIP_KEYS = frozenset(
+    spec.key for spec in _PIPELINE if _SkipWhen.VERIFY_MODE in spec.skip_when
+)
 # Lab 占用：pending/queued/running。needs_review 不算 live（不续 TTL）。
 LIVE_TASK_STATUSES = frozenset({"pending", "queued", "running"})
 # 前置节点视为"可续跑"的终态:completed(有产出可复用)或 skipped(分支出口跳过)。
@@ -83,7 +90,9 @@ class TaskService:
             project_ref_type=getattr(task, "project_ref_type", None),
             clone_depth=getattr(task, "clone_depth", None),
             source_type=task.source_type,
-            vulnerability_description=task.vulnerability_description,
+            task_type=getattr(task, "task_type", None) or "verify",
+            source_alert_group_id=getattr(task, "source_alert_group_id", None),
+            vulnerability_description=task.vulnerability_description or "",
             vulnerability_reasoning=task.vulnerability_reasoning,
             status=task.status,
             verdict=getattr(task, "verdict", None),
@@ -136,6 +145,7 @@ class TaskService:
             project_ref_type=request.project_ref_type,
             clone_depth=request.clone_depth,
             source_type=request.source_type,
+            task_type=request.task_type,
             vulnerability_description=request.vulnerability_description,
             vulnerability_reasoning=request.vulnerability_reasoning,
             priority=request.priority,
@@ -172,21 +182,27 @@ class TaskService:
         owner_id: str,
         filename: str,
         data: bytes,
-        vulnerability_description: str,
+        vulnerability_description: str | None,
+        task_type: str = "verify",
         name: str | None = None,
         priority: str = "medium",
         vulnerability_reasoning: str | None = None,
         credential_refs: list[str] | None = None,
     ) -> TaskDetail:
-        """上传源码包并创建验证任务。同名项目已存在则 409。"""
+        """上传源码包并创建审计或定向验证任务。同名项目已存在则 409。"""
         from app.contexts.project.repository import ProjectRepository
         from app.contexts.project.service import ProjectService
 
-        desc = (vulnerability_description or "").strip()
-        if len(desc) < 10:
-            raise ValueError("请至少输入 10 个字符的漏洞描述")
-        if priority not in ("low", "medium", "high", "critical"):
-            raise ValueError("非法优先级")
+        request = TaskCreateRequest(
+            project_address="upload://local/pending",
+            source_type="local_upload",
+            task_type=task_type,
+            vulnerability_description=vulnerability_description,
+            vulnerability_reasoning=vulnerability_reasoning,
+            priority=priority,
+            credential_refs=credential_refs or [],
+            clone_depth=None,
+        )
 
         await self._require_platform_ready()
         project, _result = await ProjectService(
@@ -197,15 +213,7 @@ class TaskService:
             data=data,
             name=name,
         )
-        request = TaskCreateRequest(
-            project_address=project.git_url,
-            source_type="local_upload",
-            vulnerability_description=desc,
-            vulnerability_reasoning=vulnerability_reasoning,
-            priority=priority,
-            credential_refs=credential_refs or [],
-            clone_depth=None,
-        )
+        request = request.model_copy(update={"project_address": project.git_url})
         return await self.create_task(request, owner_id)
 
     async def redispatch_stale_queued(
@@ -243,21 +251,67 @@ class TaskService:
         return dispatched
 
     async def get_task(self, task_id: str, owner_id: str) -> TaskDetail | None:
+        from app.contexts.agent.usage_ledger import task_usage_summary
+
         task = await self.repo.get_by_id_with_runs(task_id, owner_id)
         if not task:
             return None
-        return self._to_detail(task, task.runs)
+        detail = self._to_detail(task, task.runs)
+        detail.usage = await task_usage_summary(self.repo.session, task_id)
+        return detail
 
     async def list_tasks(
         self, owner_id: str, status: str | None = None,
         priority: str | None = None, limit: int = 50, offset: int = 0,
         q: str | None = None, date_from: str | None = None, date_to: str | None = None,
+        task_type: str | None = None,
     ) -> TaskListResponse:
         tasks, total = await self.repo.list_by_owner(
-            owner_id, status, priority, limit, offset, q=q, date_from=date_from, date_to=date_to,
+            owner_id, status, priority, limit, offset, q=q, date_from=date_from,
+            date_to=date_to, task_type=task_type,
         )
+        task_ids = [task.id for task in tasks]
+        finding_counts: dict[str, tuple[int, int, int]] = {}
+        report_statuses: dict[str, str] = {}
+        if task_ids:
+            from sqlalchemy import case, func, select
+
+            from app.contexts.finding.models import AlertGroup
+            from app.contexts.report.models import Report
+
+            finding_rows = await self.session.execute(
+                select(
+                    AlertGroup.task_id,
+                    func.count(AlertGroup.id),
+                    func.sum(case((AlertGroup.status == "needs_review", 1), else_=0)),
+                    func.sum(case((AlertGroup.resolution == "confirmed", 1), else_=0)),
+                )
+                .where(AlertGroup.task_id.in_(task_ids))
+                .group_by(AlertGroup.task_id)
+            )
+            finding_counts = {
+                task_id: (int(total_count or 0), int(pending or 0), int(confirmed or 0))
+                for task_id, total_count, pending, confirmed in finding_rows.all()
+            }
+            report_rows = await self.session.execute(
+                select(Report.task_id, Report.status)
+                .where(Report.task_id.in_(task_ids), Report.owner_id == owner_id)
+                .order_by(Report.created_at.desc())
+            )
+            for task_id, report_status in report_rows.all():
+                report_statuses.setdefault(task_id, report_status)
+
+        summaries = []
+        for task in tasks:
+            total_findings, pending_review, confirmed = finding_counts.get(task.id, (0, 0, 0))
+            summaries.append(TaskSummary.model_validate(task).model_copy(update={
+                "finding_count": total_findings,
+                "pending_review_count": pending_review,
+                "confirmed_count": confirmed,
+                "report_status": report_statuses.get(task.id),
+            }))
         return TaskListResponse(
-            items=[TaskSummary.model_validate(t) for t in tasks],
+            items=summaries,
             total=total, limit=limit, offset=offset,
         )
 
@@ -422,10 +476,28 @@ class TaskService:
 
         return new_run.id
 
+    async def set_source_alert_group(self, task_id: str, alert_group_id: str) -> None:
+        """发现侧→验证侧唯一溯源指针(discovery-spec §5.1)。
+
+        自动终认：dispatch 经此方法把本审计任务指向主线索组(溯源自指)；
+        人工放行：finding service 创建 verify Task 时写新任务。无物理 FK。
+        """
+        task = await self.repo.session.get(Task, task_id)
+        if task is None:
+            raise ValueError(f"任务不存在: {task_id}")
+        task.source_alert_group_id = alert_group_id
+        await self.repo.session.flush()
+
     async def _copy_prior_nodes_for_resume(
         self, task: Task, new_run_id: str, from_node: str, *, source_run: TaskRun | None
     ) -> None:
-        """把 source_run 里 from_node 之前的可续跑节点拷进新 run,供编排器断点续跑。"""
+        """把 source_run 里 from_node 之前的可续跑节点拷进新 run,供编排器断点续跑。
+
+        按节点 key 匹配并**重写为新拓扑 node_index**(旧 run 的 index 与新
+        DEFAULT_PIPELINE 不一致，直接拷 index 会让编排器找不到行)。
+        verify 任务里被 VERIFY_MODE skip 的节点(扫描/聚类/二审/调度)在旧 run
+        可能没有行——缺行不视为失败，新 run 会重新 skip。
+        """
         from .models import NodeRun
 
         if from_node not in _RETRYABLE_FROM_NODES:
@@ -435,23 +507,39 @@ class TaskService:
         if source_run is None:
             raise ValueError("任务尚无运行记录，无法从指定节点重试")
 
+        task_type = getattr(task, "task_type", None) or "verify"
         prior_nodes = await self.repo.get_node_runs(source_run.id)
-        by_index = {nr.node_index: nr for nr in prior_nodes}
-        for idx in range(target_index):
-            src = by_index.get(idx)
-            if src is None or src.status not in _RESUMABLE_STATUSES:
-                raise ValueError(
-                    f"前置节点未完成，无法从 {from_node} 重试（缺 index {idx}）"
-                )
+        by_key = {nr.node_key: nr for nr in prior_nodes}
 
-        for idx in range(target_index):
-            src = by_index[idx]
+        for spec in _PIPELINE:
+            if spec.index >= target_index:
+                continue
+            src = by_key.get(spec.key)
+            if src is not None and src.status in _RESUMABLE_STATUSES:
+                continue
+            # 缺行/不可续跑：verify 任务里本就会被 VERIFY_MODE skip 的节点放行
+            if (
+                task_type == "verify"
+                and _VERIFY_MODE_SKIP_KEYS
+                and spec.key in _VERIFY_MODE_SKIP_KEYS
+            ):
+                continue
+            raise ValueError(
+                f"前置节点未完成，无法从 {from_node} 重试（缺 {spec.key}）"
+            )
+
+        for spec in _PIPELINE:
+            if spec.index >= target_index:
+                continue
+            src = by_key.get(spec.key)
+            if src is None or src.status not in _RESUMABLE_STATUSES:
+                continue  # VERIFY_MODE 容忍的缺行
             self.repo.session.add(
                 NodeRun(
                     run_id=new_run_id,
                     task_id=task.id,
-                    node_index=src.node_index,
-                    node_key=src.node_key,
+                    node_index=spec.index,
+                    node_key=spec.key,
                     status=src.status,
                     input_json=src.input_json,
                     output_json=src.output_json,

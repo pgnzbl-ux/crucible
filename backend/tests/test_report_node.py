@@ -155,3 +155,14 @@ def test_report_columns_drop_cvss_for_not_reproduced():
     assert cols["summary"] == "产品Y"
     assert cols["poc_language"] is None
     assert cols["poc_code"] is None
+
+
+def test_report_columns_use_audit_title_for_discovery_aggregate():
+    cols = report_columns_from_orch_result({
+        "verdict": None,
+        "report_data": {
+            "document_kind": "code_audit_report",
+            "product_intro": "仓库代码审计报告",
+        },
+    })
+    assert cols["title"] == "代码审计报告"

@@ -26,8 +26,10 @@ def test_agent_runner_image_is_analyst_toolbox_not_slim():
         assert pkg in text
 
 
-def test_dockerfile_copies_node_skills_not_desktop_plugin():
+def test_dockerfile_does_not_bake_node_skills():
+    """Skill 由 worker -v 挂载；镜像不得 COPY 全量 node-skills。"""
     text = DOCKERFILE.read_text(encoding="utf-8")
-    assert "COPY infrastructure/agent-runner/node-skills" in text
+    assert "COPY infrastructure/agent-runner/node-skills" not in text
     assert "COPY plugins/vuln-verify-expert" not in text
     assert "PLUGIN_DIR" not in text
+    assert "/node-skill" in text

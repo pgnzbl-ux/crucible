@@ -9,7 +9,6 @@ from .base import NodeContext
 
 
 class ReportNode:
-    node_index = 5
     node_key = "report"
 
     @property
@@ -54,6 +53,7 @@ class ReportNode:
             "expected_verdict": expected,
             "document_kind": kind,
         }
+        report_meta: dict[str, Any] = {}
         output = await run_ai_node_with_shape_retry(
             node_key="report",
             input_json=input_json,
@@ -61,7 +61,11 @@ class ReportNode:
             runner_env=ctx.runner_env,
             on_event=ctx.on_event,
             task_id=ctx.task_id,
+            meta_out=report_meta,
         )
+        from app.contexts.agent.usage_ledger import record_node_usage
+
+        await record_node_usage(ctx, "report", report_meta)
         final = output.get("final_verdict")
         if final != expected:
             raise RuntimeError(f"verdict 漂移: expected={expected} got={final}")

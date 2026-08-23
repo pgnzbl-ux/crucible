@@ -45,6 +45,16 @@ def test_render_handles_missing_optional_fields():
     assert "# 漏洞验证报告" in md
 
 
+def test_render_code_audit_report_uses_audit_heading():
+    from app.contexts.report.renderer import render_report_md
+
+    md = render_report_md({
+        "document_kind": "code_audit_report",
+        "product_intro": "审计范围",
+    })
+    assert "# 代码审计报告" in md
+
+
 def test_render_verification_record_uses_record_sections():
     from app.contexts.report.renderer import render_report_md
 

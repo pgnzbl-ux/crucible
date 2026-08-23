@@ -20,13 +20,9 @@ def _runner_image_ok(monkeypatch):
 async def session():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
-        from app.contexts.identity.models import User  # noqa: F401
-        from app.contexts.lab.models import Lab  # noqa: F401
-        from app.contexts.project.models import Project  # noqa: F401
-        from app.contexts.report.models import Report  # noqa: F401
-        from app.contexts.settings.models import LlmProvider  # noqa: F401
-        from app.contexts.task.models import AgentEvent, NodeRun, Task, TaskRun  # noqa: F401
+        from app.shared.models import register_models
 
+        register_models()
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as value:
@@ -106,6 +102,24 @@ async def test_create_marks_task_and_run_failed_when_dispatch_fails(session):
 
 
 @pytest.mark.asyncio
+async def test_create_discovery_task_returns_detail(session):
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.schemas import TaskCreateRequest
+    from app.contexts.task.service import TaskService
+
+    await _seed_default_llm(session)
+    req = TaskCreateRequest(
+        project_address="https://github.com/acme/demo",
+        task_type="discovery",
+    )
+    with patch("app.core.celery_app.celery_app.send_task"):
+        detail = await TaskService(TaskRepository(session)).create_task(req, "u1")
+    assert detail.task_type == "discovery"
+    assert detail.vulnerability_description == ""
+    assert detail.status == "queued"
+
+
+@pytest.mark.asyncio
 async def test_create_rejects_unsafe_git_url(session):
     from app.contexts.task.repository import TaskRepository
     from app.contexts.task.schemas import TaskCreateRequest
@@ -179,6 +193,94 @@ async def test_create_task_from_upload_ingests_and_dispatches(session):
     assert project.id in artifact.object_key
     assert project.git_url == f"upload://local/{project.id}"
     assert store.get_bytes(artifact.object_key)
+
+
+@pytest.mark.asyncio
+async def test_create_discovery_task_from_upload_without_vulnerability_description(session):
+    import io
+    import zipfile
+
+    from app.contexts.project.source_cache import MemorySourceStore
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("demo/app.py", "print(1)\n")
+    await _seed_default_llm(session)
+    with (
+        patch("app.core.celery_app.celery_app.send_task"),
+        patch("app.contexts.project.service.MinioSourceStore", return_value=MemorySourceStore()),
+    ):
+        detail = await TaskService(TaskRepository(session)).create_task_from_upload(
+            owner_id="u1",
+            filename="demo.zip",
+            data=buf.getvalue(),
+            task_type="discovery",
+            vulnerability_description=None,
+        )
+    assert detail.task_type == "discovery"
+    assert detail.vulnerability_description == ""
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_applies_task_type_before_pagination(session):
+    from app.contexts.task.models import Task
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+
+    session.add_all([
+        Task(project_address="verify", task_type="verify", vulnerability_description="known issue description", owner_id="u1"),
+        Task(project_address="audit-one", task_type="discovery", vulnerability_description=None, owner_id="u1"),
+        Task(project_address="audit-two", task_type="discovery", vulnerability_description=None, owner_id="u1"),
+    ])
+    await session.commit()
+
+    result = await TaskService(TaskRepository(session)).list_tasks(
+        "u1", task_type="discovery", limit=1, offset=0,
+    )
+    assert result.total == 2
+    assert len(result.items) == 1
+    assert result.items[0].task_type == "discovery"
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_includes_finding_and_report_summary(session):
+    from app.contexts.finding.models import AlertGroup
+    from app.contexts.report.models import Report
+    from app.contexts.task.models import Task
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+
+    task = Task(
+        project_address="https://github.com/acme/shop.git",
+        project_ref="main",
+        project_ref_type="branch",
+        task_type="discovery",
+        owner_id="u1",
+    )
+    session.add(task)
+    await session.flush()
+    session.add_all([
+        AlertGroup(
+            task_id=task.id, group_key="g-review", cwe="CWE-89", file_path="a.py",
+            representative_finding_id="f1", status="needs_review", member_count=2,
+        ),
+        AlertGroup(
+            task_id=task.id, group_key="g-confirmed", cwe="CWE-78", file_path="b.py",
+            representative_finding_id="f2", status="resolved", resolution="confirmed",
+        ),
+        Report(task_id=task.id, run_id="run-summary", owner_id="u1", status="generated"),
+    ])
+    await session.commit()
+
+    result = await TaskService(TaskRepository(session)).list_tasks("u1")
+    row = result.items[0]
+    assert row.project_ref == "main"
+    assert row.finding_count == 2
+    assert row.pending_review_count == 1
+    assert row.confirmed_count == 1
+    assert row.report_status == "generated"
 
 
 @pytest.mark.asyncio

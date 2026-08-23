@@ -27,11 +27,12 @@ def render_report_md(report_data: dict[str, Any]) -> str:
     缺 document_kind 的旧数据按漏洞报告 8 节渲染。
     """
     data = report_data or {}
-    if data.get("document_kind") == "verification_record":
+    document_kind = data.get("document_kind")
+    if document_kind == "verification_record":
         heading = "# 漏洞验证记录"
         keys, titles = RECORD_SECTION_KEYS, RECORD_SECTION_TITLES
     else:
-        heading = "# 漏洞验证报告"
+        heading = "# 代码审计报告" if document_kind == "code_audit_report" else "# 漏洞验证报告"
         keys, titles = REPORT_SECTION_KEYS, REPORT_SECTION_TITLES
     parts: list[str] = [f"{heading}\n"]
     for i, (key, title) in enumerate(zip(keys, titles, strict=True), start=1):

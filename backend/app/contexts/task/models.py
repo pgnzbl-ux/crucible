@@ -7,7 +7,7 @@ from app.shared.base import BaseModel
 
 
 class Task(BaseModel):
-    """漏洞验证任务"""
+    """代码审计或定向验证任务。"""
     __tablename__ = "tasks"
 
     project_address: Mapped[str] = mapped_column(String(1024), nullable=False, comment="项目地址 (Git URL)")
@@ -27,8 +27,15 @@ class Task(BaseModel):
         comment="共用靶场 Lab",
     )
     source_type: Mapped[str] = mapped_column(String(20), default="git", comment="git | local_upload")
-    vulnerability_description: Mapped[str] = mapped_column(Text, nullable=False, comment="漏洞描述")
+    task_type: Mapped[str] = mapped_column(
+        String(20), default="verify", comment="verify(漏洞验证) | discovery(仓库审计)",
+    )
+    vulnerability_description: Mapped[str | None] = mapped_column(Text, nullable=True, comment="漏洞描述；task_type=discovery 时为空")
     vulnerability_reasoning: Mapped[str | None] = mapped_column(Text, comment="漏洞推理过程")
+    # 逻辑溯源指针(discovery-spec §5.1)：验证 Task ← AlertGroup。禁止物理 FK/relationship
+    source_alert_group_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, index=True, comment="来源 AlertGroup id(发现侧→验证侧溯源)",
+    )
     status: Mapped[str] = mapped_column(
         String(20), default="pending", index=True,
         comment="pending | queued | running | needs_review | completed | failed | cancelled | archived"
@@ -109,19 +116,19 @@ class AgentEvent(BaseModel):
 
 
 class NodeRun(BaseModel):
-    """节点级执行记录 — 6 节点编排的核心。
+    """节点级执行记录 — 审计与验证编排的执行轨迹。
 
-    一个 TaskRun 下挂 6 个 NodeRun(node_index 0-5),各自记录
+    一个 TaskRun 下挂流水线 NodeRun，各自记录
     input/output JSON、状态、排障 attempt。断点续跑时复用已完成的 output_json。
     """
     __tablename__ = "node_runs"
 
     run_id: Mapped[str] = mapped_column(String(36), ForeignKey("task_runs.id"), index=True)
     task_id: Mapped[str] = mapped_column(String(36), ForeignKey("tasks.id"), index=True)
-    node_index: Mapped[int] = mapped_column(comment="0-5")
+    node_index: Mapped[int] = mapped_column(comment="流水线节点序号")
     node_key: Mapped[str] = mapped_column(
         String(20),
-        comment="source|profile|env_ready|audit|reproduce|report",
+        comment="source|profile|scan_*|env_ready|cluster|triage|dispatch|audit|reproduce|report",
     )
     status: Mapped[str] = mapped_column(
         String(20), default="pending",
@@ -162,4 +169,26 @@ class NodeRunFailure(BaseModel):
 
     __table_args__ = (
         UniqueConstraint("run_id", "node_key", name="uq_node_run_failures_run_node"),
+    )
+
+
+class AgentUsage(BaseModel):
+    """任务 token 消耗台账 — 预算控制与成本可视化的数据源。
+
+    每个 agent/fast 模型会话一行；写入方持各自的 session（节点 ctx /
+    级联层 / lead worker）。run_id 不设 FK（并发写路径不做删除耦合）。
+    """
+    __tablename__ = "agent_usage"
+
+    task_id: Mapped[str] = mapped_column(String(36), ForeignKey("tasks.id"), index=True)
+    run_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    node_key: Mapped[str] = mapped_column(String(20), nullable=False)
+    source: Mapped[str | None] = mapped_column(
+        String(20), comment="agent | fast_model；null=未标注",
+    )
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+
+    __table_args__ = (
+        Index("idx_agent_usage_task_node", "task_id", "node_key"),
     )

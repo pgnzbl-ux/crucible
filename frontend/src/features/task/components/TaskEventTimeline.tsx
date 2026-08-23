@@ -74,7 +74,9 @@ function matchesFilter(ev: AgentEvent, filter: StreamFilter): boolean {
   if (filter === 'all') return true
   const t = ev.event_type
   if (filter === 'thinking') return t === 'agent.thinking'
-  if (filter === 'message') return t === 'agent.message' || t === 'agent.completed' || t === 'phase.updated'
+  if (filter === 'message') {
+    return t === 'agent.message' || t === 'agent.completed' || t === 'phase.updated' || t === 'triage.progress'
+  }
   if (filter === 'tool') return t.startsWith('tool.call')
   if (filter === 'error') {
     const p = payloadOf(ev)
@@ -478,9 +480,23 @@ function renderBody(ev: AgentEvent, p: Record<string, unknown>) {
 
   if (ev.event_type === 'phase.updated') {
     const phase = asText(p.phase)
+    const phaseLabel = EVENT_PHASE_LABELS[phase] ?? NODE_LABELS[phase] ?? phase
     return (
       <Text>
-        {EVENT_PHASE_LABELS[phase] ?? phase} {asText(p.message) ? `· ${asText(p.message)}` : ''}
+        {phaseLabel} {asText(p.message) ? `· ${asText(p.message)}` : ''}
+      </Text>
+    )
+  }
+
+  if (ev.event_type === 'triage.progress') {
+    const done = asText(p.adjudicated)
+    const pending = asText(p.pending)
+    const reason = asText(p.reason)
+    return (
+      <Text>
+        已审 {done}
+        {pending ? `，待审 ${pending}` : ''}
+        {reason === 'budget' ? '（预算中断）' : ''}
       </Text>
     )
   }

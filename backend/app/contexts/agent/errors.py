@@ -13,7 +13,7 @@ _RULES: list[tuple[str, str, str]] = [
     (
         "SIGKILL",
         "Agent 容器被平台强杀",
-        "exit=137 多为超过 run 硬顶（agent_run_hard_timeout_seconds）被巡检拆掉、单容器超时或 OOM。"
+        "当前平台不会按运行时长强杀 Agent；exit=137 优先检查 OOM、人工取消或 Docker/worker 异常。"
         "看该节点事件流最后几条确认执行到哪一步。",
     ),
     (
@@ -62,14 +62,24 @@ _RULES: list[tuple[str, str, str]] = [
         "核对源码包是否为 zip / tar.gz，以及任务是否仍能找到已上传的缓存。",
     ),
     (
+        "源码工作区准备失败",
+        "源码工作目录权限异常",
+        "旧靶场修改了源码属主，平台未能自动隔离目录。停止仍占用该任务目录的容器后，从源码获取节点重试。",
+    ),
+    (
+        "already exists and is not an empty directory",
+        "源码工作目录没有清空",
+        "这是旧版本遗留工作区导致的错误。更新并重启 Celery worker 后，从源码获取节点重试。",
+    ),
+    (
         "源码克隆失败",
         "Git 克隆源码失败",
         "核对仓库地址、分支/tag，以及任务凭据是否有权限。",
     ),
     (
         "超时",
-        "节点执行超时被停止",
-        "模型卡住或靶场过慢。可加大 AGENT_RUNNER_TIMEOUT_SECONDS，或检查 compose/健康检查。",
+        "历史节点超时记录",
+        "当前版本已取消 Agent 总运行时长限制。重启 API 与 Celery worker 后，从本节点重试。",
     ),
     (
         "agent-runner 镜像",
@@ -161,9 +171,34 @@ def humanize_agent_error(raw: str | None) -> tuple[str, str]:
     return text[:240], "查看该节点的事件流（错误/工具输出）与容器 stderr，定位具体失败步骤。"
 
 
+NODE_ERROR_LOG_MAX = 32_000
+RUN_ERROR_LOG_MAX = 2_000
+
+
+def clip_error_log(text: str | None, *, limit: int = NODE_ERROR_LOG_MAX) -> str:
+    """节点排错日志：保留现场，只在极端长度时截尾。"""
+    body = (text or "").strip() or "未知错误"
+    if len(body) <= limit:
+        return body
+    marker = "\n...[truncated]"
+    return body[: max(0, limit - len(marker))] + marker
+
+
+def node_error_log_from_output(output: dict | None) -> str | None:
+    """从节点 output 抽出应落库的错误日志（扫描失败隔离也要留）。"""
+    if not isinstance(output, dict):
+        return None
+    err = output.get("error") or output.get("error_log")
+    if err not in (None, ""):
+        return clip_error_log(str(err))
+    if output.get("status") == "failed":
+        return clip_error_log("引擎失败")
+    return None
+
+
 def format_agent_error(raw: str | None, *, node_key: str | None = None) -> str:
-    """落库 / 前端展示用的多行错误（标题 + 原因 + 下一步）。"""
+    """落库 / 前端展示用的多行错误（标题 + 原因原文 + 下一步）。"""
     title, hint = humanize_agent_error(raw)
     prefix = f"节点 {node_key} 失败: " if node_key else ""
-    cause = (raw or "").strip()[:400] or "未知错误"
+    cause = clip_error_log((raw or "").strip() or "未知错误")
     return f"{prefix}{title}\n原因: {cause}\n下一步: {hint}"

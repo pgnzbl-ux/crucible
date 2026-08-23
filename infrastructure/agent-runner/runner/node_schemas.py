@@ -150,4 +150,37 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
         },
         "required": ["report_data", "final_verdict"],
     },
+    "triage": {
+        "type": "object",
+        "properties": {
+            "verdict": {
+                "type": "string",
+                "enum": ["tp", "fp", "need_more_context"],
+                "description": "二审判决",
+            },
+            "confidence": {"type": "number", "description": "0–1"},
+            "why": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "简短理由",
+            },
+            "evidence": {
+                "type": "array",
+                "description": "[{file, lines}]",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "file": {"type": "string"},
+                        "lines": {"type": "string"},
+                    },
+                },
+            },
+            "need": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "仍看不到而必须确认的符号（尽量用工具自补后仍缺再列）",
+            },
+        },
+        "required": ["verdict", "confidence", "why"],
+    },
 }

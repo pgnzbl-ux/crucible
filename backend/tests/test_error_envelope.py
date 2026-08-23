@@ -84,3 +84,18 @@ def test_conflict_error_uses_error_envelope():
     assert body["error"]["code"] == "CONFLICT"
     assert "项目名称已存在" in body["error"]["message"]
     assert body["detail"] == body["error"]["message"]
+
+
+def test_unhandled_exception_returns_500_envelope():
+    app = _app_with_handlers()
+
+    @app.get("/kaboom")
+    def kaboom():
+        raise KeyError("surprise")
+
+    response = TestClient(app, raise_server_exceptions=False).get("/kaboom")
+    assert response.status_code == 500
+    body = response.json()
+    assert body["error"]["code"] == "INTERNAL_ERROR"
+    assert isinstance(body["error"]["message"], str) and body["error"]["message"]
+    assert body["detail"] == body["error"]["message"]

@@ -1,4 +1,5 @@
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import Project, SourceArtifact
@@ -66,6 +67,21 @@ class ProjectRepository:
         await self.session.delete(project)
         await self.session.flush()
 
+    async def get_source_artifact(self, artifact_id: str) -> SourceArtifact | None:
+        return await self.session.get(SourceArtifact, artifact_id)
+
+    async def delete_source_artifact(self, row: SourceArtifact) -> None:
+        await self.session.delete(row)
+        await self.session.flush()
+
+    async def count_source_artifacts_by_object_key(self, object_key: str) -> int:
+        result = await self.session.execute(
+            select(func.count())
+            .select_from(SourceArtifact)
+            .where(SourceArtifact.object_key == object_key)
+        )
+        return int(result.scalar_one())
+
     async def find_source_artifact(
         self,
         owner_id: str,
@@ -118,8 +134,29 @@ class ProjectRepository:
             await self.session.refresh(existing)
             return existing
         row = SourceArtifact(**data)
-        self.session.add(row)
-        await self.session.flush()
+        try:
+            async with self.session.begin_nested():
+                self.session.add(row)
+                await self.session.flush()
+        except IntegrityError:
+            # 并发提交同 owner+repo+ref 撞 uq_source_artifacts_owner_host_ref：
+            # 复用已有行改写（与 _get_or_create_node_run 同模式）
+            existing = (await self.session.execute(
+                select(SourceArtifact).where(
+                    SourceArtifact.owner_id == data["owner_id"],
+                    SourceArtifact.git_host == data["git_host"],
+                    SourceArtifact.project_key == data["project_key"],
+                    SourceArtifact.ref_type == data["ref_type"],
+                    SourceArtifact.ref_name == data["ref_name"],
+                )
+            )).scalar_one_or_none()
+            if existing is None:
+                raise
+            for k, v in data.items():
+                setattr(existing, k, v)
+            await self.session.flush()
+            await self.session.refresh(existing)
+            return existing
         await self.session.refresh(row)
         return row
 

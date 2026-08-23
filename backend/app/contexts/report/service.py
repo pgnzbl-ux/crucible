@@ -91,8 +91,21 @@ class ReportService:
         )
 
     @staticmethod
-    def _to_summary(report: Report) -> ReportSummary:
-        return ReportSummary.model_validate(report)
+    def _to_summary(report: Report, task_context: dict[str, Any] | None = None) -> ReportSummary:
+        document_kind: str | None = None
+        try:
+            payload = json.loads(report.report_data or "{}")
+            if isinstance(payload, dict) and isinstance(payload.get("document_kind"), str):
+                document_kind = payload["document_kind"]
+        except (json.JSONDecodeError, TypeError):
+            pass
+        context = task_context or {}
+        return ReportSummary.model_validate(report).model_copy(update={
+            "project_address": context.get("project_address"),
+            "project_ref": context.get("project_ref"),
+            "task_type": context.get("task_type"),
+            "document_kind": document_kind,
+        })
 
     @staticmethod
     def _to_evidence_detail(ev: Evidence, *, with_url: bool = False) -> EvidenceResponse:
@@ -136,7 +149,7 @@ class ReportService:
             run_id=run_id,
             owner_id=owner_id,
             conclusion=conclusion if conclusion in CONCLUSION_LABELS else "unconfirmed",
-            title=f"漏洞验证报告 — {task_id[:8]}",
+            title=f"安全分析报告 — {task_id[:8]}",
             summary=CONCLUSION_LABELS.get(conclusion, conclusion),
             reasoning=reasoning[:50000] or None,
             evidence_summary=json.dumps(
@@ -197,7 +210,27 @@ class ReportService:
         offset: int = 0,
     ) -> tuple[list[ReportSummary], int]:
         rows, total = await self.repo.list_by_owner(owner_id, status, verdict, query, limit, offset)
-        return [self._to_summary(r) for r in rows], total
+        contexts: dict[str, dict[str, Any]] = {}
+        if rows:
+            from sqlalchemy import select
+
+            from app.contexts.task.models import Task
+
+            result = await self.repo.session.execute(
+                select(Task.id, Task.project_address, Task.project_ref, Task.task_type).where(
+                    Task.id.in_([row.task_id for row in rows]),
+                    Task.owner_id == owner_id,
+                )
+            )
+            contexts = {
+                task_id: {
+                    "project_address": project_address,
+                    "project_ref": project_ref,
+                    "task_type": task_type,
+                }
+                for task_id, project_address, project_ref, task_type in result.all()
+            }
+        return [self._to_summary(r, contexts.get(r.task_id)) for r in rows], total
 
     # ── 发布 ──
 
@@ -238,6 +271,8 @@ class ReportService:
             return None, "报告不存在"
         if not report:
             return None, "报告不存在"
+        if report.status == "published":
+            return None, "报告已发布，不能追加证据"
         # kind 白名单（防任意值落库）
         if kind not in ("artifact", "log", "screenshot", "poc"):
             return None, "非法证据类型"

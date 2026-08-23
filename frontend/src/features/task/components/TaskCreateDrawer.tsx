@@ -26,7 +26,7 @@ import type { SourceArtifact } from '../../../shared/lib/api'
 
 const ARCHIVE_ACCEPT = '.zip,.tar,.tar.gz,.tgz,application/zip,application/gzip,application/x-tar'
 
-/** 从源码管理详情页进入：锁定项目，版本只能从下拉选 */
+/** 从项目资产详情页进入：锁定项目，版本只能从下拉选 */
 export type BoundProjectSource = ProjectSelectSource & {
   source_type?: 'git' | 'local_upload' | string
   artifacts?: SourceArtifact[]
@@ -52,7 +52,8 @@ type CreateFormValues = {
   project_ref?: string
   project_ref_type?: GitRefType
   clone_depth?: number
-  vulnerability_description: string
+  task_type?: 'verify' | 'discovery'
+  vulnerability_description?: string
   priority: string
   credential_refs?: string[]
   existing_upload_url?: string
@@ -154,6 +155,7 @@ export function TaskCreateDrawer({
   const createMutation = useMutation({
     mutationFn: async (values: CreateFormValues) => {
       const source_type = values.source_type === 'local_upload' ? 'local_upload' : 'git'
+      const taskType: 'verify' | 'discovery' = values.task_type === 'verify' ? 'verify' : 'discovery'
       const description = values.vulnerability_description
       const priority = values.priority
       const credential_refs = values.credential_refs
@@ -163,7 +165,8 @@ export function TaskCreateDrawer({
           return api.createTask({
             project_address: existing,
             source_type: 'local_upload',
-            vulnerability_description: description,
+            task_type: taskType,
+            vulnerability_description: taskType === 'verify' ? description : undefined,
             priority,
             credential_refs,
           })
@@ -177,7 +180,8 @@ export function TaskCreateDrawer({
           return api.createTaskFromUpload({
             file,
             name: uploadName,
-            vulnerability_description: description,
+            task_type: taskType,
+            vulnerability_description: taskType === 'verify' ? description : undefined,
             priority,
             credential_refs,
           })
@@ -186,10 +190,11 @@ export function TaskCreateDrawer({
       }
       const payload = {
         project_address: values.project_address || '',
+        task_type: taskType,
         project_ref: values.project_ref,
         project_ref_type: values.project_ref_type,
         clone_depth: values.clone_depth,
-        vulnerability_description: description,
+        vulnerability_description: taskType === 'discovery' ? undefined : description,
         priority,
         credential_refs,
       }
@@ -215,7 +220,7 @@ export function TaskCreateDrawer({
       open={open}
       onClose={onClose}
       size={560}
-      title={boundProject ? `新建验证任务 · ${boundProject.name}` : '新建漏洞验证任务'}
+      title={boundProject ? `发起代码审计 · ${boundProject.name}` : '发起代码审计'}
     >
       <Form
         form={form}
@@ -362,7 +367,7 @@ export function TaskCreateDrawer({
               <Form.Item
                 name="upload_project_name"
                 label="项目名称"
-                extra="同一账号下名称不能重复；与源码管理登记规则一致。"
+                extra="同一账号下名称不能重复；与项目资产登记规则一致。"
                 rules={[{ required: true, message: '请填写项目名称' }]}
               >
                 <Input placeholder="例如 demo-app" />
@@ -376,7 +381,7 @@ export function TaskCreateDrawer({
               extra={
                 existingUpload
                   ? '已选择下方入库项目，无需再上传文件。'
-                  : '支持 zip / tar / tar.gz，不超过 200MB。同名项目会拒绝；建议先在源码管理登记。'
+                  : '支持 zip / tar / tar.gz，不超过 200MB。同名项目会拒绝；建议先在项目资产登记。'
               }
               rules={[
                 {
@@ -421,6 +426,21 @@ export function TaskCreateDrawer({
           </>
         ) : null}
 
+        <Form.Item
+          name="task_type"
+          label="分析方式"
+          initialValue="discovery"
+          extra="代码审计用于自动挖掘漏洞；定向验证用于验证你已经掌握的具体线索"
+        >
+          <Radio.Group
+            optionType="button"
+            buttonStyle="solid"
+            options={[
+              { value: 'discovery', label: '代码审计' },
+              { value: 'verify', label: '定向验证' },
+            ]}
+          />
+        </Form.Item>
         <Form.Item name="priority" label="优先级">
           <Select
             options={[
@@ -431,12 +451,36 @@ export function TaskCreateDrawer({
             ]}
           />
         </Form.Item>
-        <Form.Item
-          name="vulnerability_description"
-          label="漏洞描述"
-          rules={[{ required: true, min: 10, message: '请至少输入 10 个字符的漏洞描述' }]}
-        >
-          <Input.TextArea rows={5} placeholder="描述待验证的漏洞类型、疑似位置、触发条件等" />
+        <Form.Item noStyle shouldUpdate={(a, b) => a.task_type !== b.task_type}>
+          {({ getFieldValue }) => {
+            const taskType = getFieldValue('task_type') ?? 'discovery'
+            return (
+              <Form.Item
+                name="vulnerability_description"
+                label="已知漏洞线索"
+                rules={
+                  taskType === 'verify'
+                    ? [{ required: true, min: 10, message: '请至少输入 10 个字符的漏洞描述' }]
+                    : []
+                }
+                extra={
+                  taskType === 'discovery'
+                    ? '代码审计会通过扫描引擎与 AI 二审自动发现线索'
+                    : undefined
+                }
+              >
+                <Input.TextArea
+                  rows={5}
+                  disabled={taskType === 'discovery'}
+                  placeholder={
+                    taskType === 'discovery'
+                      ? '无需填写；系统将自动分析整个代码版本'
+                      : '描述待验证的漏洞类型、疑似位置、触发条件等'
+                  }
+                />
+              </Form.Item>
+            )
+          }}
         </Form.Item>
         <Form.Item
           name="credential_refs"
@@ -456,7 +500,7 @@ export function TaskCreateDrawer({
         </Form.Item>
         <Space>
           <Button type="primary" htmlType="submit" loading={createMutation.isPending}>
-            提交分析
+            开始分析
           </Button>
           <Button onClick={onClose}>取消</Button>
         </Space>

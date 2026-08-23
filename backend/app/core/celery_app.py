@@ -22,7 +22,8 @@ def create_celery_app() -> Celery:
         task_time_limit=settings.celery_task_time_limit,
         worker_prefetch_multiplier=1,  # 一次只取一个任务，配合 acks_late 保证不丢
         broker_transport_options={
-            "visibility_timeout": max(3600, settings.celery_task_time_limit + 300),
+            # Redis 消息租约不是执行超时；取足够长以免长任务仍在运行时被重复投递。
+            "visibility_timeout": 7 * 24 * 60 * 60,
         },
     )
     app.autodiscover_tasks(["app.contexts.agent"])

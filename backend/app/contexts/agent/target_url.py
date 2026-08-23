@@ -9,14 +9,16 @@ _LOOPBACK = {"localhost", "127.0.0.1", "::1"}
 
 def host_advertise_ip() -> str:
     """探测本机对外网卡 IPv4。失败时才退回 127.0.0.1。"""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock = None
     try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.connect(("8.8.8.8", 80))
         ip = sock.getsockname()[0]
     except OSError:
         ip = ""
     finally:
-        sock.close()
+        if sock is not None:
+            sock.close()
     if ip and ip not in _LOOPBACK and not ip.startswith("169.254."):
         return ip
     try:

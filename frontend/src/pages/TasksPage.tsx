@@ -26,6 +26,7 @@ export function TasksPage() {
   const apiParams = buildTaskListApiParams({
     status: params.status,
     priority: params.priority,
+    taskType: params.taskType,
     q: params.q,
     dateFrom: params.dateFrom,
     dateTo: params.dateTo,
@@ -84,7 +85,7 @@ export function TasksPage() {
       return { locked: true as const }
     },
     onSuccess: (_data, id) => {
-      message.success('任务已删除')
+      message.success('审计运行已归档')
       applyTaskMutationCache(qc, id, 'delete')
     },
     onError: (e: Error) => {
@@ -104,15 +105,15 @@ export function TasksPage() {
   return (
     <>
       <PageHeader
-        title="任务管理"
-        subtitle="提交漏洞验证任务，Agent 将在隔离沙箱中自动分析"
+        title="代码审计"
+        subtitle="对项目版本执行安全扫描、AI 复核与多线索终认"
         extra={
           <Space>
             <Button icon={<ReloadOutlined />} loading={isFetching} onClick={() => refetch()}>
               刷新
             </Button>
             <Button type="primary" icon={<PlusOutlined />} onClick={() => setParams({ create: true })}>
-              新建任务
+              发起代码审计
             </Button>
           </Space>
         }

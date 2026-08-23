@@ -7,6 +7,25 @@ from sqlalchemy.orm import selectinload
 from .models import Task, TaskRun, AgentEvent, NodeRun, NodeRunFailure
 
 
+def _day_bound_utc(date_str: str, *, end_of_day: bool) -> datetime:
+    """把 ISO 日期串按其自带时区取当日边界后换算到 UTC。
+
+    带时区输入（如 +08:00）在输入时区的自然日内取边界再转 UTC；
+    naive 输入按 UTC 处理。不能直接 replace(tzinfo=utc)——那是重贴
+    标签，过滤窗口会随偏移量漂移。
+    """
+    parsed = datetime.fromisoformat(date_str)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    day = parsed.replace(
+        hour=23 if end_of_day else 0,
+        minute=59 if end_of_day else 0,
+        second=59 if end_of_day else 0,
+        microsecond=999999 if end_of_day else 0,
+    )
+    return day.astimezone(timezone.utc)
+
+
 class TaskRepository:
     """任务数据访问层 — 纯 SQL，无业务逻辑"""
 
@@ -44,9 +63,8 @@ class TaskRepository:
         q: str | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
+        task_type: str | None = None,
     ) -> tuple[list[Task], int]:
-        from datetime import datetime, timezone
-
         stmt = select(Task).where(Task.owner_id == owner_id)
         count_stmt = select(func.count(Task.id)).where(Task.owner_id == owner_id)
 
@@ -64,20 +82,21 @@ class TaskRepository:
         if priority:
             stmt = stmt.where(Task.priority == priority)
             count_stmt = count_stmt.where(Task.priority == priority)
+        if task_type:
+            stmt = stmt.where(Task.task_type == task_type)
+            count_stmt = count_stmt.where(Task.task_type == task_type)
         if q:
             pattern = f"%{q}%"
             stmt = stmt.where(Task.project_address.ilike(pattern))
             count_stmt = count_stmt.where(Task.project_address.ilike(pattern))
         if date_from:
-            start = datetime.fromisoformat(date_from).replace(
-                hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
-            )
+            # fromisoformat 后按真实偏移换算到 UTC 再取当日边界，
+            # 不能直接 replace(tzinfo=utc)（那是重贴标签，窗口会偏移）
+            start = _day_bound_utc(date_from, end_of_day=False)
             stmt = stmt.where(Task.created_at >= start)
             count_stmt = count_stmt.where(Task.created_at >= start)
         if date_to:
-            end = datetime.fromisoformat(date_to).replace(
-                hour=23, minute=59, second=59, microsecond=999999, tzinfo=timezone.utc
-            )
+            end = _day_bound_utc(date_to, end_of_day=True)
             stmt = stmt.where(Task.created_at <= end)
             count_stmt = count_stmt.where(Task.created_at <= end)
 
@@ -204,18 +223,76 @@ class TaskRepository:
         return out
 
     async def delete_hard(self, task: Task) -> None:
-        """物理删除任务 + 级联清理 runs/nodes/events。
+        """物理删除任务 + 级联清理全部子表。
 
-        顺序: events → nodes → runs → task(尊重 FK)。
-        SQLite 默认不强制 FK pragma,用手动级联确保干净。
+        PG 的 FK 均为 NO ACTION（无数据库级联），必须按依赖序手动删：
+        evidences → reports；adjudications/review_actions → alert_groups →
+        raw_findings → scan_runs；lead_runs；再删原有的
+        failures/events/nodes/runs/task。SQLite 不强制 FK，用手动级联保持一致。
         """
-        run_ids = [r.id for r in task.runs] if task.runs else []
-        await self.session.execute(delete(NodeRunFailure).where(NodeRunFailure.task_id == task.id))
+        from app.contexts.discovery.models import ScanRun
+        from app.contexts.finding.models import (
+            Adjudication,
+            AlertGroup,
+            LeadRun,
+            RawFinding,
+            ReviewAction,
+        )
+        from app.contexts.report.models import Evidence, Report
+
+        task_id = task.id
+        run_ids = [
+            row for row in (
+                await self.session.execute(
+                    select(TaskRun.id).where(TaskRun.task_id == task_id)
+                )
+            ).scalars()
+        ]
+        report_ids = [
+            row for row in (
+                await self.session.execute(
+                    select(Report.id).where(Report.task_id == task_id)
+                )
+            ).scalars()
+        ]
+        group_ids = [
+            row for row in (
+                await self.session.execute(
+                    select(AlertGroup.id).where(AlertGroup.task_id == task_id)
+                )
+            ).scalars()
+        ]
+        if report_ids:
+            await self.session.execute(
+                delete(Evidence).where(Evidence.report_id.in_(report_ids))
+            )
+        if group_ids:
+            await self.session.execute(
+                delete(Adjudication).where(Adjudication.alert_group_id.in_(group_ids))
+            )
+            await self.session.execute(
+                delete(ReviewAction).where(ReviewAction.alert_group_id.in_(group_ids))
+            )
+        await self.session.execute(delete(LeadRun).where(LeadRun.task_id == task_id))
+        from app.contexts.task.models import AgentUsage
+
+        await self.session.execute(
+            delete(AgentUsage).where(AgentUsage.task_id == task_id)
+        )
+        await self.session.execute(
+            delete(AlertGroup).where(AlertGroup.task_id == task_id)
+        )
+        await self.session.execute(
+            delete(RawFinding).where(RawFinding.task_id == task_id)
+        )
+        await self.session.execute(delete(Report).where(Report.task_id == task_id))
+        await self.session.execute(delete(ScanRun).where(ScanRun.task_id == task_id))
+        await self.session.execute(delete(NodeRunFailure).where(NodeRunFailure.task_id == task_id))
         if run_ids:
             await self.session.execute(delete(AgentEvent).where(AgentEvent.run_id.in_(run_ids)))
             await self.session.execute(delete(NodeRun).where(NodeRun.run_id.in_(run_ids)))
             await self.session.execute(delete(TaskRun).where(TaskRun.id.in_(run_ids)))
         # task 级 events(若有 task_id 直接关联但无 run 的孤儿)
-        await self.session.execute(delete(AgentEvent).where(AgentEvent.task_id == task.id))
+        await self.session.execute(delete(AgentEvent).where(AgentEvent.task_id == task_id))
         await self.session.delete(task)
         await self.session.flush()

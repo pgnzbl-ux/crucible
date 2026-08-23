@@ -106,3 +106,8 @@ $RECYCLE.BIN/
 # docs：只纳入截图等静态资源，其余本地文档不进仓库
 docs/*
 !docs/assets/
+!docs/discovery-spec.md
+!docs/discovery-plan.md
+
+# 黄金集评估报告（跑出来的 Markdown，不入库）
+scripts/eval/out/

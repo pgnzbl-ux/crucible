@@ -29,6 +29,7 @@ from runner.run_one import (  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 NODE_SKILLS = ROOT / "infrastructure" / "agent-runner" / "node-skills"
+os.environ["NODE_SKILL_DIR"] = str(NODE_SKILLS)
 
 _ROLE_LEAKS = (
     "你是项目画像员",
@@ -127,7 +128,7 @@ def test_submit_schema_uses_only_anthropic_tool_subset():
 
 def test_node_skills_exist_and_are_sliced():
     assert NODE_AI_KEYS == frozenset(
-        {"profile", "env_ready", "audit", "reproduce", "report"}
+        {"profile", "env_ready", "audit", "reproduce", "report", "triage"}
     )
     for key in NODE_AI_KEYS:
         path = NODE_SKILLS / key / "SKILL.md"
@@ -156,6 +157,10 @@ def test_node_skills_exist_and_are_sliced():
             assert "verification_record" in body
             assert "vulnerability_report" in body
             assert "expected_verdict" in body
+        if key == "triage":
+            assert "tp" in body and "fp" in body
+            assert "need_more_context" in body
+            assert "禁止" in body
 
 
 def test_load_node_skill_reads_distilled_file():

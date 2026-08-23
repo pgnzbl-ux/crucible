@@ -88,7 +88,7 @@ docker compose -p crucible-infra ps    # 基础设施
 - [ ] `curl http://127.0.0.1:8010/health` 返回 200（或实际健康端点）
 - [ ] `ENVIRONMENT=production` 下 API 正常启动（config 强制校验通过：AUTH_SECRET / PostgreSQL / CORS 非 `*`）
 - [ ] worker 日志无 Docker 权限报错；`sudo -u crucible docker ps` 可用
-- [ ] 建一个 Mock 任务跑通 6 节点（沙箱拉起 → 事件落库 → 报告生成）
+- [ ] 建一个 Mock 任务跑通编排（沙箱拉起 → 事件落库 → 报告生成）
 - [ ] Nginx：HTTPS 跳转、`/docs` 可开、SSE 事件流无缓冲（浏览器 Network 里 EventStream 帧持续到达）
 - [ ] `.env` 权限 600，属主 crucible
 

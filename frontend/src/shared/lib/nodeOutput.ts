@@ -200,12 +200,16 @@ export function isNodeSelectable(status: string): boolean {
   return status !== 'pending'
 }
 
-/** 任务已取消/失败时，仍显示 running/pending 的节点跟任务终态对齐。 */
+/**
+ * 任务终止时只收敛仍在执行的节点；失败任务的 pending 节点从未启动，
+ * 必须保留 pending，交给拓扑展示层标成“未执行”，不能伪造成 failed。
+ */
 export function displayNodeStatus(nodeStatus: string, taskStatus?: string): string {
-  if (nodeStatus === 'running' || nodeStatus === 'pending') {
+  if (nodeStatus === 'running') {
     if (taskStatus === 'cancelled') return 'cancelled'
     if (taskStatus === 'failed') return 'failed'
   }
+  if (nodeStatus === 'pending' && taskStatus === 'cancelled') return 'cancelled'
   return nodeStatus
 }
 
@@ -256,9 +260,19 @@ export function overlayFromSseEvents(
     if (ev.type === 'phase.updated') {
       const phase = typeof p.phase === 'string' ? p.phase : ''
       const msg = str(p.message)
-      if (phase !== 'env_ready' || !msg) continue
-      const prev = map.get('env_ready') ?? {}
-      map.set('env_ready', {
+      // 步骤条 running 文案：画像 / 靶场 / 扫描阶段句写入 progress
+      const progressPhases = new Set([
+        'env_ready',
+        'profile',
+        'scan_semgrep',
+        'scan_gitleaks',
+        'scan_osv',
+        'cluster',
+        'triage',
+      ])
+      if (!progressPhases.has(phase) || !msg) continue
+      const prev = map.get(phase) ?? {}
+      map.set(phase, {
         ...prev,
         output: { ...(prev.output ?? {}), progress: msg },
       })

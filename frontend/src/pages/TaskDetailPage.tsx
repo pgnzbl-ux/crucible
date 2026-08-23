@@ -10,7 +10,7 @@ import { useLocation, useRoute, useSearch } from 'wouter'
 
 import { api } from '../shared/lib/api'
 import { getStatusMeta } from '../shared/lib/meta'
-import { canCancel, canDelete, canRetry, CONFIRM_COPY, defaultTaskDetailTab } from '../shared/lib/taskActions'
+import { canCancel, canDelete, canRetry, CONFIRM_COPY, defaultTaskDetailTab, taskDetailTabFromValue } from '../shared/lib/taskActions'
 import type { TaskDetailTab } from '../shared/lib/taskActions'
 import { PageHeader } from '../shared/components/PageHeader'
 import { PageContainer } from '../shared/components/PageContainer'
@@ -18,12 +18,9 @@ import { TaskDetailTabs } from '../features/task/components/TaskDetailTabs'
 import { tryLockTaskAction, unlockTaskAction } from '../shared/lib/taskActionLock'
 import { applyTaskMutationCache } from '../shared/lib/taskCache'
 
-const TAB_KEYS: TaskDetailTab[] = ['overview', 'progress', 'events', 'report']
-
 function tabFromSearch(search: string): TaskDetailTab | null {
   const raw = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search).get('tab')
-  if (raw && (TAB_KEYS as string[]).includes(raw)) return raw as TaskDetailTab
-  return null
+  return taskDetailTabFromValue(raw)
 }
 
 export function TaskDetailPage() {
@@ -90,7 +87,7 @@ export function TaskDetailPage() {
       return { locked: true as const }
     },
     onSuccess: () => {
-      message.success('任务已删除')
+      message.success('审计运行已归档')
       navigate('/tasks')
       applyTaskMutationCache(qc, taskId, 'delete')
     },
@@ -114,7 +111,7 @@ export function TaskDetailPage() {
     ? task.project_address.replace(/^https?:\/\//, '').slice(0, 48)
     : isLoading
       ? '加载中...'
-      : '任务详情'
+      : '审计详情'
 
   const confirm = (kind: keyof typeof CONFIRM_COPY, onOk: () => void) => {
     const copy = CONFIRM_COPY[kind]
@@ -194,7 +191,7 @@ export function TaskDetailPage() {
           <Result
             status={isError ? 'error' : '404'}
             title={isError ? '加载失败' : '任务不存在'}
-            subTitle={isError ? '请检查网络后重试，或返回任务列表。' : '该任务已删除或你没有访问权限。'}
+            subTitle={isError ? '请检查网络后重试，或返回审计列表。' : '该审计运行不存在或你没有访问权限。'}
             extra={
               <Button type="primary" onClick={() => navigate('/tasks')}>
                 返回列表

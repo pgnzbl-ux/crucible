@@ -2,11 +2,18 @@
 from __future__ import annotations
 
 import logging
+import os
 import tarfile
 from pathlib import Path
 
 from app.core.config import get_settings
-from app.shared.object_store import KIND_REGISTRY, ObjectNotFoundError, build_ref, get_object_store
+from app.shared.object_store import (
+    KIND_REGISTRY,
+    ObjectNotFoundError,
+    ObjectRef,
+    build_ref,
+    get_object_store,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +46,32 @@ def pack_project_dir(project_dir: str, archive_path: str, arcname: str | None = 
         tar.add(project_dir, arcname=name)
 
 
+def _source_member_filter(member: tarfile.TarInfo, destination: str) -> tarfile.TarInfo | None:
+    """安全解包，并让缓存内容归当前 worker 所有且保持可清理。
+
+    靶场容器可能把 bind mount 中的文件改成自己的 uid/gid；这些元数据若原样
+    进入 tar，再由 root worker 解开，会制造 worker 无法覆盖/删除的 nobody 文件。
+    """
+    filtered = tarfile.data_filter(member, destination)
+    if filtered is None:
+        return None
+    mode = filtered.mode if filtered.mode is not None else (member.mode or 0)
+    if filtered.isdir():
+        mode |= 0o700
+    elif filtered.isfile():
+        mode |= 0o600
+    return filtered.replace(
+        uid=os.getuid(),
+        gid=os.getgid(),
+        uname=None,
+        gname=None,
+        mode=mode,
+    )
+
+
 def extract_source_archive(archive_path: str, host_workdir: str) -> None:
     with tarfile.open(archive_path, "r:gz") as tar:
-        kwargs: dict = {}
-        if hasattr(tarfile, "data_filter"):
-            kwargs["filter"] = "data"
-        tar.extractall(host_workdir, **kwargs)
+        tar.extractall(host_workdir, filter=_source_member_filter)
 
 
 class MemorySourceStore:
@@ -68,6 +95,9 @@ class MemorySourceStore:
         item = self._data.get(object_key)
         return item[1] if item else None
 
+    def delete(self, object_key: str) -> None:
+        self._data.pop(object_key, None)
+
 
 class MinioSourceStore:
     def upload(self, object_key: str, sha: str, archive_path: str) -> None:
@@ -84,3 +114,7 @@ class MinioSourceStore:
         except ObjectNotFoundError as exc:
             raise FileNotFoundError(f"源码缓存不存在: {object_key}") from exc
         Path(dest_path).write_bytes(data)
+
+    def delete(self, object_key: str) -> None:
+        spec = KIND_REGISTRY["source"]
+        get_object_store().delete(ObjectRef(kind="source", bucket=spec.bucket, key=object_key))

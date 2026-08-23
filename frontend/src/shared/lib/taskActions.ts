@@ -4,7 +4,14 @@ export const BLOCK_DELETE_STATUSES = ['running', 'pending', 'queued', 'archived'
 /** 单节点重试允许的起点（与后端 _RETRYABLE_FROM_NODES 对齐）。source/profile 走整条重试。 */
 export const RETRYABLE_FROM_NODES = ['env_ready', 'audit', 'reproduce', 'report'] as const
 
-export type TaskDetailTab = 'overview' | 'progress' | 'events' | 'report'
+export type TaskDetailTab = 'overview' | 'progress' | 'report'
+
+export function taskDetailTabFromValue(value: string | null | undefined): TaskDetailTab | null {
+  // 兼容合并前的运行日志链接：原 events 页现在归入审计过程工作台。
+  if (value === 'events') return 'progress'
+  if (value === 'overview' || value === 'progress' || value === 'report') return value
+  return null
+}
 
 export function canCancel(status: string): boolean {
   return (ACTIVE_STATUSES as readonly string[]).includes(status)
@@ -26,8 +33,8 @@ export function canDelete(status: string): boolean {
   return !(BLOCK_DELETE_STATUSES as readonly string[]).includes(status)
 }
 
-export function defaultTaskDetailTab(_status?: string): TaskDetailTab {
-  return 'progress'
+export function defaultTaskDetailTab(status?: string): TaskDetailTab {
+  return status && (ACTIVE_STATUSES as readonly string[]).includes(status) ? 'progress' : 'overview'
 }
 
 /** 仅终态且可能已出报告时才拉报告，避免失败任务刷 404。 */
@@ -54,8 +61,8 @@ export const CONFIRM_COPY = {
     okText: '重试',
   },
   delete: {
-    title: '删除任务',
-    content: '删除后任务将从列表中移除，关联报告一并不可见。确定继续？',
-    okText: '删除',
+    title: '归档审计运行',
+    content: '归档后将从默认列表中移除，关联报告仍保留，可通过“已归档”筛选查看。确定继续？',
+    okText: '归档',
   },
 } as const

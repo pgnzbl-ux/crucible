@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
-from app.shared.deps import CurrentUserId, get_current_user_id
+from app.shared.deps import CurrentUserId, get_current_admin_id, get_current_user_id
 
 from .repository import SettingsRepository
 from .schemas import (
@@ -40,7 +40,7 @@ async def get_settings_service(repo: Annotated[SettingsRepository, Depends(get_s
 
 # ── LLM Provider ──
 
-@router.get("/llm/providers", response_model=LlmProviderListResponse)
+@router.get("/llm/providers", response_model=LlmProviderListResponse, dependencies=[Depends(get_current_admin_id)])
 async def list_providers(
     svc: Annotated[SettingsService, Depends(get_settings_service)],
 ) -> LlmProviderListResponse:
@@ -48,7 +48,7 @@ async def list_providers(
     return LlmProviderListResponse(items=items, total=total)
 
 
-@router.post("/llm/providers", response_model=LlmProviderResponse, status_code=201)
+@router.post("/llm/providers", response_model=LlmProviderResponse, status_code=201, dependencies=[Depends(get_current_admin_id)])
 async def create_provider(
     request: LlmProviderCreateRequest,
     svc: Annotated[SettingsService, Depends(get_settings_service)],
@@ -59,7 +59,7 @@ async def create_provider(
         raise HTTPException(400, str(e)) from e
 
 
-@router.put("/llm/providers/{provider_id}", response_model=LlmProviderResponse)
+@router.put("/llm/providers/{provider_id}", response_model=LlmProviderResponse, dependencies=[Depends(get_current_admin_id)])
 async def update_provider(
     provider_id: str,
     request: LlmProviderUpdateRequest,
@@ -74,7 +74,7 @@ async def update_provider(
     return provider
 
 
-@router.delete("/llm/providers/{provider_id}", status_code=204)
+@router.delete("/llm/providers/{provider_id}", status_code=204, dependencies=[Depends(get_current_admin_id)])
 async def delete_provider(
     provider_id: str,
     svc: Annotated[SettingsService, Depends(get_settings_service)],
@@ -84,7 +84,7 @@ async def delete_provider(
         raise HTTPException(404, "Provider 不存在")
 
 
-@router.post("/llm/providers/{provider_id}/activate", response_model=LlmProviderResponse)
+@router.post("/llm/providers/{provider_id}/activate", response_model=LlmProviderResponse, dependencies=[Depends(get_current_admin_id)])
 async def activate_provider(
     provider_id: str,
     svc: Annotated[SettingsService, Depends(get_settings_service)],
@@ -95,7 +95,7 @@ async def activate_provider(
     return provider
 
 
-@router.post("/llm/providers/{provider_id}/test", response_model=LlmProviderTestResult)
+@router.post("/llm/providers/{provider_id}/test", response_model=LlmProviderTestResult, dependencies=[Depends(get_current_admin_id)])
 async def test_provider(
     provider_id: str,
     svc: Annotated[SettingsService, Depends(get_settings_service)],
@@ -103,7 +103,7 @@ async def test_provider(
     return await svc.test_connection(provider_id=provider_id)
 
 
-@router.post("/llm/test", response_model=LlmProviderTestResult)
+@router.post("/llm/test", response_model=LlmProviderTestResult, dependencies=[Depends(get_current_admin_id)])
 async def test_connection(
     request: LlmProviderTestRequest,
     svc: Annotated[SettingsService, Depends(get_settings_service)],
@@ -160,16 +160,21 @@ async def delete_credential(
         raise HTTPException(404, "凭据不存在")
 
 
-@router.get("/runtime", response_model=RuntimeSettingsResponse)
+@router.get("/runtime", response_model=RuntimeSettingsResponse, dependencies=[Depends(get_current_admin_id)])
 async def get_runtime_settings(
     svc: Annotated[SettingsService, Depends(get_settings_service)],
 ) -> RuntimeSettingsResponse:
     return await svc.get_runtime_settings()
 
 
-@router.put("/runtime", response_model=RuntimeSettingsResponse)
+@router.put("/runtime", response_model=RuntimeSettingsResponse, dependencies=[Depends(get_current_admin_id)])
 async def update_runtime_settings(
     request: RuntimeSettingsUpdateRequest,
     svc: Annotated[SettingsService, Depends(get_settings_service)],
 ) -> RuntimeSettingsResponse:
-    return await svc.update_runtime_settings(request.max_concurrent_tasks)
+    try:
+        return await svc.update_runtime_settings(request)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(503, str(e)) from e

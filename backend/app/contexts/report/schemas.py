@@ -55,12 +55,17 @@ class ReportDetail(BaseModel):
 class ReportSummary(BaseModel):
     id: str
     task_id: str
+    project_address: str | None = None
+    project_ref: str | None = None
+    task_type: str | None = None
+    document_kind: str | None = None
     status: str
     conclusion: str
     title: str
     summary: str | None
     verdict: str | None = None
     severity: str | None = None
+    published_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

@@ -1,13 +1,13 @@
 """节点 2 靶场就绪 — 排障循环测试(mock docker + AI)。"""
-import sys
+import asyncio
 import os
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import sys
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from unittest.mock import patch, AsyncMock, MagicMock
 
-from types import SimpleNamespace
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.contexts.agent.nodes.base import NodeContext
 
@@ -51,7 +51,6 @@ def _enable_sdk():
     with patch("app.core.config.get_settings") as gs:
         s = MagicMock()
         s.claude_agent_sdk_enabled = True
-        s.agent_runner_timeout_seconds = 1800
         gs.return_value = s
         yield
 
@@ -75,19 +74,53 @@ def _mock_lab_acquire(tmp_path):
         LS.return_value.acquire = AsyncMock(return_value=lab)
         LS.return_value.download_recipe = AsyncMock(return_value=None)
         LS.return_value.upload_recipe = AsyncMock()
-        LS.return_value.mark_ready = AsyncMock()
-        LS.return_value.mark_failed = AsyncMock()
+        LS.return_value.mark_ready = AsyncMock(return_value=True)
+        LS.return_value.mark_failed = AsyncMock(return_value=True)
+        LS.return_value.heartbeat_creation = AsyncMock(return_value=True)
+        LS.return_value.live_task_ids = AsyncMock(return_value=["t1"])
         LS.return_value.touch = AsyncMock()
         yield lab
 
 
 @pytest.fixture(autouse=True)
-def _free_docker_ports():
+def _free_docker_ports(tmp_path):
     """默认假定宿主机没有被其他容器占用的映射口，避免测试机 docker ps 干扰。"""
+    async def runtime_bindings(_project):
+        files = sorted((tmp_path / "project" / ".vuln-env").glob("*.yml"))
+        for compose_file in files:
+            from app.contexts.agent.nodes.env_ready.ports import (
+                parse_compose_port_mappings,
+                web_host_ports,
+            )
+
+            mappings = parse_compose_port_mappings(
+                compose_file.read_text(encoding="utf-8")
+            )
+            host_ports = web_host_ports(mappings)
+            if host_ports:
+                return [
+                    {
+                        "host_ip": "0.0.0.0",
+                        "host_port": host_port,
+                        "container_port": container_port,
+                        "protocol": "tcp",
+                    }
+                    for host_port, container_port in mappings
+                    if host_port in host_ports
+                ]
+        return []
+
     with patch(
         "app.contexts.agent.nodes.env_ready.ports.list_docker_occupied_host_ports",
         return_value=set(),
         create=True,
+    ), patch(
+        "app.contexts.agent.nodes.env_ready.ports.load_runtime_web_bindings",
+        side_effect=runtime_bindings,
+    ), patch(
+        "app.contexts.agent.nodes.env_ready.reuse._live_started_containers",
+        new_callable=AsyncMock,
+        return_value=["web"],
     ):
         yield
 
@@ -167,7 +200,76 @@ async def test_env_ready_retry_until_success(tmp_path):
         out = await node.execute(ctx)
 
     assert mock_ai.call_count == 3
+    assert mock_ai.call_args_list[1].kwargs["failed_stage"] == "port_conflict"
+    assert "port in use" in mock_ai.call_args_list[1].args[2]
+    assert mock_ai.call_args_list[2].kwargs["failed_stage"] == "compose_build"
+    assert "build fail" in mock_ai.call_args_list[2].args[2]
     assert out["target_url"] == "http://192.168.1.8:8000"
+
+
+@pytest.mark.asyncio
+async def test_env_ready_container_healthcheck_failure_is_labeled_for_next_round(tmp_path):
+    """compose --wait 的 unhealthy 必须区别于构建/启动失败并携带诊断。"""
+    from app.contexts.agent.nodes import env_ready as mod
+    from app.contexts.agent.nodes.env_ready import ai_recipe, compose_host, health
+
+    ctx = _exec_ctx(tmp_path, {"is_web": True, "port": 8000})
+    _write_compose(tmp_path)
+
+    with patch.object(ai_recipe, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
+         patch.object(compose_host, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
+         patch.object(compose_host, "collect_compose_logs", new_callable=AsyncMock) as mock_logs, \
+         patch.object(compose_host, "docker_compose_down", new_callable=AsyncMock), \
+         patch.object(health, "health_check", new_callable=AsyncMock) as mock_hc, \
+         patch("app.contexts.agent.target_url.host_advertise_ip", return_value="192.168.1.8"):
+        mock_ai.side_effect = [
+            _recipe(".vuln-env/docker-compose.yml", "http://localhost:8000"),
+            _recipe(".vuln-env/docker-compose.yml", "http://localhost:8000"),
+        ]
+        mock_up.side_effect = [
+            (False, "container project-web-1 is unhealthy"),
+            (True, ""),
+        ]
+        mock_logs.return_value = (
+            "web healthcheck: exit=1 output=curl: connection refused"
+        )
+        mock_hc.return_value = (True, 8000, "http")
+
+        await mod.EnvReadyNode().execute(ctx)
+
+    retry = mock_ai.call_args_list[1]
+    assert retry.kwargs["failed_stage"] == "container_healthcheck"
+    assert "Docker healthcheck 失败" in retry.args[2]
+    assert "curl: connection refused" in retry.args[2]
+
+
+@pytest.mark.asyncio
+async def test_env_ready_docker_platform_failure_does_not_consume_ai_retries(tmp_path):
+    """Docker daemon/权限故障是平台错误，不能让 AI 连续改五轮配方。"""
+    from app.contexts.agent.nodes import env_ready as mod
+    from app.contexts.agent.nodes.env_ready import ai_recipe, compose_host
+
+    ctx = _exec_ctx(tmp_path, {"is_web": True, "port": 8000})
+    _write_compose(tmp_path)
+
+    with patch.object(ai_recipe, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
+         patch.object(compose_host, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
+         patch.object(compose_host, "collect_compose_logs", new_callable=AsyncMock) as mock_logs, \
+         patch.object(compose_host, "docker_compose_down", new_callable=AsyncMock) as mock_down:
+        mock_ai.return_value = _recipe(
+            ".vuln-env/docker-compose.yml", "http://localhost:8000"
+        )
+        mock_up.return_value = (
+            False,
+            "Cannot connect to the Docker daemon. Is the docker daemon running?",
+        )
+
+        with pytest.raises(RuntimeError, match="failed_stage=docker_unavailable"):
+            await mod.EnvReadyNode().execute(ctx)
+
+    assert mock_ai.await_count == 1
+    mock_logs.assert_not_awaited()
+    mock_down.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -268,6 +370,73 @@ services:
     assert parse_compose_port_mappings(long_form) == [(3001, 3000)]
 
 
+def test_compose_port_declaration_accepts_dynamic_tcp_but_not_udp():
+    from app.contexts.agent.nodes.env_ready.ports import (
+        compose_declares_web_port,
+        parse_compose_port_mappings,
+    )
+
+    dynamic = """
+services:
+  web:
+    ports:
+      - "3000"
+"""
+    udp_only = """
+services:
+  web:
+    ports:
+      - target: 3000
+        published: 3001
+        protocol: udp
+"""
+
+    assert parse_compose_port_mappings(dynamic) == []
+    assert compose_declares_web_port(dynamic) is True
+    assert compose_declares_web_port(udp_only) is False
+
+
+def test_runtime_bindings_reject_loopback_only_and_database_ports():
+    from app.contexts.agent.nodes.env_ready.ports import (
+        publishable_runtime_bindings,
+        web_runtime_bindings,
+    )
+
+    bindings = web_runtime_bindings(
+        [
+            {
+                "host_ip": "127.0.0.1",
+                "host_port": 49153,
+                "container_port": 3000,
+                "protocol": "tcp",
+            },
+            {
+                "host_ip": "0.0.0.0",
+                "host_port": 49154,
+                "container_port": 5432,
+                "protocol": "tcp",
+            },
+            {
+                "host_ip": "0.0.0.0",
+                "host_port": 49155,
+                "container_port": 8080,
+                "protocol": "tcp",
+            },
+        ]
+    )
+
+    assert publishable_runtime_bindings(bindings, "10.0.0.8") == [
+        {
+            "host_ip": "0.0.0.0",
+            "host_port": 49155,
+            "container_port": 8080,
+            "protocol": "tcp",
+            "probe_host": "127.0.0.1",
+            "public_host": "10.0.0.8",
+        }
+    ]
+
+
 def _urlopen_cm(body: str, status: int = 200):
     resp = MagicMock()
     resp.status = status
@@ -311,6 +480,24 @@ def test_http_alive_rejects_crash_homepage(body, expect_alive):
         assert health._http_alive("http://127.0.0.1:8080") is expect_alive
 
 
+@pytest.mark.parametrize(("status", "expected"), [(401, True), (403, True), (404, False)])
+def test_http_alive_accepts_auth_gate_but_rejects_missing_route(status, expected):
+    import io
+    import urllib.error
+
+    from app.contexts.agent.nodes.env_ready import health
+
+    error = urllib.error.HTTPError(
+        "http://127.0.0.1:8080/",
+        status,
+        "probe",
+        {},
+        io.BytesIO(b"ordinary response"),
+    )
+    with patch("urllib.request.urlopen", side_effect=error):
+        assert health._http_alive("http://127.0.0.1:8080/") is expected
+
+
 @pytest.mark.asyncio
 async def test_health_check_settles_before_first_probe():
     """compose up 后端口未立刻 bind，先等 3s 再探。"""
@@ -328,12 +515,12 @@ async def test_health_check_settles_before_first_probe():
     async def fake_sleep(seconds):
         events.append(("sleep", seconds))
 
-    def fake_alive(url: str, timeout: float = 5) -> bool:
+    async def fake_probe(url: str, timeout: float = 5) -> tuple[bool, str]:
         events.append(("probe", url))
-        return True
+        return True, ""
 
     with (
-        patch.object(health, "_http_alive", fake_alive),
+        patch.object(health, "_probe_http_async", fake_probe),
         patch.object(health, "HEALTH_SETTLE_SECONDS", 3),
         patch.object(health, "HEALTH_RETRIES", 1),
         patch.object(health, "HEALTH_RETRY_SECONDS", 0),
@@ -344,7 +531,7 @@ async def test_health_check_settles_before_first_probe():
     assert port == 3001
     assert scheme == "http"
     assert events[0] == ("sleep", 3)
-    assert events[1] == ("probe", "http://127.0.0.1:3001")
+    assert events[1] == ("probe", "http://127.0.0.1:3001/")
 
 
 @pytest.mark.asyncio
@@ -359,15 +546,66 @@ async def test_health_check_records_crash_body_for_ai_feedback():
     )
 
     with (
-        patch("urllib.request.urlopen", return_value=_urlopen_cm(_ZENTAO_FATAL)),
+        patch.object(
+            health,
+            "_probe_http_async",
+            new_callable=AsyncMock,
+            return_value=(False, "首页内容异常: zt_config"),
+        ),
         patch.object(health, "HEALTH_SETTLE_SECONDS", 0),
         patch.object(health, "HEALTH_RETRIES", 1),
         patch.object(health, "HEALTH_RETRY_SECONDS", 0),
     ):
-        ok, port, scheme = await health.health_check([8080])
+        result = await health.health_check([8080])
+        ok, port, scheme = result
     assert ok is False
     assert port is None
-    assert "zt_config" in (getattr(health.health_check, "last_error", "") or "")
+    assert "zt_config" in health.failure_reason(result)
+
+
+@pytest.mark.asyncio
+async def test_health_check_keeps_crash_body_over_fallback_tls_connection_error():
+    """HTTP 正文根因不能被随后备用 HTTPS 的连接失败覆盖。"""
+    from app.contexts.agent.nodes.env_ready import health
+
+    async def fake_probe(url: str, timeout: float = 5) -> tuple[bool, str]:
+        if url.startswith("http://"):
+            return False, "首页内容异常: Fatal error: missing table"
+        return False, "无 HTTP 应答: ConnectError: connection refused"
+
+    with patch.object(health, "_probe_http_async", fake_probe):
+        result = await health.health_check(
+            [8080], retries=1, retry_seconds=0, settle_seconds=0
+        )
+
+    assert "Fatal error: missing table" in health.failure_reason(result)
+    assert "ConnectError" not in health.failure_reason(result)
+
+
+@pytest.mark.asyncio
+async def test_health_check_failure_reason_isolated_between_concurrent_labs():
+    """并发探活的错误必须跟随各自结果，不能通过函数属性互相覆盖。"""
+    from app.contexts.agent.nodes.env_ready import health
+
+    async def fake_probe(url: str, timeout: float = 5) -> tuple[bool, str]:
+        if ":3001" in url:
+            await asyncio.sleep(0.01)
+            return False, "lab-a connection refused"
+        await asyncio.sleep(0)
+        return False, "lab-b database starting"
+
+    with patch.object(health, "_probe_http_async", fake_probe):
+        first, second = await asyncio.gather(
+            health.health_check(
+                [3001], retries=1, retry_seconds=0, settle_seconds=0
+            ),
+            health.health_check(
+                [3002], retries=1, retry_seconds=0, settle_seconds=0
+            ),
+        )
+
+    assert health.failure_reason(first).endswith("lab-a connection refused")
+    assert health.failure_reason(second).endswith("lab-b database starting")
 
 
 @pytest.mark.asyncio
@@ -383,12 +621,12 @@ async def test_health_check_does_not_scan_host_common_ports():
 
     seen: list[str] = []
 
-    def fake_alive(url: str, timeout: float = 5) -> bool:
+    async def fake_probe(url: str, timeout: float = 5) -> tuple[bool, str]:
         seen.append(url)
-        return False
+        return False, "无 HTTP 应答"
 
     with (
-        patch.object(health, "_http_alive", fake_alive),
+        patch.object(health, "_probe_http_async", fake_probe),
         patch.object(health, "HEALTH_SETTLE_SECONDS", 0),
         patch.object(health, "HEALTH_RETRIES", 1),
         patch.object(health, "HEALTH_RETRY_SECONDS", 0),
@@ -397,7 +635,10 @@ async def test_health_check_does_not_scan_host_common_ports():
     assert ok is False
     assert port is None
     assert scheme == "http"
-    assert seen == ["http://127.0.0.1:3001"]
+    assert seen == [
+        "http://127.0.0.1:3001/",
+        "https://127.0.0.1:3001/",
+    ]
 
 
 @pytest.mark.asyncio
@@ -413,12 +654,12 @@ async def test_health_check_probes_https_for_tls_container_port():
 
     seen: list[str] = []
 
-    def fake_alive(url: str, timeout: float = 5) -> bool:
+    async def fake_probe(url: str, timeout: float = 5) -> tuple[bool, str]:
         seen.append(url)
-        return "https" in url
+        return ("https" in url), ""
 
     with (
-        patch.object(health, "_http_alive", fake_alive),
+        patch.object(health, "_probe_http_async", fake_probe),
         patch.object(health, "HEALTH_SETTLE_SECONDS", 0),
         patch.object(health, "HEALTH_RETRIES", 1),
         patch.object(health, "HEALTH_RETRY_SECONDS", 0),
@@ -429,7 +670,7 @@ async def test_health_check_probes_https_for_tls_container_port():
     assert ok is True
     assert port == 8443
     assert scheme == "https"
-    assert seen == ["https://127.0.0.1:8443"]
+    assert seen == ["https://127.0.0.1:8443/"]
 
 
 def test_web_container_ports_keeps_alignment_with_host_ports():
@@ -449,19 +690,24 @@ def test_publish_target_url_supports_https_scheme():
     assert publish_target_url(3001, advertise_ip="192.168.1.8") == "http://192.168.1.8:3001"
 
 
-def test_reused_lab_alive_uses_target_url_scheme():
+@pytest.mark.asyncio
+async def test_reused_lab_alive_uses_target_url_scheme():
     from types import SimpleNamespace
 
     from app.contexts.agent.nodes.env_ready.reuse import _reused_lab_alive
 
     with patch(
-        "app.contexts.agent.nodes.env_ready.health._http_alive", return_value=True
-    ) as alive:
-        ok = _reused_lab_alive(
+        "app.contexts.agent.nodes.env_ready.health.health_check",
+        new_callable=AsyncMock,
+        return_value=(True, 8443, "https"),
+    ) as health_check:
+        ok = await _reused_lab_alive(
             SimpleNamespace(target_url="https://10.0.0.8:8443")
         )
     assert ok is True
-    assert alive.call_args.args[0] == "https://127.0.0.1:8443"
+    assert health_check.await_args.args[0] == [8443]
+    assert health_check.await_args.kwargs["host_ips"] == ["10.0.0.8"]
+    assert health_check.await_args.kwargs["preferred_scheme"] == "https"
 
 
 def test_health_check_budget_covers_slow_jvm():
@@ -511,6 +757,66 @@ def test_summarize_compose_failure_keeps_root_cause(log, must_keep, must_drop):
         assert must_drop not in summary
 
 
+def test_summarize_compose_failure_scans_past_database_noise():
+    """Web 根因即使排在 2000 字符之后也不能被预截断。"""
+    from app.contexts.agent.nodes.env_ready.compose_host import summarize_compose_failure
+
+    log = ("mysql initialization progress\n" * 120) + (
+        "web | Fatal error: database connection refused\n"
+    )
+    summary = summarize_compose_failure(log)
+    assert "Fatal error" in summary
+    assert "connection refused" in summary
+
+
+def test_container_state_summary_keeps_healthcheck_output_without_env():
+    from app.contexts.agent.nodes.env_ready.compose_host import _summarize_container_states
+
+    raw = """[
+      {
+        "Name": "/project-web-1",
+        "Config": {
+          "Env": ["PASSWORD=must-not-leak"],
+          "Labels": {"com.docker.compose.service": "web"}
+        },
+        "State": {
+          "Status": "running",
+          "ExitCode": 0,
+          "OOMKilled": false,
+          "Health": {
+            "Status": "unhealthy",
+            "Log": [{"ExitCode": 1, "Output": "curl: connection refused"}]
+          }
+        }
+      }
+    ]"""
+    summary = _summarize_container_states(raw)
+    assert "web: status=running" in summary
+    assert "health=unhealthy" in summary
+    assert "curl: connection refused" in summary
+    assert "must-not-leak" not in summary
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        ("failed to solve: Dockerfile COPY missing", "compose_build"),
+        ("Bind for 0.0.0.0:8080 failed: port in use", "port_conflict"),
+        ("container web exited with code 1", "container_start"),
+        ("container web is unhealthy", "container_healthcheck"),
+        ("docker compose up 超时(>600s)", "compose_timeout"),
+        ("docker compose 安全策略拒绝: privileged", "compose_policy"),
+        ("Cannot connect to the Docker daemon", "docker_unavailable"),
+    ],
+)
+def test_classify_compose_failure_stage(error, expected):
+    from app.contexts.agent.nodes.env_ready.compose_host import (
+        classify_compose_failure_stage,
+    )
+
+    assert classify_compose_failure_stage(error) == expected
+
+
 @pytest.mark.asyncio
 async def test_env_ready_url_uses_mapped_host_port_not_container_port(tmp_path):
     """AI 写了 3001:3000 却把 target_url 写成容器端口 3000 → 对外仍用宿主机映射口。"""
@@ -538,6 +844,48 @@ async def test_env_ready_url_uses_mapped_host_port_not_container_port(tmp_path):
         out = await mod.EnvReadyNode().execute(ctx)
     assert mock_hc.await_args.args[0] == [3001]
     assert out["target_url"] == "http://10.0.0.8:3001"
+
+
+@pytest.mark.asyncio
+async def test_env_ready_uses_docker_assigned_port_for_bare_mapping(tmp_path):
+    from app.contexts.agent.nodes import env_ready as mod
+    from app.contexts.agent.nodes.env_ready import ai_recipe, compose_host, health, ports
+
+    _write_compose(tmp_path, mapping="3000")
+    ctx = _exec_ctx(tmp_path, {"is_web": True, "port": 3000})
+    actual = [
+        {
+            "host_ip": "0.0.0.0",
+            "host_port": 49153,
+            "container_port": 3000,
+            "protocol": "tcp",
+        }
+    ]
+    with patch.object(
+        ai_recipe, "run_ai_turn", new_callable=AsyncMock
+    ) as mock_ai, patch.object(
+        compose_host, "docker_compose_up", new_callable=AsyncMock
+    ) as mock_up, patch.object(
+        health, "health_check", new_callable=AsyncMock
+    ) as mock_hc, patch.object(
+        ports,
+        "load_runtime_web_bindings",
+        new_callable=AsyncMock,
+        return_value=actual,
+    ), patch(
+        "app.contexts.agent.target_url.host_advertise_ip", return_value="10.0.0.8"
+    ):
+        mock_ai.return_value = _recipe(
+            ".vuln-env/docker-compose.yml",
+            "http://localhost:3000",
+        )
+        mock_up.return_value = (True, "")
+        mock_hc.return_value = (True, 49153, "http")
+
+        out = await mod.EnvReadyNode().execute(ctx)
+
+    assert mock_hc.await_args.args[0] == [49153]
+    assert out["target_url"] == "http://10.0.0.8:49153"
 
 
 @pytest.mark.asyncio

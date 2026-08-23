@@ -18,8 +18,10 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import decode_access_token
+from app.core.database import get_db_session
 
 # auto_error=False：SSE 端点用 ?token=，缺 header 不在此抛错，由下游统一处理
 _bearer = HTTPBearer(auto_error=False)
@@ -58,11 +60,33 @@ async def get_current_user_id(
 
     # 未提供 token
     if settings.environment == "development":
-        # 开发模式回退（保留原 owner_id="system" 行为，不破坏 Mock 冒烟）
-        return "system"
+        # 开发模式回退（保留原 owner_id="system" 行为，不破坏 Mock 冒烟）。
+        # 仅限本机来源：服务以 0.0.0.0 监听，放行局域网会被匿名以 system 身份
+        # 操作；testclient 是 FastAPI TestClient 的固定来源。
+        client_host = request.client.host if request.client else ""
+        if client_host in ("127.0.0.1", "::1", "testclient", ""):
+            return "system"
 
     raise HTTPException(401, "未提供认证凭据")
 
 
 # 各 Context 直接 Depends(CurrentUserId) 注入
 CurrentUserId = Annotated[str, Depends(get_current_user_id)]
+
+
+async def get_current_admin_id(
+    user_id: CurrentUserId,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> str:
+    """平台级配置只允许活跃管理员修改或读取。"""
+    from app.contexts.identity.models import User
+
+    user = await session.get(User, user_id)
+    if user is None or not user.is_active:
+        raise HTTPException(401, "用户不存在或已停用")
+    if not user.is_admin and user.role != "admin":
+        raise HTTPException(403, "仅管理员可访问平台设置")
+    return user_id
+
+
+CurrentAdminId = Annotated[str, Depends(get_current_admin_id)]

@@ -1,6 +1,7 @@
-import { App, Button, Empty, Space, Table, Tag, Typography } from 'antd'
+import { App, Button, Dropdown, Empty, Space, Table, Tag, Typography } from 'antd'
 import {
   DeleteOutlined,
+  MoreOutlined,
   PauseCircleOutlined,
   PlusOutlined,
   RedoOutlined,
@@ -13,6 +14,7 @@ import type { TaskSummary } from '../../../shared/lib/api'
 import { getStatusMeta, getPriorityMeta, getVerdictMeta } from '../../../shared/lib/meta'
 import { canCancel, canDelete, canRetry, CONFIRM_COPY } from '../../../shared/lib/taskActions'
 import { tableRowNavigateProps } from '../../../shared/lib/tableRowNavigate'
+import { auditResultLabel, projectLabel, sourceVersionLabel } from '../../../shared/lib/tablePresentation'
 
 const { Text } = Typography
 
@@ -48,35 +50,59 @@ export function TaskTable({
 
   const columns: ColumnsType<TaskSummary> = [
     {
-      title: '项目地址',
+      title: '项目 / 版本',
       dataIndex: 'project_address',
       ellipsis: true,
-      render: (v: string) => <Text code>{v}</Text>,
+      render: (v: string, row) => (
+        <div>
+          <Text strong>{projectLabel(v)}</Text>
+          <div><Text type="secondary" style={{ fontSize: 12 }}>{sourceVersionLabel(row.project_ref, row.project_ref_type)}</Text></div>
+        </div>
+      ),
     },
     {
-      title: '状态',
+      title: '审计配置',
+      dataIndex: 'task_type',
+      width: 130,
+      render: (v: TaskSummary['task_type'], row) => (
+        <div>
+          <Tag color={v === 'discovery' ? 'blue' : 'purple'}>{v === 'discovery' ? '代码审计' : '定向验证'}</Tag>
+          <div><Text type="secondary" style={{ fontSize: 12 }}>优先级：{getPriorityMeta(row.priority).label}</Text></div>
+        </div>
+      ),
+    },
+    {
+      title: '执行状态',
       dataIndex: 'status',
-      width: 110,
-      render: (v: string) => {
+      width: 140,
+      render: (v: string, row) => {
         const m = getStatusMeta(v)
-        return <Tag color={m.color}>{m.label}</Tag>
+        return (
+          <div>
+            <Tag color={m.color}>{m.label}</Tag>
+            <div><Text type="secondary" style={{ fontSize: 12 }}>更新 {dayjs(row.updated_at).format('MM-DD HH:mm')}</Text></div>
+          </div>
+        )
       },
     },
     {
-      title: '判定',
+      title: '审计结果',
       dataIndex: 'verdict',
-      width: 110,
-      render: (v: string | null) =>
-        v ? <Tag color={getVerdictMeta(v).color}>{getVerdictMeta(v).label}</Tag> : <Text type="secondary">—</Text>,
+      width: 150,
+      render: (v: string | null, row) => (
+        <div>
+          <Tag color={v ? getVerdictMeta(v).color : row.status === 'completed' ? 'green' : 'default'}>
+            {auditResultLabel(row.status, v)}
+          </Tag>
+          {row.task_type === 'discovery' ? (
+            <div><Text type="secondary" style={{ fontSize: 12 }}>线索 {row.finding_count} · 待复核 {row.pending_review_count} · 确认 {row.confirmed_count}</Text></div>
+          ) : null}
+          {row.report_status ? <div><Text type="secondary" style={{ fontSize: 12 }}>报告：{row.report_status === 'published' ? '已发布' : '已生成'}</Text></div> : null}
+        </div>
+      ),
     },
     {
-      title: '优先级',
-      dataIndex: 'priority',
-      width: 90,
-      render: (v: string) => <Tag color={getPriorityMeta(v).color}>{getPriorityMeta(v).label}</Tag>,
-    },
-    {
-      title: '创建时间',
+      title: '发起时间',
       dataIndex: 'created_at',
       width: 170,
       render: (v: string) => dayjs(v).format('MM-DD HH:mm:ss'),
@@ -84,72 +110,53 @@ export function TaskTable({
     {
       title: '操作',
       key: 'actions',
-      width: 200,
+      width: 150,
       fixed: 'right',
-      render: (_, row) => (
-        <Space size="small" wrap onClick={(e) => e.stopPropagation()}>
+      render: (_, row) => {
+        const moreItems = []
+        if (canCancel(row.status)) {
+          moreItems.push({
+            key: 'cancel', icon: <PauseCircleOutlined />, label: '取消运行', danger: true,
+            onClick: () => modal.confirm({
+              title: CONFIRM_COPY.cancel.title, content: CONFIRM_COPY.cancel.content,
+              okText: CONFIRM_COPY.cancel.okText, okType: 'danger', cancelText: '返回',
+              onOk: () => onCancel(row.id),
+            }),
+          })
+        }
+        if (canRetry(row.status)) {
+          moreItems.push({
+            key: 'retry', icon: <RedoOutlined />, label: '重新运行',
+            onClick: () => modal.confirm({
+              title: CONFIRM_COPY.retry.title, content: CONFIRM_COPY.retry.content,
+              okText: CONFIRM_COPY.retry.okText, cancelText: '返回',
+              onOk: () => onRetry(row.id),
+            }),
+          })
+        }
+        if (canDelete(row.status)) {
+          moreItems.push({
+            key: 'archive', icon: <DeleteOutlined />, label: '归档运行', danger: true,
+            onClick: () => modal.confirm({
+              title: CONFIRM_COPY.delete.title, content: CONFIRM_COPY.delete.content,
+              okText: CONFIRM_COPY.delete.okText, okType: 'danger', cancelText: '返回',
+              onOk: () => onDelete(row.id),
+            }),
+          })
+        }
+        return (
+        <Space size="small" onClick={(e) => e.stopPropagation()}>
           <Button size="small" type="link" onClick={() => navigate(`/tasks/${row.id}?tab=progress`)}>
-            详情
+            {row.status === 'needs_review' ? '继续处理' : row.status === 'completed' ? '查看结果' : row.status === 'failed' ? '查看错误' : '查看进度'}
           </Button>
-          {canCancel(row.status) && (
-            <Button
-              size="small"
-              danger
-              icon={<PauseCircleOutlined />}
-              onClick={() => {
-                modal.confirm({
-                  title: CONFIRM_COPY.cancel.title,
-                  content: CONFIRM_COPY.cancel.content,
-                  okText: CONFIRM_COPY.cancel.okText,
-                  okType: 'danger',
-                  cancelText: '返回',
-                  onOk: () => onCancel(row.id),
-                })
-              }}
-              loading={pendingId === row.id}
-            >
-              取消
-            </Button>
-          )}
-          {canRetry(row.status) && (
-            <Button
-              size="small"
-              icon={<RedoOutlined />}
-              onClick={() => {
-                modal.confirm({
-                  title: CONFIRM_COPY.retry.title,
-                  content: CONFIRM_COPY.retry.content,
-                  okText: CONFIRM_COPY.retry.okText,
-                  cancelText: '返回',
-                  onOk: () => onRetry(row.id),
-                })
-              }}
-              loading={pendingId === row.id}
-            >
-              重试
-            </Button>
-          )}
-          {canDelete(row.status) && (
-            <Button
-              size="small"
-              danger
-              icon={<DeleteOutlined />}
-              onClick={(e) => {
-                e.stopPropagation()
-                modal.confirm({
-                  title: CONFIRM_COPY.delete.title,
-                  content: CONFIRM_COPY.delete.content,
-                  okText: CONFIRM_COPY.delete.okText,
-                  okType: 'danger',
-                  cancelText: '返回',
-                  onOk: () => onDelete(row.id),
-                })
-              }}
-              loading={pendingId === row.id}
-            />
-          )}
+          {moreItems.length > 0 ? (
+            <Dropdown menu={{ items: moreItems }} trigger={['click']}>
+              <Button size="small" icon={<MoreOutlined />} loading={pendingId === row.id} aria-label="更多操作" />
+            </Dropdown>
+          ) : null}
         </Space>
-      ),
+        )
+      },
     },
   ]
 
@@ -159,12 +166,12 @@ export function TaskTable({
       loading={loading}
       columns={columns}
       dataSource={data}
-      scroll={{ x: 900 }}
+      scroll={{ x: 980 }}
       locale={{
         emptyText: (
-          <Empty description="暂无任务">
+          <Empty description="暂无审计运行">
             <Button type="primary" icon={<PlusOutlined />} onClick={onCreate}>
-              新建任务
+              发起代码审计
             </Button>
           </Empty>
         ),

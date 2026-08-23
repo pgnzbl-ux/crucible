@@ -21,14 +21,12 @@ import logging
 import os
 import shutil
 import subprocess
-import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 
 import docker
-import requests
 from docker.errors import DockerException, ImageNotFound, NotFound
 from docker.types import LogConfig
 
@@ -138,13 +136,16 @@ class AgentRunnerSpec:
     network: str | None = AGENT_RUNNER_NETWORK
     env: dict[str, str] = field(default_factory=dict)
     host_workdir: str = ""                  # bind mount 源（host 路径 → /workspace）
+    # 当前节点 skill 目录（host）→ /node-skill:ro；只挂本节点，不进镜像
+    skill_host_dir: str | None = None
     prompt_json_filename: str = ".prompt.json"
     workdir_container: str = "/workspace"
     user: str = "1000:1000"
     extra_labels: dict[str, str] = field(default_factory=dict)
     pids_limit: int = 256
     network_disabled: bool = False           # True = 完全断网（强隔离）
-    timeout_seconds: int = 1800
+    # 用空 tmpfs 遮蔽 /workspace 下的敏感子路径（如 .secrets/），轻工位节点用
+    hide_workspace_paths: tuple[str, ...] = ()
 
 
 # ─ ── Manager ─ ──
@@ -171,14 +172,12 @@ class AgentRunnerManager:
     def _client_or_connect(self):
         """惰性连接 Docker daemon；失败抛 AgentRunnerError（调用方转节点失败）。
 
-        read timeout 对齐 agent 超时预算 + 120s 余量：docker-py 默认 60s，
-        而 agent 静默思考/长工具调用超过 60s 属常态——logs(follow=True) 流
-        会中途抛 ReadTimeout 杀掉整个节点（2026-08-19 P0#5）。
+        Agent 允许无限运行，因此 Docker 流式读取也不能使用总时长 read timeout；
+        任务取消时由 remove_for_task / stop_and_remove 主动中断容器。
         """
         if self._client is None:
-            read_timeout = settings.agent_runner_timeout_seconds + 120
             try:
-                self._client = docker.from_env(timeout=read_timeout)
+                self._client = docker.from_env(timeout=None)
             except DockerException as e:
                 raise AgentRunnerError(f"无法连接 Docker daemon: {e}") from e
             self._ensure_network()
@@ -229,6 +228,12 @@ class AgentRunnerManager:
         # 资源限制
         nano_cpus = max(int(spec.cpu_limit * 1_000_000_000), 100_000_000)
 
+        volumes: dict[str, dict[str, str]] = {
+            spec.host_workdir: {"bind": spec.workdir_container, "mode": "rw"},
+        }
+        if spec.skill_host_dir:
+            volumes[spec.skill_host_dir] = {"bind": "/node-skill", "mode": "ro"}
+
         container_config: dict = {
             "image": spec.image,
             "name": name,
@@ -236,9 +241,7 @@ class AgentRunnerManager:
             "environment": {**spec.env, "PYTHONPATH": "/app"},
             "working_dir": spec.workdir_container,
             "user": spec.user,
-            "volumes": {
-                spec.host_workdir: {"bind": spec.workdir_container, "mode": "rw"},
-            },
+            "volumes": volumes,
             "labels": _runner_labels(name, spec),
             "nano_cpus": nano_cpus,
             "mem_limit": spec.memory_limit,
@@ -248,6 +251,10 @@ class AgentRunnerManager:
             # tmpfs：根只读下唯一可写区
             "tmpfs": {
                 "/tmp": "rw,size=256m,nosuid,nodev,uid=1000,gid=1000,mode=1777",
+                **{
+                    p: "rw,size=1m,nosuid,nodev,uid=1000,gid=1000,mode=700"
+                    for p in spec.hide_workspace_paths
+                },
             },
             "cap_drop": ["ALL"],
             "security_opt": ["no-new-privileges"],
@@ -298,8 +305,6 @@ class AgentRunnerManager:
             spec.memory_limit = settings.agent_runner_memory_limit
         if spec.network is None:
             spec.network = settings.agent_runner_network
-        if not spec.timeout_seconds:
-            spec.timeout_seconds = settings.agent_runner_timeout_seconds
         return spec
 
     # ── 一站式流式拉起 ──
@@ -322,44 +327,11 @@ class AgentRunnerManager:
         """
         runner: AgentRunner | None = None
         parser = LineBufferedJsonParser()
-        timed_out = False
-        timer: threading.Timer | None = None
         if not hasattr(self, "_active_ids"):
             self._active_ids = set()
         try:
             runner = self.create(spec)
             logger.info(f"agent-runner 容器启动: {runner.name} image={spec.image}")
-
-            timeout = spec.timeout_seconds or 0
-            stop_failed: list[str] = []
-
-            def _on_timeout() -> None:
-                nonlocal timed_out
-                timed_out = True
-                logger.warning(f"agent-runner 超时({timeout}s),停止容器: {runner.name if runner else '?'}")
-                # stop 失败必须留痕：容器不停 → logs 流永不 EOF → 消费线程
-                # 挂死在 docker read 上。降级 SIGKILL 强拆，再失败记进
-                # summary 供人工介入（2026-08-19 P0#5：曾 except: pass 静默
-                # 吞掉，超时后平台无限挂死无任何线索）。
-                if runner is None:
-                    return
-                try:
-                    runner.container.stop(timeout=10)
-                except Exception as e:  # noqa: BLE001
-                    stop_failed.append(f"stop 失败: {e}")
-                    try:
-                        runner.container.kill()
-                    except Exception as e2:  # noqa: BLE001
-                        stop_failed.append(f"kill 失败: {e2}")
-                        logger.error(
-                            "agent-runner 超时后 stop+kill 均失败，容器可能仍在运行: %s (%s / %s)",
-                            runner.name, e, e2,
-                        )
-
-            if timeout > 0:
-                timer = threading.Timer(timeout, _on_timeout)
-                timer.daemon = True
-                timer.start()
 
             # 边消费边回调（行缓冲）
             for chunk in runner.container.logs(
@@ -378,36 +350,9 @@ class AgentRunnerManager:
             for event in parser.flush():
                 on_event(event)
 
-            # 等待容器结束；超时后 stop/kill 都失败时容器可能永不停 →
-            # wait() 无界阻塞整个 worker 线程。设兜底宽限（stop timeout 10s +
-            # kill 生效余量），到点按超时处理（2026-08-19 P0#6）。
-            wait_grace = 30 if timed_out else None
-            try:
-                wait_result = runner.container.wait(timeout=wait_grace)
-            except requests.exceptions.ReadTimeout:
-                logger.error(
-                    "agent-runner wait() 兜底超时（stop/kill 均未生效）: %s", runner.name
-                )
-                wait_result = {"StatusCode": 137}
-            except Exception as e:  # noqa: BLE001
-                if timed_out:
-                    logger.warning("agent-runner wait() 异常（已超时，按 137 处理）: %s", e)
-                    wait_result = {"StatusCode": 137}
-                else:
-                    raise
+            # logs(follow=True) 结束后容器应已退出；不按运行时长强制 stop/kill。
+            wait_result = runner.container.wait(timeout=None)
             exit_code = int(wait_result.get("StatusCode", 1))
-            if timed_out:
-                # 超时场景 exit 统一 137 归因口径——但若 agent 已在超时瞬间
-                # 正常写完 output（exit 0），保留真实退出码：产物已落盘，
-                # 按超时丢弃会白跑一轮完整验证（P0#6 边界竞态）。归因由
-                # summary.timed_out 携带，不靠 exit_code 编码。
-                if exit_code == 0:
-                    logger.info(
-                        "agent-runner 超时瞬间正常完成（exit 0），保留产物不判失败: %s",
-                        runner.name,
-                    )
-                else:
-                    exit_code = 137
 
             # 检查 OOM
             runner.container.reload()
@@ -442,8 +387,8 @@ class AgentRunnerManager:
                 "exit_code": exit_code,
                 "oom_killed": oom_killed,
                 "stderr_tail": stderr_tail,
-                "timed_out": timed_out,
-                "stop_failed": "; ".join(stop_failed),
+                "timed_out": False,
+                "stop_failed": "",
             }
             return exit_code, summary
 
@@ -452,8 +397,6 @@ class AgentRunnerManager:
         except DockerException as e:
             raise AgentRunnerError(f"agent-runner 流式消费失败: {e}") from e
         finally:
-            if timer is not None:
-                timer.cancel()
             if runner is not None:
                 self._active_ids.discard(runner.id)
                 try:

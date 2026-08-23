@@ -436,6 +436,238 @@ body,
   flex-shrink: 0;
 }
 
+/* ── 项目资产：信息密度适中的资产清单 ── */
+.crucible-project-assets {
+  padding-top: 14px;
+}
+.crucible-project-assets__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 34px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+.crucible-project-assets__bar-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--crucible-text);
+  font-size: 14px;
+  font-weight: 600;
+}
+.crucible-project-assets__count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  color: var(--crucible-text-secondary);
+  background: var(--crucible-bg);
+  font-size: 12px;
+  font-weight: 500;
+}
+.crucible-project-assets__table .ant-table-container {
+  overflow: hidden;
+  border: 1px solid var(--crucible-border);
+  border-radius: 10px;
+}
+.crucible-project-assets__table .ant-table-thead > tr > th {
+  height: 42px;
+  padding-block: 9px;
+  color: var(--crucible-text-secondary);
+  background: #fafbfc;
+  border-bottom-color: var(--crucible-border);
+  font-size: 12px;
+  font-weight: 600;
+}
+.crucible-project-assets__table .ant-table-tbody > tr > td {
+  height: 76px;
+  padding-block: 13px;
+  vertical-align: middle;
+}
+.crucible-project-assets__table .ant-table-tbody > tr:last-child > td {
+  border-bottom: 0;
+}
+.crucible-project-assets__table .ant-table-tbody > tr > td:first-child {
+  position: relative;
+}
+.crucible-project-assets__table .ant-table-tbody > tr > td:first-child::before {
+  content: '';
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 0;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--crucible-primary);
+  opacity: 0;
+  transform: scaleY(0.55);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+.crucible-project-assets__table .ant-table-tbody > tr:hover > td:first-child::before,
+.crucible-project-assets__table .ant-table-tbody > tr:focus-visible > td:first-child::before {
+  opacity: 1;
+  transform: scaleY(1);
+}
+.crucible-project-assets__table .ant-table-pagination.ant-pagination {
+  margin: 16px 2px 0;
+}
+.crucible-project-asset__identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.crucible-project-asset__source-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  color: var(--crucible-primary);
+  background: var(--crucible-primary-light);
+  font-size: 17px;
+}
+.crucible-project-asset__source-icon.is-upload {
+  color: #531dab;
+  background: #f9f0ff;
+}
+.crucible-project-asset__identity-body,
+.crucible-project-asset__version-body {
+  min-width: 0;
+}
+.crucible-project-asset__name {
+  display: block;
+  overflow: hidden;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.crucible-project-asset__meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  margin-top: 5px;
+  color: var(--crucible-text-disabled);
+  font-size: 12px;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+.crucible-project-asset__meta-separator {
+  flex: 0 0 auto;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--crucible-border-strong);
+}
+.crucible-project-asset__address {
+  display: block;
+  min-width: 0;
+  font-size: 12px;
+}
+.crucible-project-asset__stack {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+}
+.crucible-project-asset__pill {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--crucible-border);
+  border-radius: 6px;
+  color: var(--crucible-text-secondary);
+  background: #fafafa;
+  font-size: 12px;
+  line-height: 20px;
+}
+.crucible-project-asset__pill.is-web {
+  color: #237804;
+  background: #f6ffed;
+  border-color: #d9f7be;
+}
+.crucible-project-asset__pill.is-language {
+  color: var(--crucible-primary-active);
+  background: var(--crucible-primary-light);
+  border-color: #bae0ff;
+}
+.crucible-project-asset__framework {
+  display: block;
+  min-width: 0;
+  font-size: 12px;
+}
+.crucible-project-asset__unprofiled {
+  font-size: 12px;
+}
+.crucible-project-asset__version {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+.crucible-project-asset__version-icon {
+  flex: 0 0 auto;
+  color: var(--crucible-text-disabled);
+  font-size: 14px;
+}
+.crucible-project-asset__eyebrow,
+.crucible-project-asset__ref,
+.crucible-project-asset__state-time {
+  display: block;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.crucible-project-asset__ref {
+  max-width: 100%;
+  margin-top: 2px;
+  color: var(--crucible-text);
+  font-family: var(--crucible-font-mono);
+}
+.crucible-project-asset__state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+.crucible-project-asset__state-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--crucible-text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+}
+.crucible-project-asset__state-label.is-ready {
+  color: #389e0d;
+}
+.crucible-project-asset__state-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--crucible-border-strong);
+}
+.crucible-project-asset__state-time {
+  white-space: nowrap;
+}
+.crucible-project-asset__actions {
+  white-space: nowrap;
+}
+.crucible-project-asset__actions .ant-btn-link {
+  padding-inline: 6px;
+  font-weight: 500;
+}
+
 /* ── 统计卡 ── */
 .stat-card {
   border-radius: 12px;
@@ -594,6 +826,7 @@ body,
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 .crucible-fill-tabs {
   flex: 1;
@@ -619,6 +852,90 @@ body,
   min-height: 0;
   height: 100%;
   overflow: auto;
+}
+.crucible-fill-tabs .ant-tabs-tabpane {
+  height: 100%;
+  min-height: 0;
+}
+
+/* 审计过程工作台：左侧节点进度，右侧所选节点实时日志。 */
+.crucible-audit-workbench {
+  display: grid;
+  grid-template-columns: minmax(340px, 0.88fr) minmax(500px, 1.35fr);
+  gap: 12px;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+.crucible-audit-workbench__pane {
+  min-width: 0;
+  min-height: 0;
+  padding: 14px;
+  overflow: hidden;
+  border: 1px solid var(--crucible-border);
+  border-radius: 12px;
+  background: var(--crucible-bg-elevated, var(--crucible-bg));
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--crucible-text) 4%, transparent);
+}
+.crucible-audit-workbench__pane.is-progress {
+  display: flex;
+  flex-direction: column;
+}
+.crucible-audit-workbench__head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--crucible-border);
+}
+.crucible-audit-workbench__head > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.crucible-audit-workbench__head strong {
+  font-size: 14px;
+}
+.crucible-audit-workbench__head small {
+  color: var(--crucible-text-secondary);
+  font-size: 11px;
+}
+.crucible-audit-workbench__progress-scroll {
+  flex: 1;
+  min-height: 0;
+  padding-right: 4px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.crucible-audit-workbench__progress-scroll .crucible-node-progress {
+  width: 100%;
+  margin: 0;
+}
+.crucible-audit-workbench__pane.is-events {
+  display: flex;
+  flex-direction: column;
+}
+.crucible-audit-workbench .crucible-stream {
+  min-height: 0;
+}
+@media (max-width: 900px) {
+  .crucible-audit-workbench {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+    overflow: visible;
+  }
+  .crucible-audit-workbench__pane.is-progress {
+    height: min(66vh, 620px);
+    min-height: 440px;
+  }
+  .crucible-audit-workbench__pane.is-events {
+    height: min(70vh, 660px);
+    min-height: 460px;
+  }
 }
 
 /* ── Agent 过程流：贴底跟随的实时窗口 ── */
@@ -722,49 +1039,783 @@ body,
   box-shadow: var(--crucible-shadow-pop);
 }
 
-/* ── 任务详情：顶部横向节点流程条（运行中与终态均保留，点击看该节点事件） ── */
+/* ── 任务详情：顶部编排画布（十字虚线网格，默认铺满） ── */
 .crucible-detail-nodes-pin {
   flex: 0 0 auto;
-  overflow-x: auto;
-  padding: 8px 4px 16px;
+  height: 136px;
+  min-height: 136px;
+  padding: 0;
+  overflow: hidden;
   margin-bottom: 8px;
   border-bottom: 1px solid var(--crucible-border);
 }
-.crucible-node-steps-compact.is-clickable .ant-steps-item.is-selectable {
+.crucible-detail-nodes-pin.is-expanded {
+  /* 详细 DAG 本体约 318px，高度贴合画布，避免底部出现大块空白。 */
+  height: 336px;
+  min-height: 336px;
+}
+.crucible-node-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.crucible-node-flow.is-compact {
+  position: relative;
+  height: 100%;
+  gap: 0;
+}
+.crucible-node-flow.is-compact .crucible-node-flow__dag {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.crucible-flow-canvas__toolbar {
+  position: absolute;
+  z-index: 3;
+  top: 6px;
+  right: 8px;
+  left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--crucible-bg-elevated, var(--crucible-bg)) 88%, transparent);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 1px 8px color-mix(in srgb, var(--crucible-text) 7%, transparent);
+}
+.crucible-dag-overview {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  overflow: hidden;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--crucible-primary) 3%, transparent), transparent 25%),
+    var(--crucible-bg);
+}
+.crucible-dag-overview__mode {
+  position: absolute;
+  z-index: 2;
+  top: 9px;
+  left: 14px;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--crucible-primary) 25%, var(--crucible-border));
+  border-radius: 999px;
+  color: var(--crucible-primary);
+  background: color-mix(in srgb, var(--crucible-primary) 7%, var(--crucible-bg));
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+}
+.crucible-dag-overview__track {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 34px 204px 10px 14px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.crucible-dag-overview__segment {
+  display: flex;
+  flex: 1 0 auto;
+  align-items: center;
+  min-width: 132px;
+}
+.crucible-dag-stage-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 116px;
+  height: 68px;
+  padding: 8px 9px;
+  border: 1px solid var(--crucible-border);
+  border-radius: 10px;
+  background: var(--crucible-bg-elevated, var(--crucible-bg));
+  color: var(--crucible-text);
+  text-align: left;
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--crucible-text) 5%, transparent);
+}
+.crucible-dag-stage-card:disabled {
+  cursor: default;
+  opacity: 1;
+}
+.crucible-dag-stage-card.is-selectable {
   cursor: pointer;
 }
-.crucible-node-steps-compact.is-clickable .ant-steps-item.is-pending {
-  cursor: default;
+.crucible-dag-stage-card.is-selectable:hover {
+  border-color: color-mix(in srgb, var(--crucible-primary) 65%, var(--crucible-border));
+  transform: translateY(-1px);
 }
-.crucible-node-steps-compact.is-clickable .ant-steps-item:has(.is-selected) {
-  border-radius: 8px;
-  background: var(--crucible-bg);
+.crucible-dag-stage-card.is-selected {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--crucible-primary) 70%, transparent);
 }
-.crucible-node-steps-compact .ant-steps-item.is-selected .ant-steps-item-wrapper,
-.crucible-node-steps-compact .crucible-node-steps-select.is-selected {
+.crucible-dag-stage-card.is-running {
+  border-color: color-mix(in srgb, var(--crucible-primary) 65%, var(--crucible-border));
+  background: color-mix(in srgb, var(--crucible-primary) 5%, var(--crucible-bg-elevated, var(--crucible-bg)));
+}
+.crucible-dag-stage-card.is-completed {
+  border-color: color-mix(in srgb, var(--crucible-success) 42%, var(--crucible-border));
+}
+.crucible-dag-stage-card.is-failed,
+.crucible-dag-stage-card.is-degraded {
+  border-color: color-mix(in srgb, var(--crucible-error) 52%, var(--crucible-border));
+}
+.crucible-dag-stage-card.is-blocked {
+  border-style: dashed;
+  background: color-mix(in srgb, var(--crucible-border) 10%, var(--crucible-bg-elevated, var(--crucible-bg)));
+}
+.crucible-dag-stage-card__index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  color: var(--crucible-text-secondary);
+  background: color-mix(in srgb, var(--crucible-border-strong) 24%, transparent);
+  font-family: var(--crucible-font-mono);
+  font-size: 10px;
   font-weight: 600;
 }
-.crucible-node-steps-compact.is-clickable .ant-steps-item.is-selectable:hover .ant-steps-item-title {
-  color: var(--crucible-primary);
+.crucible-dag-stage-card__copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
 }
-.crucible-node-steps-compact.is-clickable .ant-steps-item.is-selectable .ant-steps-item-content,
-.crucible-node-steps-compact.is-clickable .ant-steps-item.is-selectable .crucible-node-steps-compact__caption {
+.crucible-dag-stage-card__copy strong {
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.crucible-dag-stage-card__copy small {
+  overflow: hidden;
+  color: var(--crucible-text-secondary);
+  font-size: 10px;
+  line-height: 1.2;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.crucible-dag-stage-card__state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  color: var(--crucible-text-disabled);
+  font-size: 13px;
+}
+.crucible-dag-stage-card__state em {
+  font-family: var(--crucible-font-mono);
+  font-size: 8px;
+  font-style: normal;
+}
+.crucible-dag-stage-card.is-running .crucible-dag-stage-card__state { color: var(--crucible-primary); }
+.crucible-dag-stage-card.is-completed .crucible-dag-stage-card__state { color: var(--crucible-success); }
+.crucible-dag-stage-card.is-failed .crucible-dag-stage-card__state,
+.crucible-dag-stage-card.is-degraded .crucible-dag-stage-card__state { color: var(--crucible-error); }
+.crucible-dag-stage-card.is-blocked .crucible-dag-stage-card__state { color: var(--crucible-text-secondary); }
+.crucible-dag-overview__arrow {
+  flex: 0 0 18px;
+  color: var(--crucible-border-strong);
+  font-size: 22px;
+  line-height: 1;
+  text-align: center;
+}
+.crucible-flow-canvas {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: color-mix(in srgb, var(--crucible-bg) 96%, var(--crucible-primary));
+  scrollbar-gutter: stable;
+}
+.crucible-flow-canvas.is-overflow-y {
+  overflow-y: auto;
+}
+.crucible-flow-canvas__grid {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 0;
+}
+.crucible-flow-canvas__grid-dot {
+  fill: var(--crucible-border-strong);
+  opacity: 0.38;
+}
+.crucible-flow-canvas__slot {
+  position: relative;
+  z-index: 1;
+}
+.crucible-flow-canvas__world {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+}
+.crucible-dag-group {
+  position: absolute;
+  z-index: 0;
+  box-sizing: border-box;
+  border: 1px solid color-mix(in srgb, var(--crucible-border-strong) 68%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--crucible-bg-elevated, var(--crucible-bg)) 78%, transparent);
+  pointer-events: none;
+}
+.crucible-dag-group.is-prepare { background: color-mix(in srgb, var(--crucible-primary) 4%, var(--crucible-bg-elevated, var(--crucible-bg))); }
+.crucible-dag-group.is-parallel { background: color-mix(in srgb, #1677ff 4%, var(--crucible-bg-elevated, var(--crucible-bg))); }
+.crucible-dag-group.is-deep { background: color-mix(in srgb, #08979c 5%, var(--crucible-bg-elevated, var(--crucible-bg))); }
+.crucible-dag-group.is-review { background: color-mix(in srgb, #722ed1 4%, var(--crucible-bg-elevated, var(--crucible-bg))); }
+.crucible-dag-group.is-dispatch { background: color-mix(in srgb, #c41d7f 4%, var(--crucible-bg-elevated, var(--crucible-bg))); }
+.crucible-dag-group.is-verify { background: color-mix(in srgb, #d46b08 5%, var(--crucible-bg-elevated, var(--crucible-bg))); }
+.crucible-dag-group.is-result { background: color-mix(in srgb, var(--crucible-success) 4%, var(--crucible-bg-elevated, var(--crucible-bg))); }
+.crucible-dag-group__index {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  color: var(--crucible-text-secondary);
+  background: color-mix(in srgb, var(--crucible-border-strong) 22%, transparent);
+  font-family: var(--crucible-font-mono);
+  font-size: 9px;
+  font-weight: 600;
+}
+.crucible-dag-group__copy {
+  position: absolute;
+  top: 9px;
+  left: 36px;
+  right: 10px;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+.crucible-dag-group__copy strong {
+  flex: 0 0 auto;
+  font-size: 11px;
+  line-height: 18px;
+}
+.crucible-dag-group__copy small {
+  overflow: hidden;
+  color: var(--crucible-text-secondary);
+  font-size: 9px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.crucible-flow-canvas__edges {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  z-index: 1;
+  pointer-events: none;
+}
+.crucible-dag__edge {
+  stroke: color-mix(in srgb, var(--crucible-text-secondary) 58%, var(--crucible-border-strong));
+  stroke-width: 1.45;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.crucible-dag__edge.is-conditional {
+  stroke: color-mix(in srgb, #d48806 72%, var(--crucible-border-strong));
+  stroke-dasharray: 6 4;
+}
+.crucible-dag__edge.is-support {
+  stroke: color-mix(in srgb, var(--crucible-primary) 62%, var(--crucible-border-strong));
+  stroke-dasharray: 3 4;
+}
+.crucible-dag__arrow {
+  fill: color-mix(in srgb, var(--crucible-text-secondary) 55%, var(--crucible-border-strong));
+}
+.crucible-dag__edge-label {
+  fill: var(--crucible-text-secondary);
+  stroke: var(--crucible-bg);
+  stroke-width: 4px;
+  paint-order: stroke;
+  font-size: 9px;
+  font-weight: 600;
+  text-anchor: middle;
+  pointer-events: none;
+}
+.crucible-dag__edge-label.is-conditional { fill: color-mix(in srgb, #d48806 80%, var(--crucible-text)); }
+.crucible-dag__edge-label.is-support { fill: var(--crucible-primary); }
+.crucible-dag-node {
+  position: absolute;
+  box-sizing: border-box;
   cursor: default;
+  z-index: 2;
 }
-.crucible-node-steps-select {
-  display: inline-block;
+.crucible-dag-node.is-selectable {
+  cursor: pointer;
 }
-.crucible-node-steps-compact__caption {
-  display: block;
+.crucible-dag-node.is-box {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 10px;
+  border: 1px solid var(--crucible-border);
+  border-radius: 8px;
+  background: var(--crucible-bg-elevated, var(--crucible-bg));
+  box-shadow:
+    0 1px 2px color-mix(in srgb, var(--crucible-text) 6%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--crucible-border) 35%, transparent);
+  color: var(--crucible-text);
+  font-size: 12px;
+  line-height: 1.2;
 }
-.crucible-node-steps-compact .ant-steps-item-title,
-.crucible-node-steps-compact .ant-steps-item-content,
-.crucible-node-steps-compact__title,
-.crucible-node-steps-compact__content {
-  max-width: 140px;
+.crucible-dag-node.is-box:hover.is-selectable {
+  border-color: var(--crucible-primary);
+}
+.crucible-dag-node.is-running.is-box {
+  border-color: color-mix(in srgb, var(--crucible-primary) 55%, var(--crucible-border));
+}
+.crucible-dag-node.is-completed.is-box {
+  border-color: color-mix(in srgb, var(--crucible-success) 45%, var(--crucible-border));
+}
+.crucible-dag-node.is-failed.is-box,
+.crucible-dag-node.is-degraded.is-box {
+  border-color: color-mix(in srgb, var(--crucible-error) 50%, var(--crucible-border));
+}
+.crucible-dag-node.is-blocked.is-box {
+  border-style: dashed;
+  background: color-mix(in srgb, var(--crucible-border) 10%, var(--crucible-bg-elevated, var(--crucible-bg)));
+}
+.crucible-dag-node.is-selected.is-box,
+.crucible-dag-node.is-selected.is-diamond,
+.crucible-dag-node.is-selected.is-terminal {
+  box-shadow: 0 0 0 2px var(--crucible-primary);
+}
+.crucible-dag-node__port {
+  position: absolute;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  margin-top: -4px;
+  border-radius: 50%;
+  background: var(--crucible-bg-elevated, var(--crucible-bg));
+  border: 1.5px solid var(--crucible-border-strong);
+  box-sizing: border-box;
+  z-index: 2;
+}
+.crucible-dag-node__port.is-in {
+  left: -5px;
+}
+.crucible-dag-node__port.is-out {
+  right: -5px;
+}
+.crucible-dag-node.is-diamond {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: visible;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--crucible-text);
+}
+.crucible-dag-node__diamond {
+  position: absolute;
+  inset: 16%;
+  z-index: 0;
+  background: var(--crucible-bg-elevated, var(--crucible-bg));
+  border: 1.5px solid var(--crucible-border-strong);
+  transform: rotate(45deg);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--crucible-text) 6%, transparent);
+}
+.crucible-dag-node.is-diamond .crucible-dag-node__label {
+  position: relative;
+  z-index: 1;
+  padding: 0 6px;
+}
+.crucible-dag-node.is-terminal {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 2px solid var(--crucible-border-strong);
+  background: var(--crucible-bg-elevated, var(--crucible-bg));
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--crucible-text);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--crucible-text) 6%, transparent);
+}
+.crucible-dag-node__status {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--crucible-text-disabled);
+  background: color-mix(in srgb, var(--crucible-border-strong) 14%, transparent);
+  font-size: 13px;
+  line-height: 1;
+}
+.crucible-dag-node.is-completed .crucible-dag-node__status {
+  color: var(--crucible-success);
+  background: color-mix(in srgb, var(--crucible-success) 9%, transparent);
+}
+.crucible-dag-node.is-failed .crucible-dag-node__status,
+.crucible-dag-node.is-degraded .crucible-dag-node__status {
+  color: var(--crucible-error);
+  background: color-mix(in srgb, var(--crucible-error) 9%, transparent);
+}
+.crucible-dag-node.is-running .crucible-dag-node__status {
+  color: var(--crucible-primary);
+  background: color-mix(in srgb, var(--crucible-primary) 10%, transparent);
+}
+.crucible-dag-node.is-skipped .crucible-dag-node__status,
+.crucible-dag-node.is-pending .crucible-dag-node__status,
+.crucible-dag-node.is-blocked .crucible-dag-node__status,
+.crucible-dag-node.is-cancelled .crucible-dag-node__status {
+  color: var(--crucible-text-disabled);
+}
+.crucible-dag-node__copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.crucible-dag-node__label {
+  font-weight: 600;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.crucible-dag-node__caption {
+  overflow: hidden;
+  color: var(--crucible-text-secondary);
+  font-size: 9.5px;
+  line-height: 1.15;
   white-space: nowrap;
+  text-overflow: ellipsis;
+}
+@media (max-width: 900px) {
+  .crucible-detail-nodes-pin {
+    height: 144px;
+    min-height: 144px;
+  }
+  .crucible-dag-overview__track {
+    padding-right: 176px;
+  }
+  .crucible-dag-overview__segment {
+    min-width: 140px;
+  }
+}
+.crucible-node-progress {
+  width: min(100%, 1040px);
+  margin: 0 auto;
+  gap: 12px;
+}
+.crucible-node-progress__summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px 20px;
+  padding: 16px 18px;
+  border: 1px solid var(--crucible-border);
+  border-radius: 12px;
+  background:
+    linear-gradient(110deg, color-mix(in srgb, var(--crucible-primary) 7%, transparent), transparent 42%),
+    var(--crucible-bg-elevated, var(--crucible-bg));
+}
+.crucible-node-progress__summary-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.crucible-node-progress__eyebrow {
+  color: var(--crucible-primary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+.crucible-node-progress__summary-copy strong {
+  overflow: hidden;
+  font-size: 15px;
+  line-height: 1.4;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.crucible-node-progress__summary-copy small {
+  color: var(--crucible-text-secondary);
+  font-size: 12px;
+}
+.crucible-node-progress__percent {
+  align-self: center;
+  color: var(--crucible-primary);
+  font-family: var(--crucible-font-mono);
+  font-size: 22px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.crucible-node-progress__bar {
+  grid-column: 1 / -1;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--crucible-border-strong) 35%, transparent);
+}
+.crucible-node-progress__bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--crucible-primary), color-mix(in srgb, var(--crucible-success) 72%, var(--crucible-primary)));
+  transition: width 0.24s ease;
+}
+.crucible-node-progress__toolbar:empty {
+  display: none;
+}
+.crucible-node-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 2px 0 12px;
+}
+.crucible-node-list__item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: start;
+  padding: 0 0 14px;
+}
+.crucible-node-list__item:last-child {
+  padding-bottom: 0;
+}
+.crucible-node-list__rail {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  justify-content: center;
+  padding-top: 11px;
+}
+.crucible-node-list__connector {
+  position: absolute;
+  z-index: 0;
+  top: 39px;
+  bottom: -1px;
+  left: 20px;
+  width: 2px;
+  border-radius: 999px;
+  background: var(--crucible-border-strong);
+}
+.crucible-node-list__item.is-completed .crucible-node-list__connector,
+.crucible-node-list__item.is-skipped .crucible-node-list__connector {
+  background: color-mix(in srgb, var(--crucible-success) 54%, var(--crucible-border-strong));
+}
+.crucible-node-list__item.is-running .crucible-node-list__connector {
+  background: linear-gradient(var(--crucible-primary), var(--crucible-border-strong));
+}
+.crucible-node-list__item.is-blocked .crucible-node-list__connector {
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--crucible-border-strong) 0 4px,
+    transparent 4px 8px
+  );
+}
+.crucible-node-list__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 2px solid var(--crucible-border-strong);
+  border-radius: 50%;
+  color: var(--crucible-text-disabled);
+  background: var(--crucible-bg-elevated, var(--crucible-bg));
+  font-size: 13px;
+  line-height: 1;
+  box-shadow: 0 0 0 4px var(--crucible-bg);
+}
+.crucible-node-list__item.is-completed .crucible-node-list__icon {
+  border-color: color-mix(in srgb, var(--crucible-success) 60%, var(--crucible-border));
+  color: var(--crucible-success);
+}
+.crucible-node-list__item.is-failed .crucible-node-list__icon,
+.crucible-node-list__item.is-degraded .crucible-node-list__icon {
+  border-color: color-mix(in srgb, var(--crucible-error) 64%, var(--crucible-border));
+  color: var(--crucible-error);
+}
+.crucible-node-list__item.is-running .crucible-node-list__icon {
+  border-color: var(--crucible-primary);
+  color: var(--crucible-primary);
+  box-shadow: 0 0 0 4px var(--crucible-bg), 0 0 0 6px color-mix(in srgb, var(--crucible-primary) 12%, transparent);
+}
+.crucible-node-list__item.is-skipped .crucible-node-list__icon,
+.crucible-node-list__item.is-blocked .crucible-node-list__icon,
+.crucible-node-list__item.is-cancelled .crucible-node-list__icon {
+  color: var(--crucible-text-secondary);
+}
+.crucible-node-list__card {
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--crucible-border);
+  border-radius: 10px;
+  background: var(--crucible-bg-elevated, var(--crucible-bg));
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--crucible-text) 4%, transparent);
+}
+.crucible-node-list__item.is-running .crucible-node-list__card {
+  border-color: color-mix(in srgb, var(--crucible-primary) 58%, var(--crucible-border));
+  background: color-mix(in srgb, var(--crucible-primary) 4%, var(--crucible-bg-elevated, var(--crucible-bg)));
+}
+.crucible-node-list__item.is-failed .crucible-node-list__card,
+.crucible-node-list__item.is-degraded .crucible-node-list__card {
+  border-color: color-mix(in srgb, var(--crucible-error) 48%, var(--crucible-border));
+}
+.crucible-node-list__item.is-selected .crucible-node-list__card {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--crucible-primary) 55%, transparent);
+}
+.crucible-node-list__item.is-selectable {
+  cursor: pointer;
+  outline: none;
+}
+.crucible-node-list__item.is-selectable:hover .crucible-node-list__card {
+  border-color: color-mix(in srgb, var(--crucible-primary) 48%, var(--crucible-border));
+}
+.crucible-node-list__item.is-selectable:focus-visible .crucible-node-list__card {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--crucible-primary) 62%, transparent);
+}
+.crucible-node-list__item.is-skipped .crucible-node-list__card {
+  background: color-mix(in srgb, var(--crucible-border) 12%, var(--crucible-bg-elevated, var(--crucible-bg)));
+}
+.crucible-node-list__item.is-blocked .crucible-node-list__card {
+  border-style: dashed;
+  background: color-mix(in srgb, var(--crucible-border) 10%, var(--crucible-bg-elevated, var(--crucible-bg)));
+}
+.crucible-node-list__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+.crucible-node-list__title {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.crucible-node-list__title > strong {
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 1.35;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.crucible-node-list__stage {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--crucible-text-secondary);
+  font-family: var(--crucible-font-mono);
+  font-size: 10px;
+  line-height: 1.2;
+}
+.crucible-node-list__stage em {
+  padding: 1px 5px;
+  border-radius: 999px;
+  color: var(--crucible-primary);
+  background: color-mix(in srgb, var(--crucible-primary) 9%, transparent);
+  font-family: var(--crucible-font-sans);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 600;
+}
+.crucible-node-list__meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  color: var(--crucible-text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.crucible-node-list__status {
+  padding: 2px 7px;
+  border: 1px solid var(--crucible-border);
+  border-radius: 999px;
+  color: var(--crucible-text-secondary);
+  background: var(--crucible-bg);
+  font-size: 10px;
+  font-weight: 600;
+}
+.crucible-node-list__status.is-running { border-color: color-mix(in srgb, var(--crucible-primary) 40%, var(--crucible-border)); color: var(--crucible-primary); }
+.crucible-node-list__status.is-completed { border-color: color-mix(in srgb, var(--crucible-success) 40%, var(--crucible-border)); color: var(--crucible-success); }
+.crucible-node-list__status.is-failed,
+.crucible-node-list__status.is-degraded { border-color: color-mix(in srgb, var(--crucible-error) 44%, var(--crucible-border)); color: var(--crucible-error); }
+.crucible-node-list__status.is-blocked { border-style: dashed; color: var(--crucible-text-secondary); }
+.crucible-node-list__summary {
+  margin: 8px 0 0;
+  color: var(--crucible-text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.crucible-node-list__retry {
+  margin-top: 5px;
+  padding-left: 0;
+}
+@media (max-width: 700px) {
+  .crucible-node-progress__summary {
+    padding: 14px;
+  }
+  .crucible-node-progress__percent {
+    font-size: 18px;
+  }
+  .crucible-node-list__item {
+    grid-template-columns: 36px minmax(0, 1fr);
+  }
+  .crucible-node-list__connector {
+    left: 17px;
+  }
+  .crucible-node-list__head {
+    flex-direction: column;
+    gap: 8px;
+  }
+  .crucible-node-list__meta {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+.crucible-node-error-log {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  max-height: 240px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--crucible-bg);
+  border: 1px solid var(--crucible-border);
+  border-radius: 6px;
+  color: var(--crucible-error);
+}
+.crucible-node-flow__detail {
+  padding: 10px 12px;
+  border: 1px solid var(--crucible-border);
+  border-radius: 8px;
 }
 /* ── 白盒审计结论：分区排版，替代一坨 pre-wrap 长文 ── */
 .crucible-audit {

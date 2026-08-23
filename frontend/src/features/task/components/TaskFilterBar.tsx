@@ -57,6 +57,18 @@ export function TaskFilterBar({ params, onChange, onClear }: TaskFilterBarProps)
       <Space wrap size="middle">
         <Select
           allowClear
+          aria-label="分析方式"
+          placeholder="分析方式"
+          style={{ width: 140 }}
+          value={params.taskType}
+          onChange={(v) => onChange({ taskType: v })}
+          options={[
+            { value: 'discovery', label: '代码审计' },
+            { value: 'verify', label: '定向验证' },
+          ]}
+        />
+        <Select
+          allowClear
           aria-label="状态"
           placeholder="状态"
           style={{ width: 140 }}

@@ -121,6 +121,8 @@ REPRODUCE_DENY_RES = [
 def _allowed_tools_for(node_key: str | None) -> list[str]:
     if node_key == "profile":
         return ["Read", "Grep", "Glob"]
+    if node_key == "triage":
+        return ["Read", "Grep", "Glob"]
     if node_key == "audit":
         return ["Read", "Grep", "Glob", "Bash", "WebSearch"]
     return ["Read", "Grep", "Glob", "Bash", "Write", "Edit", "WebFetch", "WebSearch"]
@@ -463,6 +465,7 @@ async def _stream_messages(
                     "duration_ms": getattr(message, "duration_ms", None),
                     "total_cost_usd": getattr(message, "total_cost_usd", None),
                     "num_turns": getattr(message, "num_turns", None),
+                    "usage": getattr(message, "usage", None),
                     "is_error": is_error,
                     "sequence": seq,
                     "timestamp": ts,
@@ -596,22 +599,28 @@ def _build_node_prompt(node_key: str, input_json: dict[str, Any]) -> str:
 
 
 # ── 节点蒸馏 skill（system_prompt）──
+# 生产：worker -v 挂当前节点目录 → /node-skill:ro，只读 SKILL.md。
+# 单测：可设 NODE_SKILL_DIR 指向仓库 node-skills/ 做回退。
 
-NODE_AI_KEYS = frozenset({"profile", "env_ready", "audit", "reproduce", "report"})
-
-
-def _node_skill_dir() -> Path:
-    override = os.environ.get("NODE_SKILL_DIR")
-    if override:
-        return Path(override)
-    return Path(__file__).resolve().parent.parent / "node-skills"
+NODE_AI_KEYS = frozenset({"profile", "env_ready", "audit", "reproduce", "report", "triage"})
 
 
 def _load_node_skill(node_key: str) -> str:
-    path = _node_skill_dir() / node_key / "SKILL.md"
-    if not path.is_file():
-        raise FileNotFoundError(f"节点 skill 不存在: {path}")
-    return path.read_text(encoding="utf-8")
+    """加载本节点 skill 正文。优先卷映射路径，禁止依赖镜像内全量 skills。"""
+    candidates: list[Path] = []
+    override = os.environ.get("NODE_SKILL_FILE")
+    if override:
+        candidates.append(Path(override))
+    candidates.append(Path("/node-skill/SKILL.md"))
+    skill_dir = os.environ.get("NODE_SKILL_DIR")
+    if skill_dir:
+        candidates.append(Path(skill_dir) / node_key / "SKILL.md")
+    for path in candidates:
+        if path.is_file():
+            return path.read_text(encoding="utf-8")
+    raise FileNotFoundError(
+        f"节点 skill 不存在（已查 {', '.join(str(p) for p in candidates)}）"
+    )
 
 
 def _system_prompt_for(node_key: str | None) -> dict[str, str] | None:
@@ -638,7 +647,7 @@ def _make_submit_result_tool(schema: dict):
     @tool(name="submit_result", description="提交本节点的结构化结果。完成后必须调用此工具。", input_schema=schema)
     async def submit_result(input: dict) -> dict:
         # input 已按 schema 校验;写文件供 worker 读取
-        out_path = Path("/workspace/.node_output.json")
+        out_path = Path(os.environ.get("NODE_OUTPUT_PATH", "/workspace/.node_output.json"))
         out_path.write_text(json.dumps(input, ensure_ascii=False, default=str), encoding="utf-8")
         return {"status": "submitted", "fields": list(input.keys())}
 
@@ -702,7 +711,7 @@ def _build_options(
 
 async def _main() -> int:
     # 节点模式(阶段 2):优先读 .node.json;兼容模式:读 .prompt.json
-    node_path = Path("/workspace/.node.json")
+    node_path = Path(os.environ.get("NODE_INPUT_PATH", "/workspace/.node.json"))
     prompt_path = Path("/workspace/.prompt.json")
     node_key = os.environ.get("NODE_KEY") or None
     input_json: dict[str, Any] = {}
@@ -748,24 +757,49 @@ async def _main() -> int:
     else:
         prompt = _build_prompt(task)
 
+    # 审计链 sidecar：真实 prompt/skill/usage 回传 worker（spec §4.2 全量审计）
+    meta: dict[str, Any] = {
+        "node_key": node_key, "model": model, "prompt": prompt,
+    }
+    if node_key and node_key in NODE_AI_KEYS:
+        try:
+            meta["system_append"] = _load_node_skill(node_key)
+        except (OSError, FileNotFoundError):
+            meta["system_append"] = None
+    assistant_texts: list[str] = []
+
     exit_code = 0
     saw_completion = False
     saw_failure = False
     saw_llm_failure = False
     async for event in _stream_messages(options, prompt, node_key=node_key):
         print(json.dumps(event, ensure_ascii=False, default=str), flush=True)
-        if event.get("type") == "agent.completed":
+        et = event.get("type")
+        if et == "agent.message" and event.get("text"):
+            assistant_texts.append(str(event["text"]))
+        if et == "agent.completed":
             saw_completion = True
             if event.get("is_error"):
                 saw_failure = True
-        elif event.get("type") == "agent.failed":
+            for k in ("usage", "num_turns", "duration_ms", "total_cost_usd", "session_id"):
+                if event.get(k) is not None:
+                    meta[k] = event[k]
+        elif et == "agent.failed":
             saw_failure = True
             if _is_llm_api_failure(str(event.get("error") or "")):
                 saw_llm_failure = True
+    meta["assistant_text"] = "\n".join(assistant_texts)[-8000:]
+    try:
+        Path(os.environ.get("NODE_META_PATH", "/workspace/.node_meta.json")).write_text(
+            json.dumps(meta, ensure_ascii=False, default=str), encoding="utf-8",
+        )
+    except OSError:
+        pass  # sidecar 失败不影响节点主流程
 
     # 节点模式:校验 submit_result 是否被调用(.node_output.json 存在)
     if node_key and node_key in NODE_AI_KEYS:
-        if not Path("/workspace/.node_output.json").exists() and not saw_llm_failure:
+        output_path = Path(os.environ.get("NODE_OUTPUT_PATH", "/workspace/.node_output.json"))
+        if not output_path.exists() and not saw_llm_failure:
             print(json.dumps(_failed_event(
                 f"节点 {node_key} 未调用 submit_result(无 .node_output.json)",
                 sequence=999,

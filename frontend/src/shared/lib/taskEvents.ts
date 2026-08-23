@@ -1,4 +1,5 @@
 import type { AgentEvent } from './api'
+import { PIPELINE_NODE_ORDER } from './meta'
 
 export interface StreamEvent {
   type: string
@@ -96,7 +97,7 @@ export function eventsForRun(events: AgentEvent[], runId: string | undefined): A
   return events.filter((e) => e.run_id === runId)
 }
 
-const NODE_KEYS = new Set(['source', 'profile', 'env_ready', 'audit', 'reproduce', 'report'])
+const NODE_KEYS = new Set(PIPELINE_NODE_ORDER)
 
 function eventPayload(ev: AgentEvent): Record<string, unknown> {
   const p = (ev.payload ?? {}) as Record<string, unknown>
@@ -113,6 +114,8 @@ function explicitNodeKey(ev: AgentEvent): string | null {
   if (ev.event_type === 'phase.updated' && typeof p.phase === 'string' && NODE_KEYS.has(p.phase)) {
     return p.phase
   }
+  const prefix = ev.event_type.split('.')[0]
+  if (prefix && NODE_KEYS.has(prefix)) return prefix
   return null
 }
 

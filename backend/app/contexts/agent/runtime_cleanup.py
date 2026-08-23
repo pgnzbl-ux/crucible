@@ -1,9 +1,8 @@
 """任务取消 / 结束 / 巡检时拆掉 agent-runner（best-effort）。
 
 热路径：cancel / 任务结束 / 删除调用 teardown_task_runtime。
-安全网：Celery worker 启动后每 5 分钟扫一次孤儿（含超时卡住的 running）。
-强杀门槛是 run 级硬顶（agent_run_hard_timeout_seconds）；单容器超时
-（agent_runner_timeout_seconds）由 run_with_streaming 内的定时器负责，两层解耦。
+安全网：Celery worker 启动后每 5 分钟扫一次孤儿。
+live run 不按年龄强拆；只有取消/结束/库中不存在的任务才清理运行时。
 身份：agent-runner 标签 crucible.task_id，或从 host_workdir 挂载路径反查。
 发现源只认 Docker 容器，不把失败任务留下的 compose.yml 当成还活着的运行时。
 """
@@ -58,13 +57,9 @@ def task_id_from_host_path(path: str, workdir_base: str) -> str | None:
     return None
 
 
-def should_keep_runtime(status: str | None, age_seconds: float, timeout_seconds: int) -> bool:
-    """仅保留未超时的 pending/queued/running。
-
-    timeout_seconds 应传 run 级硬顶（agent_run_hard_timeout_seconds），
-    单容器超时由 run_with_streaming 内的定时器负责，巡检不做单容器级强杀。
-    """
-    return bool(status) and status in LIVE_STATUSES and age_seconds < timeout_seconds
+def should_keep_runtime(status: str | None) -> bool:
+    """保留所有 live run，不因运行时间较长而强拆。"""
+    return bool(status) and status in LIVE_STATUSES
 
 
 async def teardown_task_runtime(task_id: str) -> None:
@@ -102,27 +97,16 @@ async def sweep_orphan_runtimes(
     *,
     discovered_ids: set[str] | None = None,
     status_by_id: dict[str, tuple[str | None, float | None]] | None = None,
-    now: float | None = None,
-    timeout_seconds: int | None = None,
     teardown: Callable[[str], Awaitable[None]] | None = None,
 ) -> list[str]:
-    """拆掉已结束 / 超时 / 库里没有的任务运行时。返回被拆的 task_id。
-
-    默认门槛用 run 级硬顶（agent_run_hard_timeout_seconds，默认 7200s）；
-    单容器 1800s 超时由 run_with_streaming 的定时器独立负责。
-    """
-    clock = time.time() if now is None else now
-    timeout = (
-        get_settings().agent_run_hard_timeout_seconds if timeout_seconds is None else timeout_seconds
-    )
+    """拆掉已结束或库里没有的任务运行时；live run 无时长硬限。"""
     ids = discovered_ids if discovered_ids is not None else list_managed_task_ids()
     statuses = status_by_id if status_by_id is not None else await load_task_runtime_status(ids)
     tear = teardown or teardown_task_runtime
     torn: list[str] = []
     for tid in ids:
-        status, started = statuses.get(tid, (None, None))
-        age = (clock - started) if started is not None else timeout + 1
-        if should_keep_runtime(status, age, timeout):
+        status, _started = statuses.get(tid, (None, None))
+        if should_keep_runtime(status):
             continue
         try:
             await tear(tid)
@@ -313,13 +297,20 @@ async def load_running_run_ids() -> set[str]:
 
 
 def collect_task_ids_from_containers(containers: Iterable, workdir_base: str) -> set[str]:
-    """从任务标签、挂载路径收集 task_id；忽略共享 Lab 的 compose 项目名。"""
+    """从 agent-runner 的任务标签、挂载路径收集 task_id。
+
+    靶场 / 基础设施即使 bind 了任务 workdir，也不算 runner 运行时；
+    否则已取消任务留下的 Lab 会每 5 分钟被误报拆掉一次。
+    """
     ids: set[str] = set()
     for container in containers:
         labels = getattr(container, "labels", None) or {}
         tid = labels.get("crucible.task_id")
         if tid:
             ids.add(tid)
+            continue
+        if labels.get("managed_by") != "crucible-agent-runner":
+            continue
         mounts = (getattr(container, "attrs", None) or {}).get("Mounts") or []
         for mount in mounts:
             from_mount = task_id_from_host_path(mount.get("Source") or "", workdir_base)
@@ -329,10 +320,12 @@ def collect_task_ids_from_containers(containers: Iterable, workdir_base: str) ->
 
 
 def list_managed_task_ids() -> set[str]:
-    """从 Docker 容器收集 task_id。残留 host_workdir / compose.yml 不算运行时。"""
+    """只从 agent-runner 容器收集 task_id。Lab / 残留 compose.yml 不算运行时。"""
     try:
         client = agent_runner_manager._client_or_connect()  # noqa: SLF001 — 平台能力内部枚举
-        containers = client.containers.list(all=True)
+        containers = client.containers.list(
+            all=True, filters={"label": "managed_by=crucible-agent-runner"}
+        )
     except Exception:  # noqa: BLE001
         logger.warning("列举托管容器失败(best-effort)", exc_info=True)
         return set()

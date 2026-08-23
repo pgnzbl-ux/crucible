@@ -147,19 +147,46 @@ class CredentialListResponse(BaseModel):
 
 class RuntimeSettingsUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    max_concurrent_tasks: int = Field(..., ge=1)
+    max_concurrent_tasks: int | None = Field(None, ge=1)
+    max_concurrent_agent_runners: int | None = Field(None, ge=1)
+    lead_verify_per_task: int | None = Field(None, ge=1)
+    reproduce_per_lab: int | None = Field(None, ge=1)
+    task_token_budget: int | None = Field(None, ge=0)
 
     @model_validator(mode="after")
-    def _within_hard_cap(self) -> "RuntimeSettingsUpdateRequest":
+    def _validate_runtime_budget(self) -> "RuntimeSettingsUpdateRequest":
         from app.core.config import get_settings
 
         allowed = get_settings().agent_runner_concurrency_limit
-        if self.max_concurrent_tasks > allowed:
-            raise ValueError(f"max_concurrent_tasks 不能超过 {allowed}")
+        values = self.model_dump(exclude_none=True)
+        if not values:
+            raise ValueError("至少提交一项运行时设置")
+        for field_name, value in values.items():
+            if value > allowed:
+                raise ValueError(f"{field_name} 不能超过 {allowed}")
+        if (
+            self.max_concurrent_agent_runners is not None
+            and self.lead_verify_per_task is not None
+            and self.lead_verify_per_task > self.max_concurrent_agent_runners
+        ):
+            raise ValueError("单任务线索终认并发不能超过全局 AI 容器并发")
+        if (
+            self.lead_verify_per_task is not None
+            and self.reproduce_per_lab is not None
+            and self.reproduce_per_lab > self.lead_verify_per_task
+        ):
+            raise ValueError("同靶场复现并发不能超过单任务线索终认并发")
         return self
 
 
 class RuntimeSettingsResponse(BaseModel):
     max_concurrent_tasks: int
+    max_concurrent_agent_runners: int
+    lead_verify_per_task: int
+    reproduce_per_lab: int
+    task_token_budget: int = 0
     max_allowed: int
+    agent_runner_max_allowed: int
+    lead_verify_max_allowed: int
+    reproduce_max_allowed: int
     worker_pool: Literal["prefork"]

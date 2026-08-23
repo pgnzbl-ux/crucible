@@ -100,4 +100,20 @@ describe('api error envelope', () => {
       code: 'EVIDENCE_REJECTED',
     })
   })
+
+  it('createTaskFromUpload carries explicit discovery mode without a vulnerability description', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 202,
+      ok: true,
+      json: async () => ({ id: 't1' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const file = new File(['x'], 'source.zip', { type: 'application/zip' })
+
+    await api.createTaskFromUpload({ file, name: 'demo', task_type: 'discovery' })
+
+    const body = fetchMock.mock.calls[0][1].body as FormData
+    expect(body.get('task_type')).toBe('discovery')
+    expect(body.get('vulnerability_description')).toBeNull()
+  })
 })

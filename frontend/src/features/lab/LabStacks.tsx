@@ -26,10 +26,29 @@ function showMutateContainer(status: string, liveTaskCount: number): boolean {
 }
 
 function statusColor(status: string) {
-  if (status === 'running') return 'green'
+  if (status === 'running' || status === 'ready' || status.toLowerCase().startsWith('up')) return 'green'
   if (status === 'failed' || status === 'error') return 'red'
   if (status === 'creating' || status === 'starting' || status === 'rebuilding') return 'processing'
+  if (status === 'expired') return 'orange'
   return 'default'
+}
+
+const LAB_STATUS_LABELS: Record<string, string> = {
+  creating: '正在创建',
+  ready: '可用于验证',
+  stopped: '已停止',
+  rebuilding: '正在重建',
+  failed: '创建失败',
+  expired: '已到期',
+  destroyed: '已销毁',
+}
+
+function containerStatusLabel(status: string) {
+  const normalized = status.toLowerCase()
+  if (normalized.startsWith('up') || normalized === 'running') return '运行中'
+  if (normalized.includes('restart')) return '重启中'
+  if (normalized.includes('exit') || normalized === 'stopped') return '已停止'
+  return status || '未知'
 }
 
 function formatTtl(seconds: number) {
@@ -171,15 +190,15 @@ export function LabStacks() {
   }
 
   const containerColumns = (lab: Lab): ColumnsType<LabContainer> => [
-    { title: '容器', dataIndex: 'name', width: 180 },
+    { title: '容器服务', dataIndex: 'name', width: 180 },
     {
-      title: '状态',
+      title: '运行状态',
       dataIndex: 'status',
       width: 110,
-      render: (status: string) => <Tag color={statusColor(status)}>{status}</Tag>,
+      render: (status: string) => <Tag color={statusColor(status)}>{containerStatusLabel(status)}</Tag>,
     },
     {
-      title: '端口',
+      title: '暴露端口',
       dataIndex: 'ports',
       width: 180,
       render: (ports: string) => ports || '—',
@@ -242,16 +261,29 @@ export function LabStacks() {
 
   const labColumns: ColumnsType<Lab> = [
     {
-      title: '提交',
+      title: '源码版本',
       dataIndex: 'commit_sha',
       width: 110,
-      render: (sha: string) => <Text code>{sha.slice(0, 8)}</Text>,
+      render: (sha: string, lab) => (
+        <div>
+          <Text code>{sha.slice(0, 8)}</Text>
+          <div><Text type="secondary" style={{ fontSize: 12 }}>{lab.containers.length} 个容器服务</Text></div>
+        </div>
+      ),
     },
     {
-      title: '状态',
+      title: '可用状态',
       dataIndex: 'status',
       width: 110,
-      render: (status: string) => <Tag color={statusColor(status)}>{status}</Tag>,
+      render: (status: string, lab) => {
+        const running = lab.containers.filter((item) => containerStatusLabel(item.status) === '运行中').length
+        return (
+          <div>
+            <Tag color={statusColor(status)}>{LAB_STATUS_LABELS[status] ?? status}</Tag>
+            <div><Text type="secondary" style={{ fontSize: 12 }}>容器健康 {running}/{lab.containers.length}</Text></div>
+          </div>
+        )
+      },
     },
     {
       title: '访问地址',
@@ -269,17 +301,17 @@ export function LabStacks() {
       },
     },
     {
-      title: '剩余时间',
+      title: '自动到期',
       dataIndex: 'ttl_remaining_seconds',
       width: 120,
       render: (seconds: number | null) =>
         seconds == null ? '—' : <TtlCountdown seconds={seconds} />,
     },
     {
-      title: '占用任务',
+      title: '使用情况',
       dataIndex: 'live_task_count',
       width: 90,
-      render: (count: number) => count ?? 0,
+      render: (count: number) => count > 0 ? <Tag color="processing">{count} 个审计正在使用</Tag> : <Tag color="green">空闲</Tag>,
     },
     {
       title: '操作',

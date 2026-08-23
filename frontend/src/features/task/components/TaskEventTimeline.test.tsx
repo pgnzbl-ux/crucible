@@ -112,4 +112,43 @@ describe('TaskEventTimeline 事件流窗口', () => {
     const empty = render([], false, { nodeLabel: '白盒审计' })
     expect(empty).toContain('「白盒审计」暂无事件')
   })
+
+  it('renders discovery scan phase and triage progress in the stream', () => {
+    const html = render(
+      [
+        event(1, {
+          event_type: 'phase.updated',
+          payload: { phase: 'scan_gitleaks', message: '启动 gitleaks' },
+        }),
+        event(2, {
+          event_type: 'triage.progress',
+          payload: { adjudicated: 10, pending: 3, reason: 'budget' },
+        }),
+      ],
+      false,
+    )
+    expect(html).toContain('扫描·泄露')
+    expect(html).toContain('启动 gitleaks')
+    expect(html).toContain('二审进度')
+    expect(html).toContain('已审 10')
+  })
+
+  it('renders profile phase labels in the stream', () => {
+    const html = render(
+      [
+        event(1, {
+          event_type: 'phase.updated',
+          payload: { phase: 'profile', message: '规则扫描完成（python/fastapi · 1 语言）' },
+        }),
+        event(2, {
+          event_type: 'phase.updated',
+          payload: { phase: 'profile', message: '启动轻度 AI 画像' },
+        }),
+      ],
+      false,
+    )
+    expect(html).toContain('项目画像')
+    expect(html).toContain('规则扫描完成')
+    expect(html).toContain('启动轻度 AI 画像')
+  })
 })

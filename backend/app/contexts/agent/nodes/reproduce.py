@@ -9,7 +9,6 @@ from .base import NodeContext, workspace_repo_path
 
 
 class ReproduceNode:
-    node_index = 4
     node_key = "reproduce"
 
     @property
@@ -58,11 +57,18 @@ class ReproduceNode:
             "audit": inp.audit.model_dump(exclude_none=True),
             "vulnerability_description": inp.vulnerability_description,
         }
-        return await run_ai_node_with_shape_retry(
+        meta: dict[str, Any] = {}
+        output = await run_ai_node_with_shape_retry(
             node_key="reproduce",
             input_json=input_json,
             host_workdir=ctx.host_workdir,
             runner_env=ctx.runner_env,
             on_event=ctx.on_event,
             task_id=ctx.task_id,
+            reproduce_scope=ctx.lab_id or ctx.task_id,
+            meta_out=meta,
         )
+        from app.contexts.agent.usage_ledger import record_node_usage
+
+        await record_node_usage(ctx, "reproduce", meta)
+        return output

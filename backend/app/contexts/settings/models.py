@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Index, Integer, String, Text
+from sqlalchemy import Boolean, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.shared.base import BaseModel
@@ -22,10 +22,14 @@ class LlmProvider(BaseModel):
     model: Mapped[str] = mapped_column(String(100), nullable=False, comment="模型名，如 deepseek-v4-flash")
     timeout_ms: Mapped[int] = mapped_column(Integer, default=600000, comment="API_TIMEOUT_MS")
     is_default: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否为全局默认（当前启用）Provider")
+    # 模型角色映射(discovery-spec §5.4)：screening(粗筛) | final(终审) | hunting(P2 占位)
+    role: Mapped[str | None] = mapped_column(String(20), nullable=True, comment="模型角色；空=不占角色")
     extra: Mapped[str] = mapped_column(Text, default="{}", comment="扩展配置 JSON")
 
     __table_args__ = (
         Index("idx_llm_providers_default", "is_default"),
+        Index("idx_llm_providers_role", "role", unique=True, sqlite_where=text("role IS NOT NULL"),
+              postgresql_where=text("role IS NOT NULL")),
     )
 
     def __repr__(self) -> str:
@@ -62,7 +66,7 @@ class Credential(BaseModel):
 
 
 class PlatformSetting(BaseModel):
-    """平台运行时单例配置（同时运行任务数等）。"""
+    """平台运行时单例配置（任务、AI 容器与终认工位资源预算）。"""
 
     __tablename__ = "platform_settings"
 
@@ -72,6 +76,22 @@ class PlatformSetting(BaseModel):
     max_concurrent_tasks: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, comment="同时 running 的验证任务软上限"
     )
+    max_concurrent_agent_runners: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=4, comment="全平台同时运行的 AI 容器软上限"
+    )
+    lead_verify_per_task: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=2, comment="单任务同时终认的线索数"
+    )
+    reproduce_per_lab: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, comment="同一靶场同时执行的复现数"
+    )
+    task_token_budget: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0",
+        comment="单任务 token 预算(prompt+completion)；0=不限。软停：耗尽后不开新 agent 会话",
+    )
 
     def __repr__(self) -> str:
-        return f"<PlatformSetting {self.singleton_key} n={self.max_concurrent_tasks}>"
+        return (
+            f"<PlatformSetting {self.singleton_key} tasks={self.max_concurrent_tasks} "
+            f"runners={self.max_concurrent_agent_runners}>"
+        )

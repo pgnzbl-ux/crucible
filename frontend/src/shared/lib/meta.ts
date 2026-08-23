@@ -28,7 +28,7 @@ export const CONCLUSION_META: Record<string, { label: string; color: TagProps['c
   failed: { label: '分析失败', color: 'default' },
 }
 
-// 判定(verdict,对齐 docs/agent-node-contracts.md)。needs_review 是 audit uncertain 的验证记录判定。
+// 判定(verdict,对齐 docs/discovery-spec.md §12)。needs_review 是 audit uncertain 的验证记录判定。
 export const VERDICT_META: Record<string, { label: string; color: TagProps['color'] }> = {
   confirmed: { label: '已确认', color: 'red' },
   partial: { label: '部分确认', color: 'orange' },
@@ -57,11 +57,45 @@ export const REPORT_STATUS_META: Record<string, { label: string; color: TagProps
 export const NODE_LABELS: Record<string, string> = {
   source: '源码获取',
   profile: '项目画像',
+  scan_gitleaks: '扫描·泄露',
+  scan_osv: '扫描·依赖',
+  scan_semgrep: '扫描·SAST',
   env_ready: '靶场就绪',
+  cluster: '聚类分组',
+  triage: 'AI 二审',
+  dispatch: '线索调度',
   audit: '白盒审计',
   reproduce: '复现验证',
+  lead_verify: '多线索终认',
   report: '报告生成',
+  over: '结束',
 }
+
+// 12 节点拓扑顺序(discovery-spec §4.2.4)；后端按 node_index 返回
+export const PIPELINE_NODE_ORDER: string[] = [
+  'source',
+  'profile',
+  'scan_gitleaks',
+  'scan_osv',
+  'scan_semgrep',
+  'env_ready',
+  'cluster',
+  'triage',
+  'dispatch',
+  'audit',
+  'reproduce',
+  'report',
+]
+
+// 验证任务会被 VERIFY_MODE 跳过的发现侧节点：步骤条默认隐藏(discovery-spec §9.2)
+export const VERIFY_MODE_SKIPPED_KEYS = new Set([
+  'scan_gitleaks',
+  'scan_osv',
+  'scan_semgrep',
+  'cluster',
+  'triage',
+  'dispatch',
+])
 
 export const NODE_STATUS_META: Record<string, { label: string; color: TagProps['color']; status: string }> = {
   pending: { label: '等待', color: 'default', status: 'wait' },
@@ -76,7 +110,18 @@ export const EVENT_PHASE_LABELS: Record<string, string> = {
   preflight: '环境准备',
   credentials: '凭据注入',
   running: '执行分析',
+  source: '源码获取',
+  profile: '项目画像',
+  scan_gitleaks: '扫描·泄露',
+  scan_osv: '扫描·依赖',
+  scan_semgrep: '扫描·SAST',
   env_ready: '靶场构建',
+  cluster: '聚类分组',
+  triage: 'AI 二审',
+  dispatch: '线索调度',
+  audit: '白盒审计',
+  reproduce: '复现验证',
+  report: '报告生成',
   scanning: '代码审计',
   reproducing: '尝试复现',
   completed: '完成',
@@ -93,6 +138,7 @@ export const EVENT_TYPE_LABELS: Record<string, string> = {
   'tool.call.denied': '工具拒绝',
   'node.updated': '节点',
   'phase.updated': '阶段',
+  'triage.progress': '二审进度',
   'raw.message': '原始消息',
 }
 

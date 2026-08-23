@@ -25,6 +25,28 @@ def test_settings_has_no_llm_env_fields():
         assert name not in Settings.model_fields, f"{name} 不应再从 .env 注入"
 
 
+def test_default_env_file_is_backend_local():
+    """配置文件位置不应随 API/Celery 的启动目录变化。"""
+    from pathlib import Path
+
+    backend_root = Path(__file__).resolve().parents[1]
+    assert Path(Settings.model_config["env_file"]).resolve() == backend_root / ".env"
+
+
+def test_env_example_only_contains_supported_settings():
+    """模板中的陈旧变量会被 Pydantic 静默忽略，必须在测试阶段直接报出。"""
+    from pathlib import Path
+
+    env_example = Path(__file__).resolve().parents[1] / ".env.example"
+    declared = {
+        line.split("=", 1)[0].strip()
+        for line in env_example.read_text(encoding="utf-8").splitlines()
+        if line and not line.lstrip().startswith("#") and "=" in line
+    }
+    supported = {name.upper() for name in Settings.model_fields}
+    assert declared <= supported, f".env.example 存在无效配置: {sorted(declared - supported)}"
+
+
 def test_infra_connection_fields_have_no_code_defaults():
     """连接串只进 .env，禁止在 Settings 里再抄一份 URL。"""
     for name in (

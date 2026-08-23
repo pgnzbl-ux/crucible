@@ -10,12 +10,12 @@ LLM Provider 管理服务。
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import time
-from typing import Any
 
 import httpx
-
 from sqlalchemy.exc import IntegrityError
 
 from app.core.config import get_settings
@@ -33,8 +33,11 @@ from .schemas import (
     LlmProviderTestResult,
     LlmProviderUpdateRequest,
     RuntimeSettingsResponse,
+    RuntimeSettingsUpdateRequest,
     normalize_provider_type,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def to_response(provider: LlmProvider, plain_key: str = "") -> LlmProviderResponse:
@@ -144,7 +147,14 @@ class SettingsService:
         row = await self.repo.get_platform_setting()
         if row is not None:
             return row
-        row = PlatformSetting(singleton_key="default", max_concurrent_tasks=1)
+        hard_cap = get_settings().agent_runner_concurrency_limit
+        row = PlatformSetting(
+            singleton_key="default",
+            max_concurrent_tasks=1,
+            max_concurrent_agent_runners=hard_cap,
+            lead_verify_per_task=min(get_settings().lead_verify_per_task, hard_cap),
+            reproduce_per_lab=1, task_token_budget=0,
+        )
         try:
             async with self.repo.session.begin_nested():
                 return await self.repo.add_platform_setting(row)
@@ -155,21 +165,76 @@ class SettingsService:
             return found
 
     def _runtime_response(self, row: PlatformSetting) -> RuntimeSettingsResponse:
+        hard_cap = get_settings().agent_runner_concurrency_limit
+        # 旧数据或部署硬顶下调后，读取即收敛到一组真正可执行的预算。
+        row.max_concurrent_tasks = min(max(1, row.max_concurrent_tasks), hard_cap)
+        row.max_concurrent_agent_runners = min(
+            max(1, row.max_concurrent_agent_runners), hard_cap
+        )
+        row.lead_verify_per_task = min(
+            max(1, row.lead_verify_per_task), row.max_concurrent_agent_runners
+        )
+        row.reproduce_per_lab = min(
+            max(1, row.reproduce_per_lab), row.lead_verify_per_task
+        )
         return RuntimeSettingsResponse(
             max_concurrent_tasks=row.max_concurrent_tasks,
-            max_allowed=get_settings().agent_runner_concurrency_limit,
+            max_concurrent_agent_runners=row.max_concurrent_agent_runners,
+            lead_verify_per_task=row.lead_verify_per_task,
+            reproduce_per_lab=row.reproduce_per_lab,
+            task_token_budget=row.task_token_budget,
+            max_allowed=hard_cap,
+            agent_runner_max_allowed=hard_cap,
+            lead_verify_max_allowed=hard_cap,
+            reproduce_max_allowed=hard_cap,
             worker_pool=worker_pool_hint(),
         )
 
+    async def _sync_scheduler_limits(self, runtime: RuntimeSettingsResponse) -> None:
+        """把 DB 单一真相同步到 Redis 调度原语；保存必须保证实际生效。"""
+        try:
+            from app.contexts.agent.runner_slots import set_runtime_limits
+
+            await asyncio.wait_for(
+                set_runtime_limits(
+                    agent_runners=runtime.max_concurrent_agent_runners,
+                    reproduce_per_lab=runtime.reproduce_per_lab,
+                ),
+                timeout=1.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("运行时并发设置同步 Redis 失败", exc_info=True)
+            raise RuntimeError("Redis 调度器不可用，并发设置未保存") from exc
+
     async def get_runtime_settings(self) -> RuntimeSettingsResponse:
         row = await self._get_or_create_platform_setting()
-        return self._runtime_response(row)
-
-    async def update_runtime_settings(self, n: int) -> RuntimeSettingsResponse:
-        row = await self._get_or_create_platform_setting()
-        row.max_concurrent_tasks = n
+        response = self._runtime_response(row)
         await self.repo.session.flush()
-        return self._runtime_response(row)
+        return response
+
+    async def update_runtime_settings(
+        self, request: RuntimeSettingsUpdateRequest
+    ) -> RuntimeSettingsResponse:
+        row = await self._get_or_create_platform_setting()
+        updates = request.model_dump(exclude_none=True)
+        merged = {
+            "max_concurrent_tasks": row.max_concurrent_tasks,
+            "max_concurrent_agent_runners": row.max_concurrent_agent_runners,
+            "lead_verify_per_task": row.lead_verify_per_task,
+            "reproduce_per_lab": row.reproduce_per_lab,
+            "task_token_budget": row.task_token_budget,
+            **updates,
+        }
+        if merged["lead_verify_per_task"] > merged["max_concurrent_agent_runners"]:
+            raise ValueError("单任务线索终认并发不能超过全局 AI 容器并发")
+        if merged["reproduce_per_lab"] > merged["lead_verify_per_task"]:
+            raise ValueError("同靶场复现并发不能超过单任务线索终认并发")
+        for field_name, value in merged.items():
+            setattr(row, field_name, value)
+        await self.repo.session.flush()
+        response = self._runtime_response(row)
+        await self._sync_scheduler_limits(response)
+        return response
 
     # ── 测试连接 ──
 

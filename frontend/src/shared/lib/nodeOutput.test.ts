@@ -123,9 +123,9 @@ describe('summarizeNodeOutput', () => {
     expect(displayNodeStatus('running', 'running')).toBe('running')
   })
 
-  it('failed task coerces in-flight nodes', () => {
+  it('failed task only coerces the active node; downstream pending nodes stay unexecuted', () => {
     expect(displayNodeStatus('running', 'failed')).toBe('failed')
-    expect(displayNodeStatus('pending', 'failed')).toBe('failed')
+    expect(displayNodeStatus('pending', 'failed')).toBe('pending')
     expect(displayNodeStatus('completed', 'failed')).toBe('completed')
   })
 
@@ -270,5 +270,52 @@ describe('overlayFromSseEvents', () => {
       output: { progress: 'Building web' },
     })
   })
-})
 
+  it('paints profile running caption from phase.updated', () => {
+    const map = overlayFromSseEvents([
+      { type: 'node.updated', event: { node_key: 'profile', status: 'running' } },
+      { type: 'phase.updated', event: { phase: 'profile', message: '规则扫描完成（python/fastapi · 1 语言）' } },
+      { type: 'phase.updated', event: { phase: 'profile', message: '启动轻度 AI 画像' } },
+    ])
+    expect(map.get('profile')).toEqual({
+      status: 'running',
+      output: { progress: '启动轻度 AI 画像' },
+    })
+  })
+
+  it('paints scan_semgrep running caption from phase.updated', () => {
+    const map = overlayFromSseEvents([
+      { type: 'node.updated', event: { node_key: 'scan_semgrep', status: 'running' } },
+      { type: 'phase.updated', event: { phase: 'scan_semgrep', message: '规则包 python · 超时上限 1200s' } },
+      { type: 'phase.updated', event: { phase: 'scan_semgrep', message: '扫描进行中…已 45s / 上限 1200s' } },
+    ])
+    expect(map.get('scan_semgrep')).toEqual({
+      status: 'running',
+      output: { progress: '扫描进行中…已 45s / 上限 1200s' },
+    })
+  })
+
+  it('paints cluster running caption from phase.updated', () => {
+    const map = overlayFromSseEvents([
+      { type: 'node.updated', event: { node_key: 'cluster', status: 'running' } },
+      { type: 'phase.updated', event: { phase: 'cluster', message: '构建函数索引（语言 python）' } },
+      { type: 'phase.updated', event: { phase: 'cluster', message: '分组完成：3 组（A=1 B=1 F=0 bypass=1）' } },
+    ])
+    expect(map.get('cluster')).toEqual({
+      status: 'running',
+      output: { progress: '分组完成：3 组（A=1 B=1 F=0 bypass=1）' },
+    })
+  })
+
+  it('paints triage running caption from phase.updated', () => {
+    const map = overlayFromSseEvents([
+      { type: 'node.updated', event: { node_key: 'triage', status: 'running' } },
+      { type: 'phase.updated', event: { phase: 'triage', message: '待审 12 组（跳过 LLM 3）' } },
+      { type: 'phase.updated', event: { phase: 'triage', message: '二审 2/12：CWE-89 app/db.py' } },
+    ])
+    expect(map.get('triage')).toEqual({
+      status: 'running',
+      output: { progress: '二审 2/12：CWE-89 app/db.py' },
+    })
+  })
+})

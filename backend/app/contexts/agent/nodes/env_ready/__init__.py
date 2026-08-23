@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from typing import Any
 
 from app.contexts.agent.target_url import host_advertise_ip, publish_target_url
@@ -18,6 +17,7 @@ from .create_loop import MAX_ATTEMPTS
 from .events import _emit
 
 logger = logging.getLogger(__name__)
+LAB_WAIT_TIMEOUT_SECONDS = 1860
 
 
 async def _resolve_project_id(ctx: NodeContext) -> str:
@@ -48,16 +48,13 @@ async def _wait_for_lab(
     commit_sha: str,
 ) -> Any:
     from app.contexts.lab.service import LabService
-    from app.core.config import get_settings
 
-    timeout = get_settings().agent_runner_timeout_seconds
-    deadline = time.monotonic() + float(timeout)
     svc = LabService(ctx.db_session)
-    while True:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + LAB_WAIT_TIMEOUT_SECONDS
+    while loop.time() < deadline:
         _emit(ctx, "等待其他任务把靶场搭好")
         await asyncio.sleep(2)
-        if time.monotonic() >= deadline:
-            raise RuntimeError("等待靶场就绪超时")
         result = await svc.acquire(
             owner_id=owner_id,
             project_id=project_id,
@@ -66,10 +63,12 @@ async def _wait_for_lab(
         )
         if result.role != "wait":
             return result
+    raise RuntimeError(
+        f"等待共享靶场就绪超时（>{LAB_WAIT_TIMEOUT_SECONDS}s），请重试任务"
+    )
 
 
 class EnvReadyNode:
-    node_index = 2
     node_key = "env_ready"
 
     @property

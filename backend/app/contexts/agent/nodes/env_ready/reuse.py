@@ -23,21 +23,40 @@ def _reused_output(
     }
 
 
-def _reused_lab_alive(result: Any) -> bool:
+async def _reused_lab_alive(
+    result: Any,
+    *,
+    retries: int = 3,
+    settle_seconds: float = 0,
+) -> bool:
     """复用前快探：DB 说 ready 不代表应用进程还活着。
 
     容器在跑但应用崩溃（Fatal/缺表）时，reproduce 会拿死靶标白烧一整个节点。
     单次探测不重试（快失败，死靶场降级重建的成本远低于白跑 reproduce）。
-    GET 首页正文，崩溃页不算活着。target_url host 可能是对外 IP，本机视角换成 127.0.0.1 探。
+    GET 目标路由正文，崩溃页不算活着。保留 target_url 的 host，兼容只绑定
+    某个非回环宿主地址的端口映射。
     """
     raw = str(result.target_url or "")
     if not raw:
         return False
     parsed = urlparse(raw if "://" in raw else f"http://{raw}")
-    if not parsed.port:
-        return False
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    host = parsed.hostname or "127.0.0.1"
     scheme = parsed.scheme or "http"
-    return health._http_alive(f"{scheme}://127.0.0.1:{parsed.port}")
+    path = parsed.path or "/"
+    if parsed.query:
+        path += f"?{parsed.query}"
+    ok, _, _ = await health.health_check(
+        [port],
+        host_ips=[host],
+        preferred_scheme=scheme,
+        probe_path=path,
+        compose_project=getattr(result, "compose_project", None),
+        retries=retries,
+        retry_seconds=1,
+        settle_seconds=settle_seconds,
+    )
+    return ok
 
 
 async def _live_started_containers(compose_project: str | None, fallback: Any) -> list[str]:
@@ -79,7 +98,13 @@ async def _start_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
         events._emit(ctx, "靶场容器已不存在，改为重新创建")
         await svc.reclaim_gone_runtime(result.lab_id, ctx.task_id)
         return await _create_lab(ctx, result)
-    rebuilt = await _reuse_or_rebuild_dead_lab(ctx, svc, result)
+    rebuilt = await _reuse_or_rebuild_dead_lab(
+        ctx,
+        svc,
+        result,
+        retries=30,
+        settle_seconds=3,
+    )
     if rebuilt is not None:
         return rebuilt
     creds = await ai_recipe._backfill_reused_initial_creds(ctx, svc, result)
@@ -95,7 +120,12 @@ async def _start_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
 
 
 async def _reuse_or_rebuild_dead_lab(
-    ctx: NodeContext, svc: Any, result: Any
+    ctx: NodeContext,
+    svc: Any,
+    result: Any,
+    *,
+    retries: int = 3,
+    settle_seconds: float = 0,
 ) -> dict[str, Any] | None:
     """复用前快探；死靶场标 failed → reclaim → 缓存配方重建（不烧 AI）。
 
@@ -103,9 +133,50 @@ async def _reuse_or_rebuild_dead_lab(
     """
     from .create_loop import _create_lab
 
-    if _reused_lab_alive(result):
+    if await _reused_lab_alive(
+        result,
+        retries=retries,
+        settle_seconds=settle_seconds,
+    ):
         return None
+    other_users = [
+        task_id
+        for task_id in await svc.live_task_ids(result.lab_id)
+        if task_id != ctx.task_id
+    ]
+    if other_users:
+        raise RuntimeError(
+            "共享靶场探活失败，但仍被其他任务使用，拒绝并发重建: "
+            + ", ".join(other_users[:5])
+        )
     events._emit(ctx, "复用靶场探活失败（应用可能已死），降级重建")
-    await svc.mark_failed(result.lab_id, "复用前探活失败：应用不响应")
+    marked = await svc.mark_failed(
+        result.lab_id,
+        "复用前探活失败：应用不响应",
+        expected_statuses={"ready", "stopped"},
+    )
+    if not marked:
+        raise RuntimeError("靶场状态已变化，拒绝使用旧探活结果重建")
+    # acquire/bind 可与上面的 CAS 并发；标 failed 后再检查一次，避免拆掉
+    # 刚刚开始复用该 Lab 的其他任务。若状态已被别人接管，CAS 恢复会失败，
+    # 但后续 reclaim 同样不会由当前任务赢得创建权。
+    other_users = [
+        task_id
+        for task_id in await svc.live_task_ids(result.lab_id)
+        if task_id != ctx.task_id
+    ]
+    if other_users:
+        await svc.mark_ready(
+            result.lab_id,
+            target_url=result.target_url or "",
+            compose_path=result.compose_path or ".vuln-env/docker-compose.yml",
+            transport_shape=result.transport_shape or {"protocol": "http"},
+            initial_creds=result.initial_creds or {},
+            expected_statuses={"failed"},
+        )
+        raise RuntimeError(
+            "共享靶场探活失败后出现新的使用任务，拒绝并发重建: "
+            + ", ".join(other_users[:5])
+        )
     await svc.reclaim_gone_runtime(result.lab_id, ctx.task_id)
     return await _create_lab(ctx, result)

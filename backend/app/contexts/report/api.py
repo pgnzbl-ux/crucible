@@ -93,12 +93,20 @@ async def upload_evidence(
     kind: Annotated[str, Form(description="artifact | log | screenshot | poc")] = "artifact",
 ) -> EvidenceResponse:
     """上传证据文件 → MinIO → 落 evidences 表。返回带预签名下载 URL 的记录。"""
-    data = await file.read()
+    # 流式读入并限制 50MB（防滥用；超大证据建议走对象存储直传，P1 再做）
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > 50 * 1024 * 1024:
+            raise HTTPException(413, "单文件超过 50MB 限制")
+        chunks.append(chunk)
+    data = b"".join(chunks)
     if not data:
         raise HTTPException(400, "文件为空")
-    # 大小限制 50MB（防滥用；超大证据建议走对象存储直传，P1 再做）
-    if len(data) > 50 * 1024 * 1024:
-        raise HTTPException(413, "单文件超过 50MB 限制")
     evidence, err = await svc.attach_evidence(
         report_id=report_id,
         owner_id=user_id,
@@ -112,6 +120,8 @@ async def upload_evidence(
             raise HTTPException(404, err)
         if "非法" in err:
             raise HTTPException(400, err)
+        if "已发布" in err:
+            raise HTTPException(409, err)
         raise HTTPException(503, err)
     return evidence
 

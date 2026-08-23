@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Button, Empty, Input, Select, Table, Tag, Typography } from 'antd'
-import { FileProtectOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons'
+import { EyeOutlined, FileProtectOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import dayjs from 'dayjs'
@@ -12,6 +12,7 @@ import { useErrorToast } from '../shared/hooks/useErrorToast'
 import { PageHeader } from '../shared/components/PageHeader'
 import { PageContainer } from '../shared/components/PageContainer'
 import { tableRowNavigateProps } from '../shared/lib/tableRowNavigate'
+import { auditResultLabel, projectLabel, reportTypeLabel, sourceVersionLabel } from '../shared/lib/tablePresentation'
 
 const { Text } = Typography
 
@@ -46,19 +47,35 @@ export function ReportsPage() {
 
   const columns: ColumnsType<ReportSummary> = [
     {
-      title: '标题',
-      dataIndex: 'title',
+      title: '项目 / 版本',
+      dataIndex: 'project_address',
       ellipsis: true,
+      render: (v: string | null, row) => (
+        <div>
+          <Text strong>{projectLabel(v)}</Text>
+          <div><Text type="secondary" style={{ fontSize: 12 }}>{sourceVersionLabel(row.project_ref, null)} · {row.title}</Text></div>
+        </div>
+      ),
     },
     {
-      title: '判定',
+      title: '报告类型',
+      dataIndex: 'document_kind',
+      width: 140,
+      render: (v: string | null, row) => <Tag color={row.task_type === 'discovery' ? 'blue' : 'purple'}>{reportTypeLabel(v, row.task_type)}</Tag>,
+    },
+    {
+      title: '漏洞结果',
       dataIndex: 'verdict',
-      width: 120,
-      render: (v: string | null) =>
-        v ? <Tag color={getVerdictMeta(v).color}>{getVerdictMeta(v).label}</Tag> : <Text type="secondary">—</Text>,
+      width: 160,
+      render: (v: string | null, row) => (
+        <div>
+          <Tag color={v ? getVerdictMeta(v).color : 'green'}>{auditResultLabel('completed', v)}</Tag>
+          {row.severity ? <div><Text type="secondary" style={{ fontSize: 12 }}>最高风险：{row.severity}</Text></div> : null}
+        </div>
+      ),
     },
     {
-      title: '状态',
+      title: '发布状态',
       dataIndex: 'status',
       width: 100,
       render: (v: string) => {
@@ -67,24 +84,33 @@ export function ReportsPage() {
       },
     },
     {
-      title: '任务',
-      dataIndex: 'task_id',
-      width: 110,
-      render: (v: string) => <Text code>{v.slice(0, 8)}</Text>,
+      title: '生成 / 发布时间',
+      dataIndex: 'created_at',
+      width: 170,
+      render: (v: string, row) => (
+        <div>
+          <Text>{dayjs(v).format('MM-DD HH:mm')}</Text>
+          {row.published_at ? <div><Text type="secondary" style={{ fontSize: 12 }}>发布 {dayjs(row.published_at).format('MM-DD HH:mm')}</Text></div> : null}
+        </div>
+      ),
     },
     {
-      title: '生成时间',
-      dataIndex: 'created_at',
-      width: 160,
-      render: (v: string) => dayjs(v).format('MM-DD HH:mm:ss'),
+      title: '操作',
+      key: 'actions',
+      width: 110,
+      render: (_: unknown, row) => (
+        <Button size="small" type="primary" icon={<EyeOutlined />} onClick={() => navigate(`/reports/${row.id}`)}>
+          阅读报告
+        </Button>
+      ),
     },
   ]
 
   return (
     <>
       <PageHeader
-        title="验证报告"
-        subtitle="任务跑完后在这里阅读全文，和本地打开 report.md 一样"
+        title="审计报告"
+        subtitle="汇总审计范围、发现漏斗、终认结论与修复建议"
         extra={
           <Button icon={<ReloadOutlined />} loading={isFetching} onClick={() => refetch()}>
             刷新
@@ -106,7 +132,7 @@ export function ReportsPage() {
         />
         <Input
           allowClear
-          placeholder="搜索标题 / 任务 ID"
+          placeholder="搜索标题 / 审计运行 ID"
           prefix={<SearchOutlined />}
           style={{ width: 260 }}
           value={keyword}
@@ -124,7 +150,7 @@ export function ReportsPage() {
             emptyText: (
               <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无报告">
                 <Button type="link" icon={<FileProtectOutlined />} onClick={() => navigate('/tasks')}>
-                  去任务列表
+                  去代码审计
                 </Button>
               </Empty>
             ),
@@ -141,6 +167,7 @@ export function ReportsPage() {
               setPageSize(nextPageSize)
             },
           }}
+          scroll={{ x: 980 }}
           onRow={(row) => tableRowNavigateProps(() => navigate(`/reports/${row.id}`))}
         />
       </PageContainer>

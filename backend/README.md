@@ -1,26 +1,28 @@
 # Crucible 后端
 
-FastAPI API、Celery Worker、PostgreSQL、六节点编排。产品说明与全仓启动见仓库根目录 [README.md](../README.md)。
+FastAPI API、Celery Worker、PostgreSQL、节点编排。产品说明与全仓启动见仓库根目录 [README.md](../README.md)。
 
 ## 职责
 
-- HTTP API（端口 **8010**）：认证、任务、项目、靶场、报告、设置
-- Celery Worker：认领任务，按 6 节点编排验证（源码 → 画像 → 靶场 → 审计 → 复现 → 报告）
+- HTTP API（端口 **8010**）：认证、项目资产、代码审计、漏洞线索、审计报告、验证环境与设置
+- Celery Worker：认领审计运行并编排。仓库审计先扫描、聚类与 AI 研判，再按线索独立终认；定向验证是可选的次级工作流
 - 对象存储：源码缓存、靶场配方、证据、报告、失败节点包（MinIO）
 
 ## 启动
 
-先在仓库根目录拉起基础设施并构建 Agent 镜像（见根 README）。然后：
+仓库根 `.venv`。先拉起基础设施并构建 Agent 镜像（见根 README）。然后：
 
 ```bash
+cd /path/to/Crucible && source .venv/bin/activate
 cd backend
-cp .env.example .env
+cp .env.example .env          # 首次
 pip install -e ".[dev]"
+pip install -r requirements.txt
 
 # 终端 1：API
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8010
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload
 
-# 终端 2：Worker（必须用这个入口，固定 prefork）
+# 终端 2：Worker（必须用这个入口，固定 prefork；缺扫描器二进制和本地 semgrep 规则时写入当前 .venv）
 python run_worker.py
 ```
 
@@ -44,7 +46,7 @@ alembic upgrade head
 | `CLAUDE_AGENT_SDK_ENABLED` | `true` 走真实 Agent，`false` 走 Mock |
 | `AUTH_SECRET` | JWT；生产环境必填 |
 
-LLM 端点、Key、模型只在控制台「设置 → LLM Provider」配置，不要加 `LLM_*` 环境变量。
+LLM 端点、Key、模型只由管理员在控制台「设置 → LLM Provider」配置，不要加 `LLM_*` 环境变量；个人验证凭据仍按用户隔离。
 
 同时运行几个任务于控制台「设置」里可改（`python run_worker.py` 固定 prefork）。
 
@@ -57,7 +59,7 @@ backend/
 ├── app/
 │   ├── main.py              # FastAPI 入口
 │   ├── core/                # 配置、数据库、JWT、Celery、agent-runner
-│   ├── contexts/            # identity / task / agent / lab / project / report / settings
+│   ├── contexts/            # identity / task / agent / lab / project / report / settings / finding / discovery
 │   └── shared/              # 鉴权、事件、SSE、对象存储
 ├── alembic/                 # 迁移链：基线 c18a0e9b4d21 + 增量 revision（head 见 .claude/skills/db-migrate）
 ├── tests/

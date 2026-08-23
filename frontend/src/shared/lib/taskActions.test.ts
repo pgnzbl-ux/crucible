@@ -9,6 +9,7 @@ import {
   defaultTaskDetailTab,
   shouldFetchTaskReport,
   reportBelongsToCurrentRun,
+  taskDetailTabFromValue,
 } from './taskActions'
 
 describe('taskActions', () => {
@@ -56,10 +57,17 @@ describe('taskActions', () => {
     expect(canDelete(status)).toBe(expected)
   })
 
-  it('default tab is progress for active tasks and when unspecified', () => {
+  it('defaults active runs to progress and terminal runs to audit overview', () => {
     expect(defaultTaskDetailTab('running')).toBe('progress')
     expect(defaultTaskDetailTab('queued')).toBe('progress')
-    expect(defaultTaskDetailTab('completed')).toBe('progress')
+    expect(defaultTaskDetailTab('completed')).toBe('overview')
+    expect(defaultTaskDetailTab()).toBe('overview')
+  })
+
+  it('maps the legacy events tab to the merged audit process page', () => {
+    expect(taskDetailTabFromValue('events')).toBe('progress')
+    expect(taskDetailTabFromValue('progress')).toBe('progress')
+    expect(taskDetailTabFromValue('unknown')).toBeNull()
   })
 
   it.each([

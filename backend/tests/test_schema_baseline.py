@@ -1,5 +1,6 @@
 """ORM create_all 与唯一 Alembic 基线对齐。"""
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -60,9 +61,34 @@ def test_alembic_chain_from_baseline():
     )
     assert 'revision: str = "h1c4d8e05f26"' in comments
     assert 'down_revision: Union[str, None] = "g7b3e9a02c15"' in comments
+    discovery = (versions / "i2d5f6a07b31_discovery_wp1_tables.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'revision: str = "i2d5f6a07b31"' in discovery
+    assert 'down_revision: Union[str, None] = "h1c4d8e05f26"' in discovery
+    lead_runs = (versions / "j3e6a7b18c42_lead_runs_table.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'revision: str = "j3e6a7b18c42"' in lead_runs
+    assert 'down_revision: Union[str, None] = "i2d5f6a07b31"' in lead_runs
+    runtime_budget = (
+        versions / "k4f7b8c29d53_runtime_concurrency_budget.py"
+    ).read_text(encoding="utf-8")
+    assert 'revision: str = "k4f7b8c29d53"' in runtime_budget
+    assert 'down_revision: Union[str, None] = "j3e6a7b18c42"' in runtime_budget
+    triage_provenance = (
+        versions / "l5f8d2c31a70_triage_verdict_provenance.py"
+    ).read_text(encoding="utf-8")
+    assert 'revision: str = "l5f8d2c31a70"' in triage_provenance
+    assert 'down_revision: Union[str, None] = "k4f7b8c29d53"' in triage_provenance
+    budget_ledger = (
+        versions / "m6e0b3c42d81_task_token_budget_ledger.py"
+    ).read_text(encoding="utf-8")
+    assert 'revision: str = "m6e0b3c42d81"' in budget_ledger
+    assert 'down_revision: Union[str, None] = "l5f8d2c31a70"' in budget_ledger
     from app.core.database import _alembic_head
 
-    assert _alembic_head() == "h1c4d8e05f26"
+    assert _alembic_head() == "m6e0b3c42d81"
 
 
 @pytest.mark.asyncio
@@ -98,7 +124,13 @@ async def test_create_all_schema_matches_models():
             assert {"owner_id", "task_id", "run_id", "node_run_id", "node_key", "error_class", "bundle_key", "bucket"} <= fail_cols
             assert "platform_settings" in insp.get_table_names()
             runtime_cols = {c["name"] for c in insp.get_columns("platform_settings")}
-            assert {"singleton_key", "max_concurrent_tasks"} <= runtime_cols
+            assert {
+                "singleton_key",
+                "max_concurrent_tasks",
+                "max_concurrent_agent_runners",
+                "lead_verify_per_task",
+                "reproduce_per_lab",
+            } <= runtime_cols
 
         await conn.run_sync(_check)
     await engine.dispose()
@@ -166,3 +198,74 @@ async def test_align_alembic_version_stamps_head(tmp_path):
         rows = (await conn.execute(text("SELECT version_num FROM alembic_version"))).fetchall()
     await engine.dispose()
     assert [r[0] for r in rows] == [_alembic_head()]
+
+
+@pytest.mark.asyncio
+async def test_alembic_upgrade_head_sqlite(tmp_path, monkeypatch):
+    """在临时 SQLite 上真实执行 alembic upgrade head，断言最终 schema 与 ORM 一致。
+
+    之前迁移链只在字符串层面被校验，从未真正跑过 upgrade；本测试回归
+    “基线 create_all 重复建表导致增量迁移冲突”这类问题。
+    """
+    from app.core.database import _alembic_head
+
+    backend_root = Path(__file__).resolve().parents[1]
+    db_path = tmp_path / "migrate.sqlite"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path.as_posix()}")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=str(backend_root),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        "alembic upgrade head 失败:\n"
+        f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
+    )
+
+    register_models()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path.as_posix()}")
+    async with engine.begin() as conn:
+
+        def _check(sync_conn):
+            insp = inspect(sync_conn)
+            # alembic_version 应被钉到当前 head
+            rows = sync_conn.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).fetchall()
+            assert {r[0] for r in rows} == {_alembic_head()}
+            # 全部 ORM 表都已建出
+            registered = {t.name for t in Base.metadata.sorted_tables}
+            assert registered <= set(insp.get_table_names())
+            # 增量迁移新增的列
+            task_cols = {c["name"] for c in insp.get_columns("tasks")}
+            assert {
+                "project_ref_type",
+                "clone_depth",
+                "task_type",
+                "source_alert_group_id",
+            } <= task_cols
+            project_cols = {c["name"] for c in insp.get_columns("projects")}
+            assert {"source_type", "default_ref_type"} <= project_cols
+            provider_cols = {c["name"] for c in insp.get_columns("llm_providers")}
+            assert "role" in provider_cols
+            # 增量迁移新增的表
+            for table in (
+                "platform_settings",
+                "scan_runs",
+                "raw_findings",
+                "alert_groups",
+                "adjudications",
+                "review_actions",
+            ):
+                assert table in insp.get_table_names(), table
+            # 关键唯一约束
+            uniques = {
+                tuple(u["column_names"])
+                for u in insp.get_unique_constraints("source_artifacts")
+            }
+            assert ("owner_id", "git_host", "project_key", "ref_type", "ref_name") in uniques
+
+        await conn.run_sync(_check)
+    await engine.dispose()

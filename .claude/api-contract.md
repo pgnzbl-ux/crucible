@@ -87,10 +87,13 @@
   "project_ref_type": "branch | tag | commit（可选；省略则自动推断）",
   "clone_depth": 1,
   "source_type": "git",
-  "vulnerability_description": "漏洞描述（至少 10 字符）",
+  "task_type": "verify | discovery",
+  "vulnerability_description": "漏洞描述（task_type=verify 必填，≥10 字符；discovery 必空）",
   "priority": "low | medium | high | critical"
 }
 ```
+
+`task_type`（默认 `verify`）：`verify`=漏洞验证（人工给描述，扫描/聚类/二审/调度节点 `VERIFY_MODE` skip，走 6 个终认节点）；`discovery`=仓库审计（禁止填描述，跑全 12 节点，dispatch 选 0/1 条主线索进同一套 audit）。
 
 `clone_depth`：浅克隆层数，默认 `1`；`0` 表示全量 clone（流量更大）。`project_ref_type` 显式指定可避免 tag 名被误判为 branch 导致缓存 SHA 对不上。`source_type` 默认 `git`；`local_upload` 时 `project_address` 必须是已登记的 `upload://local/{project_id}`，节点 0 从 MinIO 解开原始包，不再 clone。
 
@@ -231,6 +234,49 @@ owner 校验：所有环境均要求 `report.owner_id` 匹配当前用户。报�
 
 ---
 
+## Finding Context（告警复核台，discovery-spec §9.1）
+
+仓库审计（`task_type=discovery`）产出的告警组，供人工复核。仅 owner 可访问，非 owner 与不存在统一 404。
+
+### GET `/api/v1/findings/groups`
+
+分页查询告警组。Query：`task_id` / `status` / `cwe` / `ai_verdict` / `engine` / `clue_grade` / `limit`（默认 50，最大 200）/ `offset`。未传 `task_id` 时只返回当前用户任务集合内的组。
+
+响应 `{ total, items }`。每条 `AlertGroupSummary`：`id / task_id / cwe / file_path / function_symbol / line_span / member_count / engine_set / status / clue_grade / ai_verdict / ai_confidence / priority / resolution / created_at / updated_at`。
+
+`status` 状态机：`clustered → triaged → dispatched → resolved(*) | needs_review`。`ai_verdict` 为 `tp / fp / need_more_context / bypass`（osv 依赖情报 bypass 不进终认）。
+
+### GET `/api/v1/findings/groups/{group_id}`
+
+告警组详情：摘要字段 + `members`（成员 findings）、`representative`（代表成员）、`adjudications`（AI 二审记录，含 prompt/response 全文）、`reviews`（人工复核动作）、`verification_task_id` / `verification_verdict`（关联验证任务及终认判定）。
+
+读取时做**惰性对账**（§4.4 丢事件兜底）：组仍 `dispatched` 且关联 Task 已有终态 verdict → 当场回写。
+
+### POST `/api/v1/findings/groups/{group_id}/review`
+
+人工复核，动作即标注数据。请求体：
+
+```json
+{ "action": "confirm | reject | revise_cwe | adjust_confidence",
+  "reason_tags": ["..."], "reason_text": "...",
+  "cwe": "CWE-89", "confidence": 0.9 }
+```
+
+- `confirm` → 组 `resolved(confirmed)`；`reject` → `resolved(false_positive)`（**必须带 `reason_tags`**）
+- `revise_cwe` 必填 `cwe`；`adjust_confidence` 必填 `confidence`（0–1）
+
+响应 200：更新后的 `AlertGroupSummary`。
+
+### POST `/api/v1/findings/groups/{group_id}/revive`
+
+FP 误杀护栏：AI 判 `fp` 的组一键复活回复核队列（不物理删除）。响应 `{ id, status }`。
+
+### POST `/api/v1/findings/groups/{group_id}/dispatch`
+
+人工放行送验证：另开 `task_type=verify`（同 project/ref，Lab 复用）。请求体 `{ "include_engine_conclusion": false }`——勾选才在描述追加【引擎线索】原文（默认不锚定）。响应 `{ group_id, verification_task_id }`。组随后 `dispatched`，验证任务终态经事件回流写回该组（`resolved` / 退回 `needs_review`）。
+
+---
+
 ## Project Context
 
 ### GET `/api/v1/projects/`
@@ -253,6 +299,15 @@ Git 项目：该仓库已缓存的 MinIO 源码包（按 owner + host + `project
 
 非所有者或不存在 → 404。
 
+### DELETE `/api/v1/projects/{id}/artifacts/{artifact_id}`
+
+删除一条源码制品索引（Git 缓存包或上传原始包）。204。
+
+- 制品必须属于该项目且当前用户是 owner；否则与项目详情一致 → 404。
+- **独享** `object_key`：同时删 MinIO 对象。
+- **多行共用**同一 `object_key`（历史脏数据：同一 SHA 被记成 branch 又记成 tag）：只删本行，对象保留。
+- 删的是缓存索引，进行中任务的 `host_workdir` 不受影响；下次源码节点未命中则重新 clone / 需重新上传。
+
 ### POST `/api/v1/projects/`
 
 手工登记 **Git** 仓库。`git_url` 必须是合法 Git 地址（非法 → 400）。同 owner **名称已存在** → 409 `CONFLICT`。`source_type=git`。
@@ -270,6 +325,8 @@ Git 项目：该仓库已缓存的 MinIO 源码包（按 owner + host + `project
 ### PUT `/api/v1/projects/{id}` / DELETE `/api/v1/projects/{id}`
 
 改名称/备注/默认引用/删除。改名若与同 owner 其他项目冲突 → 409。GET/PUT/DELETE 均校验 owner；非所有者或不存在 → 404。
+
+删除项目时同步删除该仓库（`project_key`）下当前用户的全部 `source_artifacts`；独享 `object_key` 的 MinIO 对象一并删除，共用对象保留。进行中任务的工作目录不受影响。仍被任务或靶场引用 → 409 `PROJECT_IN_USE`（不静默拆外键）。
 
 ---
 
@@ -388,7 +445,7 @@ Provider **没有独立启用/停用字段**。Agent 运行时只读取唯一的
 
 ## 待补（P0/P1/P2 路线）
 
-- ~~P0-0: Agent 编排~~ ✅ 平台 6 节点编排(见 docs/agent-workflow.md)
+- ~~P0-0: Agent 编排~~ ✅ 平台 12 节点编排(见 docs/discovery-spec.md)
 - ~~P0-1: `GET /tasks/{id}/events/stream` SSE 端点~~ ✅
 - ~~P0-2: `POST /tasks/{id}/cancel` 真正生效~~ ✅（revoke + 容器销毁）
 - ~~P0-3: JWT 闭环 + SSE `?token=` 鉴权~~ ✅

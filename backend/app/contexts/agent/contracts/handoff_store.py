@@ -6,14 +6,22 @@ from typing import Any
 
 from .inputs import (
     AuditInput,
+    ClusterInput,
+    DispatchInput,
     EnvReadyInput,
     ProfileInput,
     ReportInput,
     ReproduceInput,
+    ScanGitleaksInput,
+    ScanOsvInput,
+    ScanSemgrepInput,
     SourceInput,
+    TriageInput,
 )
 from .outputs import (
     AuditHandoff,
+    DispatchHandoff,
+    EngineScanHandoff,
     EnvReadyHandoff,
     ProfileHandoff,
     ReproduceHandoff,
@@ -36,6 +44,7 @@ class TaskScalars:
     vulnerability_description: str
     host_workdir: str
     source_path: str
+    task_type: str = "verify"  # verify | discovery(discovery-spec §4.2.3)
 
 
 class HandoffStore:
@@ -60,13 +69,27 @@ class HandoffStore:
     def project(self, node_key: str):
         return project_handoff(node_key, self._raw.get(node_key))
 
-    def signals(self) -> ControlSignals:
+    def signals(self, verify_mode: bool = False) -> ControlSignals:
         profile = self.get_raw("profile")
         audit = self.get_raw("audit")
+        dispatch = self.get_raw("dispatch")
         is_web = profile.get("is_web") if isinstance(profile.get("is_web"), bool) else None
         gate = audit.get("gate_verdict")
         gate_verdict = str(gate) if gate is not None else None
-        return ControlSignals(is_web=is_web, gate_verdict=gate_verdict)
+        lead = dispatch.get("has_lead") if dispatch else None
+        queued = dispatch.get("queued_count") if dispatch else None
+        if isinstance(lead, bool):
+            has_dispatch_lead = lead
+        elif isinstance(queued, int):
+            has_dispatch_lead = queued > 0
+        else:
+            has_dispatch_lead = None
+        return ControlSignals(
+            is_web=is_web,
+            gate_verdict=gate_verdict,
+            has_dispatch_lead=has_dispatch_lead,
+            verify_mode=verify_mode,
+        )
 
 
 class InputAssembler:
@@ -93,18 +116,73 @@ class InputAssembler:
                 source=SourceHandoff.model_validate(store.get_raw("source")),
                 profile=ProfileHandoff.model_validate(store.get_raw("profile")),
             )
+        if node_key == "scan_gitleaks":
+            return ScanGitleaksInput(
+                source=SourceHandoff.model_validate(store.get_raw("source")),
+                host_workdir=task.host_workdir,
+                source_path=task.source_path,
+            )
+        if node_key == "scan_osv":
+            return ScanOsvInput(
+                source=SourceHandoff.model_validate(store.get_raw("source")),
+                host_workdir=task.host_workdir,
+                source_path=task.source_path,
+            )
+        if node_key == "scan_semgrep":
+            return ScanSemgrepInput(
+                source=SourceHandoff.model_validate(store.get_raw("source")),
+                profile=ProfileHandoff.model_validate(store.get_raw("profile")),
+                host_workdir=task.host_workdir,
+                source_path=task.source_path,
+            )
+        if node_key == "cluster":
+            scans = [
+                EngineScanHandoff.model_validate(store.get_raw(key))
+                for key in ("scan_gitleaks", "scan_osv", "scan_semgrep")
+            ]
+            profile_raw = store.get_raw("profile")
+            return ClusterInput(
+                source=SourceHandoff.model_validate(store.get_raw("source")),
+                host_workdir=task.host_workdir,
+                source_path=task.source_path,
+                scans=scans,
+                profile=ProfileHandoff.model_validate(profile_raw) if profile_raw else None,
+            )
+        if node_key == "triage":
+            return TriageInput(
+                source=SourceHandoff.model_validate(store.get_raw("source")),
+                host_workdir=task.host_workdir,
+                source_path=task.source_path,
+                cluster=project_handoff("cluster", store.get_raw("cluster")),
+            )
+        if node_key == "dispatch":
+            return DispatchInput(
+                source=SourceHandoff.model_validate(store.get_raw("source")),
+                host_workdir=task.host_workdir,
+                source_path=task.source_path,
+                triage=project_handoff("triage", store.get_raw("triage")),
+                profile=ProfileHandoff.model_validate(store.get_raw("profile")),
+            )
         if node_key == "audit":
+            # 验证：人给的描述；审计：description 为空串 + dispatch 主线索(discovery-spec §4.2.4)
+            dispatch_raw = store.get_raw("dispatch")
+            dispatch = (
+                DispatchHandoff.model_validate(dispatch_raw)
+                if task.task_type != "verify" and dispatch_raw
+                else None
+            )
             return AuditInput(
                 source=SourceHandoff.model_validate(store.get_raw("source")),
                 profile=ProfileHandoff.model_validate(store.get_raw("profile")),
-                vulnerability_description=task.vulnerability_description,
+                vulnerability_description=task.vulnerability_description or "" or "",
+                dispatch=dispatch,
             )
         if node_key == "reproduce":
             return ReproduceInput(
                 source=SourceHandoff.model_validate(store.get_raw("source")),
                 env_ready=EnvReadyHandoff.model_validate(store.get_raw("env_ready")),
                 audit=audit_for_reproduce(store.get_raw("audit")),
-                vulnerability_description=task.vulnerability_description,
+                vulnerability_description=task.vulnerability_description or "",
             )
         if node_key == "report":
             repro_raw = dict(store.get_raw("reproduce"))
@@ -114,7 +192,7 @@ class InputAssembler:
                 env_ready=EnvReadyHandoff.model_validate(store.get_raw("env_ready")),
                 audit=AuditHandoff.model_validate(store.get_raw("audit")),
                 reproduce=ReproduceHandoff.model_validate(repro_raw),
-                vulnerability_description=task.vulnerability_description,
+                vulnerability_description=task.vulnerability_description or "",
                 project_address=task.project_address,
             )
         raise KeyError(f"无法组装未知节点 Input: {node_key}")

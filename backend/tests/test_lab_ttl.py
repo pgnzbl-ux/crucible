@@ -227,7 +227,7 @@ async def test_failed_lab_runtime_is_cleaned_by_sweeper(session):
 
 
 @pytest.mark.asyncio
-async def test_cleanup_promotes_expired_lab_with_running_containers(session):
+async def test_cleanup_does_not_promote_expired_without_http_probe(session):
     from app.contexts.lab.models import Lab
 
     svc, result = await ready_lab(session)
@@ -245,10 +245,10 @@ async def test_cleanup_promotes_expired_lab_with_running_containers(session):
     ) as down:
         cleaned = await svc.cleanup_terminal_runtimes()
 
-    assert cleaned == []
-    down.assert_not_awaited()
+    assert cleaned == [result.lab_id]
+    down.assert_awaited_once_with(result.compose_project)
     await session.refresh(lab)
-    assert lab.status == "ready"
+    assert lab.status == "expired"
 
 
 @pytest.mark.asyncio
@@ -301,7 +301,7 @@ async def test_ttl_restores_ready_when_task_appears_after_claim(session):
         svc,
         "live_task_ids",
         new_callable=AsyncMock,
-        side_effect=[[], ["new-live-task"]],
+        side_effect=[[], ["t1"]],
     ), patch(
         "app.contexts.lab.docker_ops.compose_down", new_callable=AsyncMock
     ) as down:
@@ -330,7 +330,7 @@ async def test_creating_restores_claim_when_task_appears_after_claim(session):
         svc,
         "live_task_ids",
         new_callable=AsyncMock,
-        side_effect=[[], ["new-live-task"]],
+        side_effect=[[], ["t1"]],
     ), patch(
         "app.contexts.lab.docker_ops.compose_down", new_callable=AsyncMock
     ) as down:
@@ -339,6 +339,35 @@ async def test_creating_restores_claim_when_task_appears_after_claim(session):
     assert failed == []
     down.assert_not_awaited()
     assert (await session.get(Lab, result.lab_id)).status == "creating"
+
+
+@pytest.mark.asyncio
+async def test_creating_waiter_does_not_keep_dead_creator_lease_alive(session):
+    from app.contexts.lab.models import Lab
+    from app.contexts.lab.service import LabService
+    from app.contexts.task.models import Task
+
+    await seed(session)
+    svc = LabService(session)
+    result = await svc.acquire(
+        owner_id="u1", project_id="p1", commit_sha=SHA, task_id="t1"
+    )
+    (await session.get(Task, "t1")).status = "cancelled"
+    await session.commit()
+
+    with patch.object(
+        svc,
+        "live_task_ids",
+        new_callable=AsyncMock,
+        side_effect=[["waiter-task"], ["waiter-task"]],
+    ), patch(
+        "app.contexts.lab.docker_ops.compose_down", new_callable=AsyncMock
+    ) as down:
+        failed = await svc.fail_stale_creating()
+
+    assert failed == [result.lab_id]
+    down.assert_awaited_once_with(result.compose_project)
+    assert (await session.get(Lab, result.lab_id)).status == "failed"
 
 
 @pytest.mark.asyncio

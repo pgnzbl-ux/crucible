@@ -13,8 +13,9 @@ import type { ColumnsType } from 'antd/es/table'
 import dayjs from 'dayjs'
 import { useLocation } from 'wouter'
 
-import { api, type TaskStats, type TaskSummary } from '../shared/lib/api'
-import { getStatusMeta, getPriorityMeta } from '../shared/lib/meta'
+import { api, type TaskSummary } from '../shared/lib/api'
+import { getStatusMeta } from '../shared/lib/meta'
+import { auditResultLabel, projectLabel, sourceVersionLabel } from '../shared/lib/tablePresentation'
 import { statsPollMs, sumTaskStats } from '../shared/lib/taskListQuery'
 import { tableRowNavigateProps } from '../shared/lib/tableRowNavigate'
 import { useErrorToast } from '../shared/hooks/useErrorToast'
@@ -23,20 +24,6 @@ import { StatCard } from '../features/dashboard/components/StatCard'
 import { TaskTrendChart, TREND_SAMPLE_NOTE } from '../features/dashboard/components/TaskTrendChart'
 
 const { Text } = Typography
-
-const COUNT_QUERIES = [
-  { key: 'queued', title: '排队中', status: 'pending,queued', icon: <ClockCircleOutlined />, tone: 'default' as const, filter: 'pending,queued' },
-  { key: 'running', title: '分析中', status: 'running', icon: <ThunderboltOutlined />, tone: 'primary' as const, filter: 'running' },
-  { key: 'needsReview', title: '待复核', status: 'needs_review', icon: <BugOutlined />, tone: 'warning' as const, filter: 'needs_review' },
-  { key: 'completed', title: '已完成', status: 'completed', icon: <CheckCircleOutlined />, tone: 'success' as const, filter: 'completed' },
-  { key: 'failed', title: '失败', status: 'failed', icon: <BugOutlined />, tone: 'error' as const, filter: 'failed' },
-  { key: 'total', title: '任务总数', status: undefined, icon: <FileProtectOutlined />, tone: 'default' as const, filter: undefined },
-]
-
-function cardValue(stats: TaskStats | undefined, filter?: string): number {
-  if (!stats) return 0
-  return filter ? sumTaskStats(stats.by_status, filter) : stats.total
-}
 
 export function DashboardPage() {
   const [, navigate] = useLocation()
@@ -56,20 +43,39 @@ export function DashboardPage() {
     queryFn: () => api.listTasks({ limit: '200' }),
     refetchInterval: () => statsPollMs(stats?.by_status),
   })
+  const { data: findingStats, error: findingStatsError, isError: isFindingStatsError } = useQuery({
+    queryKey: ['finding-stats'],
+    queryFn: () => api.getFindingStats(),
+    refetchInterval: () => statsPollMs(stats?.by_status),
+  })
   useErrorToast(isStatsError, statsError, '工作台统计加载失败')
   useErrorToast(isRecentError, recentError, '最近任务加载失败')
+  useErrorToast(isFindingStatsError, findingStatsError, '漏洞线索统计加载失败')
 
   const tasks = data?.items ?? []
+  const cards = [
+    { key: 'running', title: '进行中的审计', value: sumTaskStats(stats?.by_status ?? {}, 'pending,queued,running'), icon: <ThunderboltOutlined />, tone: 'primary' as const, href: '/tasks?status=pending%2Cqueued%2Crunning' },
+    { key: 'review', title: '待人工复核', value: findingStats?.by_queue.review ?? 0, icon: <ClockCircleOutlined />, tone: 'warning' as const, href: '/findings?scope=review' },
+    { key: 'confirming', title: '终认中', value: findingStats?.by_status.dispatched ?? 0, icon: <BugOutlined />, tone: 'warning' as const, href: '/findings?status=dispatched' },
+    { key: 'confirmed', title: '已确认漏洞', value: findingStats?.by_resolution.confirmed ?? 0, icon: <CheckCircleOutlined />, tone: 'success' as const, href: '/findings?status=resolved' },
+    { key: 'findings', title: '漏洞线索', value: findingStats?.total ?? 0, icon: <BugOutlined />, tone: 'default' as const, href: '/findings?scope=all' },
+    { key: 'total', title: '审计运行', value: stats?.total ?? 0, icon: <FileProtectOutlined />, tone: 'default' as const, href: '/tasks' },
+  ]
 
   const recentColumns: ColumnsType<TaskSummary> = [
     {
-      title: '项目地址',
+      title: '项目 / 版本',
       dataIndex: 'project_address',
       ellipsis: true,
-      render: (v: string) => <Text code>{v}</Text>,
+      render: (v: string, row) => (
+        <div>
+          <Text strong>{projectLabel(v)}</Text>
+          <div><Text type="secondary" style={{ fontSize: 12 }}>{sourceVersionLabel(row.project_ref, row.project_ref_type)}</Text></div>
+        </div>
+      ),
     },
     {
-      title: '状态',
+      title: '当前状态',
       dataIndex: 'status',
       width: 100,
       render: (v: string) => {
@@ -78,14 +84,19 @@ export function DashboardPage() {
       },
     },
     {
-      title: '优先级',
-      dataIndex: 'priority',
-      width: 80,
-      render: (v: string) => <Tag color={getPriorityMeta(v).color}>{getPriorityMeta(v).label}</Tag>,
+      title: '审计结果',
+      dataIndex: 'verdict',
+      width: 140,
+      render: (v: string | null, row) => (
+        <div>
+          <Text>{auditResultLabel(row.status, v)}</Text>
+          {row.task_type === 'discovery' ? <div><Text type="secondary" style={{ fontSize: 12 }}>线索 {row.finding_count} · 确认 {row.confirmed_count}</Text></div> : null}
+        </div>
+      ),
     },
     {
-      title: '创建时间',
-      dataIndex: 'created_at',
+      title: '最近更新',
+      dataIndex: 'updated_at',
       width: 150,
       render: (v: string) => dayjs(v).format('MM-DD HH:mm'),
     },
@@ -95,26 +106,24 @@ export function DashboardPage() {
     <>
       <PageHeader
         title="工作台"
-        subtitle="AI 漏洞自动验证平台 · 任务总览"
+        subtitle="代码审计、漏洞线索与终认状态总览"
         extra={
           <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/tasks?create=1')}>
-            新建任务
+            发起代码审计
           </Button>
         }
       />
 
       <Row gutter={[16, 16]} className="crucible-stagger">
-        {COUNT_QUERIES.map((card) => (
+        {cards.map((card) => (
           <Col xs={24} sm={12} lg={8} key={card.key}>
             <StatCard
               title={card.title}
-              value={cardValue(stats, card.status)}
+              value={card.value}
               icon={card.icon}
               tone={card.tone}
-              trend={card.key === 'total' ? '全部任务' : '点击筛选'}
-              onClick={() =>
-                card.filter ? navigate(`/tasks?status=${card.filter}`) : navigate('/tasks')
-              }
+              trend="点击查看"
+              onClick={() => navigate(card.href)}
             />
           </Col>
         ))}
@@ -122,14 +131,14 @@ export function DashboardPage() {
 
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} lg={14}>
-          <Card className="crucible-card-hover" title={`近 7 日任务趋势（${TREND_SAMPLE_NOTE}）`}>
+          <Card className="crucible-card-hover" title={`近 7 日审计趋势（${TREND_SAMPLE_NOTE}）`}>
             {isLoading ? <Skeleton active paragraph={{ rows: 4 }} /> : <TaskTrendChart tasks={tasks} />}
           </Card>
         </Col>
         <Col xs={24} lg={10}>
           <Card
             className="crucible-card-hover"
-            title="最近任务"
+            title="最近审计"
             extra={
               <Button type="link" onClick={() => navigate('/tasks')}>
                 查看全部 <ArrowRightOutlined />
@@ -150,9 +159,9 @@ export function DashboardPage() {
                 }
               />
             ) : (
-              <Empty description="暂无任务">
+              <Empty description="暂无审计运行">
                 <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/tasks?create=1')}>
-                  新建任务
+                  发起代码审计
                 </Button>
               </Empty>
             )}

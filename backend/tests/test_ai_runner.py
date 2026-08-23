@@ -698,11 +698,13 @@ class _MgrStub:
         self.calls: list[dict] = []
 
     def run_with_streaming(self, spec, on_event):  # noqa: ANN001
-        self.calls.append(json.loads(Path(spec.host_workdir, ".node.json").read_text("utf-8")))
+        input_path = Path(spec.host_workdir) / Path(spec.env["NODE_INPUT_PATH"]).relative_to("/workspace")
+        output_path = Path(spec.host_workdir) / Path(spec.env["NODE_OUTPUT_PATH"]).relative_to("/workspace")
+        self.calls.append(json.loads(input_path.read_text("utf-8")))
         item = self.script.pop(0)
         if isinstance(item, Exception):
             raise item
-        Path(spec.host_workdir, ".node_output.json").write_text(
+        output_path.write_text(
             json.dumps(item, ensure_ascii=False), encoding="utf-8"
         )
         return 0, {"timed_out": False, "stderr_tail": ""}
@@ -813,3 +815,28 @@ def test_summarize_submit_truncates_and_tags():
     assert data["evidence"].startswith("<list:")
     assert data["cvss"].startswith("<dict:")
     assert len(data["weird"]) <= 100
+
+
+def test_light_workstation_env_filter():
+    """轻工位（triage/profile）凭据最小化：runner_env 只保留 SDK 必需键（spec §7.4）。"""
+    from app.contexts.agent.ai_runner import (
+        _LIGHT_WORKSTATION_NODES,
+        _is_sdk_env_key,
+    )
+
+    assert _LIGHT_WORKSTATION_NODES == frozenset({"triage", "profile"})
+    assert _is_sdk_env_key("ANTHROPIC_API_KEY")
+    assert _is_sdk_env_key("ANTHROPIC_BASE_URL")
+    assert _is_sdk_env_key("CLAUDE_SDK_MAX_TURNS")
+    assert _is_sdk_env_key("API_TIMEOUT_MS")
+    assert not _is_sdk_env_key("DB_PASSWORD")  # 任务级凭据必须被剥离
+    assert not _is_sdk_env_key("GITHUB_TOKEN")
+
+
+def test_agent_runner_spec_hide_workspace_paths():
+    """容器规格支持用空 tmpfs 遮蔽 /workspace 敏感子路径。"""
+    from app.core.agent_runner import AgentRunnerSpec
+
+    spec = AgentRunnerSpec(host_workdir="/tmp/x", hide_workspace_paths=("/workspace/.secrets",))
+    assert spec.hide_workspace_paths == ("/workspace/.secrets",)
+    assert AgentRunnerSpec(host_workdir="/tmp/x").hide_workspace_paths == ()

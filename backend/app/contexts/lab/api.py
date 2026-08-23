@@ -1,3 +1,4 @@
+import subprocess
 from collections.abc import Awaitable
 from typing import Annotated, Any
 
@@ -38,6 +39,13 @@ async def _execute(operation: Awaitable[Any]) -> Any:
         raise HTTPException(400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(400, detail=str(exc)) from exc
+    except subprocess.CalledProcessError as exc:
+        # docker/compose 命令失败属基础设施故障 → 503（对齐 error-handling.md §1）
+        stderr_tail = (exc.stderr or "")[-200:].strip() if isinstance(exc.stderr, str) else ""
+        detail = f"靶场基础设施操作失败: {exc.cmd[0] if exc.cmd else 'docker'}"
+        if stderr_tail:
+            detail = f"{detail}（{stderr_tail}）"
+        raise HTTPException(503, detail=detail) from exc
 
 
 @router.get("", response_model=LabListResponse)

@@ -14,7 +14,6 @@ from .base import NodeContext, workspace_repo_path
 
 
 class SourceNode:
-    node_index = 0
     node_key = "source"
 
     @property

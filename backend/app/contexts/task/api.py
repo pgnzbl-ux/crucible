@@ -34,7 +34,7 @@ async def create_task(
     svc: Annotated[TaskService, Depends(get_task_service)],
     user_id: CurrentUserId,
 ) -> TaskDetail:
-    """创建漏洞验证任务"""
+    """创建代码审计或定向验证任务。"""
     try:
         return await svc.create_task(request, user_id)
     except TaskDispatchError as e:
@@ -50,13 +50,16 @@ async def list_tasks(
     q: str | None = Query(None, description="项目地址关键词"),
     date_from: str | None = Query(None, description="创建日起 YYYY-MM-DD"),
     date_to: str | None = Query(None, description="创建日止 YYYY-MM-DD"),
+    task_type: str | None = Query(None, description="verify | discovery(discovery-spec §9.1)"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> TaskListResponse:
     """获取任务列表"""
-    return await svc.list_tasks(
+    items = await svc.list_tasks(
         user_id, status, priority, limit, offset, q=q, date_from=date_from, date_to=date_to,
+        task_type=task_type,
     )
+    return items
 
 
 @router.get("/stats", response_model=TaskStatsResponse)
@@ -76,13 +79,14 @@ async def create_task_from_upload(
     svc: Annotated[TaskService, Depends(get_task_service)],
     user_id: CurrentUserId,
     file: UploadFile = File(..., description="源码包 zip / tar / tar.gz，≤200MB"),
-    vulnerability_description: Annotated[str, Form(min_length=10)] = ...,
+    vulnerability_description: Annotated[str | None, Form()] = None,
+    task_type: Annotated[str, Form(pattern=r"^(verify|discovery)$")] = "verify",
     name: Annotated[str | None, Form()] = None,
     priority: Annotated[str, Form()] = "medium",
     vulnerability_reasoning: Annotated[str | None, Form()] = None,
     credential_refs: Annotated[str | None, Form(description="JSON 数组，凭据 id 列表")] = None,
 ) -> TaskDetail:
-    """上传本地源码包并创建验证任务。节点 0 从 MinIO 解开，不再 git clone。"""
+    """上传本地源码包并创建代码审计或定向验证。"""
     import json as _json
 
     chunks: list[bytes] = []
@@ -115,6 +119,7 @@ async def create_task_from_upload(
             filename=file.filename or "source.zip",
             data=data,
             vulnerability_description=vulnerability_description,
+            task_type=task_type,
             name=name,
             priority=priority,
             vulnerability_reasoning=vulnerability_reasoning,
