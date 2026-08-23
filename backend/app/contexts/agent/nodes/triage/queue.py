@@ -40,8 +40,9 @@ def order_groups(
 
 
 def should_skip_llm(group) -> bool:
-    """跳过 LLM：F 级 / 攻击面降权组 → needs_review。"""
-    if (getattr(group, "clue_grade", None) or "") == "F":
+    """跳过 LLM：仅 A/B 进二审；F / 非 A/B / 攻击面降权 → needs_review。"""
+    grade = (getattr(group, "clue_grade", None) or "")
+    if grade not in ("A", "B"):
         return True
     return should_downgrade(
         getattr(group, "file_path", None) or "",

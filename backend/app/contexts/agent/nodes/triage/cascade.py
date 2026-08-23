@@ -20,12 +20,15 @@ from typing import Any
 
 from sqlalchemy import and_, case, func, or_, select
 
+from app.contexts.agent.nodes.base import emit_phase
 from app.contexts.finding.models import Adjudication, AlertGroup, RawFinding
 from app.contexts.finding.service import FindingService
 
 logger = logging.getLogger(__name__)
 
 FAST_CONCURRENCY = 8  # 快模型纯 HTTP 调用，并发可高于 agent
+FAST_PROGRESS_EVERY = 25  # 快审每完成 N 次调用播报一次进度事件
+FAST_BATCH = 100  # 快审分批粒度：批间复查 token 预算
 
 
 @dataclass
@@ -140,6 +143,12 @@ async def apply_carryover(
             AlertGroup.status.in_(("adjudicated", "resolved")),
             AlertGroup.ai_verdict.in_(("tp", "fp")),
             AlertGroup.ai_confidence >= min_conf,
+            # 只携带 agent 亲审真值：rule/fast/propagated 入库即成"永久真值"
+            # 会跨任务自举复利（与 T1 统计同口径）
+            or_(
+                AlertGroup.verdict_source.is_(None),
+                AlertGroup.verdict_source == "agent",
+            ),
             RawFinding.fingerprint.in_(fingerprints),
         )
         .order_by(AlertGroup.ai_confidence.desc())
@@ -226,11 +235,13 @@ async def rule_fp_rates(
 
 async def calibrated_propagate_factor(
     session, *, default_factor: float, min_verified: int,
+    project_id: str | None = None,
 ) -> float:
     """传播折扣按历史验证一致率自校准。
 
     一致率 = agent 亲审(tp/fp) 与终态 resolution 同向的比例。样本不足时
     返回默认折扣。夹在 [0.3, 0.95]：校准是修正不是颠覆。
+    给 project_id 时只统计同项目（与 T0/T1 同口径），避免跨项目互染。
     """
     agree_expr = case(
         (
@@ -244,12 +255,17 @@ async def calibrated_propagate_factor(
         ),
         else_=0.0,
     )
-    n, agreed = (await session.execute(
-        select(func.count(), func.sum(agree_expr)).where(
-            AlertGroup.ai_verdict.in_(("tp", "fp")),
-            AlertGroup.resolution.is_not(None),
+    stmt = select(func.count(), func.sum(agree_expr)).where(
+        AlertGroup.ai_verdict.in_(("tp", "fp")),
+        AlertGroup.resolution.is_not(None),
+    )
+    if project_id:
+        from app.contexts.task.models import Task
+
+        stmt = stmt.join(Task, Task.id == AlertGroup.task_id).where(
+            Task.project_id == project_id,
         )
-    )).one()
+    n, agreed = (await session.execute(stmt)).one()
     n, agreed = int(n or 0), float(agreed or 0)
     if n < min_verified:
         return default_factor
@@ -320,6 +336,8 @@ def _fast_prompt(pack, group, *, rubric: str | None) -> tuple[str, str]:
             "function_symbol": group.function_symbol,
             "line_span": group.line_span,
             "grade": pack.grade,
+            "has_dataflow": pack.has_dataflow,
+            "rule_class": pack.rule_class,
             "source_to_sink": list(pack.source_to_sink),
             "slices": [{"label": s.label, "text": s.text} for s in pack.slices],
         },
@@ -350,7 +368,13 @@ async def fast_screen(
         if rep is None:
             escalated.append(group)
             continue
-        pack = build_pack(group=group, representative=rep, slices=extract_slices(ctx, group, rep, index))
+        slices = extract_slices(ctx, group, rep, index)
+        if not slices:
+            # 无代码切片不送快审：单次补全没有工具补看源码，零上下文等于
+            # 盲猜（agent 亲审有仓库挂载，不受此限制）
+            escalated.append(group)
+            continue
+        pack = build_pack(group=group, representative=rep, slices=slices)
         if pack is None:
             escalated.append(group)
             continue
@@ -359,7 +383,61 @@ async def fast_screen(
         )
         prepared.append((group, system, user))
 
+    # 并发协程绝不共享 session（greenlet 互锁 + 事务锁滞留的根源）：
+    # provider 在并发前一次性解析，之后 llm_complete 只走 HTTP
+    from app.core.llm_gateway import _resolve_provider
+
+    try:
+        provider = await _resolve_provider(session, "screening")
+    except Exception as e:  # noqa: BLE001 — 无可用 provider：全组升级 agent
+        logger.warning("快审 provider 解析失败，整层升级: %s", e)
+        return groups, 0
+    # ORM 对象并发跨协程读属性是隐性契约（绑定 session 过期即 greenlet 崩）：
+    # 快照成纯值再交给并发调用，与解析会话彻底解耦
+    from types import SimpleNamespace
+
+    provider = SimpleNamespace(
+        id=provider.id, model=provider.model, base_url=provider.base_url,
+        api_key_encrypted=provider.api_key_encrypted,
+        timeout_ms=provider.timeout_ms,
+    )
+
     sem = asyncio.Semaphore(FAST_CONCURRENCY)
+    # 快审全程可见：每 FAST_PROGRESS_EVERY 次调用播报一次进度
+    state = {"done": 0, "tp": 0, "fp": 0, "escalated": 0}
+    total = len(prepared)
+    emit_phase(
+        ctx, f"快审启动：{total} 组送 screening 模型（并发 {FAST_CONCURRENCY}）",
+        phase="triage",
+    )
+
+    def _note_progress(outcome: tuple | None) -> None:
+        state["done"] += 1
+        if outcome is None:
+            state["escalated"] += 1
+        elif outcome[0] == "tp":
+            state["tp"] += 1
+        elif outcome[0] == "fp":
+            state["fp"] += 1
+        if state["done"] % FAST_PROGRESS_EVERY == 0 or state["done"] == total:
+            emit_phase(
+                ctx,
+                f"快审 {state['done']}/{total}"
+                f"（tp {state['tp']} · fp {state['fp']} · 升级 {state['escalated']}）",
+                phase="triage",
+            )
+            if ctx.on_event:
+                ctx.on_event({
+                    "type": "triage.progress",
+                    "adjudicated": state["tp"] + state["fp"],
+                    "pending": total - state["done"],
+                    "tiers": {
+                        "carried": 0, "rule": 0,
+                        "fast_model": state["tp"] + state["fp"],
+                        "agent": 0, "propagated": 0,
+                    },
+                    "stage": "fast_screen",
+                })
 
     async def _one(item) -> tuple[AlertGroup, tuple | None]:
         group, system, user = item
@@ -367,11 +445,12 @@ async def fast_screen(
             try:
                 result = await llm_complete(
                     role="screening", system=system, user=user,
-                    session=session, max_tokens=1024, temperature=0.1,
+                    provider=provider, max_tokens=1024, temperature=0.1,
                 )
                 parsed = parse_verdict_json(result.text)
             except Exception as e:  # noqa: BLE001 — 快审任何失败都升级，不影响节点
                 logger.info("快审失败升级 agent: %s %s", group.group_key, e)
+                _note_progress(None)
                 return group, None
             verdict = parsed.get("verdict")
             if verdict not in ("tp", "fp", "need_more_context"):
@@ -380,9 +459,36 @@ async def fast_screen(
                 confidence = float(parsed.get("confidence"))
             except (TypeError, ValueError):
                 confidence = 0.0
-            return group, (verdict, confidence, parsed, result)
+            outcome = (verdict, confidence, parsed, result)
+            _note_progress(outcome if verdict in ("tp", "fp") else None)
+            return group, outcome
 
-    results = await asyncio.gather(*[_one(item) for item in prepared])
+    # 快审也烧 token（本层 ~1.2k/条 × 数百条）：预算耗尽整层跳过、
+    # 分批间复查（主会话串行点，并发协程不碰会话）
+    from app.contexts.agent.usage_ledger import budget_state
+
+    exhausted, spent, budget = await budget_state(session, ctx.task_id)
+    if exhausted:
+        emit_phase(
+            ctx,
+            f"token 预算耗尽（{spent}/{budget}），快审跳过，全部升级 agent 审议",
+            phase="triage",
+        )
+        return groups, 0
+
+    results: list[tuple[AlertGroup, tuple | None]] = []
+    for start in range(0, len(prepared), FAST_BATCH):
+        batch = prepared[start:start + FAST_BATCH]
+        results.extend(await asyncio.gather(*[_one(item) for item in batch]))
+        exhausted, spent, budget = await budget_state(session, ctx.task_id)
+        if exhausted and start + FAST_BATCH < len(prepared):
+            emit_phase(
+                ctx,
+                f"token 预算耗尽（{spent}/{budget}），快审中止于"
+                f" {len(results)}/{len(prepared)}，其余升级 agent 审议",
+                phase="triage",
+            )
+            break
     by_id = {g.id: outcome for g, outcome in results}
     threshold = settings.triage_fast_confidence
     decided = 0

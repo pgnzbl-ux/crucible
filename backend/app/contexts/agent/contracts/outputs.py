@@ -122,6 +122,8 @@ class ClusterHandoff(_HandoffBase):
     findings_without_function: int = 0
     bypass_count: int = 0
     downgraded_count: int = 0
+    dropped_c_count: int = 0  # 确定性降噪 C 档（未建 AlertGroup）
+    dropped_c_by_engine: dict[str, int] = Field(default_factory=dict)
 
 
 class TriageHandoff(_HandoffBase):
@@ -131,6 +133,15 @@ class TriageHandoff(_HandoffBase):
     tp_count: int = 0
     fp_count: int = 0
     need_more_count: int = 0
+    # 级联收敛分级计数（展示/排障用，下游节点不依赖）
+    carried_count: int = 0
+    rule_count: int = 0
+    fast_model_count: int = 0
+    propagated_count: int = 0
+    propagated_review_count: int = 0
+    family_count: int = 0
+    escalated_count: int = 0
+    budget_exhausted: bool = False
 
 
 class DispatchHandoff(_HandoffBase):

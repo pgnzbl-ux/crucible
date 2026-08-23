@@ -652,6 +652,17 @@ export const api = {
 
 // ── 发现侧·复核台(discovery-spec §9) ──
 
+export interface FindingEvidenceRaw {
+  confidence?: string
+  category?: string | null
+  has_dataflow?: boolean
+  rule_class?: string
+  entropy?: number
+  called?: boolean | null
+  unimportant?: boolean
+  [key: string]: unknown
+}
+
 export interface FindingSummary {
   id: string
   engine: string
@@ -664,6 +675,8 @@ export interface FindingSummary {
   message: string
   source_to_sink?: unknown[] | null
   code_snippet?: string | null
+  /** 降噪/二审证据元数据（已脱敏）；非引擎结论措辞 */
+  raw?: FindingEvidenceRaw | null
 }
 
 export interface AlertGroupSummary {

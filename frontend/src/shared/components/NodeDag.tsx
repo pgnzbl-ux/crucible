@@ -88,6 +88,15 @@ function nodeCaption(key: string, output?: Record<string, unknown> | null): stri
   if (key.startsWith('scan_') && typeof output?.finding_count === 'number') {
     return `${output.finding_count} 条发现`
   }
+  if (key === 'cluster') {
+    const groups = typeof output?.group_count === 'number' ? output.group_count : null
+    const dropped = typeof output?.dropped_c_count === 'number' ? output.dropped_c_count : null
+    if (groups != null && dropped != null && dropped > 0) {
+      return `${groups} 组 · C档丢弃 ${dropped}`
+    }
+    if (groups != null) return `${groups} 组`
+    if (dropped != null && dropped > 0) return `C档丢弃 ${dropped}`
+  }
   if ((key === 'dispatch' || key === 'lead_verify') && typeof output?.queued_count === 'number') {
     return `${output.queued_count} 条线索`
   }

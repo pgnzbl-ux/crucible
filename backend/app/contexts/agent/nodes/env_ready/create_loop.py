@@ -100,6 +100,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
         for attempt in range(1, MAX_ATTEMPTS + 1):
             if not await svc.heartbeat_creation(result.lab_id, ctx.task_id):
                 raise RuntimeError("靶场创建权已转移，当前任务停止建场")
+            await events.raise_if_cancelled(ctx)
             if attempt > 1:
                 await _bump_node_attempt(ctx, attempt)
             occupied = ports.list_docker_occupied_host_ports(exclude_project=exclude_project)
@@ -270,7 +271,10 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 preferred_scheme=preferred_scheme,
                 probe_path=probe_path,
                 compose_project=result.compose_project,
+                cancel_check=events.cancel_check(ctx),
             )
+            # 探活因取消提前返回时不能当健康失败回喂 AI（那会拆场进下一轮）
+            await events.raise_if_cancelled(ctx)
             ok, live_port, scheme = health_result
             if not ok or live_port is None:
                 logs = await compose_host.collect_compose_logs(

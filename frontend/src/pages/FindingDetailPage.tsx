@@ -7,7 +7,7 @@ import { useLocation, useParams } from 'wouter'
 import { api } from '../shared/lib/api'
 import { PageContainer } from '../shared/components/PageContainer'
 import { useErrorToast } from '../shared/hooks/useErrorToast'
-import { formatSourceToSink } from '../shared/lib/findingEvidence'
+import { formatSourceToSink, evidenceMetaFromFinding, ruleClassLabel } from '../shared/lib/findingEvidence'
 
 const { Text, Paragraph } = Typography
 
@@ -80,6 +80,8 @@ export function FindingDetailPage() {
   const rep = data.representative
   const latestAdj = data.adjudications[data.adjudications.length - 1]
   const sourceToSink = formatSourceToSink(rep?.source_to_sink)
+  const evidenceMeta = evidenceMetaFromFinding(rep)
+  const ruleLabel = ruleClassLabel(evidenceMeta.ruleClass)
 
   return (
     <PageContainer>
@@ -159,6 +161,17 @@ export function FindingDetailPage() {
 
         {rep && (
           <Card title="命中代码(脱敏)" size="small">
+            <Paragraph style={{ marginBottom: 8 }}>
+              <Space size={[4, 4]} wrap>
+                <Tag color={evidenceMeta.hasDataflow ? 'blue' : 'default'}>
+                  {evidenceMeta.hasDataflow ? '有数据流' : '无数据流'}
+                </Tag>
+                {evidenceMeta.confidence ? (
+                  <Tag>规则置信 {evidenceMeta.confidence}</Tag>
+                ) : null}
+                {ruleLabel ? <Tag color={evidenceMeta.ruleClass === 'known' ? 'orange' : 'default'}>{ruleLabel}</Tag> : null}
+              </Space>
+            </Paragraph>
             {sourceToSink ? (
               <Paragraph>
                 <Text type="secondary">数据流：</Text>

@@ -24,8 +24,18 @@ async def record_usage(
 
     if not task_id:
         return
-    prompt = int((usage or {}).get("prompt_tokens") or 0)
-    completion = int((usage or {}).get("completion_tokens") or 0)
+    # 两套键名都要认：快模型网关回 prompt/completion_tokens；agent SDK
+    # 原样回传 input/output_tokens —— 只认一套会把 agent 会话记成 0 消耗
+    def _tok(raw: dict, *keys: str) -> int:
+        for key in keys:
+            v = raw.get(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                return int(v)
+        return 0
+
+    raw = usage or {}
+    prompt = _tok(raw, "prompt_tokens", "input_tokens")
+    completion = _tok(raw, "completion_tokens", "output_tokens")
     session.add(AgentUsage(
         task_id=task_id, run_id=run_id, node_key=node_key, source=source,
         prompt_tokens=prompt, completion_tokens=completion,

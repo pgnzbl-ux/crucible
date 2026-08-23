@@ -70,13 +70,25 @@ async def test_record_and_summary(factory):
             s, task_id="t1", run_id=None, node_key="triage",
             usage={"prompt_tokens": 10, "completion_tokens": 5}, source="fast_model",
         )
+        # agent SDK 原样回传的 usage：input/output_tokens 键名 + 混入的
+        # 非数值字段(嵌套 dict/str)——都不得漏记或炸记账
+        await record_usage(
+            s, task_id="t1", run_id="r2", node_key="triage",
+            usage={
+                "input_tokens": 27890, "output_tokens": 7061,
+                "cache_read_input_tokens": 976896,
+                "server_tool_use": {"web_search_requests": 0},
+                "service_tier": "standard",
+            },
+            source="agent",
+        )
         await s.commit()
 
     async with factory() as s:
         summary = await task_usage_summary(s, "t1")
     assert summary == {
-        "prompt_tokens": 110, "completion_tokens": 55,
-        "total_tokens": 165, "sessions": 2,
+        "prompt_tokens": 100 + 10 + 27890, "completion_tokens": 50 + 5 + 7061,
+        "total_tokens": 165 + 27890 + 7061, "sessions": 3,
     }
 
 

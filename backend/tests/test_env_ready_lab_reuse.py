@@ -2,7 +2,7 @@
 import os
 import sys
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -39,9 +39,18 @@ def _ctx(tmp_path, **kwargs):
         },
         project_id="p1",
         owner_id="u1",
-        db_session=object(),
+        db_session=_dummy_session(),
         **kwargs,
     )
+
+
+def _dummy_session():
+    """可 await 的哑会话：排障环/探活的取消检查会发 SELECT，结果回非 cancelled。"""
+    sess = MagicMock()
+    probe = MagicMock()
+    probe.scalar_one_or_none.return_value = "running"
+    sess.execute = AsyncMock(return_value=probe)
+    return sess
 
 
 def _prepare_lab_service(mock_cls) -> None:
@@ -109,7 +118,7 @@ async def test_env_ready_backfills_missing_creds_without_compose_up(tmp_path):
         project_address="https://github.com/a/b", project_ref=None,
         previous_outputs={"source": {"commit_sha": "a"*40, "repo_dirname": "b"},
                           "profile": {"is_web": True}},
-        project_id="p1", owner_id="u1", db_session=object(),
+        project_id="p1", owner_id="u1", db_session=_dummy_session(),
     )
     with patch("app.core.config.get_settings") as gs, \
          patch("app.contexts.lab.service.LabService") as LS, \
@@ -443,7 +452,7 @@ async def test_reproduce_touches_lab_when_lab_id_present():
             "audit": {"gate_verdict": "pass"},
         },
         lab_id="lab1",
-        db_session=object(),
+        db_session=_dummy_session(),
     )
     with patch("app.contexts.lab.service.LabService") as LS, \
          patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", new_callable=AsyncMock) as ai:

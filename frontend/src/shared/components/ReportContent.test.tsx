@@ -64,6 +64,14 @@ describe('ReportContent', () => {
             poc_commands: '```bash\ncurl x\n```',
             fix_suggestions: '参数化',
             reporting_decision: '报送',
+            audit_summary: {
+              denoise_funnel: {
+                finding_count: 40,
+                dropped_c_count: 12,
+                group_count: 8,
+                bypass_count: 3,
+              },
+            },
           },
         }}
       />,
@@ -71,6 +79,8 @@ describe('ReportContent', () => {
     expect(html).toMatch(/<strong>产品<\/strong>/)
     expect(html).toContain('app/login.py')
     expect(html).toContain('9.8')
+    expect(html).toContain('降噪漏斗')
+    expect(html).toContain('原始 40 → C档 12 → 复核组 8 → bypass 3')
   })
 
   it('shows verification record notice without poc or cvss', () => {

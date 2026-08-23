@@ -68,6 +68,10 @@ class EngineScanError(RuntimeError):
     """引擎执行失败(超时/非零退出/不可用)。ScanRun 会标 failed，节点仍完成。"""
 
 
+class ScanCancelledError(RuntimeError):
+    """任务取消导致扫描中止。ScanRun 收敛终态后上抛，由编排器按取消收尾。"""
+
+
 class EngineScanNode:
     """一引擎一节点：node_key/engine 由适配器类属性声明。"""
 
@@ -144,12 +148,15 @@ class EngineScanNode:
         settings,
         *,
         on_tick: Callable[[int], None] | None = None,
+        stop_check: Callable[[], Any] | None = None,
     ) -> str:
         """执行引擎子进程：超时/输出上限(§8.3)；取消时终止进程。
 
         二进制不存在/不可执行 → EngineScanError(引擎失败，节点仍 completed)。
         非 success_exit_codes 必须带 stderr，供 NodeRun.error_message 排错。
         on_tick(elapsed_s)：每 SCAN_PROGRESS_TICK_SECONDS 调用一次（进程仍在跑）。
+        stop_check()：同一节流周期内 await 的取消探测（返回 True 即杀进程组，
+        抛 ScanCancelledError）；缺省不检查。
         """
         max_bytes = settings.scanner_output_max_bytes
         timeout = self.timeout_seconds(settings)
@@ -187,6 +194,15 @@ class EngineScanNode:
                     break
                 if on_tick:
                     on_tick(int(time.monotonic() - started))
+                if stop_check is not None and await stop_check():
+                    _kill_scanner_process_group(proc)
+                    await proc.wait()
+                    comm.cancel()
+                    try:
+                        await comm
+                    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                        pass
+                    raise ScanCancelledError(f"{self.engine} 因任务取消中止")
             stdout, stderr = comm.result()
         except asyncio.CancelledError:
             _kill_scanner_process_group(proc)
@@ -282,9 +298,18 @@ class EngineScanNode:
                 phase=self.node_key,
             )
 
+        async def _stop_check() -> bool:
+            # 取消轮询与进度心跳同周期：任务取消后扫描器提前终止，
+            # 不再跑满整个超时窗口才被丢弃
+            if ctx.db_session is None:
+                return False
+            from ..base import task_run_cancelled
+
+            return await task_run_cancelled(ctx.db_session, ctx.task_id, ctx.run_id)
+
         try:
             stdout = await self._run_subprocess(
-                argv, repo_root, settings, on_tick=_on_tick,
+                argv, repo_root, settings, on_tick=_on_tick, stop_check=_stop_check,
             )
             emit_phase(ctx, "解析输出…", phase=self.node_key)
             findings = self.parse_output(stdout)
@@ -301,6 +326,13 @@ class EngineScanNode:
             await ctx.db_session.commit()
             emit_phase(ctx, f"完成，命中 {len(findings)} 条", phase=self.node_key)
             return _finish("completed", len(findings))
+        except ScanCancelledError as e:
+            # 取消不是引擎失败：ScanRun 也要收敛终态（防悬挂的 running 行），
+            # 异常上抛后编排器复查库内取消状态，把节点收敛为 cancelled
+            emit_phase(ctx, "任务已取消，扫描中止", phase=self.node_key)
+            await svc.finish_scan_run(scan_run, status="failed", error=str(e))
+            await ctx.db_session.commit()
+            raise
         except EngineScanError as e:
             logger.warning("引擎 %s 失败(失败隔离，节点仍完成): %s", self.engine, e)
             await svc.finish_scan_run(scan_run, status="failed", error=str(e))

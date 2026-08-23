@@ -108,6 +108,34 @@ def _semgrep_source_to_sink(result: dict) -> list[str] | None:
     return chain or None
 
 
+def _semgrep_confidence(props: dict) -> str:
+    """规则 metadata.confidence → HIGH|MEDIUM|LOW|UNKNOWN（缺省 UNKNOWN，不作 LOW）。"""
+    raw = props.get("confidence") or props.get("Likelihood") or ""
+    if isinstance(raw, list):
+        raw = raw[0] if raw else ""
+    text = str(raw).strip().upper()
+    if text in ("HIGH", "MEDIUM", "LOW"):
+        return text
+    return "UNKNOWN"
+
+
+def _semgrep_category(props: dict) -> str | None:
+    """优先 properties.category；否则从 tags 推断 security/best-practice 等。"""
+    cat = props.get("category") or props.get("Category")
+    if isinstance(cat, list):
+        cat = cat[0] if cat else None
+    if cat:
+        return str(cat).strip().lower() or None
+    tags = props.get("tags") or []
+    if not isinstance(tags, list):
+        return None
+    lowered = [str(t).lower() for t in tags]
+    for needle in ("security", "best-practice", "best_practice", "correctness", "performance"):
+        if any(needle in t for t in lowered):
+            return "best-practice" if "best" in needle else needle
+    return None
+
+
 def normalize_semgrep(sarif: dict) -> list[dict]:
     """semgrep SARIF → RawFinding 字段 dict 列表(未脱敏引擎不含秘密，消息原样)。"""
     rules = _semprep_rule_index(sarif)
@@ -132,6 +160,9 @@ def normalize_semgrep(sarif: dict) -> list[dict]:
                 rule_meta.get("shortDescription", {}).get("text"),
                 message,
             )
+            source_to_sink = _semgrep_source_to_sink(result)
+            confidence = _semgrep_confidence(props)
+            category = _semgrep_category(props)
             findings.append({
                 "engine": "semgrep",
                 "rule_id": rule_id,
@@ -141,15 +172,76 @@ def normalize_semgrep(sarif: dict) -> list[dict]:
                 "line_start": line_start,
                 "line_end": line_end,
                 "message": message[:4000],
-                "source_to_sink": _semgrep_source_to_sink(result),
+                "source_to_sink": source_to_sink,
                 "code_snippet": (snippet or "")[:8000] or None,
                 "fingerprint": fingerprint("semgrep", rule_id, uri, line_start, cwe),
-                "raw": {"rule_id": rule_id, "level": result.get("level")},
+                "raw": {
+                    "rule_id": rule_id,
+                    "level": result.get("level"),
+                    "confidence": confidence,
+                    "category": category,
+                    "has_dataflow": bool(source_to_sink),
+                },
             })
     return findings
 
 
 # ── gitleaks SARIF ──
+
+# 厂商/已知前缀规则 → known；其余（含 generic-api-key、entropy 类）→ generic
+_GITLEAKS_KNOWN_RULE_IDS = frozenset({
+    "aws-access-token", "aws-access-token-id", "aws-secret-access-key",
+    "github-pat", "github-fine-grained-pat", "github-app-token",
+    "github-oauth", "github-refresh-token", "gitlab-pat", "gitlab-pat-routable",
+    "gitlab-deploy-token", "slack-bot-token", "slack-user-token", "slack-app-token",
+    "slack-legacy-token", "stripe-access-token", "stripe-restricted-api-key",
+    "private-key", "rsa-private-key", "ssh-private-key", "pgp-private-key",
+    "google-api-key", "google-oauth-access-token", "heroku-api-key",
+    "npm-access-token", "pypi-upload-token", "huggingface-access-token",
+    "openai-api-key", "anthropic-api-key", "jwt", "jwt-base64",
+})
+
+
+def gitleaks_rule_class(rule_id: str) -> str:
+    """known（厂商前缀）| generic（熵/泛匹配）。"""
+    rid = (rule_id or "").strip().lower()
+    if not rid or rid in ("gitleaks.generic", "generic-api-key", "generic-secret"):
+        return "generic"
+    if rid in _GITLEAKS_KNOWN_RULE_IDS:
+        return "known"
+    if rid.startswith("generic") or "entropy" in rid or rid.endswith("-generic"):
+        return "generic"
+    # 带厂商味的 id（aws-/github-/slack-…）默认 known
+    prefixes = (
+        "aws-", "github-", "gitlab-", "slack-", "stripe-", "google-", "gcp-",
+        "azure-", "heroku-", "npm-", "pypi-", "openai-", "anthropic-", "huggingface-",
+        "private-key", "rsa-", "ssh-", "pgp-", "jwt",
+    )
+    if any(rid.startswith(p) for p in prefixes):
+        return "known"
+    return "generic"
+
+
+def _gitleaks_entropy(result: dict) -> float | None:
+    """从 SARIF properties / partialFingerprints 尽量取 entropy。"""
+    props = result.get("properties") or {}
+    for key in ("entropy", "Entropy", "gitleaks:entropy"):
+        val = props.get(key)
+        if val is None:
+            continue
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            continue
+    fps = result.get("partialFingerprints") or {}
+    for key, val in fps.items():
+        if "entropy" in str(key).lower():
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                continue
+    return None
+
 
 def normalize_gitleaks(sarif: dict) -> list[dict]:
     findings: list[dict] = []
@@ -163,6 +255,11 @@ def normalize_gitleaks(sarif: dict) -> list[dict]:
             message = redact_secrets((result.get("message") or {}).get("text") or "")
             snippet_obj = region.get("snippet")
             snippet = snippet_obj.get("text") if isinstance(snippet_obj, dict) else snippet_obj
+            rule_class = gitleaks_rule_class(rule_id)
+            entropy = _gitleaks_entropy(result)
+            raw: dict[str, Any] = {"rule_id": rule_id, "rule_class": rule_class}
+            if entropy is not None:
+                raw["entropy"] = entropy
             findings.append({
                 "engine": "gitleaks",
                 "rule_id": rule_id,
@@ -175,7 +272,7 @@ def normalize_gitleaks(sarif: dict) -> list[dict]:
                 "source_to_sink": None,
                 "code_snippet": (redact_secrets(snippet or "") or "")[:8000] or None,
                 "fingerprint": fingerprint("gitleaks", rule_id, uri, line_start, "CWE-798"),
-                "raw": {"rule_id": rule_id},  # 原始条目不落数据库(SARIF 归档在 MinIO)
+                "raw": raw,
             })
     return findings
 
@@ -326,6 +423,29 @@ def _osv_cvss_raw(vuln: dict) -> object:
     return None
 
 
+def _osv_called_index(pkg: dict) -> dict[str, bool]:
+    """groups[].experimentalAnalysis|analysis → vuln_id → called。"""
+    out: dict[str, bool] = {}
+    for group in pkg.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        analysis = group.get("experimentalAnalysis") or group.get("analysis") or {}
+        if not isinstance(analysis, dict):
+            continue
+        for vid, detail in analysis.items():
+            if isinstance(detail, dict) and "called" in detail:
+                out[str(vid)] = bool(detail["called"])
+    return out
+
+
+def _osv_unimportant(vuln: dict) -> bool | None:
+    ds = vuln.get("database_specific") if isinstance(vuln.get("database_specific"), dict) else {}
+    for key in ("unimportant", "is_unimportant", "hide"):
+        if key in ds:
+            return bool(ds[key])
+    return None
+
+
 def normalize_osv(report: dict) -> list[dict]:
     """osv-scanner scan --format=json → 每个依赖组件一条 finding(直报，不进 triage)。"""
     findings: list[dict] = []
@@ -336,12 +456,29 @@ def normalize_osv(report: dict) -> list[dict]:
             package = pkg.get("package") or {}
             dep_name = package.get("name") or "unknown"
             version = package.get("version") or ""
+            called_by_id = _osv_called_index(pkg)
             for vuln in pkg.get("vulnerabilities") or []:
                 vid = vuln.get("id") or ""
                 if not vid:
                     continue
                 aliases = vuln.get("aliases") or []
                 cve = next((a for a in aliases if a.startswith("CVE-")), "")
+                called = called_by_id.get(vid)
+                if called is None:
+                    # 别名组内任一 id 有分析则回填
+                    for aid in aliases:
+                        if aid in called_by_id:
+                            called = called_by_id[aid]
+                            break
+                unimportant = _osv_unimportant(vuln)
+                raw: dict[str, Any] = {
+                    "rule_id": vid, "dependency_name": dep_name, "version": version,
+                    "cve": cve, "aliases": aliases[:5],
+                    "cvss": _osv_cvss_raw(vuln),
+                    "called": called,  # bool | None
+                }
+                if unimportant is not None:
+                    raw["unimportant"] = unimportant
                 findings.append({
                     "engine": "osv",
                     "rule_id": vid,
@@ -356,11 +493,7 @@ def normalize_osv(report: dict) -> list[dict]:
                     "source_to_sink": None,
                     "code_snippet": None,
                     "fingerprint": fingerprint("osv", vid, f"{lockfile}#{dep_name}", None, None),
-                    "raw": {
-                        "rule_id": vid, "dependency_name": dep_name, "version": version,
-                        "cve": cve, "aliases": aliases[:5],
-                        "cvss": _osv_cvss_raw(vuln),
-                    },
+                    "raw": raw,
                 })
     return findings
 

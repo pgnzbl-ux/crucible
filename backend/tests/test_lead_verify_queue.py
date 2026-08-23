@@ -74,6 +74,28 @@ def test_aggregate_report_zero_confirmed_still_returns_audit_report():
     assert "未确认" in out["report_data"]["reporting_decision"]
 
 
+def test_aggregate_report_includes_denoise_funnel():
+    class _L:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    out = build_discovery_report_from_leads(
+        [_L(lead_description="x", verdict="false_positive",
+            audit_output={}, reproduce_output=None)],
+        denoise={
+            "finding_count": 40,
+            "dropped_c_count": 12,
+            "dropped_c_by_engine": {"semgrep": 10, "gitleaks": 2},
+            "group_count": 8,
+            "bypass_count": 3,
+        },
+    )
+    funnel = out["report_data"]["audit_summary"]["denoise_funnel"]
+    assert funnel["dropped_c_count"] == 12
+    assert funnel["finding_count"] == 40
+    assert "C 档降噪 12" in out["report_data"]["product_intro"]
+
+
 @pytest.mark.asyncio
 async def test_lead_queue_concurrency_cap(monkeypatch):
     """同任务并发不超过 lead_verify_per_task。"""
@@ -396,5 +418,74 @@ async def test_lead_path_reuses_nodes_with_container_semantics():
             # reproduce 经节点做了容器侧 URL 重写
             assert repro_call["input_json"]["target_url"] != "http://localhost:8080"
             assert "host.docker.internal" in repro_call["input_json"]["target_url"]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_uncertain_lead_group_returns_to_review_not_stuck_dispatched():
+    """gate=uncertain（verdict=None）的线索组退回人工。
+
+    旧行为保持 dispatched 等"任务级收尾"，但收尾只认 source_alert_group_id
+    指针组——多线索任务里其余组会永久悬挂在 dispatched（复核台永远终认中）。
+    """
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    from app.shared.base import Base
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        from app.shared.models import register_models
+
+        register_models()
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    from app.contexts.agent.lead_worker import _reconcile_group
+    from app.contexts.discovery.models import ScanRun
+    from app.contexts.finding.models import AlertGroup, RawFinding
+    from app.contexts.task.models import Task, TaskRun
+
+    async def _group(key: str, path: str) -> AlertGroup:
+        f = RawFinding(
+            task_id=task.id, scan_run_id=sr.id, engine="semgrep",
+            rule_id="r", cwe="CWE-89", severity="error", file_path=path,
+            line_start=1, line_end=1, message="m",
+            fingerprint=f"fp-{key}", raw={},
+        )
+        session.add(f)
+        await session.flush()
+        return AlertGroup(
+            task_id=task.id, group_key=key, file_path=path,
+            member_count=1, representative_finding_id=f.id,
+            status="dispatched",
+        )
+
+    try:
+        async with factory() as session:
+            task = Task(project_address="x", task_type="discovery",
+                        vulnerability_description=None, owner_id="u1", status="running")
+            session.add(task)
+            await session.flush()
+            run = TaskRun(task_id=task.id, status="running")
+            session.add(run)
+            await session.flush()
+            sr = ScanRun(task_id=task.id, run_id=run.id, node_run_id="nr",
+                         engine="semgrep", status="completed", config_summary={})
+            session.add(sr)
+            await session.flush()
+
+            group = await _group("gk-uncertain", "module/a.py")
+            group2 = await _group("gk-confirmed", "module/b.py")
+            session.add_all([group, group2])
+            await session.flush()
+
+            await _reconcile_group(session, group.id, None)
+            assert group.status == "needs_review"
+
+            # 有权威结论的档位不受影响
+            await _reconcile_group(session, group2.id, "confirmed")
+            assert group2.status == "resolved"
+            assert group2.resolution == "confirmed"
     finally:
         await engine.dispose()

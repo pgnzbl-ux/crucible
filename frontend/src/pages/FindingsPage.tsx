@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react'
-import { Button, Input, Segmented, Select, Space, Table, Tag, Tooltip, Typography } from 'antd'
-import { EyeOutlined, ReloadOutlined } from '@ant-design/icons'
+import { useEffect, useMemo, useState } from 'react'
+import { Button, Empty, Input, Segmented, Select, Space, Table, Tag, Tooltip, Typography } from 'antd'
+import { ClearOutlined, EyeOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { useLocation, useSearch } from 'wouter'
 import dayjs from 'dayjs'
@@ -11,16 +11,26 @@ import { PageContainer } from '../shared/components/PageContainer'
 import { useErrorToast } from '../shared/hooks/useErrorToast'
 import { getPriorityMeta } from '../shared/lib/meta'
 import { findingStatusLabel, projectLabel, screeningStatusMeta, sourceVersionLabel } from '../shared/lib/tablePresentation'
+import {
+  buildFindingsSearch,
+  FINDING_PROGRESS_OPTIONS,
+  parseFindingProgress,
+  parseFindingScope,
+  progressToParams,
+  type FindingProgressValue,
+  type FindingScope,
+} from '../shared/lib/findingsListQuery'
+import { tableRowNavigateProps } from '../shared/lib/tableRowNavigate'
 
 const { Text } = Typography
 
-const STATUS_META: Record<string, { label: string; color: string }> = {
-  new: { label: '新建', color: 'default' },
-  clustered: { label: '已聚类', color: 'default' },
-  adjudicated: { label: '已裁决', color: 'processing' },
-  needs_review: { label: '待复核', color: 'warning' },
-  dispatched: { label: '终认中', color: 'processing' },
-  resolved: { label: '已处置', color: 'success' },
+const STATUS_TAG_COLOR: Record<string, string> = {
+  new: 'default',
+  clustered: 'default',
+  adjudicated: 'processing',
+  needs_review: 'warning',
+  dispatched: 'processing',
+  resolved: 'success',
 }
 
 const VERDICT_META: Record<string, { label: string; color: string }> = {
@@ -36,6 +46,14 @@ const GRADE_META: Record<string, { label: string; color: string }> = {
   F: { label: 'F · 疑似误报', color: 'default' },
 }
 
+const ENGINE_LABELS: Record<string, string> = {
+  semgrep: 'Semgrep 静态',
+  gitleaks: 'Gitleaks 密钥',
+  osv: 'OSV 依赖',
+}
+
+const PAGE_SIZE = 20
+
 function severityMeta(severity: string | null) {
   const normalized = (severity ?? '').toLowerCase()
   if (normalized === 'critical') return { label: '严重', color: 'red' }
@@ -45,41 +63,65 @@ function severityMeta(severity: string | null) {
   return null
 }
 
-const PAGE_SIZE = 20
-type FindingScope = 'focus' | 'review' | 'processing' | 'noise' | 'all'
-
 export function FindingsPage() {
   const [, navigate] = useLocation()
   const search = useSearch()
-  const [status, setStatus] = useState<string | undefined>(
-    () => new URLSearchParams(search).get('status') ?? undefined,
-  )
-  const [scope, setScope] = useState<FindingScope>(() => {
-    const query = new URLSearchParams(search)
-    const requested = query.get('scope')
-    if (requested && ['focus', 'review', 'processing', 'noise', 'all'].includes(requested)) {
-      return requested as FindingScope
-    }
-    return query.get('status') ? 'all' : 'focus'
+  const query = useMemo(() => new URLSearchParams(search), [search])
+
+  const [scope, setScope] = useState<FindingScope>(() => parseFindingScope(query))
+  const [progress, setProgress] = useState<FindingProgressValue | undefined>(() => parseFindingProgress(query))
+  const [keyword, setKeyword] = useState(() => query.get('q') ?? '')
+  const [debouncedQ, setDebouncedQ] = useState(() => (query.get('q') ?? '').trim())
+  const [aiVerdict, setAiVerdict] = useState<string | undefined>(() => query.get('verdict') ?? undefined)
+  const [clueGrade, setClueGrade] = useState<string | undefined>(() => query.get('grade') ?? undefined)
+  const [engine, setEngine] = useState<string | undefined>(() => query.get('engine') ?? undefined)
+  const [page, setPage] = useState(() => {
+    const raw = Number(query.get('page') || '1')
+    return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 1
   })
-  const [aiVerdict, setAiVerdict] = useState<string | undefined>(undefined)
-  const [clueGrade, setClueGrade] = useState<string | undefined>(undefined)
-  const [engine, setEngine] = useState<string | undefined>(undefined)
-  const [cwe, setCwe] = useState('')
-  const [page, setPage] = useState(1)
+
+  const progressParams = useMemo(() => progressToParams(progress), [progress])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const next = keyword.trim()
+      setDebouncedQ((prev) => {
+        if (prev === next) return prev
+        setPage(1)
+        return next
+      })
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [keyword])
+
+  useEffect(() => {
+    const href = buildFindingsSearch({
+      scope,
+      status: progressParams.status,
+      resolution: progressParams.resolution,
+      q: debouncedQ || undefined,
+      engine,
+      clueGrade,
+      aiVerdict,
+      page,
+    })
+    const current = search ? `/findings?${search}` : '/findings'
+    if (href !== current) navigate(href, { replace: true })
+  }, [scope, progressParams, debouncedQ, engine, clueGrade, aiVerdict, page, navigate, search])
 
   const params = useMemo(
     () => ({
-      status,
+      status: progressParams.status,
+      resolution: progressParams.resolution,
       scope,
       ai_verdict: aiVerdict,
       clue_grade: clueGrade,
       engine,
-      cwe: cwe.trim() || undefined,
+      q: debouncedQ || undefined,
       limit: PAGE_SIZE,
       offset: (page - 1) * PAGE_SIZE,
     }),
-    [status, scope, aiVerdict, clueGrade, engine, cwe, page],
+    [progressParams, scope, aiVerdict, clueGrade, engine, debouncedQ, page],
   )
 
   const { data, isError, error, isLoading, isFetching, refetch } = useQuery({
@@ -101,9 +143,21 @@ export function FindingsPage() {
   useErrorToast(isError, error)
   useErrorToast(isStatsError, statsError, '漏洞线索统计加载失败')
 
+  const hasExtraFilters = Boolean(progress || debouncedQ || aiVerdict || clueGrade || engine)
+  const clearFilters = () => {
+    setScope('focus')
+    setProgress(undefined)
+    setKeyword('')
+    setDebouncedQ('')
+    setAiVerdict(undefined)
+    setClueGrade(undefined)
+    setEngine(undefined)
+    setPage(1)
+  }
+
   const scopeOptions = [
-    { value: 'focus', label: `重点线索 ${stats?.by_queue.focus ?? 0}` },
-    { value: 'review', label: `需人工复核 ${stats?.by_queue.review ?? 0}` },
+    { value: 'focus', label: `重点 ${stats?.by_queue.focus ?? 0}` },
+    { value: 'review', label: `待复核 ${stats?.by_queue.review ?? 0}` },
     { value: 'processing', label: `初筛中 ${stats?.by_queue.processing ?? 0}` },
     { value: 'noise', label: `已降噪 ${stats?.by_queue.noise ?? 0}` },
     { value: 'all', label: `全部 ${stats?.total ?? 0}` },
@@ -158,11 +212,11 @@ export function FindingsPage() {
       dataIndex: 'file_path',
       ellipsis: true,
       render: (v: string, row: AlertGroupSummary) => (
-        <Button type="link" style={{ padding: 0, height: 'auto' }} onClick={() => navigate(`/findings/${row.id}`)}>
+        <Text>
           {v}
           {row.function_symbol ? ` · ${row.function_symbol}()` : ''}
           {row.line_span ? ` L${row.line_span}` : ''}
-        </Button>
+        </Text>
       ),
     },
     {
@@ -174,7 +228,13 @@ export function FindingsPage() {
         return (
           <div>
             <Tag color={meta?.color ?? 'default'}>{meta?.label ?? '证据待评估'}</Tag>
-            <div><Text type="secondary" style={{ fontSize: 12 }}>{row.member_count > 1 ? `已合并 ${row.member_count} 个规则命中` : '单个规则命中'} · {(row.engine_set ?? []).join(' + ') || '未知引擎'}</Text></div>
+            <div>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {row.member_count > 1 ? `已合并 ${row.member_count} 个规则命中` : '单个规则命中'}
+                {' · '}
+                {(row.engine_set ?? []).map((e) => ENGINE_LABELS[e] ?? e).join(' + ') || '未知引擎'}
+              </Text>
+            </div>
           </div>
         )
       },
@@ -213,14 +273,16 @@ export function FindingsPage() {
     {
       title: '处理状态',
       dataIndex: 'status',
-      width: 100,
+      width: 120,
       render: (v: string, row: AlertGroupSummary) => {
-        const meta = STATUS_META[v] ?? { label: v, color: 'default' }
-        return (
-          <Tag color={row.resolution === 'confirmed' ? 'red' : row.resolution === 'false_positive' ? 'green' : meta.color}>
-            {findingStatusLabel(v, row.resolution)}
-          </Tag>
-        )
+        const color = row.resolution === 'confirmed'
+          ? 'red'
+          : row.resolution === 'false_positive'
+            ? 'green'
+            : row.resolution === 'ignored'
+              ? 'default'
+              : (STATUS_TAG_COLOR[v] ?? 'default')
+        return <Tag color={color}>{findingStatusLabel(v, row.resolution)}</Tag>
       },
     },
     {
@@ -234,18 +296,32 @@ export function FindingsPage() {
       key: 'actions',
       width: 100,
       render: (_: unknown, row: AlertGroupSummary) => (
-        <Button size="small" icon={<EyeOutlined />} onClick={() => navigate(`/findings/${row.id}`)}>
+        <Button
+          size="small"
+          type={row.status === 'needs_review' ? 'primary' : 'default'}
+          icon={<EyeOutlined />}
+          onClick={(event) => {
+            event.stopPropagation()
+            navigate(`/findings/${row.id}`)
+          }}
+        >
           {row.status === 'needs_review' ? '开始复核' : row.status === 'dispatched' ? '查看终认' : '查看详情'}
         </Button>
       ),
     },
   ]
 
+  const emptyDescription = hasExtraFilters
+    ? '当前筛选下没有线索，试试清空条件或换个工作队列'
+    : scope === 'focus'
+      ? '暂无重点线索。新扫描完成后会出现在这里；也可查看「待复核」或「全部」'
+      : '这个队列暂时是空的'
+
   return (
     <>
       <PageHeader
         title="漏洞线索"
-        subtitle="默认只呈现初筛保留的重点线索；原始规则命中会先聚类、研判和降噪"
+        subtitle="先选工作队列处理待办，再用搜索定位具体文件 / CWE / 项目"
         extra={
           <Button
             icon={<ReloadOutlined />}
@@ -256,57 +332,59 @@ export function FindingsPage() {
           </Button>
         }
       />
-      <div className="crucible-filter-bar">
-        <Space wrap>
+      <div className="crucible-filter-bar" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center' }}>
           <Segmented
             value={scope}
             options={scopeOptions}
             onChange={(value) => { setScope(value as FindingScope); setPage(1) }}
           />
+          <Input
+            allowClear
+            prefix={<SearchOutlined />}
+            placeholder="搜索路径 / CWE / 项目 / 函数 / 审计 ID"
+            style={{ width: 320, maxWidth: '100%' }}
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+          />
+          {hasExtraFilters || scope !== 'focus' ? (
+            <Button icon={<ClearOutlined />} onClick={clearFilters}>
+              清空条件
+            </Button>
+          ) : null}
+        </div>
+        <Space wrap size={[8, 8]}>
           <Select
             allowClear
-            placeholder="处理状态"
+            placeholder="发现引擎"
             style={{ width: 150 }}
-            value={status}
-            onChange={(v) => {
-              setStatus(v)
-              setPage(1)
-            }}
-            options={Object.entries(STATUS_META).map(([value, m]) => ({ value, label: m.label }))}
+            value={engine}
+            onChange={(v) => { setEngine(v); setPage(1) }}
+            options={Object.entries(ENGINE_LABELS).map(([value, label]) => ({ value, label }))}
           />
           <Select
             allowClear
             placeholder="证据强度"
-            style={{ width: 140 }}
+            style={{ width: 150 }}
             value={clueGrade}
             onChange={(v) => { setClueGrade(v); setPage(1) }}
             options={['A', 'B', 'F'].map((value) => ({ value, label: GRADE_META[value]?.label ?? `${value} 级` }))}
           />
           <Select
             allowClear
-            placeholder="发现引擎"
-            style={{ width: 140 }}
-            value={engine}
-            onChange={(v) => { setEngine(v); setPage(1) }}
-            options={['semgrep', 'gitleaks', 'osv'].map((value) => ({ value, label: value }))}
-          />
-          <Input
-            allowClear
-            placeholder="CWE，如 CWE-89"
-            style={{ width: 170 }}
-            value={cwe}
-            onChange={(e) => { setCwe(e.target.value); setPage(1) }}
-          />
-          <Select
-            allowClear
             placeholder="AI 研判"
             style={{ width: 140 }}
             value={aiVerdict}
-            onChange={(v) => {
-              setAiVerdict(v)
-              setPage(1)
-            }}
+            onChange={(v) => { setAiVerdict(v); setPage(1) }}
             options={Object.entries(VERDICT_META).map(([value, m]) => ({ value, label: m.label }))}
+          />
+          <Select
+            allowClear
+            placeholder="处理状态"
+            style={{ width: 150 }}
+            value={progress}
+            onChange={(v) => { setProgress(v as FindingProgressValue | undefined); setPage(1) }}
+            options={FINDING_PROGRESS_OPTIONS}
           />
         </Space>
       </div>
@@ -318,6 +396,15 @@ export function FindingsPage() {
           columns={columns}
           dataSource={data?.items ?? []}
           scroll={{ x: 1320 }}
+          locale={{
+            emptyText: (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={emptyDescription}>
+                {hasExtraFilters || scope !== 'focus' ? (
+                  <Button type="link" onClick={clearFilters}>清空条件并回到重点队列</Button>
+                ) : null}
+              </Empty>
+            ),
+          }}
           pagination={{
             current: page,
             pageSize: PAGE_SIZE,
@@ -326,6 +413,7 @@ export function FindingsPage() {
             showTotal: (total) => `共 ${total} 条`,
             onChange: setPage,
           }}
+          onRow={(row) => tableRowNavigateProps(() => navigate(`/findings/${row.id}`))}
         />
       </PageContainer>
     </>

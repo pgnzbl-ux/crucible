@@ -697,8 +697,29 @@ async def _run_one_container_unthrottled(
     if node_meta_path.exists():
         try:
             if meta_out is not None:
+                fresh_meta = json.loads(node_meta_path.read_text(encoding="utf-8"))
+                prev_usage = meta_out.get("usage")
                 meta_out.clear()
-                meta_out.update(json.loads(node_meta_path.read_text(encoding="utf-8")))
+                meta_out.update(fresh_meta)
+                if (
+                    isinstance(prev_usage, dict)
+                    and isinstance(fresh_meta.get("usage"), dict)
+                ):
+                    # 形状回喂重试时 meta 每轮整体覆盖：usage 必须跨轮累加，
+                    # 否则台账只记最后一轮、预算会系统性晚停
+                    def _u(d: dict, *keys: str) -> int:
+                        for k in keys:
+                            v = d.get(k)
+                            if v:
+                                return int(v)
+                        return 0
+
+                    meta_out["usage"] = {
+                        "prompt_tokens": _u(prev_usage, "prompt_tokens", "input_tokens")
+                        + _u(fresh_meta["usage"], "prompt_tokens", "input_tokens"),
+                        "completion_tokens": _u(prev_usage, "completion_tokens", "output_tokens")
+                        + _u(fresh_meta["usage"], "completion_tokens", "output_tokens"),
+                    }
         except (json.JSONDecodeError, OSError):
             pass
         try:

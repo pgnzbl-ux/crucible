@@ -1,10 +1,11 @@
-"""cluster 节点 — 函数索引 + 指纹分组 + grade/降权。
+"""cluster 节点 — 确定性降噪 + 函数索引 + 指纹分组 + grade/降权。
 
 入口检查：三个 ScanRun 全 failed → raise「全引擎失败」。
 按 profile.languages 建索引（python/java/js/ts）；产出 ClusterHandoff 计数与进度事件。
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from .base import NodeContext, emit_phase
@@ -32,13 +33,13 @@ class ClusterNode:
     async def execute(self, ctx: NodeContext, node_input=None) -> dict[str, Any]:
         from sqlalchemy import select
 
-        from app.contexts.discovery.models import ScanRun
         from app.contexts.finding.clustering import cluster_findings
         from app.contexts.finding.context_extractor import (
             build_function_index,
             resolve_index_languages,
             save_index,
         )
+        from app.contexts.finding.denoise import partition_for_cluster
         from app.contexts.finding.models import RawFinding
         from app.contexts.finding.service import FindingService
 
@@ -72,7 +73,10 @@ class ClusterNode:
             phase=self.node_key,
         )
         repo_root = getattr(inp.source, "project_path", None) or ctx.source_path
-        index = build_function_index(repo_root, languages=index_langs)
+        # 同步磁盘索引放线程池：卡事件循环会拖住同波次并发节点
+        index = await asyncio.to_thread(
+            build_function_index, repo_root, languages=index_langs,
+        )
         index_built = bool(index)
         if index_built:
             save_index(ctx.host_workdir, index)
@@ -92,7 +96,14 @@ class ClusterNode:
             }
             for f in findings
         ]
-        groups = cluster_findings(dicts, index)
+        keep, dropped_c, dropped_by_engine = partition_for_cluster(dicts)
+        if dropped_c:
+            emit_phase(
+                ctx,
+                f"降噪丢弃 C 档 {len(dropped_c)} 条（{' '.join(f'{k}={v}' for k, v in sorted(dropped_by_engine.items()))}）",
+                phase=self.node_key,
+            )
+        groups = cluster_findings(keep, index)
 
         svc = FindingService(ctx.db_session)
         finding_by_id = {f.id: f for f in findings}
@@ -121,7 +132,7 @@ class ClusterNode:
             (
                 f"分组完成：{len(groups)} 组"
                 f"（A={by_grade.get('A', 0)} B={by_grade.get('B', 0)} "
-                f"F={by_grade.get('F', 0)} bypass={bypass_count}）"
+                f"F={by_grade.get('F', 0)} C={len(dropped_c)} bypass={bypass_count}）"
             ),
             phase=self.node_key,
         )
@@ -137,4 +148,6 @@ class ClusterNode:
             "findings_without_function": without_fn,
             "bypass_count": bypass_count,
             "downgraded_count": downgraded,
+            "dropped_c_count": len(dropped_c),
+            "dropped_c_by_engine": dropped_by_engine,
         }

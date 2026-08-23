@@ -196,7 +196,10 @@ async def _try_cached_recipe(
         host_ips=[str(item["probe_host"]) for item in usable_bindings],
         preferred_scheme=preferred_scheme,
         compose_project=result.compose_project,
+        cancel_check=events.cancel_check(ctx),
     )
+    # 取消导致的提前返回不当健康失败处理（那会拆场回喂 AI）
+    await events.raise_if_cancelled(ctx)
     ok, live_port, scheme = health_result
     if not ok or live_port is None:
         logs = await compose_host.collect_compose_logs(

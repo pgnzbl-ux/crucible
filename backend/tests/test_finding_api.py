@@ -73,7 +73,7 @@ async def _seed_review_env(factory):
             cwe="CWE-89", severity="error", file_path="app/db.py", line_start=42,
             line_end=42, message="sqli", source_to_sink=["a.py:1 (x)"],
             code_snippet="42\tq = 'SELECT ' + u", fingerprint=hashlib.sha256(b"k").hexdigest(),
-            raw={},
+            raw={"confidence": "HIGH", "has_dataflow": True, "category": "security"},
         )
         s.add(f)
         await s.flush()
@@ -136,6 +136,74 @@ def test_list_groups_filters(client_env):
         params={"ai_verdict": "fp"},
     )
     assert resp2.json()["total"] == 0
+
+
+def test_list_groups_q_searches_path_cwe_and_project(client_env):
+    client, factory = client_env
+    import asyncio
+
+    _group_id, _task_id = asyncio.run(_seed_review_env(factory))
+    headers = _auth(client)
+
+    hit_path = client.get("/api/v1/findings/groups", headers=headers, params={"q": "db.py"})
+    assert hit_path.status_code == 200
+    assert hit_path.json()["total"] == 1
+
+    hit_cwe = client.get("/api/v1/findings/groups", headers=headers, params={"q": "CWE-89"})
+    assert hit_cwe.json()["total"] == 1
+
+    hit_project = client.get("/api/v1/findings/groups", headers=headers, params={"q": "github.com/a/b"})
+    assert hit_project.json()["total"] == 1
+
+    miss = client.get("/api/v1/findings/groups", headers=headers, params={"q": "no-such-path"})
+    assert miss.json()["total"] == 0
+
+
+def test_list_groups_resolution_filters_closed_outcomes(client_env):
+    client, factory = client_env
+    import asyncio
+
+    from app.contexts.finding.models import AlertGroup
+
+    group_id, task_id = asyncio.run(_seed_review_env(factory))
+
+    async def _close_as(resolution: str):
+        async with factory() as s:
+            g = await s.get(AlertGroup, group_id)
+            assert g is not None
+            g.status = "resolved"
+            g.resolution = resolution
+            await s.commit()
+
+    headers = _auth(client)
+    asyncio.run(_close_as("confirmed"))
+
+    hit = client.get(
+        "/api/v1/findings/groups", headers=headers,
+        params={"resolution": "confirmed"},
+    )
+    assert hit.status_code == 200
+    assert hit.json()["total"] == 1
+    assert hit.json()["items"][0]["resolution"] == "confirmed"
+
+    miss_fp = client.get(
+        "/api/v1/findings/groups", headers=headers,
+        params={"resolution": "false_positive"},
+    )
+    assert miss_fp.json()["total"] == 0
+
+    miss_open = client.get(
+        "/api/v1/findings/groups", headers=headers,
+        params={"status": "needs_review"},
+    )
+    assert miss_open.json()["total"] == 0
+
+    bad = client.get(
+        "/api/v1/findings/groups", headers=headers,
+        params={"resolution": "not-a-resolution"},
+    )
+    assert bad.status_code == 422
+    _ = task_id
 
 
 def test_list_groups_queue_scopes_separate_focus_review_processing_and_noise(client_env):
@@ -326,7 +394,105 @@ def test_group_detail_lazy_reconcile(client_env):
     assert data["representative"]["file_path"] == "app/db.py"
     assert data["representative"]["source_to_sink"] == ["a.py:1 (x)"]
     assert data["representative"]["code_snippet"] == "42\tq = 'SELECT ' + u"
+    assert data["representative"]["raw"]["has_dataflow"] is True
+    assert data["representative"]["raw"]["confidence"] == "HIGH"
     assert data["lead_runs"][0]["verdict"] == "code_reachable"
+
+
+def test_group_detail_tolerates_dirty_legacy_adjudication(client_env):
+    """存量脏行回归：agent 判决自由输出(usage 混嵌套 dict/str、evidence 字符串、
+    why 混非 str)不得打挂详情页 —— 读取侧收敛展示，原始输出仍在 response_text。"""
+    import asyncio
+
+    from app.contexts.finding.models import Adjudication
+
+    client, factory = client_env
+    group_id, _task_id = asyncio.run(_seed_review_env(factory))
+
+    async def _arrange():
+        async with factory() as s:
+            a = (await s.execute(
+                select(Adjudication).where(Adjudication.alert_group_id == group_id)
+            )).scalars().one()
+            a.why = ["拼接", {"note": "非字符串理由"}]
+            a.evidence = ["app/db.py:42 字符串证据", {"file": "app/db.py", "lines": "40-44"}]
+            a.need = ["缺少调用方"]
+            a.usage = {
+                "input_tokens": 27890, "output_tokens": 7061,
+                "server_tool_use": {"web_search_requests": 0},
+                "service_tier": "standard", "iterations": [],
+            }
+            await s.commit()
+
+    asyncio.run(_arrange())
+    detail = client.get(f"/api/v1/findings/groups/{group_id}", headers=_auth(client))
+    assert detail.status_code == 200
+    adj = detail.json()["adjudications"][0]
+    assert adj["why"] == ["拼接", str({"note": "非字符串理由"})]
+    assert adj["evidence"][0] == {"detail": "app/db.py:42 字符串证据"}
+    assert adj["evidence"][1] == {"file": "app/db.py", "lines": "40-44"}
+    assert adj["usage"] == {"input_tokens": 27890, "output_tokens": 7061}
+
+    # 同一脏行的 why 也流向列表端点 screening_reasons，列表不得被打挂
+    listing = client.get("/api/v1/findings/groups", headers=_auth(client))
+    assert listing.status_code == 200
+    assert listing.json()["items"][0]["screening_reasons"][0] == "拼接"
+
+
+def test_record_adjudication_sanitizes_freeform_output(client_env):
+    """写侧回归：record_adjudication 是判决唯一落库口，agent 自由输出
+    在此收敛到列契约(why/need 全 str、evidence 全 dict、usage 全数值)。"""
+    import asyncio
+
+    from app.contexts.finding.models import Adjudication, AlertGroup
+    from app.contexts.finding.service import FindingService
+
+    client, factory = client_env
+    group_id, _task_id = asyncio.run(_seed_review_env(factory))
+
+    async def _act():
+        async with factory() as s:
+            g = await s.get(AlertGroup, group_id)
+            svc = FindingService(s)
+            await svc.record_adjudication(
+                group=g,
+                adjudication=Adjudication(
+                    alert_group_id=g.id, attempt=2, verdict="need_more_context",
+                    confidence=0.1,
+                    why=["理由", 3], evidence=["字符串证据"], need=["need", 1],
+                    context_log=[], prompt_text="p", response_text="r",
+                    usage={"input_tokens": 5, "service_tier": "standard"},
+                ),
+            )
+            await s.commit()
+            stored = (await s.execute(
+                select(Adjudication).where(Adjudication.attempt == 2)
+            )).scalars().one()
+            assert stored.why == ["理由", "3"]
+            assert stored.evidence == [{"detail": "字符串证据"}]
+            assert stored.need == ["need", "1"]
+            assert stored.usage == {"input_tokens": 5}
+
+    asyncio.run(_act())
+
+
+def test_pydantic_validation_error_returns_500_not_400(client_env):
+    """端点内构造响应模型失败是服务端 bug：不得被全局 ValueError handler
+    伪装成 400(本次生产 400 的放大器)；应 500 且错误信封为 INTERNAL_ERROR。"""
+    from pydantic import BaseModel
+
+    client, _factory = client_env
+
+    @client.app.get("/api/v1/_validation_boom")
+    async def _validation_boom():
+        class _Strict(BaseModel):
+            x: dict[str, int]
+
+        return _Strict(x={"a": "not-an-int"})
+
+    resp = client.get("/api/v1/_validation_boom", headers=_auth(client))
+    assert resp.status_code == 500
+    assert resp.json()["error"]["code"] == "INTERNAL_ERROR"
 
 
 def test_review_actions_and_revive(client_env):

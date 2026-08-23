@@ -35,9 +35,19 @@ from .schemas import (
     ReviewRequest,
     ReviveResponse,
 )
-from .service import FindingService
+from .service import FindingService, numeric_usage
 
 router = APIRouter(prefix="/findings", tags=["findings"])
+
+
+def _finding_summary(f: RawFinding) -> FindingSummary:
+    return FindingSummary(
+        id=f.id, engine=f.engine, rule_id=f.rule_id, cwe=f.cwe,
+        severity=f.severity, file_path=f.file_path, line_start=f.line_start,
+        line_end=f.line_end, message=(f.message or "")[:500],
+        source_to_sink=f.source_to_sink, code_snippet=f.code_snippet,
+        raw=f.raw if isinstance(f.raw, dict) else None,
+    )
 
 
 async def _get_repo(session: Annotated[AsyncSession, Depends(get_db_session)]) -> FindingRepository:
@@ -85,7 +95,8 @@ def _summary(
         primary_engine=engine,
         screening_status=screening.status,
         screening_summary=screening.summary,
-        screening_reasons=screening.reasons,
+        # 判决 why 是 agent 自由输出，存量行可能混非 str；列表端点同样要能读
+        screening_reasons=[str(r) for r in screening.reasons],
         project_id=task.project_id if task else None,
         project_address=task.project_address if task else None,
         project_ref=task.project_ref if task else None,
@@ -96,6 +107,21 @@ def _summary(
         ai_confidence=g.ai_confidence, priority=g.priority, resolution=g.resolution,
         verdict_source=getattr(g, "verdict_source", None),
         created_at=g.created_at, updated_at=g.updated_at,
+    )
+
+
+def _adjudication_detail(a: Adjudication) -> AdjudicationDetail:
+    """判决行 → 响应模型。why/evidence/need 是 agent 自由输出，存量行可能
+    与 schema 类型不符；此处收敛，避免详情页被单条脏行打挂(原始输出在
+    response_text 审计链可查)。"""
+    return AdjudicationDetail(
+        id=a.id, attempt=a.attempt, verdict=a.verdict,
+        confidence=float(a.confidence) if a.confidence is not None else None,
+        why=[str(w) for w in (a.why or [])],
+        evidence=[e if isinstance(e, dict) else {"detail": str(e)} for e in (a.evidence or [])],
+        need=[str(n) for n in (a.need or [])],
+        prompt_text=a.prompt_text, response_text=a.response_text,
+        usage=numeric_usage(a.usage), created_at=a.created_at,
     )
 
 
@@ -121,9 +147,9 @@ async def list_groups(
     user_id: CurrentUserId,
 ) -> AlertGroupListResponse:
     total, groups = await repo.list_groups(
-        task_id=req.task_id, status=req.status, cwe=req.cwe,
+        task_id=req.task_id, status=req.status, resolution=req.resolution, cwe=req.cwe,
         ai_verdict=req.ai_verdict, engine=req.engine, clue_grade=req.clue_grade,
-        scope=req.scope,
+        scope=req.scope, q=req.q,
         limit=req.limit, offset=req.offset,
         owner_task_ids=await _owner_task_ids(repo.session, user_id, req.task_id),
     )
@@ -203,30 +229,9 @@ async def get_group_detail(
     lead_runs = list(lead_rows.scalars().all())
     return AlertGroupDetail(
         **_summary(group, task, rep, adjudications[-1] if adjudications else None).model_dump(),
-        members=[
-            FindingSummary(
-                id=f.id, engine=f.engine, rule_id=f.rule_id, cwe=f.cwe,
-                severity=f.severity, file_path=f.file_path, line_start=f.line_start,
-                line_end=f.line_end, message=(f.message or "")[:500],
-                source_to_sink=f.source_to_sink, code_snippet=f.code_snippet,
-            )
-            for f in members
-        ],
-        representative=FindingSummary(
-            id=rep.id, engine=rep.engine, rule_id=rep.rule_id, cwe=rep.cwe,
-            severity=rep.severity, file_path=rep.file_path, line_start=rep.line_start,
-            line_end=rep.line_end, message=(rep.message or "")[:500],
-            source_to_sink=rep.source_to_sink, code_snippet=rep.code_snippet,
-        ) if rep else None,
-        adjudications=[
-            AdjudicationDetail(
-                id=a.id, attempt=a.attempt, verdict=a.verdict, confidence=a.confidence,
-                why=a.why or [], evidence=a.evidence or [], need=a.need or [],
-                prompt_text=a.prompt_text, response_text=a.response_text,
-                usage=a.usage or {}, created_at=a.created_at,
-            )
-            for a in adjudications
-        ],
+        members=[_finding_summary(f) for f in members],
+        representative=_finding_summary(rep) if rep else None,
+        adjudications=[_adjudication_detail(a) for a in adjudications],
         reviews=[
             ReviewActionDetail(
                 id=r.id, action=r.action, reason_tags=r.reason_tags or [],

@@ -139,6 +139,21 @@ def test_osv_bypass_excluded_from_precision():
     assert report.triage_precision == 1.0
 
 
+def test_dropped_c_in_funnel_metrics():
+    row = score_case(_case(), CaseSnapshot(
+        raw_findings=[dict(cwe="CWE-89", file_path="app/db.py")] * 5,
+        groups=[dict(
+            cwe="CWE-89", file_path="app/db.py", status="needs_review",
+            ai_verdict="tp", member_count=1,
+        )],
+        dropped_c_count=3,
+    ))
+    report = aggregate([row])
+    assert row.dropped_c_count == 3
+    assert report.dropped_c_total == 3
+    assert "降噪漏斗" in render_markdown(report)
+
+
 def test_run_catalog_and_mock():
     catalog_report = run("catalog", api="http://x", token=None, limit=None, poll_s=1, timeout_s=1)
     assert catalog_report.skipped_count >= 50

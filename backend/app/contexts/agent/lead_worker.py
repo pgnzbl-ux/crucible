@@ -47,9 +47,12 @@ async def _reconcile_group(session: AsyncSession, group_id: str, verdict: str | 
         await svc.mark_resolved(group, "confirmed")
     elif verdict == "false_positive":
         await svc.mark_resolved(group, "false_positive")
-    elif verdict in ("code_reachable", "code_smell", "not_reproduced", "needs_review"):
+    else:
+        # code_reachable/code_smell/not_reproduced/needs_review，以及 None
+        # （gate=uncertain 等无权威结论）一律退回人工。此前 None 保持
+        # dispatched 等"任务级收尾"，但收尾只认 source_alert_group_id 指针组，
+        # 多线索任务里其余组会永久悬挂在 dispatched。
         await svc.mark_needs_review(group)
-    # None：保持 dispatched（uncertain 等任务级收尾处理）
 
 
 async def process_one_lead(
@@ -300,7 +303,11 @@ async def drain_lead_queue(
     return done_ids
 
 
-def build_discovery_report_from_leads(leads: list[LeadRun]) -> dict[str, Any]:
+def build_discovery_report_from_leads(
+    leads: list[LeadRun],
+    *,
+    denoise: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """聚合审计报告；只有 confirmed/partial 进入已确认漏洞清单。"""
     from collections import Counter
 
@@ -323,9 +330,24 @@ def build_discovery_report_from_leads(leads: list[LeadRun]) -> dict[str, Any]:
     n = len(confirmed)
     total = len(leads)
     needs_review = verdict_counts["needs_review"] + verdict_counts["code_reachable"] + verdict_counts["code_smell"] + verdict_counts["not_reproduced"]
+    denoise = denoise or {}
+    dropped_c = int(denoise.get("dropped_c_count") or 0)
+    finding_count = denoise.get("finding_count")
+    group_count = denoise.get("group_count")
+    funnel_bits = []
+    if finding_count is not None:
+        funnel_bits.append(f"原始告警 {finding_count}")
+    if dropped_c:
+        funnel_bits.append(f"C 档降噪 {dropped_c}")
+    if group_count is not None:
+        funnel_bits.append(f"复核组 {group_count}")
+    funnel_line = ("；".join(funnel_bits) + "。") if funnel_bits else ""
     report_data = {
         "document_kind": "code_audit_report",
-        "product_intro": f"仓库代码审计报告：终认 {total} 条线索，确认 {n} 条漏洞。",
+        "product_intro": (
+            f"仓库代码审计报告：终认 {total} 条线索，确认 {n} 条漏洞。"
+            + (f" 降噪漏斗：{funnel_line}" if funnel_line else "")
+        ),
         "vulnerability": body,
         "impact": "见各确认发现描述与 kill chain；未确认项不作为漏洞结论。" if n else "本轮没有已确认漏洞影响项。",
         "details": body,
@@ -341,6 +363,13 @@ def build_discovery_report_from_leads(leads: list[LeadRun]) -> dict[str, Any]:
             "confirmed_count": n,
             "needs_review_count": needs_review,
             "verdict_counts": dict(verdict_counts),
+            "denoise_funnel": {
+                "finding_count": finding_count,
+                "dropped_c_count": dropped_c,
+                "dropped_c_by_engine": denoise.get("dropped_c_by_engine") or {},
+                "group_count": group_count,
+                "bypass_count": denoise.get("bypass_count"),
+            },
         },
     }
     for key in REPORT_SECTION_KEYS:
@@ -360,6 +389,8 @@ def build_discovery_report_from_leads(leads: list[LeadRun]) -> dict[str, Any]:
         "empty_aggregate": not confirmed,
         "authored_by": "discovery_aggregate",
     }
+
+
 async def load_lead_runs(session: AsyncSession, run_id: str) -> list[LeadRun]:
     rows = await session.execute(
         select(LeadRun).where(LeadRun.run_id == run_id).order_by(LeadRun.queue_position.asc())

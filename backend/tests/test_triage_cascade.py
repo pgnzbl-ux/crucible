@@ -264,8 +264,15 @@ async def test_t2_fast_model_decides_and_escalates(factory, tmp_path):
     async def agent_side_effect(**kw):
         return _agent_output("fp", 0.85)
 
+    async def fake_provider(session, role):
+        return SimpleNamespace(
+            id="pv", model="fast-1", base_url="http://llm.test",
+            api_key_encrypted="", timeout_ms=None,
+        )
+
     with (
         patch("app.core.config.get_settings", return_value=_cascade_settings()),
+        patch("app.core.llm_gateway._resolve_provider", new=fake_provider),
         patch("app.core.llm_gateway.llm_complete", new=fast_side_effect),
         patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", new=agent_side_effect),
     ):
@@ -550,4 +557,131 @@ async def test_streaming_dispatch_during_triage(factory, tmp_path):
     groups = await _groups_of(session, ctx.task_id)
     dispatched = [g for g in groups if g.status == "dispatched"]
     assert len(dispatched) == 1
+    await gen.aclose()
+
+
+@pytest.mark.asyncio
+async def test_t0_rejects_non_agent_provenance(factory, tmp_path):
+    """防自举回归：rule/fast/propagated 来源的历史判决不得被携带——
+    否则前置层输出入库即成"永久真值"，跨任务复利。"""
+    from app.contexts.agent.nodes.triage import TriageNode
+
+    gen = _seed_env(
+        factory, tmp_path,
+        prior_groups=[{
+            "rule": "r.a", "file_path": "module/db.py",
+            "verdict": "fp", "conf": 0.99, "source": "rule",
+            "fingerprint": "FP-RULE",
+        }],
+        current=[{"rule": "r.a", "file_path": "module/db.py", "fingerprint": "FP-RULE"}],
+    )
+    ctx, session = await gen.__anext__()
+
+    with (
+        patch("app.core.config.get_settings", return_value=_cascade_settings(triage_fast_model_enabled=False)),
+        patch(
+            "app.contexts.agent.ai_runner.run_ai_node_with_shape_retry",
+            new_callable=AsyncMock, return_value=_agent_output("tp", 0.9),
+        ) as agent,
+    ):
+        out = await TriageNode().execute(ctx, None)
+
+    assert out["carried_count"] == 0
+    assert agent.await_count >= 1  # 落回 agent 亲审
+    await gen.aclose()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_leads_dedupes_by_lead_run_id():
+    """同一 lead 重复入队只保留一份（重投双跑防双消费）。"""
+    from app.contexts.agent import lead_queue as lq
+
+    class _MemRedis:
+        def __init__(self):
+            self.lists: dict[str, list] = {}
+            self.sets: dict[str, set] = {}
+
+        async def smembers(self, key):
+            return set(self.sets.get(key) or set())
+
+        async def sadd(self, key, *members):
+            self.sets.setdefault(key, set()).update(members)
+
+        async def lpush(self, key, *payloads):
+            self.lists.setdefault(key, []).extend(payloads)
+
+    mem = _MemRedis()
+    lq.set_redis_client(mem)
+    try:
+        items = [{"lead_run_id": "lr1", "group_id": "g1", "run_id": "r1"}]
+        first = await lq.enqueue_leads("t1", items)
+        again = await lq.enqueue_leads("t1", items + [
+            {"lead_run_id": "lr2", "group_id": "g2", "run_id": "r1"},
+        ])
+        assert (first, again) == (1, 1)  # 第二次只有 lr2 是新的
+        queued = [json.loads(p)["lead_run_id"] for p in mem.lists["crucible:lead_verify:t1"]]
+        assert sorted(queued) == ["lr1", "lr2"]  # lr1 只有一份
+    finally:
+        lq.set_redis_client(None)
+
+
+def test_runtime_update_accepts_token_budget():
+    """并发硬顶校验不得误杀 token 预算（量纲不同）。"""
+    from app.contexts.settings.schemas import RuntimeSettingsUpdateRequest
+
+    ok = RuntimeSettingsUpdateRequest(task_token_budget=500_000_000)
+    assert ok.task_token_budget == 500_000_000
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        RuntimeSettingsUpdateRequest(task_token_budget=3_000_000_000)
+
+
+@pytest.mark.asyncio
+async def test_t2_empty_slices_escalate_without_fast_call(factory, tmp_path):
+    """切片为空（文件读不到）不送快审：零上下文的单次补全等于盲猜，直接升级 agent。"""
+    from app.contexts.agent.nodes.triage import TriageNode
+
+    gen = _seed_env(
+        factory, tmp_path,
+        current=[
+            {"rule": "r.a", "file_path": "module/db.py"},
+            {"rule": "r.c", "file_path": "module/missing.py"},
+        ],
+    )
+    ctx, session = await gen.__anext__()
+
+    fast_users: list[str] = []
+
+    async def fast_side_effect(*, role, system, user, **kw):
+        fast_users.append(user)
+        return SimpleNamespace(
+            text=json.dumps({"verdict": "fp", "confidence": 0.9, "why": [], "need": []}),
+            model="fast-1", provider_id="pv",
+            usage={"prompt_tokens": 10, "completion_tokens": 5},
+        )
+
+    async def agent_side_effect(**kw):
+        return _agent_output("fp", 0.85)
+
+    async def fake_provider(session, role):
+        return SimpleNamespace(
+            id="pv", model="fast-1", base_url="http://llm.test",
+            api_key_encrypted="", timeout_ms=None,
+        )
+
+    with (
+        patch("app.core.config.get_settings", return_value=_cascade_settings()),
+        patch("app.core.llm_gateway._resolve_provider", new=fake_provider),
+        patch("app.core.llm_gateway.llm_complete", new=fast_side_effect),
+        patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", new=agent_side_effect),
+    ):
+        out = await TriageNode().execute(ctx, None)
+
+    assert len(fast_users) == 1  # 只有能切出代码的组进了快审
+    groups = {g.file_path: g for g in await _groups_of(session, ctx.task_id)}
+    assert groups["module/db.py"].verdict_source == "fast_model"
+    assert groups["module/missing.py"].verdict_source == "agent"
+    assert out["fast_model_count"] == 1
+    assert out["adjudicated_count"] == 1
     await gen.aclose()

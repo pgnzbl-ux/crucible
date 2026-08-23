@@ -230,10 +230,14 @@ class DispatchNode:
 
         if queue_items:
             pushed = await enqueue_leads(ctx.task_id, queue_items)
-            if pushed != len(queue_items):
-                # Redis 半失败：节点 fail，重投后由 _reconcile_lead_runs 补齐
-                raise RuntimeError(
-                    f"终认队列入队不完整：期望 {len(queue_items)} 实推 {pushed}"
+            if pushed < len(queue_items):
+                # 少推的部分要么已被 lead_run_id 去重（本就在队列），
+                # 要么 Redis 半失败——均不由节点兜底：重投/回收路径
+                # (_reconcile_lead_runs / _reclaim_orphan_leads) 会补齐
+                emit_phase(
+                    ctx,
+                    f"入队 {pushed}/{len(queue_items)}（其余已在队列或待补偿）",
+                    phase=self.node_key,
                 )
             rep = ordered[0] if ordered else None
             emit_phase(

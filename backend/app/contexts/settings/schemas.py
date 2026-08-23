@@ -161,9 +161,18 @@ class RuntimeSettingsUpdateRequest(BaseModel):
         values = self.model_dump(exclude_none=True)
         if not values:
             raise ValueError("至少提交一项运行时设置")
-        for field_name, value in values.items():
-            if value > allowed:
+        # 并发类字段受 runner 硬顶约束；token 预算是消耗量纲，只查自身上界
+        for field_name in (
+            "max_concurrent_tasks",
+            "max_concurrent_agent_runners",
+            "lead_verify_per_task",
+            "reproduce_per_lab",
+        ):
+            value = values.get(field_name)
+            if value is not None and value > allowed:
                 raise ValueError(f"{field_name} 不能超过 {allowed}")
+        if values.get("task_token_budget", 0) > 2_000_000_000:
+            raise ValueError("task_token_budget 不能超过 2,000,000,000")
         if (
             self.max_concurrent_agent_runners is not None
             and self.lead_verify_per_task is not None

@@ -55,6 +55,7 @@ class CaseSnapshot:
     task_verdict: str | None = None
     review_ready_seconds: float | None = None
     skipped: str | None = None  # 未跑（无 fixture / live 失败）时的原因
+    dropped_c_count: int = 0  # 确定性降噪 C 档（未建组）
 
 
 @dataclass
@@ -68,6 +69,7 @@ class CaseMetrics:
     tp_groups: int
     tp_groups_matching_expected: int
     bypass_groups: int
+    dropped_c_count: int
     tp_samples_in_funnel: int
     tp_samples_judged_fp: int
     has_lead: bool
@@ -139,6 +141,7 @@ def score_case(case: CaseRecord, snap: CaseSnapshot) -> CaseMetrics:
         tp_groups=len(tp_groups),
         tp_groups_matching_expected=tp_match,
         bypass_groups=bypass,
+        dropped_c_count=int(snap.dropped_c_count or 0),
         tp_samples_in_funnel=in_funnel,
         tp_samples_judged_fp=judged_fp,
         has_lead=bool(snap.has_lead),
@@ -159,6 +162,7 @@ class AggregateReport:
     median_review_ready_seconds: float | None
     skipped_count: int
     missed_by_case: dict[str, list[str]]
+    dropped_c_total: int = 0
 
 
 def aggregate(rows: list[CaseMetrics]) -> AggregateReport:
@@ -194,6 +198,7 @@ def aggregate(rows: list[CaseMetrics]) -> AggregateReport:
         median_review_ready_seconds=median,
         skipped_count=sum(1 for r in rows if r.skipped),
         missed_by_case={r.case_id: r.missed for r in scored if r.missed},
+        dropped_c_total=sum(r.dropped_c_count for r in scored),
     )
 
 
@@ -229,6 +234,7 @@ def render_markdown(report: AggregateReport) -> str:
         f"- 用例总数：{len(report.cases)}（跳过 {report.skipped_count}）",
         f"- 时效（复核台就绪，中位数）："
         f"{'n/a' if report.median_review_ready_seconds is None else f'{report.median_review_ready_seconds:.0f}s'}",
+        f"- 降噪漏斗（C 档未建组合计）：{report.dropped_c_total}",
         "",
         "## 分账指标",
         "",
@@ -248,15 +254,15 @@ def render_markdown(report: AggregateReport) -> str:
     else:
         for cid, missed in sorted(report.missed_by_case.items()):
             lines.append(f"- `{cid}`: " + "; ".join(missed))
-    lines += ["", "## 逐用例", "", "| 用例 | 覆盖 | 原始告警 | 人视野组 | 主线索 | 跳过 |", "|---|---|---|---|---|---|"]
+    lines += ["", "## 逐用例", "", "| 用例 | 覆盖 | 原始告警 | C档 | 人视野组 | 主线索 | 跳过 |", "|---|---|---|---|---|---|---|"]
     for row in report.cases:
         cov = f"{row.expected_hit}/{row.expected_total}"
         lead = "是/FP" if row.lead_false_positive else ("是" if row.has_lead else "否")
         if row.lead_false_positive is False and row.has_lead:
             lead = "是/非FP"
         lines.append(
-            f"| `{row.case_id}` | {cov} | {row.raw_alerts} | {row.human_view_groups} "
-            f"| {lead} | {row.skipped or ''} |"
+            f"| `{row.case_id}` | {cov} | {row.raw_alerts} | {row.dropped_c_count} "
+            f"| {row.human_view_groups} | {lead} | {row.skipped or ''} |"
         )
     lines.append("")
     return "\n".join(lines)

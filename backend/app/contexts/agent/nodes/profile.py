@@ -8,6 +8,7 @@ discovery-spec §6.0：画像升为权威结构化契约。
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from app.contexts.agent.contracts import InputAssembler, ProfileInput, SourceHandoff
@@ -235,7 +236,8 @@ class ProfileNode:
             return facts
 
         root = src.project_path or inp.source_path or ctx.source_path
-        hints = detect_profile(root)
+        # 同步磁盘遍历放线程池：大仓库直接跑会卡住同波次并发节点的心跳/SSE
+        hints = await asyncio.to_thread(detect_profile, root)
         emit_phase(ctx, _hints_phase_message(hints), phase=self.node_key)
 
         from app.core.config import get_settings

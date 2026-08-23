@@ -240,7 +240,7 @@ owner 校验：所有环境均要求 `report.owner_id` 匹配当前用户。报�
 
 ### GET `/api/v1/findings/groups`
 
-分页查询告警组。Query：`task_id` / `status` / `cwe` / `ai_verdict` / `engine` / `clue_grade` / `limit`（默认 50，最大 200）/ `offset`。未传 `task_id` 时只返回当前用户任务集合内的组。
+分页查询告警组。Query：`task_id` / `status` / `resolution`（`confirmed|false_positive|ignored`，按结案结果筛）/ `cwe` / `ai_verdict` / `engine` / `clue_grade` / `scope` / `q` / `limit`（默认 50，最大 200）/ `offset`。未传 `task_id` 时只返回当前用户任务集合内的组。
 
 响应 `{ total, items }`。每条 `AlertGroupSummary`：`id / task_id / cwe / file_path / function_symbol / line_span / member_count / engine_set / status / clue_grade / ai_verdict / ai_confidence / priority / resolution / created_at / updated_at`。
 

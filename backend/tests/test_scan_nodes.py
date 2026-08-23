@@ -74,6 +74,9 @@ def test_semgrep_normalize_with_codeflows():
     assert f["source_to_sink"] and len(f["source_to_sink"]) == 2
     assert f["source_to_sink"][0].startswith("app/api.py:10")
     assert f["fingerprint"]
+    assert f["raw"]["has_dataflow"] is True
+    assert f["raw"]["confidence"] == "UNKNOWN"  # fixture 未带 metadata.confidence
+    assert f["raw"]["category"] == "security"
 
 
 def test_semgrep_normalize_without_codeflows_gives_none():
@@ -91,6 +94,38 @@ def test_semgrep_normalize_without_codeflows_gives_none():
     f = normalize_semgrep(no_flows)[0]
     assert f["source_to_sink"] is None
     assert f["code_snippet"]
+    assert f["raw"]["has_dataflow"] is False
+    assert f["raw"]["confidence"] == "UNKNOWN"
+
+
+def test_semgrep_normalize_reads_confidence_and_category():
+    from app.contexts.finding.sarif import normalize_semgrep
+
+    sarif = {
+        "runs": [{
+            "tool": {"driver": {"rules": [{
+                "id": "py.low",
+                "properties": {
+                    "confidence": "LOW",
+                    "category": "best-practice",
+                    "tags": ["best-practice"],
+                },
+            }]}},
+            "results": [{
+                "ruleId": "py.low",
+                "level": "note",
+                "message": {"text": "style"},
+                "locations": [{"physicalLocation": {
+                    "artifactLocation": {"uri": "a.py"},
+                    "region": {"startLine": 1},
+                }}],
+            }],
+        }]
+    }
+    f = normalize_semgrep(sarif)[0]
+    assert f["raw"]["confidence"] == "LOW"
+    assert f["raw"]["category"] == "best-practice"
+    assert f["raw"]["has_dataflow"] is False
 
 
 # ---------- gitleaks SARIF 归一化 + 脱敏 ----------
@@ -121,6 +156,27 @@ def test_gitleaks_secret_redacted_in_message_and_snippet():
     assert "AKIAIOSFODNN7EXAMPLE" not in (f["code_snippet"] or "")
     # 保留前4+…+后4 与长度
     assert "AKIA" in f["message"] and "…" in f["message"] and "len=20" in f["message"]
+    assert f["raw"]["rule_class"] == "known"
+
+
+def test_gitleaks_generic_rule_class_and_entropy():
+    from app.contexts.finding.sarif import normalize_gitleaks
+
+    sarif = {
+        "runs": [{"results": [{
+            "ruleId": "generic-api-key",
+            "level": "error",
+            "message": {"text": "key=abc"},
+            "properties": {"entropy": 4.2},
+            "locations": [{"physicalLocation": {
+                "artifactLocation": {"uri": "x.py"},
+                "region": {"startLine": 1},
+            }}],
+        }]}]
+    }
+    f = normalize_gitleaks(sarif)[0]
+    assert f["raw"]["rule_class"] == "generic"
+    assert f["raw"]["entropy"] == 4.2
 
 
 def test_redact_private_key_block_and_context_password():
@@ -168,8 +224,36 @@ def test_osv_normalize_maps_dependencies():
     assert "CVE-2024-22195" in f["message"]
     assert f["severity"] == "warning"  # 5.4 → medium → SARIF warning
     assert len(f["severity"] or "") <= 20
+    assert f["raw"]["called"] is None  # fixture 无 call analysis
     # 同一依赖两条漏洞 fingerprint 不同
     assert len({f["fingerprint"] for f in findings}) == 2
+
+
+def test_osv_normalize_called_and_unimportant():
+    from app.contexts.finding.sarif import normalize_osv
+
+    report = {
+        "results": [{
+            "source": {"path": "go.mod"},
+            "packages": [{
+                "package": {"name": "github.com/x/y", "version": "1.0.0"},
+                "vulnerabilities": [{
+                    "id": "GO-2021-0053",
+                    "aliases": ["GHSA-c3h9-896r-86jm"],
+                    "summary": "proto",
+                    "database_specific": {"unimportant": True},
+                    "severity": [{"type": "CVSS_V3", "score": 7.5}],
+                }],
+                "groups": [{
+                    "ids": ["GO-2021-0053", "GHSA-c3h9-896r-86jm"],
+                    "experimentalAnalysis": {"GO-2021-0053": {"called": False}},
+                }],
+            }],
+        }],
+    }
+    f = normalize_osv(report)[0]
+    assert f["raw"]["called"] is False
+    assert f["raw"]["unimportant"] is True
 
 
 @pytest.mark.parametrize(
@@ -708,3 +792,52 @@ def test_worker_sigterm_registry_kills_all_active_scanner_groups():
         (202, signal.SIGKILL),
     }
     assert base._ACTIVE_SCANNER_PROCESS_GROUPS == set()
+
+
+@pytest.mark.asyncio
+async def test_scan_subprocess_cancel_check_kills_early():
+    """取消探测命中即杀进程并抛 ScanCancelledError，不跑满超时窗口才被丢弃。"""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    import pytest
+
+    from app.contexts.agent.nodes.scan import base as scan_base
+    from app.contexts.agent.nodes.scan.base import EngineScanNode, ScanCancelledError
+
+    class _Dummy(EngineScanNode):
+        engine = "gitleaks"
+        node_key = "scan_gitleaks"
+
+        def timeout_seconds(self, settings) -> int:
+            return 60
+
+    node = _Dummy()
+    ticks: list[int] = []
+    tick = 0.1
+
+    async def never_finishes():
+        await asyncio.sleep(30)
+        return (b"", b"")
+
+    proc = MagicMock()
+    proc.returncode = 0
+    proc.communicate = never_finishes
+    proc.kill = MagicMock()
+    proc.wait = AsyncMock()
+    settings = SimpleNamespace(scanner_output_max_bytes=1024 * 1024)
+
+    async def cancelled():
+        return True
+
+    with (
+        patch.object(scan_base, "SCAN_PROGRESS_TICK_SECONDS", tick),
+        patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
+    ):
+        with pytest.raises(ScanCancelledError):
+            await node._run_subprocess(
+                ["gitleaks"], "/tmp", settings, on_tick=ticks.append,
+                stop_check=cancelled,
+            )
+    proc.kill.assert_called()

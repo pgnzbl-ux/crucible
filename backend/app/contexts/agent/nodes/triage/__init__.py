@@ -104,12 +104,38 @@ class _LeadStreamer:
             })
         if not items:
             return 0
+        # 溯源指针与 dispatch 节点同语义：首个入队线索回写 source_alert_group
+        # （全流式路径下 dispatch 不再新建线索，指针只能在这里落；
+        # 仅在为空时写，避免后续批次来回改写）
+        from app.contexts.task.models import Task as _TaskModel
+        from app.contexts.task.repository import TaskRepository
+        from app.contexts.task.service import TaskService
+
+        task_row = await ctx.db_session.get(_TaskModel, ctx.task_id)
+        if task_row is not None and not getattr(task_row, "source_alert_group_id", None):
+            await TaskService(TaskRepository(ctx.db_session)).set_source_alert_group(
+                ctx.task_id, items[0]["group_id"],
+            )
         await ctx.db_session.commit()
-        pushed = await enqueue_leads(ctx.task_id, items)
-        if pushed != len(items):
-            # Redis 半失败：不入账，下一轮 poll 补（LeadRun 已建，幂等）
+        try:
+            pushed = await enqueue_leads(ctx.task_id, items)
+        except Exception:
+            # Redis 不可达：回退本批 dispatched 标记，让下轮 poll/重跑
+            # 能重新入队（否则组停在 dispatched 而队列无条目，永久悬挂）
+            from sqlalchemy import update as _update
+
+            from app.contexts.finding.models import AlertGroup
+
+            await ctx.db_session.execute(
+                _update(AlertGroup)
+                .where(AlertGroup.id.in_([i["group_id"] for i in items]))
+                .values(status="adjudicated")
+            )
+            await ctx.db_session.commit()
+            emit_phase(ctx, "终认队列入队失败，本轮流式派单回退", phase="triage")
             return 0
-        self.enqueued += len(items)
+        # pushed<len 是去重命中（本就在队列）；真丢条目由回收路径补偿
+        self.enqueued += pushed or len(items)
         emit_phase(
             ctx, f"流式入队 {len(items)} 条终认线索（累计 {self.enqueued}）",
             phase="triage",
@@ -118,8 +144,15 @@ class _LeadStreamer:
         return len(items)
 
     def _ensure_drain(self) -> None:
-        """后台排空终认队列（与 triage 剩余审议并发）。"""
-        if self.drain_task is not None or self.ctx.session_factory is None:
+        """后台排空终认队列（与 triage 剩余审议并发）。
+
+        首个 drain 把队列排空退出后，后续入队要能重新拉起——否则
+        传播阶段的新线索只能等 dispatch 后的正式排空，流式失去意义。
+        """
+        if (
+            self.drain_task is not None
+            and not self.drain_task.done()
+        ) or self.ctx.session_factory is None:
             return
         from app.contexts.agent.lead_worker import drain_lead_queue
 
@@ -169,8 +202,18 @@ class _LeadStreamer:
                 )
 
     def cancel(self) -> None:
-        if self.drain_task is not None:
+        if self.drain_task is not None and not self.drain_task.done():
             self.drain_task.cancel()
+
+    async def cancel_and_reap(self) -> None:
+        """取消并收尸：detached 任务会在编排器返回后短暂残留（engine 已
+        dispose，只会产生日志噪音），这里等它真正退出。"""
+        self.cancel()
+        if self.drain_task is not None:
+            try:
+                await self.drain_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
 
 
 class TriageNode:
@@ -236,12 +279,12 @@ class TriageNode:
             )
         except BaseException:
             if streamer is not None:
-                streamer.cancel()
+                await streamer.cancel_and_reap()
             raise
 
         if cancelled:
             if streamer is not None:
-                streamer.cancel()
+                await streamer.cancel_and_reap()
             # 已完成的判决保留；未审的保持 clustered 原状，不扫成 needs_review。
             # 编排器在 execute 返回后会复查取消并把 NodeRun 标为 cancelled。
             await ctx.db_session.commit()
@@ -249,6 +292,15 @@ class TriageNode:
 
         if streamer is not None:
             await streamer.poll()  # 收尾兜底：快审等来源的达门槛组
+            if streamer.enqueued:
+                # join 前显式分段：triage 的 NodeRun 会等流式终认排空才完成，
+                # 不播报的话事件流又回到"看不懂它在干什么"
+                emit_phase(
+                    ctx,
+                    f"二审完成，等待 {streamer.enqueued} 条流式终认线索排空"
+                    "（验证与报告随后就绪）",
+                    phase=self.node_key,
+                )
             await streamer.join()
         await ctx.db_session.commit()
         # 兜底：仍 clustered 的组转复核（正常路径应为空）
@@ -335,6 +387,7 @@ class TriageNode:
             ctx.db_session,
             default_factor=float(getattr(settings, "triage_propagate_confidence_factor", 0.85)),
             min_verified=int(getattr(settings, "triage_feedback_min_verified", 10)),
+            project_id=ctx.project_id,
         )
 
         # 传播（expire_all 后 get/select 都会重载最新库值）；
@@ -400,33 +453,64 @@ class TriageNode:
 
         sem = asyncio.Semaphore(concurrency)
         done = 0
+        started = 0
         total = len(families)
+        emit_phase(
+            ctx,
+            f"族级代表审议启动：{total} 族 · 并发 {concurrency}"
+            f"（每族只审 1 个代表，其余成员传播判决）",
+            phase=self.node_key,
+        )
 
         async def _one(family) -> str:
-            nonlocal done
+            nonlocal done, started
             async with sem:
-                if await task_run_cancelled(ctx.db_session, ctx.task_id, ctx.run_id):
-                    return "cancelled"
-                from app.contexts.agent.usage_ledger import budget_state
-
-                exhausted, spent, budget = await budget_state(
-                    ctx.db_session, ctx.task_id,
-                )
-                if exhausted:
-                    return "budget"
                 rep_gid = family.representative.id
                 label = f"{family.representative.cwe or '?'} {family.representative.file_path or ''}".strip()
                 async with factory() as ws:
+                    # 取消/预算自查必须在 worker 自己的会话上做——
+                    # 并发协程共享主会话会 greenlet 互锁并滞留事务锁
+                    if await task_run_cancelled(ws, ctx.task_id, ctx.run_id):
+                        return "cancelled"
+                    from app.contexts.agent.usage_ledger import budget_state
+
+                    exhausted, spent, budget = await budget_state(ws, ctx.task_id)
+                    if exhausted:
+                        return "budget"
                     group = await ws.get(AlertGroup, rep_gid)
                     if group is None:
                         return "missing"
-                    emit_phase(ctx, f"二审 {done + 1}/{total}：{label}", phase=self.node_key)
-                    ok = await adjudicate_group(replace(ctx, db_session=ws), group, settings)
+                    # 领号即递增：并发下每个代表拿到唯一序号
+                    started += 1
+                    emit_phase(
+                        ctx,
+                        f"二审 {started}/{total}：{label}（族内 {len(family.members)} 组）",
+                        phase=self.node_key,
+                    )
+                    try:
+                        ok = await adjudicate_group(
+                            replace(ctx, db_session=ws), group, settings,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:  # noqa: BLE001
+                        # 不让单个代表的异常炸掉 gather（兄弟协程会变孤儿
+                        # 继续写库）——降级转人工
+                        import logging
+
+                        logging.getLogger(__name__).warning(
+                            "代表审议异常转人工 %s: %s", label, e, exc_info=True,
+                        )
+                        emit_phase(ctx, f"二审异常转人工：{label}", phase=self.node_key)
+                        from app.contexts.finding.service import FindingService
+
+                        await FindingService(ws).mark_needs_review(group)
+                        ok = False
                     await ws.commit()
                 if ok:
                     stats.agent += 1
-                    await self._emit_progress(ctx, stats, pending=total - done - 1)
                 done += 1
+                await self._emit_progress(ctx, stats, pending=total - done)
                 return "ok"
 
         results = await asyncio.gather(*[_one(f) for f in families])
@@ -437,12 +521,21 @@ class TriageNode:
             from app.contexts.agent.usage_ledger import budget_state
 
             _ex, spent, budget = await budget_state(ctx.db_session, ctx.task_id)
-            stats.budget_exhausted = True
+            stats.budget_exhausted = _ex
             emit_phase(
                 ctx,
                 f"token 预算耗尽（{spent}/{budget}），停止剩余 agent 审议，未审组转人工",
                 phase=self.node_key,
             )
+            # 前端 TaskEventTimeline 以 triage.progress.reason==='budget'
+            # 渲染预算中断标记
+            if ctx.on_event:
+                ctx.on_event({
+                    "type": "triage.progress",
+                    "reason": "budget",
+                    "spent": spent,
+                    "budget": budget,
+                })
         return False
 
     # ── 输出/进度 ────────────────────────────────────────

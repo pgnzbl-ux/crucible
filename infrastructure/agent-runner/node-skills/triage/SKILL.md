@@ -9,7 +9,7 @@ description: Crucible 节点 triage。告警组轻量二审：封闭问题 + 切
 
 禁止：寻找切片之外的其他漏洞；回答「整个仓库还有什么问题」；对靶场发 HTTP；把引擎结论当真理（若输入里有引擎文案，仅供参考且可能有误）。
 
-本轮原料在 user message 的 JSON：`closed_question`、`locus`、`source_to_sink`、`slices`、`rubric`（CWE 微评分表，可空）、`engine_set`、可选 `engine_conclusion`（默认应缺省）。
+本轮原料在 user message 的 JSON：`closed_question`、`locus`、`source_to_sink`、`slices`、`rubric`（CWE 微评分表，可空）、`engine_set`、`has_dataflow`、可选 `rule_class`（gitleaks known|generic）、可选 `engine_conclusion`（默认应缺省）。
 
 若 JSON 带 `previous_error`：上一轮 `submit_result` 未过 schema——按错误补齐后重新提交完整 output。
 

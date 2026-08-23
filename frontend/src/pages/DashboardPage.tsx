@@ -57,7 +57,7 @@ export function DashboardPage() {
     { key: 'running', title: '进行中的审计', value: sumTaskStats(stats?.by_status ?? {}, 'pending,queued,running'), icon: <ThunderboltOutlined />, tone: 'primary' as const, href: '/tasks?status=pending%2Cqueued%2Crunning' },
     { key: 'review', title: '待人工复核', value: findingStats?.by_queue.review ?? 0, icon: <ClockCircleOutlined />, tone: 'warning' as const, href: '/findings?scope=review' },
     { key: 'confirming', title: '终认中', value: findingStats?.by_status.dispatched ?? 0, icon: <BugOutlined />, tone: 'warning' as const, href: '/findings?status=dispatched' },
-    { key: 'confirmed', title: '已确认漏洞', value: findingStats?.by_resolution.confirmed ?? 0, icon: <CheckCircleOutlined />, tone: 'success' as const, href: '/findings?status=resolved' },
+    { key: 'confirmed', title: '已确认漏洞', value: findingStats?.by_resolution.confirmed ?? 0, icon: <CheckCircleOutlined />, tone: 'success' as const, href: '/findings?resolution=confirmed' },
     { key: 'findings', title: '漏洞线索', value: findingStats?.total ?? 0, icon: <BugOutlined />, tone: 'default' as const, href: '/findings?scope=all' },
     { key: 'total', title: '审计运行', value: stats?.total ?? 0, icon: <FileProtectOutlined />, tone: 'default' as const, href: '/tasks' },
   ]

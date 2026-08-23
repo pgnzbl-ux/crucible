@@ -18,7 +18,10 @@ import time
 import httpx
 from sqlalchemy.exc import IntegrityError
 
-from app.core.config import get_settings
+# 经模块属性访问而非导入期绑定：若本模块在被 patch 的
+# get_settings 生效期间首次导入，顶层 from-import 会把 Mock 永久
+# 捕获进本模块（测试顺序污染的根源）
+from app.core import config as _core_config
 from app.core.crypto import mask_secret
 from app.core.url_security import validate_public_https_url
 
@@ -147,12 +150,12 @@ class SettingsService:
         row = await self.repo.get_platform_setting()
         if row is not None:
             return row
-        hard_cap = get_settings().agent_runner_concurrency_limit
+        hard_cap = _core_config.get_settings().agent_runner_concurrency_limit
         row = PlatformSetting(
             singleton_key="default",
             max_concurrent_tasks=1,
             max_concurrent_agent_runners=hard_cap,
-            lead_verify_per_task=min(get_settings().lead_verify_per_task, hard_cap),
+            lead_verify_per_task=min(_core_config.get_settings().lead_verify_per_task, hard_cap),
             reproduce_per_lab=1, task_token_budget=0,
         )
         try:
@@ -165,7 +168,7 @@ class SettingsService:
             return found
 
     def _runtime_response(self, row: PlatformSetting) -> RuntimeSettingsResponse:
-        hard_cap = get_settings().agent_runner_concurrency_limit
+        hard_cap = _core_config.get_settings().agent_runner_concurrency_limit
         # 旧数据或部署硬顶下调后，读取即收敛到一组真正可执行的预算。
         row.max_concurrent_tasks = min(max(1, row.max_concurrent_tasks), hard_cap)
         row.max_concurrent_agent_runners = min(

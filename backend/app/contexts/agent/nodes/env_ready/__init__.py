@@ -12,12 +12,14 @@ from typing import Any
 from app.contexts.agent.target_url import host_advertise_ip, publish_target_url
 
 from ..base import NodeContext
-from . import ai_recipe, create_loop, reuse
+from . import ai_recipe, create_loop, events, reuse
 from .create_loop import MAX_ATTEMPTS
 from .events import _emit
 
 logger = logging.getLogger(__name__)
 LAB_WAIT_TIMEOUT_SECONDS = 1860
+# 等待播报节流：2s 轮询 × 15 = 30s 一条，避免刷屏 AgentEvent
+LAB_WAIT_EVENT_EVERY_ITER = 15
 
 
 async def _resolve_project_id(ctx: NodeContext) -> str:
@@ -52,9 +54,13 @@ async def _wait_for_lab(
     svc = LabService(ctx.db_session)
     loop = asyncio.get_running_loop()
     deadline = loop.time() + LAB_WAIT_TIMEOUT_SECONDS
+    waited = 0
     while loop.time() < deadline:
-        _emit(ctx, "等待其他任务把靶场搭好")
+        await events.raise_if_cancelled(ctx)
+        if waited % LAB_WAIT_EVENT_EVERY_ITER == 0:
+            _emit(ctx, "等待其他任务把靶场搭好")
         await asyncio.sleep(2)
+        waited += 1
         result = await svc.acquire(
             owner_id=owner_id,
             project_id=project_id,

@@ -28,6 +28,7 @@ async def _reused_lab_alive(
     *,
     retries: int = 3,
     settle_seconds: float = 0,
+    cancel_check=None,
 ) -> bool:
     """复用前快探：DB 说 ready 不代表应用进程还活着。
 
@@ -55,6 +56,7 @@ async def _reused_lab_alive(
         retries=retries,
         retry_seconds=1,
         settle_seconds=settle_seconds,
+        cancel_check=cancel_check,
     )
     return ok
 
@@ -104,6 +106,7 @@ async def _start_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
         result,
         retries=30,
         settle_seconds=3,
+        cancel_check=events.cancel_check(ctx),
     )
     if rebuilt is not None:
         return rebuilt
@@ -126,6 +129,7 @@ async def _reuse_or_rebuild_dead_lab(
     *,
     retries: int = 3,
     settle_seconds: float = 0,
+    cancel_check=None,
 ) -> dict[str, Any] | None:
     """复用前快探；死靶场标 failed → reclaim → 缓存配方重建（不烧 AI）。
 
@@ -137,6 +141,7 @@ async def _reuse_or_rebuild_dead_lab(
         result,
         retries=retries,
         settle_seconds=settle_seconds,
+        cancel_check=cancel_check,
     ):
         return None
     other_users = [

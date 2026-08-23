@@ -362,6 +362,7 @@ async def test_cluster_node_groups_and_grades(session_factory, tmp_path):
         assert out["index_symbol_count"] >= 1
         assert "python" in out["index_languages"]
         assert out["finding_count"] == 1
+        assert out["dropped_c_count"] == 0
         groups = (await session.execute(
             select(AlertGroup).where(AlertGroup.task_id == task.id)
         )).scalars().all()
@@ -376,6 +377,46 @@ async def test_cluster_node_groups_and_grades(session_factory, tmp_path):
             select(AlertGroup).where(AlertGroup.task_id == task.id)
         )).scalars().all()
         assert len(groups2) == 1
+
+
+@pytest.mark.asyncio
+async def test_cluster_drops_c_grade_findings(session_factory, tmp_path):
+    from app.contexts.agent.nodes.cluster import ClusterNode
+    from app.contexts.finding.models import AlertGroup
+    from app.contexts.finding.sarif import fingerprint
+
+    findings = [
+        {
+            "engine": "semgrep", "rule_id": "python.low", "cwe": "CWE-89",
+            "severity": "note", "file_path": "app.py", "line_start": 2, "line_end": 2,
+            "message": "low conf", "source_to_sink": None, "code_snippet": None,
+            "fingerprint": fingerprint("semgrep", "python.low", "app.py", 2, "CWE-89"),
+            "raw": {"confidence": "LOW", "has_dataflow": False, "category": "security"},
+        },
+        {
+            "engine": "semgrep", "rule_id": "python.sqli", "cwe": "CWE-89",
+            "severity": "error", "file_path": "app.py", "line_start": 2, "line_end": 2,
+            "message": "sqli", "source_to_sink": ["app.py:1", "app.py:2"], "code_snippet": None,
+            "fingerprint": fingerprint("semgrep", "python.sqli", "app.py", 2, "CWE-89"),
+            "raw": {"confidence": "HIGH", "has_dataflow": True, "category": "security"},
+        },
+    ]
+    async with session_factory() as session:
+        ctx, task, run, inp = await _seed_discovery_task(
+            session, tmp_path,
+            [("semgrep", "completed"), ("gitleaks", "skipped"), ("osv", "skipped")],
+            findings,
+        )
+        out = await ClusterNode().execute(ctx, inp)
+        assert out["finding_count"] == 2
+        assert out["dropped_c_count"] == 1
+        assert out["dropped_c_by_engine"] == {"semgrep": 1}
+        assert out["group_count"] == 1
+        groups = (await session.execute(
+            select(AlertGroup).where(AlertGroup.task_id == task.id)
+        )).scalars().all()
+        assert len(groups) == 1
+        assert groups[0].clue_grade == "A"
 
 
 @pytest.mark.asyncio
@@ -497,3 +538,29 @@ def test_should_skip_llm_engine_set_membership():
         engine_set = ["semgrep"]
 
     assert should_skip_llm(_G2()) is True
+
+
+def test_should_skip_llm_only_a_b():
+    from app.contexts.agent.nodes.triage.queue import should_skip_llm
+
+    class _G:
+        file_path = "app/x.py"
+        cwe = "CWE-89"
+        engine_set = ["semgrep"]
+
+    class A(_G):
+        clue_grade = "A"
+
+    class B(_G):
+        clue_grade = "B"
+
+    class F(_G):
+        clue_grade = "F"
+
+    class NoneGrade(_G):
+        clue_grade = None
+
+    assert should_skip_llm(A()) is False
+    assert should_skip_llm(B()) is False
+    assert should_skip_llm(F()) is True
+    assert should_skip_llm(NoneGrade()) is True

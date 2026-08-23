@@ -5,6 +5,7 @@ from sqlalchemy import String, and_, func, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.contexts.finding.models import AlertGroup, RawFinding, ReviewAction
+from app.contexts.task.models import Task
 
 
 class FindingRepository:
@@ -13,18 +14,24 @@ class FindingRepository:
 
     async def list_groups(
         self, *, task_id: str | None = None, status: str | None = None,
+        resolution: str | None = None,
         cwe: str | None = None, ai_verdict: str | None = None,
         engine: str | None = None, clue_grade: str | None = None,
-        scope: str | None = None,
+        scope: str | None = None, q: str | None = None,
         limit: int = 50, offset: int = 0, owner_task_ids: list[str] | None = None,
     ) -> tuple[int, list[AlertGroup]]:
         stmt = select(AlertGroup)
+        need_task_join = bool((q or "").strip())
+        if need_task_join:
+            stmt = stmt.join(Task, Task.id == AlertGroup.task_id)
         if owner_task_ids is not None:
             stmt = stmt.where(AlertGroup.task_id.in_(owner_task_ids))
         if task_id:
             stmt = stmt.where(AlertGroup.task_id == task_id)
         if status:
             stmt = stmt.where(AlertGroup.status == status)
+        if resolution:
+            stmt = stmt.where(AlertGroup.resolution == resolution)
         if cwe:
             stmt = stmt.where(AlertGroup.cwe == cwe)
         if ai_verdict:
@@ -35,13 +42,29 @@ class FindingRepository:
             stmt = stmt.where(self.engine_member_clause(engine))
         if scope and scope != "all":
             stmt = stmt.where(self.queue_scope_clause(scope))
+        needle = (q or "").strip()
+        if needle:
+            pattern = f"%{needle}%"
+            stmt = stmt.where(or_(
+                AlertGroup.cwe.ilike(pattern),
+                AlertGroup.file_path.ilike(pattern),
+                AlertGroup.function_symbol.ilike(pattern),
+                AlertGroup.task_id.ilike(pattern),
+                Task.project_address.ilike(pattern),
+            ))
         total = (await self.session.execute(
-            select(func.count()).select_from(stmt.subquery())
+            select(func.count()).select_from(
+                stmt.with_only_columns(AlertGroup.id).order_by(None).distinct().subquery()
+            )
         )).scalar_one()
+        # 复核台按「最近更新」优先（规格 §3.5）；并列用创建 时间
         rows = await self.session.execute(
-            stmt.order_by(AlertGroup.created_at.desc()).limit(limit).offset(offset)
+            stmt.order_by(
+                AlertGroup.updated_at.desc().nulls_last(),
+                AlertGroup.created_at.desc(),
+            ).limit(limit).offset(offset)
         )
-        return int(total), list(rows.scalars().all())
+        return int(total), list(rows.scalars().unique().all())
 
     @staticmethod
     def engine_member_clause(engine: str):

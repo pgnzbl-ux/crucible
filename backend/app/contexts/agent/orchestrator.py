@@ -541,7 +541,28 @@ async def _complete_discovery_aggregate_report(
     )
 
     leads = await load_lead_runs(session, run_id)
-    output = build_discovery_report_from_leads(leads) or {
+    denoise: dict[str, Any] = {}
+    cluster_nr = (await session.execute(
+        select(NodeRun).where(
+            NodeRun.run_id == run_id, NodeRun.node_key == "cluster",
+        )
+    )).scalar_one_or_none()
+    if cluster_nr and cluster_nr.output_json:
+        try:
+            raw_out = json.loads(cluster_nr.output_json) if isinstance(
+                cluster_nr.output_json, str
+            ) else cluster_nr.output_json
+            if isinstance(raw_out, dict):
+                denoise = {
+                    "finding_count": raw_out.get("finding_count"),
+                    "dropped_c_count": raw_out.get("dropped_c_count"),
+                    "dropped_c_by_engine": raw_out.get("dropped_c_by_engine"),
+                    "group_count": raw_out.get("group_count"),
+                    "bypass_count": raw_out.get("bypass_count"),
+                }
+        except (TypeError, json.JSONDecodeError):
+            denoise = {}
+    output = build_discovery_report_from_leads(leads, denoise=denoise) or {
         "final_verdict": None,
         "report_data": None,
         "empty_aggregate": True,

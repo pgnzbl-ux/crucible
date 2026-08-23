@@ -42,14 +42,22 @@ AI 二审默认不接收静态引擎的最终结论措辞，只接收规则身�
 
 ### 2.4 聚类与二审
 
-原始发现按任务、CWE、文件、函数及重叠行区间聚类。AI 二审输出 `tp | fp | need_more_context | parse_failed | bypass`、置信度、理由、证据和缺失上下文；高价值线索进入终认，边界线索进入人工复核。
+确定性代码降噪必须在 AI 二审之前完成。归一化阶段把引擎结构化信号写入 Finding 的 `raw`（不另建列）：
+
+| 引擎 | 降噪可用信号 |
+|---|---|
+| Semgrep | `confidence`（HIGH/MEDIUM/LOW/UNKNOWN）、`category`、`has_dataflow`（与 codeFlows 一致） |
+| Gitleaks | `rule_class`（known \| generic）、可选 `entropy` |
+| OSV | `called`（bool\|null）、`unimportant`（若有）；依赖组件名/版本 |
+
+原始发现经降噪后再按任务、CWE、文件、函数及重叠行区间聚类。AI 二审只接收等级 A/B 的假设包；输出 `tp | fp | need_more_context | parse_failed | bypass`、置信度、理由、证据和缺失上下文。高价值线索进入终认，边界线索进入人工复核。OSV 走 SCA bypass 轨道，不进 SAST 式二审。AI 可接收 `has_dataflow` / `rule_class` 等证据元数据，但不得接收引擎最终结论措辞（§2.2）。
 
 ### 2.5 线索等级
 
-- A：高价值且证据充分，可自动进入终认。
-- B：有价值但需人工放行或补充上下文。
-- F：AI 判误报，可抽检并复活。
-- C：低价值原始条目，不形成复核组，但保留扫描统计。
+- A：高价值且证据充分，可自动进入终认。Semgrep 有 dataflow 且 confidence∈{HIGH,UNKNOWN}；Gitleaks `rule_class=known`。
+- B：有价值但需人工放行或补充上下文。有 locus+CWE；Gitleaks `generic` 且未落入 C。
+- F：无法形成可审假设包（无 locus 且无 CWE），不调 LLM；可抽检并复活。
+- C：低价值原始条目，**不形成 AlertGroup**，但保留 RawFinding 与 ScanRun 统计。产生条件（保守、表驱动）：Semgrep `confidence=LOW` 且无 dataflow；Semgrep 可得且非 security 的 category；Gitleaks `generic` 且命中占位符或落在文档/markdown 路径。缺字段时保守保留进组，不得静默当误报。
 
 ### 2.6 评估口径
 
@@ -142,7 +150,7 @@ AI 节点只接收结构化、已裁剪、已脱敏的输入并返回结构化�
 
 ### 6.2 Cluster
 
-聚类输出原始发现数、分组数、各 CWE/引擎/等级统计及函数索引覆盖情况。
+聚类输出原始发现数、分组数、各 CWE/引擎/等级统计及函数索引覆盖情况。必须包含降噪漏斗：`dropped_c_count`、按引擎的降噪计数（C 档未建组条目），以及 OSV bypass 组数。
 
 ### 6.4 Dispatch
 

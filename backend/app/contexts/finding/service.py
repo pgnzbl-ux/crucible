@@ -13,6 +13,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.contexts.finding.models import Adjudication, AlertGroup, RawFinding, ReviewAction
 
 
+def numeric_usage(usage: dict | None) -> dict[str, int]:
+    """agent 侧 SDK usage 原样回传(含 server_tool_use 等嵌套 dict/str 字段)，
+    只保留数值项 —— 列契约是 {token 计数}，其余进 response_text 审计链。"""
+    return {
+        str(k): int(v)
+        for k, v in (usage or {}).items()
+        if isinstance(v, (int, float)) and not isinstance(v, bool)
+    }
+
+
+def _sanitize_adjudication(a: Adjudication) -> Adjudication:
+    """agent 自由输出收敛到判决列契约(why/need 全 str、evidence 全 dict、
+    usage 全数值)，防止单条脏行打挂复核台详情读取。"""
+    a.why = [str(w) for w in (a.why or [])]
+    a.need = [str(n) for n in (a.need or [])]
+    a.evidence = [e if isinstance(e, dict) else {"detail": str(e)} for e in (a.evidence or [])]
+    a.usage = numeric_usage(a.usage)
+    return a
+
+
 class FindingService:
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -141,7 +161,7 @@ class FindingService:
     async def record_adjudication(
         self, *, group: AlertGroup, adjudication: Adjudication,
     ) -> None:
-        self.session.add(adjudication)
+        self.session.add(_sanitize_adjudication(adjudication))
         group.status = "adjudicated"
         group.ai_verdict = adjudication.verdict
         group.ai_confidence = adjudication.confidence

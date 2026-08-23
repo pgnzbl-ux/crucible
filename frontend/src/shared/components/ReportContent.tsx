@@ -4,7 +4,7 @@ import type { ReportDetail } from '../lib/api'
 import { api } from '../lib/api'
 import { downloadAuthenticated } from '../lib/download'
 import { getVerdictMeta } from '../lib/meta'
-import { asMarkdownSection, asRecord, documentKindOf, pocToMarkdown, sectionsFor } from '../lib/reportData'
+import { asMarkdownSection, asRecord, documentKindOf, formatDenoiseFunnel, pocToMarkdown, sectionsFor } from '../lib/reportData'
 import { AuditPanel } from './AuditPanel'
 import { MarkdownBody } from './MarkdownBody'
 
@@ -25,6 +25,7 @@ export function ReportContent({ report }: ReportContentProps) {
   const isRecord = kind === 'verification_record'
   const sections = sectionsFor(rd)
   const mdLabel = isRecord ? '导出验证记录' : '导出 Markdown'
+  const denoiseLine = formatDenoiseFunnel(rd)
 
   const exportFile = async (format: 'json' | 'md') => {
     try {
@@ -100,6 +101,14 @@ export function ReportContent({ report }: ReportContentProps) {
               label: '漏洞文件',
               children: <Text code>{report.vulnerable_file ?? '—'}</Text>,
             },
+            ...(denoiseLine
+              ? [{
+                  key: 'denoise',
+                  label: '降噪漏斗',
+                  children: <Text type="secondary">{denoiseLine}</Text>,
+                  span: 3 as const,
+                }]
+              : []),
           ]}
         />
       </Card>

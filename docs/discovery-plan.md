@@ -19,6 +19,19 @@
 5. LeadWorker 有界并发复用 AuditNode/ReproduceNode，写回线索状态。
 6. report 汇总画像、扫描、线索与终认数据；零确认也生成审计报告。
 
+## 2.1 扫描降噪与 AI 二审入口（分阶段）
+
+对应规格 §2.4 / §2.5 / §6.2。不新增编排节点；降噪在 Finding Context，由 cluster 节点调用。
+
+1. **归一化富化**：Semgrep/Gitleaks/OSV 信号写入 `RawFinding.raw`（confidence、rule_class、called 等）；本阶段不改变 grade/dispatch 行为。
+2. **确定性降噪 + C 档**：`denoise.py` 表驱动过滤后再 `cluster_findings`；升级 A/B/F 规则；cluster handoff 输出 `dropped_c_count`。
+3. **收紧 AI 入口**：triage 只审 A/B；HypothesisPack 可带证据元数据（非引擎结论）；dispatch 阈值不放宽。
+4. **评估与报告**：eval 漏斗与报告增加降噪统计；OSV bypass 仍排除在 triage_precision 外。
+
+非目标：密钥出网核验、Semgrep Pro、新 DAG 节点、OSV Rust call-analysis。
+
+> 实施状态：上述 1–4 已落地（`finding/sarif.py` 富化、`finding/denoise.py`、cluster/triage/hypothesis、eval + discovery 聚合报告 `denoise_funnel`）。
+
 ## 3. API 与页面迁移
 
 - 创建任务 API 的 Git 与上传入口统一支持显式 `task_type`。

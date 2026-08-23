@@ -47,6 +47,7 @@ def _load_fixture(case_id: str) -> CaseSnapshot:
         has_lead=bool(data.get("has_lead")),
         task_verdict=data.get("task_verdict"),
         review_ready_seconds=data.get("review_ready_seconds"),
+        dropped_c_count=int(data.get("dropped_c_count") or 0),
     )
 
 
@@ -120,12 +121,34 @@ def _live_snapshot(case: CaseRecord, api: str, token: str, poll_s: int, timeout_
 
     task = _http_json("GET", f"{api}/api/v1/tasks/{task_id}", token)
     has_lead = bool(task.get("source_alert_group_id"))
+    dropped_c = 0
+    try:
+        nodes = _http_json(
+            "GET",
+            f"{api}/api/v1/tasks/{task_id}/runs/{task.get('latest_run_id') or ''}/nodes",
+            token,
+        )
+        items = nodes if isinstance(nodes, list) else (nodes.get("items") or nodes.get("nodes") or [])
+        for nr in items:
+            if (nr.get("node_key") or nr.get("key")) != "cluster":
+                continue
+            out = nr.get("output_json") or nr.get("output") or {}
+            if isinstance(out, str):
+                try:
+                    out = json.loads(out)
+                except json.JSONDecodeError:
+                    out = {}
+            dropped_c = int(out.get("dropped_c_count") or 0)
+            break
+    except Exception:  # noqa: BLE001 — live 可选字段，失败不阻断评分
+        dropped_c = 0
     return CaseSnapshot(
         raw_findings=raw,
         groups=groups,
         has_lead=has_lead,
         task_verdict=task.get("verdict"),
         review_ready_seconds=time.time() - t0,
+        dropped_c_count=dropped_c,
     )
 
 

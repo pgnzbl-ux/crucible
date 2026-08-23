@@ -101,7 +101,10 @@ async def adjudicate_group(ctx, group, settings) -> bool:
         "engine_set": list(group.engine_set or []),
         "hypothesis_class": pack.hypothesis_class,
         "grade": pack.grade,
+        "has_dataflow": pack.has_dataflow,
     }
+    if pack.rule_class:
+        input_json["rule_class"] = pack.rule_class
     if not hide:
         input_json["engine_conclusion"] = f"{representative.rule_id}: {representative.message}"
 

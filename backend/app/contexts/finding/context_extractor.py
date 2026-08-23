@@ -7,6 +7,7 @@ profile.languages 决定建哪些；画像有语言但无一可索引时返回�
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -246,14 +247,22 @@ def save_index(host_workdir: str, index: list[dict[str, Any]]) -> str:
     return str(path)
 
 
-def load_index(host_workdir: str) -> list[dict[str, Any]]:
+@lru_cache(maxsize=4)
+def _load_index_cached(host_workdir: str) -> tuple[dict[str, Any], ...]:
     path = Path(host_workdir) / INDEX_DIR / INDEX_FILE
     if not path.exists():
-        return []
+        return ()
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return tuple(json.loads(path.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError):
-        return []
+        return ()
+
+
+def load_index(host_workdir: str) -> list[dict[str, Any]]:
+    """索引只读共享：并发代表审议/快审 prepare 各自调用会重复读盘并解析
+    （大仓库的符号索引是 MB 级 JSON），lru_cache 按 workdir 记忆化。
+    返回可变 list 视图，调用方只读。"""
+    return list(_load_index_cached(host_workdir))
 
 
 # ── 查询 API ──

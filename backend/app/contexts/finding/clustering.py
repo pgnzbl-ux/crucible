@@ -2,6 +2,7 @@
 
 分组键：sha256(cwe+file+function)（索引反查函数名，缺失降级 rule_id）；
 osv 特例按依赖组件。写 clue_grade(A/B/F，osv 为 null) 与 priority（含攻击面降权）。
+C 档由 denoise.partition_for_cluster 在调用前剔除，不进本组。
 """
 from __future__ import annotations
 
@@ -49,15 +50,40 @@ def should_downgrade(file_path: str, cwe: str | None, engine: str | list[str] | 
 
 
 def grade_for(finding: dict[str, Any]) -> str | None:
-    """clue_grade：非空 source_to_sink → A；locus+CWE → B；无法定位 → F。
-    osv 不参与 A/B/F（bypass 直报），返回 None。
+    """clue_grade：A/B/F；osv 不参与（bypass 直报），返回 None。
+
+    Semgrep：有 dataflow 且 confidence∈{HIGH,UNKNOWN} → A；有 locus+CWE → B。
+    Gitleaks：rule_class=known → A；generic → B（C 档已在 denoise 剔除）。
     """
     if finding.get("engine") == "osv":
         return None
+    raw = finding.get("raw") if isinstance(finding.get("raw"), dict) else {}
+    engine = (finding.get("engine") or "").lower()
     has_locus = bool(finding.get("file_path")) and (
         finding.get("line_start") is not None or finding.get("function_symbol")
     )
     has_cwe = bool(finding.get("cwe"))
+    has_flow = bool(finding.get("source_to_sink")) or bool(raw.get("has_dataflow"))
+
+    if engine == "gitleaks":
+        rule_class = (raw.get("rule_class") or "").strip().lower()
+        if rule_class == "known":
+            return "A"
+        if has_locus or has_cwe:
+            return "B"
+        return "F"
+
+    if engine == "semgrep":
+        confidence = str(raw.get("confidence") or "UNKNOWN").upper()
+        if has_flow and confidence in ("HIGH", "UNKNOWN"):
+            return "A"
+        if has_locus and has_cwe:
+            return "B"
+        if not has_locus and not has_cwe:
+            return "F"
+        return "B"
+
+    # 其他/缺引擎：兼容旧逻辑
     if finding.get("source_to_sink"):
         return "A"
     if has_locus and has_cwe:

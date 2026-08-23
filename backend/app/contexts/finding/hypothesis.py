@@ -51,7 +51,10 @@ class HypothesisPack(BaseModel):
     source_to_sink: list[str] = Field(default_factory=list)  # 非空才可能 grade=A
     slices: list[Slice] = Field(default_factory=list)
     closed_question: str
-    grade: Literal["A", "B", "F"] = "B"  # C 只存在于 verify 任务的人工描述
+    grade: Literal["A", "B", "F"] = "B"  # C 不进 AlertGroup，故不出现在此
+    # 证据元数据（§2.2：非引擎结论措辞）
+    has_dataflow: bool = False
+    rule_class: str | None = None  # gitleaks known|generic；其他引擎 None
 
 
 def closed_question_for(cwe: str | None) -> str | None:
@@ -70,7 +73,7 @@ def build_pack(
 ) -> HypothesisPack | None:
     """从 AlertGroup + 代表 RawFinding 组装；不满足最低条件返回 None(不调 LLM)。
 
-    - grade=F(无 locus 且无 CWE) → None；
+    - grade 非 A/B → None；
     - 无 CWE → None(未知类不做轻量裁决)。
     """
     cwe = group.cwe
@@ -78,10 +81,16 @@ def build_pack(
     if question is None:
         return None
     grade = (getattr(group, "clue_grade", None) or "B")
-    if grade == "F":
+    if grade not in ("A", "B"):
         return None
     if not (group.file_path or "").strip():
         return None
+    raw = representative.raw if isinstance(getattr(representative, "raw", None), dict) else {}
+    flows = list(representative.source_to_sink or [])
+    has_dataflow = bool(flows) or bool(raw.get("has_dataflow"))
+    rule_class = raw.get("rule_class")
+    if rule_class is not None:
+        rule_class = str(rule_class)
     return HypothesisPack(
         locus=Locus(
             file_path=group.file_path,
@@ -89,10 +98,12 @@ def build_pack(
             line_span=group.line_span,
         ),
         hypothesis_class=cwe or "",
-        source_to_sink=list(representative.source_to_sink or []),
+        source_to_sink=flows,
         slices=slices,
         closed_question=question,
         grade=grade,  # type: ignore[arg-type]
+        has_dataflow=has_dataflow,
+        rule_class=rule_class,
     )
 
 

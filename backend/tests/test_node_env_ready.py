@@ -33,6 +33,12 @@ def _write_compose(tmp_path, filename="docker-compose.yml", mapping="8000:8000",
 
 
 def _exec_ctx(tmp_path, profile=None):
+    # db_session 用可 await 的哑会话：排障环/探活的取消检查会对其发 SELECT，
+    # 结果给非 cancelled 状态（"running"）让检查短路通过
+    sess = MagicMock()
+    probe = MagicMock()
+    probe.scalar_one_or_none.return_value = "running"
+    sess.execute = AsyncMock(return_value=probe)
     return NodeContext(
         task_id="t1", run_id="r1", host_workdir=str(tmp_path),
         source_path=str(tmp_path), vulnerability_description="d",
@@ -41,7 +47,7 @@ def _exec_ctx(tmp_path, profile=None):
             "source": {"commit_sha": "a" * 40, "repo_dirname": "project"},
             "profile": profile or {"is_web": True},
         },
-        project_id="p1", owner_id="u1", db_session=object(),
+        project_id="p1", owner_id="u1", db_session=sess,
     )
 
 
@@ -1149,3 +1155,69 @@ async def test_env_ready_retry_bumps_attempt_per_round(tmp_path):
     assert bump.await_count == 1  # 第 2 轮才 bump
     bump.assert_awaited_with(ctx, 2)
     assert out["target_url"] == "http://192.168.1.8:8000"
+
+
+@pytest.mark.asyncio
+async def test_health_check_cancel_check_aborts_before_probing():
+    """取消探测命中即返回，不再发起 HTTP 探测/重试（探活最长 30×3s，取消要秒级）。"""
+    from app.contexts.agent.nodes.env_ready.health import health_check
+
+    probes = {"n": 0}
+
+    async def cancelled():
+        probes["n"] += 1
+        return True
+
+    result = await health_check(
+        [8080], retries=5, retry_seconds=0, settle_seconds=0,
+        cancel_check=cancelled,
+    )
+    assert result.ok is False
+    assert result.live_port is None
+    assert "取消" in result.reason
+    assert probes["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_wait_for_lab_aborts_on_cancelled_task():
+    """等待共享靶场（最长 1860s）时任务被取消 → 立即抛错，不跑满超时。"""
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    from app.shared.base import Base
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        from app.shared.models import register_models
+
+        register_models()
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    from app.contexts.agent.nodes.env_ready import _wait_for_lab
+    from app.contexts.task.models import Task, TaskRun
+
+    try:
+        async with factory() as session:
+            task = Task(project_address="x", task_type="discovery",
+                        vulnerability_description=None, owner_id="u1",
+                        status="cancelled")
+            session.add(task)
+            await session.flush()
+            run = TaskRun(task_id=task.id, status="running")
+            session.add(run)
+            await session.commit()
+
+            events: list[dict] = []
+            ctx = NodeContext(
+                task_id=task.id, run_id=run.id, host_workdir="/tmp/w",
+                source_path="/tmp/w/repo", vulnerability_description="",
+                project_address="x", project_ref=None,
+                db_session=session, on_event=events.append,
+            )
+            with pytest.raises(RuntimeError, match="取消"):
+                await _wait_for_lab(
+                    ctx, owner_id="u1", project_id="p1", commit_sha="abc",
+                )
+            assert not any("等待其他任务" in str(e.get("message")) for e in events)
+    finally:
+        await engine.dispose()

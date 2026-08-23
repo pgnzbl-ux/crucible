@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import re
 import ssl
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
@@ -210,6 +211,7 @@ async def health_check(
     retries: int | None = None,
     retry_seconds: float | None = None,
     settle_seconds: float | None = None,
+    cancel_check: Callable[[], Awaitable[bool]] | None = None,
 ) -> HealthCheckResult:
     """只对 compose 映射到宿主机的 Web 端口探活，不扫本机 80/8080 等常用口。
 
@@ -252,6 +254,8 @@ async def health_check(
     path = probe_path if probe_path.startswith("/") else f"/{probe_path}"
     last_error = ""
     for attempt in range(attempts):
+        if cancel_check is not None and await cancel_check():
+            return HealthCheckResult(False, None, "http", "任务已取消，中止探活")
         runtime_ready = True
         if compose_project:
             try:
