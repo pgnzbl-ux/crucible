@@ -86,7 +86,6 @@ export function useTaskEvents<T = unknown>(
     setEvents([])
     setStatus('connecting')
 
-    const token = localStorage.getItem('crucible_token')
     const lastEventIdRef = { current: 0 as number }
 
     let es: EventSource | null = null
@@ -129,12 +128,28 @@ export function useTaskEvents<T = unknown>(
       flushTimerRef.current = window.setTimeout(flush, flushIntervalMs)
     }
 
-    const connect = () => {
+    const connect = async () => {
+      if (closedByUnmountRef.current) return
+      let ticket: string | null = null
+      try {
+        const issued = await api.issueSseTicket(taskId)
+        ticket = issued.ticket
+      } catch (error) {
+        if (isUnauthorizedError(error) || !localStorage.getItem('crucible_token')) {
+          setStatus('closed')
+          errorRef.current = '登录已过期，请重新登录'
+          setError(errorRef.current)
+          return
+        }
+        // 取票失败时开发环境可回退 ?token=；生产后端会拒绝
+        ticket = null
+      }
       if (closedByUnmountRef.current) return
       const urlString = buildTaskEventStreamUrl({
         origin: window.location.origin,
         taskId,
-        token,
+        ticket,
+        token: ticket ? null : localStorage.getItem('crucible_token'),
         lastEventId: lastEventIdRef.current,
       })
       const newEs = new EventSource(urlString)
@@ -193,14 +208,14 @@ export function useTaskEvents<T = unknown>(
             setError(errorRef.current)
             reconnectTimerRef.current = window.setTimeout(() => {
               cleanup()
-              connect()
+              void connect()
             }, delay)
           })()
         }
       }
     }
 
-    connect()
+    void connect()
 
     return () => {
       closedByUnmountRef.current = true

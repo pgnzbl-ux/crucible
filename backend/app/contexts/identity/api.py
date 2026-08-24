@@ -1,10 +1,11 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
+from app.shared.rate_limit import check_rate_limit
 from .repository import IdentityRepository
 from .schemas import AuthSetupResponse, LoginRequest, RegisterRequest, TokenResponse, UserResponse
 from .service import IdentityService
@@ -47,8 +48,12 @@ async def auth_setup(
 @router.post("/register", response_model=UserResponse, status_code=201)
 async def register(
     request: RegisterRequest,
+    http_request: Request,
     svc: Annotated[IdentityService, Depends(get_identity_svc)],
 ) -> UserResponse:
+    client = http_request.client.host if http_request.client else "unknown"
+    if not check_rate_limit(f"register:{client}", limit=5, window_seconds=60):
+        raise HTTPException(429, "注册过于频繁，请稍后再试")
     try:
         return await svc.register(request)
     except PermissionError as e:
@@ -60,8 +65,13 @@ async def register(
 @router.post("/login", response_model=TokenResponse)
 async def login(
     request: LoginRequest,
+    http_request: Request,
     svc: Annotated[IdentityService, Depends(get_identity_svc)],
 ) -> TokenResponse:
+    client = http_request.client.host if http_request.client else "unknown"
+    email_key = (request.email or "").strip().lower()
+    if not check_rate_limit(f"login:{client}:{email_key}", limit=10, window_seconds=60):
+        raise HTTPException(429, "登录尝试过多，请稍后再试")
     try:
         return await svc.login(request)
     except ValueError as e:

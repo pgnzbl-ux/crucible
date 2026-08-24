@@ -10,6 +10,12 @@ from urllib.parse import urlsplit
 _ALLOWED_NON_GLOBAL = (ipaddress.ip_network("198.18.0.0/15"),)
 
 
+def _llm_base_url_relaxed() -> bool:
+    from app.core.config import get_settings
+
+    return bool(get_settings().llm_base_url_relaxed)
+
+
 def _is_allowed_resolved_ip(address: str) -> bool:
     ip = ipaddress.ip_address(address)
     if ip.is_global:
@@ -18,35 +24,57 @@ def _is_allowed_resolved_ip(address: str) -> bool:
 
 
 def normalize_https_domain_url(value: str) -> str:
-    """仅接受无 userinfo/fragment/IP 字面量的 HTTPS 域名 URL。"""
+    """规范化 LLM Provider Base URL。
+
+    - LLM_BASE_URL_RELAXED=true：http/https、域名或 IP（含本机/私网）均可
+    - false：最早安全限制——仅 HTTPS 域名，禁止 IP 字面量
+    """
     raw = value.strip().rstrip("/")
     try:
         parsed = urlsplit(raw)
         port = parsed.port
     except ValueError as exc:
         raise ValueError("base_url 格式或端口无效") from exc
-    if parsed.scheme.lower() != "https":
-        raise ValueError("base_url 必须使用 HTTPS")
+
+    scheme = parsed.scheme.lower()
+    relaxed = _llm_base_url_relaxed()
+    if relaxed:
+        if scheme not in ("http", "https"):
+            raise ValueError("base_url 必须使用 HTTP 或 HTTPS")
+    else:
+        if scheme != "https":
+            raise ValueError("base_url 必须使用 HTTPS")
+
     if not parsed.hostname:
-        raise ValueError("base_url 必须包含域名")
+        raise ValueError("base_url 必须包含主机名" if relaxed else "base_url 必须包含域名")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("base_url 禁止包含 userinfo")
     if parsed.fragment:
         raise ValueError("base_url 禁止包含 fragment")
-    try:
-        ipaddress.ip_address(parsed.hostname)
-    except ValueError:
-        pass
-    else:
-        raise ValueError("base_url 必须使用域名，禁止 IP 字面量")
+
+    if not relaxed:
+        try:
+            ipaddress.ip_address(parsed.hostname)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("base_url 必须使用域名，禁止 IP 字面量")
+
     if port is not None and not 1 <= port <= 65535:
         raise ValueError("base_url 端口无效")
     return raw
 
 
 async def validate_public_https_url(value: str) -> str:
-    """校验 URL 域名当前所有 DNS 结果均为公网地址。"""
+    """校验 LLM Provider Base URL。
+
+    - 放松：只做格式规范化
+    - 严格：HTTPS 域名须解析到公网或 TUN fake-ip
+    """
     normalized = normalize_https_domain_url(value)
+    if _llm_base_url_relaxed():
+        return normalized
+
     parsed = urlsplit(normalized)
     port = parsed.port or 443
     try:

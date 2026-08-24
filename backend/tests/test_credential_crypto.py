@@ -11,7 +11,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def test_build_env_returns_db_value_directly():
     """build_env_from_provider 直接返回 DB 存的明文 key,不调解。"""
-    from app.contexts.settings.models import LlmProvider
+    from app.contexts.settings.models import (
+        DEFAULT_LLM_EFFORT,
+        DEFAULT_LLM_MAX_CONTEXT_TOKENS,
+        LlmProvider,
+    )
     from app.contexts.settings.service import SettingsService
 
     real_key = "sk-test-1234567890abcdef"
@@ -34,6 +38,9 @@ def test_build_env_returns_db_value_directly():
     assert env["ANTHROPIC_AUTH_TOKEN"] == real_key
     assert env["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
     assert env["ANTHROPIC_MODEL"] == "deepseek-v4-flash"
+    assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == str(DEFAULT_LLM_MAX_CONTEXT_TOKENS)
+    assert env["CLAUDE_CODE_EFFORT_LEVEL"] == DEFAULT_LLM_EFFORT
+    assert env["CLAUDE_CODE_ALWAYS_ENABLE_EFFORT"] == "1"
 
 
 def test_to_response_masks_key():

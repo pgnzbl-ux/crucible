@@ -128,12 +128,16 @@ class LineBufferedJsonParser:
 
 @dataclass
 class AgentRunnerSpec:
-    """agent-runner 容器规格"""
+    """agent-runner 容器规格。
 
-    image: str = "crucible-agent-runner:base"
-    cpu_limit: float = 1.0
-    memory_limit: str = "1g"
-    network: str | None = AGENT_RUNNER_NETWORK
+    image / cpu / memory / network 默认 None：由 `_resolve_defaults` 从 Settings（.env）填入。
+    调用方只有在需要覆盖平台配置时才显式传入。
+    """
+
+    image: str | None = None
+    cpu_limit: float | None = None
+    memory_limit: str | None = None
+    network: str | None = None
     env: dict[str, str] = field(default_factory=dict)
     host_workdir: str = ""                  # bind mount 源（host 路径 → /workspace）
     # 当前节点 skill 目录（host）→ /node-skill:ro；只挂本节点，不进镜像
@@ -296,7 +300,7 @@ class AgentRunnerManager:
                 raise AgentRunnerError(f"agent-runner 镜像拉取失败: {e}") from e
 
     def _resolve_defaults(self, spec: AgentRunnerSpec) -> AgentRunnerSpec:
-        """用 settings 兜底"""
+        """用 Settings（.env）填平台默认；调用方显式传入的非空值保留。"""
         if not spec.image:
             spec.image = settings.agent_runner_image
         if spec.cpu_limit is None or spec.cpu_limit <= 0:

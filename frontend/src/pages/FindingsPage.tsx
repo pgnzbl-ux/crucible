@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Button, Empty, Input, Segmented, Select, Space, Table, Tag, Tooltip, Typography } from 'antd'
-import { ClearOutlined, EyeOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons'
-import { keepPreviousData, useQuery } from '@tanstack/react-query'
+import { App, Button, Empty, Input, Popconfirm, Segmented, Select, Space, Table, Tag, Tooltip, Typography } from 'antd'
+import { ClearOutlined, DeleteOutlined, EyeOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation, useSearch } from 'wouter'
 import dayjs from 'dayjs'
 
@@ -53,6 +53,19 @@ const ENGINE_LABELS: Record<string, string> = {
 }
 
 const PAGE_SIZE = 20
+const BATCH_DELETE_CHUNK = 100
+
+async function batchDeleteChunked(ids: string[]) {
+  const deleted: string[] = []
+  const skipped: { id: string; reason: string }[] = []
+  for (let i = 0; i < ids.length; i += BATCH_DELETE_CHUNK) {
+    const chunk = ids.slice(i, i + BATCH_DELETE_CHUNK)
+    const result = await api.batchDeleteAlertGroups(chunk)
+    deleted.push(...result.deleted)
+    skipped.push(...result.skipped)
+  }
+  return { deleted, skipped }
+}
 
 function severityMeta(severity: string | null) {
   const normalized = (severity ?? '').toLowerCase()
@@ -64,6 +77,8 @@ function severityMeta(severity: string | null) {
 }
 
 export function FindingsPage() {
+  const { message, modal } = App.useApp()
+  const qc = useQueryClient()
   const [, navigate] = useLocation()
   const search = useSearch()
   const query = useMemo(() => new URLSearchParams(search), [search])
@@ -75,6 +90,7 @@ export function FindingsPage() {
   const [aiVerdict, setAiVerdict] = useState<string | undefined>(() => query.get('verdict') ?? undefined)
   const [clueGrade, setClueGrade] = useState<string | undefined>(() => query.get('grade') ?? undefined)
   const [engine, setEngine] = useState<string | undefined>(() => query.get('engine') ?? undefined)
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
   const [page, setPage] = useState(() => {
     const raw = Number(query.get('page') || '1')
     return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 1
@@ -124,6 +140,25 @@ export function FindingsPage() {
     [progressParams, scope, aiVerdict, clueGrade, engine, debouncedQ, page],
   )
 
+  const filterParams = useMemo(
+    () => ({
+      status: progressParams.status,
+      resolution: progressParams.resolution,
+      scope,
+      ai_verdict: aiVerdict,
+      clue_grade: clueGrade,
+      engine,
+      q: debouncedQ || undefined,
+    }),
+    [progressParams, scope, aiVerdict, clueGrade, engine, debouncedQ],
+  )
+
+  const filterKey = useMemo(() => JSON.stringify(filterParams), [filterParams])
+
+  useEffect(() => {
+    setSelectedRowKeys([])
+  }, [filterKey])
+
   const { data, isError, error, isLoading, isFetching, refetch } = useQuery({
     queryKey: ['alert-groups', params],
     queryFn: () => api.listAlertGroups(params as Record<string, string | number>),
@@ -143,6 +178,70 @@ export function FindingsPage() {
   useErrorToast(isError, error)
   useErrorToast(isStatsError, statsError, '漏洞线索统计加载失败')
 
+  const refreshLists = () => {
+    void refetch()
+    void refetchStats()
+    void qc.invalidateQueries({ queryKey: ['alert-groups'] })
+    void qc.invalidateQueries({ queryKey: ['finding-stats'] })
+  }
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => api.deleteAlertGroup(id),
+    onSuccess: (_data, id) => {
+      message.success('已删除线索')
+      setSelectedRowKeys((keys) => keys.filter((k) => k !== id))
+      refreshLists()
+    },
+    onError: (e: Error) => message.error(e.message),
+  })
+
+  const batchDeleteMutation = useMutation({
+    mutationFn: (ids: string[]) => batchDeleteChunked(ids),
+    onSuccess: (result) => {
+      const blocked = result.skipped.filter((s) => s.reason === 'in_progress').length
+      if (result.deleted.length && blocked) {
+        message.warning(`已删除 ${result.deleted.length} 条；${blocked} 条终认中未删`)
+      } else if (result.deleted.length) {
+        message.success(`已删除 ${result.deleted.length} 条线索`)
+      } else if (blocked) {
+        message.warning('选中线索均在终认中，无法删除')
+      } else {
+        message.info('没有可删除的线索')
+      }
+      setSelectedRowKeys([])
+      refreshLists()
+    },
+    onError: (e: Error) => message.error(e.message),
+  })
+
+  const selectAllFilteredMutation = useMutation({
+    mutationFn: () => api.listAlertGroupIds(filterParams as Record<string, string | number>),
+    onSuccess: (result) => {
+      setSelectedRowKeys(result.ids)
+      message.success(`已跨页选中全部 ${result.ids.length} 条`)
+    },
+    onError: (e: Error) => message.error(e.message),
+  })
+
+  const confirmBatchDelete = () => {
+    const ids = selectedRowKeys.map(String)
+    if (!ids.length) return
+    modal.confirm({
+      title: `删除选中的 ${ids.length} 条线索？`,
+      content: '将永久删除线索及其 AI 研判 / 人工复核记录；引擎原始扫描结果会保留。终认进行中的条目会自动跳过。',
+      okText: '删除',
+      okType: 'danger',
+      cancelText: '取消',
+      onOk: () => batchDeleteMutation.mutateAsync(ids),
+    })
+  }
+
+  const pageIds = useMemo(() => (data?.items ?? []).map((item) => item.id), [data?.items])
+  const totalFiltered = data?.total ?? 0
+  const selectedAllFiltered = totalFiltered > 0 && selectedRowKeys.length === totalFiltered
+  const pageFullySelected = pageIds.length > 0 && pageIds.every((id) => selectedRowKeys.includes(id))
+  const showCrossPageHint = totalFiltered > pageIds.length
+
   const hasExtraFilters = Boolean(progress || debouncedQ || aiVerdict || clueGrade || engine)
   const clearFilters = () => {
     setScope('focus')
@@ -152,6 +251,7 @@ export function FindingsPage() {
     setAiVerdict(undefined)
     setClueGrade(undefined)
     setEngine(undefined)
+    setSelectedRowKeys([])
     setPage(1)
   }
 
@@ -294,19 +394,33 @@ export function FindingsPage() {
     {
       title: '操作',
       key: 'actions',
-      width: 100,
+      width: 168,
       render: (_: unknown, row: AlertGroupSummary) => (
-        <Button
-          size="small"
-          type={row.status === 'needs_review' ? 'primary' : 'default'}
-          icon={<EyeOutlined />}
-          onClick={(event) => {
-            event.stopPropagation()
-            navigate(`/findings/${row.id}`)
-          }}
-        >
-          {row.status === 'needs_review' ? '开始复核' : row.status === 'dispatched' ? '查看终认' : '查看详情'}
-        </Button>
+        <Space size={4} onClick={(event) => event.stopPropagation()}>
+          <Button
+            size="small"
+            type={row.status === 'needs_review' ? 'primary' : 'default'}
+            icon={<EyeOutlined />}
+            onClick={() => navigate(`/findings/${row.id}`)}
+          >
+            {row.status === 'needs_review' ? '复核' : row.status === 'dispatched' ? '终认' : '详情'}
+          </Button>
+          <Popconfirm
+            title="删除这条线索？"
+            description="永久删除；终认进行中时会失败。"
+            okText="删除"
+            okButtonProps={{ danger: true }}
+            cancelText="取消"
+            onConfirm={() => deleteMutation.mutateAsync(row.id)}
+          >
+            <Button
+              size="small"
+              danger
+              icon={<DeleteOutlined />}
+              loading={deleteMutation.isPending && deleteMutation.variables === row.id}
+            />
+          </Popconfirm>
+        </Space>
       ),
     },
   ]
@@ -323,13 +437,25 @@ export function FindingsPage() {
         title="漏洞线索"
         subtitle="先选工作队列处理待办，再用搜索定位具体文件 / CWE / 项目"
         extra={
-          <Button
-            icon={<ReloadOutlined />}
-            onClick={() => void Promise.all([refetch(), refetchStats()])}
-            loading={isFetching || isStatsFetching}
-          >
-            刷新
-          </Button>
+          <Space>
+            {selectedRowKeys.length > 0 ? (
+              <Button
+                danger
+                icon={<DeleteOutlined />}
+                loading={batchDeleteMutation.isPending}
+                onClick={confirmBatchDelete}
+              >
+                删除选中 ({selectedRowKeys.length})
+              </Button>
+            ) : null}
+            <Button
+              icon={<ReloadOutlined />}
+              onClick={() => void Promise.all([refetch(), refetchStats()])}
+              loading={isFetching || isStatsFetching}
+            >
+              刷新
+            </Button>
+          </Space>
         }
       />
       <div className="crucible-filter-bar" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -388,14 +514,81 @@ export function FindingsPage() {
           />
         </Space>
       </div>
+      {selectedRowKeys.length > 0 || showCrossPageHint ? (
+        <div
+          className="crucible-filter-bar"
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 8,
+            alignItems: 'center',
+            marginTop: -4,
+            marginBottom: 8,
+          }}
+        >
+          {selectedAllFiltered ? (
+            <Text>
+              已跨页选中当前筛选全部 <Text strong>{selectedRowKeys.length}</Text> 条
+            </Text>
+          ) : pageFullySelected && showCrossPageHint ? (
+            <>
+              <Text>已选本页 {pageIds.length} 条。</Text>
+              <Button
+                type="link"
+                style={{ padding: 0, height: 'auto' }}
+                loading={selectAllFilteredMutation.isPending}
+                onClick={() => selectAllFilteredMutation.mutate()}
+              >
+                选择全部 {totalFiltered} 条
+              </Button>
+            </>
+          ) : selectedRowKeys.length > 0 ? (
+            <Text>
+              已选 <Text strong>{selectedRowKeys.length}</Text> 条
+              {showCrossPageHint ? '（可跨页勾选）' : ''}
+            </Text>
+          ) : showCrossPageHint ? (
+            <Button
+              type="link"
+              style={{ padding: 0, height: 'auto' }}
+              loading={selectAllFilteredMutation.isPending}
+              onClick={() => selectAllFilteredMutation.mutate()}
+            >
+              跨页全选当前筛选（{totalFiltered} 条）
+            </Button>
+          ) : null}
+          {selectedRowKeys.length > 0 ? (
+            <Button type="link" style={{ padding: 0, height: 'auto' }} onClick={() => setSelectedRowKeys([])}>
+              清空选择
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
       <PageContainer>
         <Table
           rowKey="id"
           size="middle"
-          loading={isLoading || isFetching}
+          loading={isLoading || isFetching || selectAllFilteredMutation.isPending}
           columns={columns}
           dataSource={data?.items ?? []}
-          scroll={{ x: 1320 }}
+          scroll={{ x: 1400 }}
+          rowSelection={{
+            selectedRowKeys,
+            onChange: setSelectedRowKeys,
+            preserveSelectedRowKeys: true,
+            selections: [
+              {
+                key: 'all-filtered',
+                text: totalFiltered > 0 ? `跨页全选（${totalFiltered}）` : '跨页全选',
+                onSelect: () => { selectAllFilteredMutation.mutate() },
+              },
+              {
+                key: 'clear',
+                text: '清空选择',
+                onSelect: () => { setSelectedRowKeys([]) },
+              },
+            ],
+          }}
           locale={{
             emptyText: (
               <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={emptyDescription}>

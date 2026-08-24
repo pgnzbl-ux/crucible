@@ -1,7 +1,12 @@
-from sqlalchemy import Boolean, Index, Integer, String, Text, text
+from sqlalchemy import Boolean, Float, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.shared.base import BaseModel
+
+# Provider 高级设置全局默认（与 schemas / 迁移 server_default / 前端初值同源）
+DEFAULT_LLM_TEMPERATURE = 0.2
+DEFAULT_LLM_MAX_CONTEXT_TOKENS = 200_000
+DEFAULT_LLM_EFFORT = "high"
 
 
 class LlmProvider(BaseModel):
@@ -21,6 +26,21 @@ class LlmProvider(BaseModel):
     api_key_encrypted: Mapped[str] = mapped_column(Text, default="", comment="明文 API Key(响应层掩码)")
     model: Mapped[str] = mapped_column(String(100), nullable=False, comment="模型名，如 deepseek-v4-flash")
     timeout_ms: Mapped[int] = mapped_column(Integer, default=600000, comment="API_TIMEOUT_MS")
+    temperature: Mapped[float] = mapped_column(
+        Float, nullable=False, default=DEFAULT_LLM_TEMPERATURE,
+        server_default=str(DEFAULT_LLM_TEMPERATURE),
+        comment="采样温度 0–2；Messages API 全局约束（Agent CLI 暂不透传）",
+    )
+    max_context_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=DEFAULT_LLM_MAX_CONTEXT_TOKENS,
+        server_default=str(DEFAULT_LLM_MAX_CONTEXT_TOKENS),
+        comment="模型上下文窗口；注入 CLAUDE_CODE_MAX_CONTEXT_TOKENS 驱动 CLI 压缩",
+    )
+    effort: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=DEFAULT_LLM_EFFORT,
+        server_default=DEFAULT_LLM_EFFORT,
+        comment="思考强度 low|medium|high|xhigh|max|auto",
+    )
     is_default: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否为全局默认（当前启用）Provider")
     # 模型角色映射(discovery-spec §5.4)：screening(粗筛) | final(终审) | hunting(P2 占位)
     role: Mapped[str | None] = mapped_column(String(20), nullable=True, comment="模型角色；空=不占角色")

@@ -23,9 +23,13 @@ from .repository import FindingRepository
 from .schemas import (
     AdjudicationDetail,
     AlertGroupDetail,
+    AlertGroupIdsRequest,
+    AlertGroupIdsResponse,
     AlertGroupListRequest,
     AlertGroupListResponse,
     AlertGroupSummary,
+    BatchDeleteGroupsRequest,
+    BatchDeleteGroupsResponse,
     FindingSummary,
     FindingStatsResponse,
     LeadRunSummary,
@@ -187,6 +191,56 @@ async def list_groups(
             for g in groups
         ],
     )
+
+
+@router.get("/groups/ids", response_model=AlertGroupIdsResponse)
+async def list_group_ids(
+    req: Annotated[AlertGroupIdsRequest, Depends()],
+    repo: Annotated[FindingRepository, Depends(_get_repo)],
+    user_id: CurrentUserId,
+) -> AlertGroupIdsResponse:
+    """当前筛选下全部告警组 id（跨页全选）。超出上限返回 400。"""
+    try:
+        total, ids = await repo.list_group_ids(
+            task_id=req.task_id, status=req.status, resolution=req.resolution,
+            cwe=req.cwe, ai_verdict=req.ai_verdict, engine=req.engine,
+            clue_grade=req.clue_grade, scope=req.scope, q=req.q,
+            owner_task_ids=await _owner_task_ids(repo.session, user_id, req.task_id),
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return AlertGroupIdsResponse(total=total, ids=ids)
+
+
+@router.post("/groups/batch-delete", response_model=BatchDeleteGroupsResponse)
+async def batch_delete_groups(
+    request: BatchDeleteGroupsRequest,
+    repo: Annotated[FindingRepository, Depends(_get_repo)],
+    user_id: CurrentUserId,
+) -> BatchDeleteGroupsResponse:
+    """批量物理删除告警组。非 owner / 不存在 → skipped.not_found；终认进行中 → skipped.in_progress。"""
+    svc = FindingService(repo.session)
+    deleted, skipped = await svc.delete_groups(request.ids, owner_id=user_id)
+    await repo.session.commit()
+    return BatchDeleteGroupsResponse(deleted=deleted, skipped=skipped)
+
+
+@router.delete("/groups/{group_id}", status_code=204)
+async def delete_group(
+    group_id: str,
+    repo: Annotated[FindingRepository, Depends(_get_repo)],
+    user_id: CurrentUserId,
+) -> None:
+    """物理删除单条告警组（级联判决/复核/LeadRun；保留引擎原始发现）。"""
+    svc = FindingService(repo.session)
+    deleted, skipped = await svc.delete_groups([group_id], owner_id=user_id)
+    if deleted:
+        await repo.session.commit()
+        return
+    reason = skipped[0]["reason"] if skipped else "not_found"
+    if reason == "in_progress":
+        raise HTTPException(409, "该线索正在终认中，请待结束后再删")
+    raise HTTPException(404, "告警组不存在")
 
 
 @router.get("/groups/{group_id}", response_model=AlertGroupDetail)

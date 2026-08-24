@@ -5,7 +5,7 @@
 ## 通用约定
 
 - 前缀：`/api/v1`
-- 鉴权：除 `/health`、`/metrics`、`/api/v1/auth/login`、`/api/v1/auth/register`、`/api/v1/auth/setup` 外全部需 Bearer JWT
+- 鉴权：除 `/health`、`/health/ready`、`/api/v1/auth/login`、`/api/v1/auth/register`、`/api/v1/auth/setup` 外全部需 Bearer JWT。`/metrics` 在配置了 `METRICS_TOKEN` 时需 `Authorization: Bearer <METRICS_TOKEN>`（生产强制配置）。
 - 时间：ISO-8601 UTC
 - 错误响应同时给契约信封与兼容字段（前端优先读 `error.message`，再回退 `detail`）：
 
@@ -177,20 +177,19 @@
 
 事件时间：`created_at` 一律带 UTC 偏移（开发 SQLite 读回 naive datetime 也按 UTC 输出）；节点 `started_at` / `finished_at` 同样带 UTC 偏移。每条事件的 `payload.timestamp` 必有 epoch 秒 —— SDK 事件用 SDK 自带值，平台事件（`phase.updated` 等）落库时补齐，SSE 回放才不会显示成浏览器收到的时刻。AI 事件 payload 带 `node_key` / `node_run_id`，`AgentEvent.node_run_id` 列同步写入；思考/工具事件可按节点过滤而不靠时间边界猜测。
 
+### POST `/api/v1/tasks/{id}/events/ticket`
+
+领取短命 SSE ticket。需 Bearer。响应 `{ ticket, expires_in }`（默认约 120s）。票面绑定 `user_id` + `task_id`。
+
 ### GET `/api/v1/tasks/{id}/events/stream`
 
-**SSE** 实时事件流（P0-1 已实现）。`Content-Type: text/event-stream`。
+**SSE** 实时事件流。`Content-Type: text/event-stream`。
 
-- 响应头：`X-Accel-Buffering: no` + `Cache-Control: no-cache, no-transform`（防 nginx/反代缓冲）
-- 事件名 = `Event.event_type`（`phase.updated` / `agent.thinking` / `agent.message` / `tool.call.*` / `agent.completed` / `agent.failed` / `node.updated` / `ready` / `error`）
-- 启动先回放 **当前 run** DB 最近 1000 条（帧含 `replayed: true`），再订阅 Redis `task.{id}.events` 频道转发实时事件
-- 续播：请求带 `Last-Event-ID` header 或 `?last_event_id=`（EventSource 自管重连不能自定义 header，前端用 query）时，只回放 **sequence 更大** 的历史，实时帧同样丢掉已见过的 sequence
-- 每条事件帧带 SSE `id:`（值为 sequence），便于浏览器原生重连带 `Last-Event-ID`
-- `agent.failed` 的 `event` 含 `error`（原文）、`title`（人类可读）、`hint`（下一步）
-- 15s 心跳：`: heartbeat\n\n`
-- 客户端断开 → 立即 `unsubscribe` + 关闭 Redis 连接（防泄漏）
-- 鉴权：`?token=<jwt>` query 注入（EventSource 不支持自定义 header）
-
+- 响应头：`X-Accel-Buffering: no` + `Cache-Control: no-cache, no-transform`
+- 鉴权：**推荐** `?ticket=<sse_ticket>`（先调 ticket 接口）；开发环境兼容 `?token=<access jwt>`；**生产拒绝** `?token=`
+- 启动先回放当前 run DB 最近 1000 条（`replayed: true`），再订阅 Redis
+- 续播：`Last-Event-ID` 或 `?last_event_id=`
+- 15s 心跳；客户端断开立即清理 Redis 订阅
 ---
 
 ## Agent Context
@@ -245,6 +244,18 @@ owner 校验：所有环境均要求 `report.owner_id` 匹配当前用户。报�
 响应 `{ total, items }`。每条 `AlertGroupSummary`：`id / task_id / cwe / file_path / function_symbol / line_span / member_count / engine_set / status / clue_grade / ai_verdict / ai_confidence / priority / resolution / created_at / updated_at`。
 
 `status` 状态机：`clustered → triaged → dispatched → resolved(*) | needs_review`。`ai_verdict` 为 `tp / fp / need_more_context / bypass`（osv 依赖情报 bypass 不进终认）。
+
+### GET `/api/v1/findings/groups/ids`
+
+跨页全选：筛选条件与列表相同（无分页），响应 `{ total, ids }`。结果超过 2000 条返回 400，需先收窄筛选。
+
+### POST `/api/v1/findings/groups/batch-delete`
+
+批量物理删除。请求 `{ ids: string[] }`（1–100）。响应 `{ deleted, skipped }`；`skipped[].reason` 为 `not_found`（含非 owner）或 `in_progress`（LeadRun/验证 Task 仍进行中）。级联删 Adjudication / ReviewAction / LeadRun，清空指向该组的 `source_alert_group_id`，**不**删 RawFinding / 验证 Task。
+
+### DELETE `/api/v1/findings/groups/{group_id}`
+
+单条物理删除，语义同批量。成功 204；不存在/非 owner → 404；终认进行中 → 409。
 
 ### GET `/api/v1/findings/groups/{group_id}`
 
@@ -367,17 +378,27 @@ Provider **没有独立启用/停用字段**。Agent 运行时只读取唯一的
 
 响应字段含 `is_default`，**不含** `enabled`。
 
+高级设置（对本 Provider **全局**约束：全部 Agent 节点沙箱 + 轻量二审 Messages + 测连接）：
+
+| 字段 | 默认 | 语义 |
+|---|---|---|
+| `temperature` | `0.2` | Anthropic Messages `temperature`；Agent CLI 暂不透传（SDK 无官方能力） |
+| `max_context_tokens` | `200000` | 注入 `CLAUDE_CODE_MAX_CONTEXT_TOKENS`，CLI 按此窗口做 autocompact |
+| `effort` | `high` | `low\|medium\|high\|xhigh\|max\|auto`；注入 `CLAUDE_CODE_EFFORT_LEVEL` + Messages `output_config.effort` |
+
+缺省只来自列 / Schema / 新建表单，禁止业务路径再写死温度等魔法数。
+
 ### GET `/api/v1/settings/llm/providers`
 
-要求 Bearer JWT。Provider 当前是平台全局配置，RBAC 落地前任意已登录用户均可管理。API Key 只返回掩码（`***last4`）。
+要求 Bearer JWT。Provider 当前是平台全局配置，RBAC 落地前任意已登录用户均可管理。API Key 只返回掩码（`***last4`）。响应含上述高级字段。
 
 ### POST `/api/v1/settings/llm/providers`
 
-新建。`api_key` **明文落库**(存 `api_key_encrypted` 字段),响应层 `mask_secret` 掩码。当前尚无默认项时，新建的第一条自动 `is_default=true`。请求体可带 `is_default` 显式抢默认。
+新建。`api_key` **明文落库**(存 `api_key_encrypted` 字段),响应层 `mask_secret` 掩码。当前尚无默认项时，新建的第一条自动 `is_default=true`。请求体可带 `is_default` 显式抢默认。未传高级字段时用全局默认（0.2 / 200000 / high）。
 
 ### PUT `/api/v1/settings/llm/providers/{id}`
 
-只改名称 / 端点 / 模型 / Key / 超时。不通过 PUT 切换默认。
+可改名称 / 端点 / 模型 / Key / 超时 / `temperature` / `max_context_tokens` / `effort`。不通过 PUT 切换默认。
 
 ### DELETE `/api/v1/settings/llm/providers/{id}`
 
@@ -387,9 +408,11 @@ Provider **没有独立启用/停用字段**。Agent 运行时只读取唯一的
 
 ### POST `/api/v1/settings/llm/providers/{id}/test`
 
+使用该 Provider 已存的 temperature / effort 发测连接请求。
+
 ### POST `/api/v1/settings/llm/test`
 
-真实请求 `base_url` 验证。Base URL 必须是 HTTPS 域名，禁止 IP 字面量、userinfo、fragment；DNS 须为公网或 TUN fake-ip（`198.18.0.0/15`），仍拒绝真实私网/回环/元数据；不跟随重定向。不使用域名白名单。
+真实请求 `base_url` 验证。可选带 `temperature` / `effort`（缺省用全局默认）。由 `.env` 的 `LLM_BASE_URL_RELAXED` 控制：`true` 暂不限制（http/https、域名或 IP，含本机/私网）；`false` 恢复最早安全限制——仅 HTTPS 域名、禁止 IP 字面量、DNS 须公网或 TUN fake-ip。两种模式均禁止 userinfo、fragment。
 
 ### GET `/api/v1/settings/runtime`
 
@@ -424,7 +447,8 @@ Provider **没有独立启用/停用字段**。Agent 运行时只读取唯一的
 ## 健康检查 / 监控
 
 - `GET /health` → `{ "status": "ok", "version": "<app_version>" }`
-- `GET /metrics` → Prometheus（无需鉴权）
+- `GET /health/ready` → Postgres + Redis 探活；失败 503
+- `GET /metrics` → Prometheus；配置 `METRICS_TOKEN` 时需 Bearer（生产强制）
 
 ---
 

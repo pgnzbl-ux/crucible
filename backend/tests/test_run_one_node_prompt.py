@@ -220,6 +220,26 @@ def test_build_options_appends_skill_without_desktop_plugin():
     assert "画像" in (prompt.get("append") or "")
 
 
+def test_build_options_sets_effort_from_env(monkeypatch):
+    captured: dict = {}
+
+    class CaptureOptions:
+        def __init__(self, **kwargs):
+            captured.clear()
+            captured.update(kwargs)
+
+    import runner.run_one as run_one
+
+    monkeypatch.setenv("CLAUDE_CODE_EFFORT_LEVEL", "high")
+    run_one.ClaudeAgentOptions = CaptureOptions
+    run_one._build_options(model="m", max_turns=8, node_key="audit", cwd="/workspace/x")
+    assert captured.get("effort") == "high"
+
+    monkeypatch.setenv("CLAUDE_CODE_EFFORT_LEVEL", "auto")
+    run_one._build_options(model="m", max_turns=8, node_key="audit", cwd="/workspace/x")
+    assert "effort" not in captured
+
+
 def test_build_options_extra_args_is_dict_when_present():
     """SDK 0.2.x _build_command 走 extra_args.items()，list 会炸。"""
     captured: dict = {}

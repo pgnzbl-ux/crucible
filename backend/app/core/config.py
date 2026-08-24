@@ -44,9 +44,14 @@ class Settings(BaseSettings):
 
     auth_secret: str = ""
     auth_algorithm: str = "HS256"
-    auth_token_expire_minutes: int = 480
+    # 访问令牌默认 60 分钟；SSE 另发短命 ticket，勿再把长 JWT 塞进 query
+    auth_token_expire_minutes: int = 60
+    # SSE ticket 有效期（秒）；前端重连前可再取票
+    sse_ticket_expire_seconds: int = 120
 
     settings_encrypt_key: str = ""
+    # Prometheus /metrics：非空则要求 Authorization: Bearer <token>；生产必须非空
+    metrics_token: str = ""
 
     claude_agent_sdk_enabled: bool = False
     claude_sdk_max_turns: int = 480
@@ -74,6 +79,8 @@ class Settings(BaseSettings):
 
     # ── 轻量 LLM 网关 / triage(discovery-spec §7 / §2.4) ──
     llm_gateway_enabled: bool = True  # False = mock 固定判决(链路联调)
+    # Provider Base URL：生产必须 false。本地开发可 true（.env）；false=仅 HTTPS 公网域名
+    llm_base_url_relaxed: bool = True
     triage_hide_sast_conclusion: bool = True  # 结论信号默认不注入(§2.2 反锚定)
     triage_high_confidence: float = 0.8  # dispatch HIGH 阈值
     triage_medium_confidence: float = 0.5
@@ -122,11 +129,24 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _enforce_production_security(self) -> "Settings":
-        if self.environment == "production":
-            if not self.auth_secret:
-                raise ValueError("生产环境必须设置 AUTH_SECRET")
-            if "sqlite" in self.database_url:
-                raise ValueError("生产环境禁止使用 SQLite，必须使用 PostgreSQL")
+        if self.environment != "production":
+            return self
+        weak_secrets = {"", "dev-secret-change-in-production", "secret", "changeme"}
+        if not self.auth_secret or self.auth_secret.strip() in weak_secrets:
+            raise ValueError("生产环境必须设置强随机 AUTH_SECRET")
+        if "sqlite" in self.database_url:
+            raise ValueError("生产环境禁止使用 SQLite，必须使用 PostgreSQL")
+        if self.llm_base_url_relaxed:
+            raise ValueError("生产环境必须 LLM_BASE_URL_RELAXED=false")
+        if not self.claude_agent_sdk_enabled:
+            raise ValueError("生产环境必须 CLAUDE_AGENT_SDK_ENABLED=true")
+        if not self.llm_gateway_enabled:
+            raise ValueError("生产环境必须 LLM_GATEWAY_ENABLED=true")
+        if not (self.metrics_token or "").strip():
+            raise ValueError("生产环境必须设置 METRICS_TOKEN（保护 /metrics）")
+        origins = self.cors_origin_list
+        if not origins or any(o == "*" for o in origins):
+            raise ValueError("生产环境 CORS 必须为精确域名白名单（禁止 *）")
         return self
 
     @property

@@ -3,9 +3,16 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.contexts.settings.models import (
+    DEFAULT_LLM_EFFORT,
+    DEFAULT_LLM_MAX_CONTEXT_TOKENS,
+    DEFAULT_LLM_TEMPERATURE,
+)
 from app.core.url_security import normalize_https_domain_url
 
 _PROVIDER_TYPES = frozenset({"deepseek", "anthropic", "custom"})
+_EFFORT_PATTERN = r"^(low|medium|high|xhigh|max|auto)$"
+LlmEffort = Literal["low", "medium", "high", "xhigh", "max", "auto"]
 
 
 def normalize_provider_type(value: str) -> str:
@@ -24,6 +31,11 @@ class LlmProviderCreateRequest(BaseModel):
     api_key: str = Field("", max_length=2048, description="明文 API Key，服务端加密存储")
     model: str = Field(..., min_length=1, max_length=100)
     timeout_ms: int = Field(600000, ge=10_000, le=3_600_000)
+    temperature: float = Field(DEFAULT_LLM_TEMPERATURE, ge=0, le=2)
+    max_context_tokens: int = Field(
+        DEFAULT_LLM_MAX_CONTEXT_TOKENS, ge=1024, le=2_000_000,
+    )
+    effort: LlmEffort = Field(DEFAULT_LLM_EFFORT, pattern=_EFFORT_PATTERN)
     is_default: bool = False
     extra: dict = Field(default_factory=dict)
 
@@ -40,6 +52,9 @@ class LlmProviderUpdateRequest(BaseModel):
     api_key: str | None = Field(None, max_length=2048, description="留空表示不修改")
     model: str | None = Field(None, min_length=1, max_length=100)
     timeout_ms: int | None = Field(None, ge=10_000, le=3_600_000)
+    temperature: float | None = Field(None, ge=0, le=2)
+    max_context_tokens: int | None = Field(None, ge=1024, le=2_000_000)
+    effort: LlmEffort | None = Field(None, pattern=_EFFORT_PATTERN)
     extra: dict | None = None
 
     @field_validator("base_url")
@@ -53,6 +68,8 @@ class LlmProviderTestRequest(BaseModel):
     base_url: str | None = None
     api_key: str | None = None
     model: str | None = None
+    temperature: float | None = Field(None, ge=0, le=2)
+    effort: LlmEffort | None = Field(None, pattern=_EFFORT_PATTERN)
 
     @field_validator("base_url")
     @classmethod
@@ -71,6 +88,9 @@ class LlmProviderResponse(BaseModel):
     has_api_key: bool = False
     model: str
     timeout_ms: int
+    temperature: float
+    max_context_tokens: int
+    effort: str
     is_default: bool
     created_at: datetime
     updated_at: datetime

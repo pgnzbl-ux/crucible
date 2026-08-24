@@ -439,10 +439,12 @@ class TriageNode:
         """族代表并行全价 agent 审议。返回 True 表示取消。
 
         有 session_factory 时每个代表独立会话（并行安全）；降级路径退回
-        串行共用主会话。代表的 AgentRunnerError 由 adjudicate_group 内部
-        降级为 needs_review，不中断兄弟任务。
+        串行共用主会话。单组瞬时 AgentRunnerError 由 adjudicate_group 降级为
+        needs_review；平台级 LLM API 失败（余额不足等）中止整节点。
         """
+        from app.contexts.agent.llm_errors import is_llm_api_failure
         from app.contexts.finding.models import AlertGroup
+        from app.core.agent_runner import AgentRunnerError
 
         factory = getattr(ctx, "session_factory", None)
         concurrency = max(1, int(getattr(settings, "triage_concurrency", 4) or 1))
@@ -455,6 +457,8 @@ class TriageNode:
         done = 0
         started = 0
         total = len(families)
+        llm_stop = asyncio.Event()
+        llm_fatal: list[str] = []
         emit_phase(
             ctx,
             f"族级代表审议启动：{total} 族 · 并发 {concurrency}"
@@ -465,6 +469,8 @@ class TriageNode:
         async def _one(family) -> str:
             nonlocal done, started
             async with sem:
+                if llm_stop.is_set():
+                    return "llm_skip"
                 rep_gid = family.representative.id
                 label = f"{family.representative.cwe or '?'} {family.representative.file_path or ''}".strip()
                 async with factory() as ws:
@@ -477,6 +483,8 @@ class TriageNode:
                     exhausted, spent, budget = await budget_state(ws, ctx.task_id)
                     if exhausted:
                         return "budget"
+                    if llm_stop.is_set():
+                        return "llm_skip"
                     group = await ws.get(AlertGroup, rep_gid)
                     if group is None:
                         return "missing"
@@ -493,11 +501,33 @@ class TriageNode:
                         )
                     except asyncio.CancelledError:
                         raise
+                    except AgentRunnerError as e:
+                        if is_llm_api_failure(str(e)):
+                            llm_fatal.append(str(e))
+                            llm_stop.set()
+                            emit_phase(
+                                ctx, f"LLM 调用失败，中止二审：{label}",
+                                phase=self.node_key,
+                            )
+                            return "llm_fatal"
+                        emit_phase(ctx, f"二审异常转人工：{label}", phase=self.node_key)
+                        from app.contexts.finding.service import FindingService
+
+                        await FindingService(ws).mark_needs_review(group)
+                        ok = False
                     except Exception as e:  # noqa: BLE001
                         # 不让单个代表的异常炸掉 gather（兄弟协程会变孤儿
-                        # 继续写库）——降级转人工
+                        # 继续写库）——瞬时错误降级转人工；LLM API 失败中止
                         import logging
 
+                        if is_llm_api_failure(str(e)):
+                            llm_fatal.append(str(e))
+                            llm_stop.set()
+                            emit_phase(
+                                ctx, f"LLM 调用失败，中止二审：{label}",
+                                phase=self.node_key,
+                            )
+                            return "llm_fatal"
                         logging.getLogger(__name__).warning(
                             "代表审议异常转人工 %s: %s", label, e, exc_info=True,
                         )
@@ -517,6 +547,10 @@ class TriageNode:
         if any(r == "cancelled" for r in results):
             emit_phase(ctx, "任务已取消，中止二审", phase=self.node_key)
             return True
+        if any(r == "llm_fatal" for r in results):
+            raise AgentRunnerError(
+                llm_fatal[0] if llm_fatal else "AI 节点 triage LLM 调用失败"
+            )
         if any(r == "budget" for r in results):
             from app.contexts.agent.usage_ledger import budget_state
 

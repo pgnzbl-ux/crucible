@@ -71,6 +71,9 @@ class ClaudeSdkAdapter:
         api_key = src.get("ANTHROPIC_AUTH_TOKEN") or src.get("ANTHROPIC_API_KEY")
         model = src.get("ANTHROPIC_MODEL")
         timeout = src.get("API_TIMEOUT_MS")
+        max_context = src.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS")
+        effort = src.get("CLAUDE_CODE_EFFORT_LEVEL")
+        always_effort = src.get("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT")
 
         if base_url:
             env["ANTHROPIC_BASE_URL"] = base_url
@@ -84,6 +87,12 @@ class ClaudeSdkAdapter:
             env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
         if timeout:
             env["API_TIMEOUT_MS"] = timeout
+        if max_context:
+            env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = max_context
+        if effort:
+            env["CLAUDE_CODE_EFFORT_LEVEL"] = effort
+        if always_effort:
+            env["CLAUDE_CODE_ALWAYS_ENABLE_EFFORT"] = always_effort
 
         return env
 

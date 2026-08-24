@@ -113,6 +113,8 @@ async def test_connection(
         base_url=request.base_url,
         api_key=request.api_key,
         model=request.model,
+        temperature=request.temperature,
+        effort=request.effort,
     )
 
 

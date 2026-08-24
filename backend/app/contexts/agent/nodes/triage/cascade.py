@@ -445,10 +445,17 @@ async def fast_screen(
             try:
                 result = await llm_complete(
                     role="screening", system=system, user=user,
-                    provider=provider, max_tokens=1024, temperature=0.1,
+                    provider=provider, max_tokens=1024,
                 )
                 parsed = parse_verdict_json(result.text)
-            except Exception as e:  # noqa: BLE001 — 快审任何失败都升级，不影响节点
+            except Exception as e:  # noqa: BLE001 — 瞬时失败升级；平台级 LLM 失败中止
+                from app.contexts.agent.llm_errors import is_llm_api_failure
+                from app.core.agent_runner import AgentRunnerError
+
+                if is_llm_api_failure(str(e)):
+                    raise AgentRunnerError(
+                        f"AI 节点 triage LLM 调用失败: {e}"
+                    ) from e
                 logger.info("快审失败升级 agent: %s %s", group.group_key, e)
                 _note_progress(None)
                 return group, None

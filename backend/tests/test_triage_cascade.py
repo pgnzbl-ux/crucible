@@ -295,6 +295,49 @@ async def test_t2_fast_model_decides_and_escalates(factory, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_fast_screen_balance_failure_aborts_triage(factory, tmp_path):
+    """快审遇到余额不足必须中止 triage，不得静默升级 agent 继续烧。"""
+    from app.contexts.agent.nodes.triage import TriageNode
+    from app.core.agent_runner import AgentRunnerError
+    from app.core.llm_gateway import LlmGatewayConfigError
+
+    gen = _seed_env(
+        factory, tmp_path,
+        current=[
+            {"rule": "r.a", "file_path": "module/db.py", "fingerprint": "A"},
+            {"rule": "r.b", "file_path": "module/db.py", "fingerprint": "B"},
+        ],
+    )
+    ctx, session = await gen.__anext__()
+
+    async def boom(*, role, system, user, **kw):
+        raise LlmGatewayConfigError(
+            'LLM 网关调用失败(screening): HTTP 401: {"error":{"code":"1004","message":"余额不足"}}'
+        )
+
+    async def fake_provider(session, role):
+        return SimpleNamespace(
+            id="pv", model="fast-1", base_url="http://llm.test",
+            api_key_encrypted="", timeout_ms=None,
+        )
+
+    with (
+        patch("app.core.config.get_settings", return_value=_cascade_settings()),
+        patch("app.core.llm_gateway._resolve_provider", new=fake_provider),
+        patch("app.core.llm_gateway.llm_complete", new=boom),
+        patch(
+            "app.contexts.agent.ai_runner.run_ai_node_with_shape_retry",
+            new_callable=AsyncMock,
+        ) as agent,
+    ):
+        with pytest.raises(AgentRunnerError, match="余额不足"):
+            await TriageNode().execute(ctx, None)
+
+    agent.assert_not_called()
+    await gen.aclose()
+
+
+@pytest.mark.asyncio
 async def test_t3_family_representative_and_propagation(factory, tmp_path):
     """同根因族只审代表；成员判决传播并打折置信度。"""
     from app.contexts.agent.nodes.triage import TriageNode

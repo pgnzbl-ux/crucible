@@ -41,8 +41,8 @@ Runner 的 reproduce 节点通过 `host.docker.internal` 访问宿主映射的 L
 
 ## 2.2 LLM Base URL 与 Compose 准入
 
-- Provider Base URL 必须是 HTTPS 域名，不允许 IP 字面量、userinfo 或 fragment
-- create/update/test 和注入 Runner 前均解析 DNS；结果须为公网地址，或 TUN fake-ip 网段 `198.18.0.0/15`（Clash/Surge 等，不路由到真实内网）
+- **生产必须 `LLM_BASE_URL_RELAXED=false`**（`config` 启动校验强制）；本地开发可 `true` 以便指向本机/私网网关
+- `false` 时：Provider Base URL 必须是 HTTPS 域名，不允许 IP 字面量、userinfo 或 fragment；DNS 结果须为公网或 TUN fake-ip `198.18.0.0/15`
 - 仍拒绝 RFC1918、回环、链路本地、元数据地址（如 `169.254.169.254`）与 CGNAT `100.64.0.0/10`
 - LLM 测试连接禁止跟随重定向；不使用域名白名单，以兼容未知公网 Provider
 - AI 生成 Compose 在宿主执行前必须经过 `lab/compose_policy.py`；拒绝 privileged、host namespace、devices、cap_add、运行时 socket、越界 bind mount/build context
@@ -59,12 +59,16 @@ Runner 的 reproduce 节点通过 `host.docker.internal` 访问宿主映射的 L
 
 当 `ENVIRONMENT=production`：
 
-- `AUTH_SECRET` 必须配置
+- `AUTH_SECRET` 必须为强随机（拒绝空串与示例值）
 - **禁止** SQLite（必须 PostgreSQL）
+- `LLM_BASE_URL_RELAXED=false`
+- `CLAUDE_AGENT_SDK_ENABLED=true` 且 `LLM_GATEWAY_ENABLED=true`
+- `METRICS_TOKEN` 非空（保护 `/metrics`）
+- `CORS_ORIGINS` 精确域名白名单（禁止 `*`）
 
-仅此两项为代码强校验（与 `docs/development-guide.md` §5.3 一致）。`SETTINGS_ENCRYPT_KEY` 因 Fernet 未接入而不生效（见 §3）；CORS 无强制校验，但生产应显式配置白名单。
+`SETTINGS_ENCRYPT_KEY` 因 Fernet 未接入而不生效（见 §3；明文 Key 暂保留）。dev 环境跳过这些校验。
 
-dev 环境跳过这些校验，但提醒日志要打。
+SSE：前端先 `POST /tasks/{id}/events/ticket` 取短命票，EventSource 用 `?ticket=`；生产拒绝 `?token=` 传 access JWT。
 
 ## 5. Agent 零信任
 

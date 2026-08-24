@@ -681,6 +681,10 @@ def _build_options(
     if system_prompt is not None:
         common["system_prompt"] = system_prompt
 
+    effort = (os.environ.get("CLAUDE_CODE_EFFORT_LEVEL") or "").strip()
+    if effort and effort != "auto":
+        common["effort"] = effort
+
     if node_key and node_key in NODE_INPUT_SCHEMAS:
         try:
             from claude_agent_sdk import create_sdk_mcp_server
@@ -700,11 +704,15 @@ def _build_options(
     try:
         return ClaudeAgentOptions(**common)
     except (TypeError, ValueError):
-        # 旧 SDK 可能不接受 system_prompt dict / mcp_servers
+        # 旧 SDK 可能不接受 system_prompt dict / mcp_servers / effort
         if isinstance(common.get("system_prompt"), dict):
             common["system_prompt"] = common["system_prompt"].get("append") or ""
         common.pop("mcp_servers", None)
-        return ClaudeAgentOptions(**common)
+        try:
+            return ClaudeAgentOptions(**common)
+        except (TypeError, ValueError):
+            common.pop("effort", None)
+            return ClaudeAgentOptions(**common)
 
 
 # ── Main ──

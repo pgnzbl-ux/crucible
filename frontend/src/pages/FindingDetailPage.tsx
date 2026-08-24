@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { App, Button, Card, Checkbox, Collapse, Descriptions, Input, Modal, Space, Tag, Typography } from 'antd'
-import { ArrowLeftOutlined, SendOutlined, UndoOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, DeleteOutlined, SendOutlined, UndoOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation, useParams } from 'wouter'
 
@@ -14,7 +14,7 @@ const { Text, Paragraph } = Typography
 export function FindingDetailPage() {
   const { id } = useParams<{ id: string }>()
   const [, navigate] = useLocation()
-  const { message } = App.useApp()
+  const { message, modal } = App.useApp()
   const qc = useQueryClient()
   const [rejectOpen, setRejectOpen] = useState(false)
   const [rejectTags, setRejectTags] = useState<string[]>([])
@@ -68,6 +68,28 @@ export function FindingDetailPage() {
     onSettled: () => setDispatchOpen(false),
   })
 
+  const deleteMutation = useMutation({
+    mutationFn: () => api.deleteAlertGroup(id!),
+    onSuccess: () => {
+      message.success('已删除线索')
+      qc.invalidateQueries({ queryKey: ['alert-groups'] })
+      qc.invalidateQueries({ queryKey: ['finding-stats'] })
+      navigate('/findings')
+    },
+    onError: (e: Error) => message.error(e.message),
+  })
+
+  const confirmDelete = () => {
+    modal.confirm({
+      title: '删除这条漏洞线索？',
+      content: '将永久删除线索及其 AI 研判 / 人工复核记录；引擎原始扫描结果会保留。终认进行中时无法删除。',
+      okText: '删除',
+      okType: 'danger',
+      cancelText: '取消',
+      onOk: () => deleteMutation.mutateAsync(),
+    })
+  }
+
   if (isLoading) return <PageContainer><Text>加载中...</Text></PageContainer>
   if (error || !data) {
     return (
@@ -112,6 +134,14 @@ export function FindingDetailPage() {
               复活(误杀护栏)
             </Button>
           )}
+          <Button
+            danger
+            icon={<DeleteOutlined />}
+            loading={deleteMutation.isPending}
+            onClick={confirmDelete}
+          >
+            删除
+          </Button>
         </Space>
 
         <Card title="漏洞线索" size="small">

@@ -25,7 +25,14 @@ from app.core import config as _core_config
 from app.core.crypto import mask_secret
 from app.core.url_security import validate_public_https_url
 
-from .models import Credential, LlmProvider, PlatformSetting
+from .models import (
+    DEFAULT_LLM_EFFORT,
+    DEFAULT_LLM_MAX_CONTEXT_TOKENS,
+    DEFAULT_LLM_TEMPERATURE,
+    Credential,
+    LlmProvider,
+    PlatformSetting,
+)
 from .repository import CredentialRepository, SettingsRepository
 from .schemas import (
     CredentialCreateRequest,
@@ -56,6 +63,17 @@ def to_response(provider: LlmProvider, plain_key: str = "") -> LlmProviderRespon
         has_api_key=bool(plain_key),
         model=provider.model,
         timeout_ms=provider.timeout_ms,
+        temperature=(
+            DEFAULT_LLM_TEMPERATURE
+            if provider.temperature is None
+            else float(provider.temperature)
+        ),
+        max_context_tokens=(
+            DEFAULT_LLM_MAX_CONTEXT_TOKENS
+            if provider.max_context_tokens is None
+            else int(provider.max_context_tokens)
+        ),
+        effort=provider.effort or DEFAULT_LLM_EFFORT,
         is_default=provider.is_default,
         created_at=provider.created_at,
         updated_at=provider.updated_at,
@@ -89,6 +107,9 @@ class SettingsService:
             api_key_encrypted=request.api_key,
             model=request.model,
             timeout_ms=request.timeout_ms,
+            temperature=request.temperature,
+            max_context_tokens=request.max_context_tokens,
+            effort=request.effort,
             is_default=make_default,
             extra=json.dumps(request.extra, ensure_ascii=False),
         )
@@ -248,11 +269,20 @@ class SettingsService:
         base_url: str | None = None,
         api_key: str | None = None,
         model: str | None = None,
+        temperature: float | None = None,
+        effort: str | None = None,
     ) -> LlmProviderTestResult:
         """真实调用 Anthropic 兼容 /v1/messages 验证凭据与模型可用性"""
+        from app.contexts.settings.models import (
+            DEFAULT_LLM_EFFORT,
+            DEFAULT_LLM_TEMPERATURE,
+        )
+
         resolved_url = base_url
         resolved_key = api_key
         resolved_model = model
+        resolved_temperature = temperature
+        resolved_effort = effort
 
         if provider_id:
             provider = await self.repo.get_by_id(provider_id)
@@ -260,6 +290,15 @@ class SettingsService:
                 resolved_url = resolved_url or provider.base_url
                 resolved_key = resolved_key or provider.api_key_encrypted
                 resolved_model = resolved_model or provider.model
+                if resolved_temperature is None:
+                    resolved_temperature = provider.temperature
+                if resolved_effort is None:
+                    resolved_effort = provider.effort
+
+        if resolved_temperature is None:
+            resolved_temperature = DEFAULT_LLM_TEMPERATURE
+        if resolved_effort is None:
+            resolved_effort = DEFAULT_LLM_EFFORT
 
         if not resolved_url or not resolved_key or not resolved_model:
             return LlmProviderTestResult(ok=False, message="缺少 base_url / api_key / model 参数")
@@ -271,6 +310,13 @@ class SettingsService:
 
         endpoint = f"{resolved_url}/v1/messages"
         started = time.time()
+        payload = {
+            "model": resolved_model,
+            "max_tokens": 8,
+            "temperature": resolved_temperature,
+            "messages": [{"role": "user", "content": "ping"}],
+            "output_config": {"effort": resolved_effort},
+        }
         try:
             async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
                 resp = await client.post(
@@ -280,11 +326,7 @@ class SettingsService:
                         "anthropic-version": "2023-06-01",
                         "content-type": "application/json",
                     },
-                    json={
-                        "model": resolved_model,
-                        "max_tokens": 8,
-                        "messages": [{"role": "user", "content": "ping"}],
-                    },
+                    json=payload,
                 )
             latency = int((time.time() - started) * 1000)
             if resp.status_code == 200:
@@ -304,6 +346,12 @@ class SettingsService:
 
     def build_env_from_provider(self, provider: LlmProvider) -> dict[str, str]:
         """Provider → 沙箱环境变量（凭据零落盘）"""
+        max_context = (
+            DEFAULT_LLM_MAX_CONTEXT_TOKENS
+            if provider.max_context_tokens is None
+            else int(provider.max_context_tokens)
+        )
+        effort = provider.effort or DEFAULT_LLM_EFFORT
         return {
             "ANTHROPIC_BASE_URL": provider.base_url,
             "ANTHROPIC_AUTH_TOKEN": provider.api_key_encrypted,
@@ -313,6 +361,9 @@ class SettingsService:
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": provider.model,
             "API_TIMEOUT_MS": str(provider.timeout_ms),
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(max_context),
+            "CLAUDE_CODE_EFFORT_LEVEL": effort,
+            "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT": "1",
         }
 
     # ── Credential CRUD（P1-6 Credential Proxy） ──

@@ -6,11 +6,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.contexts.finding.models import Adjudication, AlertGroup, RawFinding, ReviewAction
+from app.contexts.finding.models import Adjudication, AlertGroup, LeadRun, RawFinding, ReviewAction
 
 
 def numeric_usage(usage: dict | None) -> dict[str, int]:
@@ -274,6 +274,79 @@ class FindingService:
         self.session.add(action_row)
         await self.session.flush()
         return action_row
+
+    async def delete_groups(
+        self, group_ids: list[str], *, owner_id: str,
+    ) -> tuple[list[str], list[dict[str, str]]]:
+        """物理删除告警组（级联判决/复核/LeadRun；保留 RawFinding 与验证 Task）。
+
+        终认进行中（LeadRun queued/running，或溯源验证 Task 仍 pending/queued/running）
+        的组跳过，避免孤儿写回。跨 Context 只清逻辑指针 source_alert_group_id。
+        """
+        from app.contexts.task.models import Task
+
+        unique_ids = list(dict.fromkeys(group_ids))
+        if not unique_ids:
+            return [], []
+
+        owned_rows = await self.session.execute(
+            select(AlertGroup.id)
+            .join(Task, Task.id == AlertGroup.task_id)
+            .where(AlertGroup.id.in_(unique_ids), Task.owner_id == owner_id)
+        )
+        owned = list(owned_rows.scalars().all())
+        owned_set = set(owned)
+        skipped: list[dict[str, str]] = [
+            {"id": gid, "reason": "not_found"}
+            for gid in unique_ids
+            if gid not in owned_set
+        ]
+        if not owned:
+            return [], skipped
+
+        active_leads = await self.session.execute(
+            select(LeadRun.alert_group_id).where(
+                LeadRun.alert_group_id.in_(owned),
+                LeadRun.status.in_(("queued", "running")),
+            ).distinct()
+        )
+        blocked = set(active_leads.scalars().all())
+
+        active_verify = await self.session.execute(
+            select(Task.source_alert_group_id).where(
+                Task.source_alert_group_id.in_(owned),
+                Task.status.in_(("pending", "queued", "running")),
+            ).distinct()
+        )
+        blocked.update(g for g in active_verify.scalars().all() if g)
+
+        deletable = [gid for gid in owned if gid not in blocked]
+        for gid in owned:
+            if gid in blocked:
+                skipped.append({"id": gid, "reason": "in_progress"})
+
+        if not deletable:
+            return [], skipped
+
+        await self.session.execute(
+            update(Task)
+            .where(Task.source_alert_group_id.in_(deletable))
+            .values(source_alert_group_id=None)
+        )
+        await self.session.execute(
+            delete(Adjudication).where(Adjudication.alert_group_id.in_(deletable))
+        )
+        await self.session.execute(
+            delete(ReviewAction).where(ReviewAction.alert_group_id.in_(deletable))
+        )
+        await self.session.execute(
+            delete(LeadRun).where(LeadRun.alert_group_id.in_(deletable))
+        )
+        await self.session.execute(
+            delete(AlertGroup).where(AlertGroup.id.in_(deletable))
+        )
+        await self.session.flush()
+        return deletable, skipped
 
     async def count_groups(self, task_id: str) -> int:
         result = await self.session.execute(

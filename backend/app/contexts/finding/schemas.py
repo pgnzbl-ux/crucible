@@ -74,9 +74,27 @@ class AlertGroupListRequest(BaseModel):
     offset: int = Field(0, ge=0)
 
 
+class AlertGroupIdsRequest(BaseModel):
+    """跨页全选：与列表相同的筛选，不分页。"""
+    task_id: str | None = None
+    status: str | None = None
+    resolution: str | None = Field(None, pattern=r"^(confirmed|false_positive|ignored)$")
+    cwe: str | None = None
+    ai_verdict: str | None = None
+    engine: str | None = None
+    clue_grade: str | None = None
+    scope: str | None = Field(None, pattern=r"^(focus|review|processing|noise|all)$")
+    q: str | None = Field(None, max_length=200)
+
+
 class AlertGroupListResponse(BaseModel):
     total: int
     items: list[AlertGroupSummary]
+
+
+class AlertGroupIdsResponse(BaseModel):
+    total: int
+    ids: list[str]
 
 
 class FindingStatsResponse(BaseModel):
@@ -161,3 +179,15 @@ class ManualDispatchRequest(BaseModel):
 class ManualDispatchResponse(BaseModel):
     group_id: str
     verification_task_id: str
+
+
+class BatchDeleteGroupsRequest(BaseModel):
+    ids: list[str] = Field(..., min_length=1, max_length=100)
+
+
+class BatchDeleteGroupsResponse(BaseModel):
+    deleted: list[str] = Field(default_factory=list)
+    skipped: list[dict[str, str]] = Field(
+        default_factory=list,
+        description="未删项：{id, reason}；reason 为 not_found | in_progress",
+    )

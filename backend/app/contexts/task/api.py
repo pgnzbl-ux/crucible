@@ -4,8 +4,10 @@ from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.database import get_db_session
-from app.shared.deps import CurrentUserId
+from app.core.security import create_sse_ticket
+from app.shared.deps import CurrentUserId, get_sse_user_id
 from app.shared.object_store import ObjectStoreError
 from app.shared.sse import stream_task_events
 
@@ -158,21 +160,36 @@ async def get_task_events(
     return events
 
 
+@router.post("/{task_id}/events/ticket")
+async def issue_sse_ticket(
+    task_id: str,
+    svc: Annotated[TaskService, Depends(get_task_service)],
+    user_id: CurrentUserId,
+) -> dict:
+    """领取短命 SSE ticket（EventSource 用 ?ticket=，避免把 access JWT 放进 URL）。"""
+    if await svc.get_task(task_id, user_id) is None:
+        raise HTTPException(404, "任务不存在")
+    ttl = get_settings().sse_ticket_expire_seconds
+    ticket = create_sse_ticket(user_id, task_id, expires_seconds=ttl)
+    return {"ticket": ticket, "expires_in": ttl}
+
+
 @router.get("/{task_id}/events/stream")
 async def stream_task_events_endpoint(
     task_id: str,
     request: Request,
-    user_id: CurrentUserId,
     svc: Annotated[TaskService, Depends(get_task_service)],
+    user_id: Annotated[str, Depends(get_sse_user_id)],
 ) -> StreamingResponse:
-    """SSE 实时事件推送（P0-1）
+    """SSE 实时事件推送。
 
-    - 鉴权：?token=<jwt>（EventSource 不能注入 header，见 shared/deps.py）
-    - 启动时回放历史（DB）
-    - 订阅 Redis 频道 task.{id}.events 转发
-    - 15s 心跳防代理超时
-    - 客户端断开立即清理 Redis 订阅（防连接泄漏）
+    - 鉴权：优先 Bearer；EventSource 用 ?ticket=（POST .../events/ticket）
+    - 开发环境仍兼容 ?token=<access jwt>；生产拒绝
+    - 启动时回放历史（DB）+ Redis 订阅；15s 心跳
     """
+    ticket_tid = getattr(request.state, "sse_ticket_task_id", None)
+    if ticket_tid is not None and ticket_tid != task_id:
+        raise HTTPException(401, "SSE ticket 与任务不匹配")
     if await svc.get_task(task_id, user_id) is None:
         raise HTTPException(404, "任务不存在")
     return StreamingResponse(
@@ -181,7 +198,7 @@ async def stream_task_events_endpoint(
         headers={
             "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # nginx: 关闭代理缓冲，SSE 实时
+            "X-Accel-Buffering": "no",
         },
     )
 

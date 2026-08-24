@@ -206,6 +206,56 @@ def test_list_groups_resolution_filters_closed_outcomes(client_env):
     _ = task_id
 
 
+def test_list_group_ids_matches_filtered_set(client_env):
+    client, factory = client_env
+    import asyncio
+    import hashlib
+
+    from app.contexts.finding.models import AlertGroup, RawFinding
+
+    group_id, task_id = asyncio.run(_seed_review_env(factory))
+
+    async def _add_second():
+        async with factory() as s:
+            first = await s.get(AlertGroup, group_id)
+            rep = await s.get(RawFinding, first.representative_finding_id)
+            f = RawFinding(
+                task_id=task_id, scan_run_id=rep.scan_run_id,
+                engine="semgrep", rule_id="other", cwe="CWE-79", severity="warning",
+                file_path="app/xss.py", line_start=1, line_end=1, message="xss",
+                fingerprint=hashlib.sha256(b"ids-other").hexdigest(), raw={},
+            )
+            s.add(f)
+            await s.flush()
+            s.add(AlertGroup(
+                task_id=task_id, group_key="gk-ids", cwe="CWE-79", file_path="app/xss.py",
+                function_symbol=None, line_span="1-1", member_count=1,
+                representative_finding_id=f.id, engine_set=["semgrep"],
+                status="resolved", clue_grade="F", ai_verdict="fp", resolution="false_positive",
+            ))
+            await s.commit()
+
+    asyncio.run(_add_second())
+    headers = _auth(client)
+
+    all_ids = client.get("/api/v1/findings/groups/ids", headers=headers, params={"scope": "all"})
+    assert all_ids.status_code == 200
+    body = all_ids.json()
+    assert body["total"] == 2
+    assert set(body["ids"]) == {
+        group_id,
+        *(i for i in body["ids"] if i != group_id),
+    }
+    assert len(body["ids"]) == 2
+
+    fp_only = client.get(
+        "/api/v1/findings/groups/ids", headers=headers,
+        params={"resolution": "false_positive"},
+    )
+    assert fp_only.json()["total"] == 1
+    assert group_id not in fp_only.json()["ids"]
+
+
 def test_list_groups_queue_scopes_separate_focus_review_processing_and_noise(client_env):
     client, factory = client_env
     import asyncio
@@ -590,3 +640,138 @@ def test_manual_dispatch_rejects_already_dispatched_group(client_env):
     assert resp.status_code == 409
     assert "已投递" in resp.json()["error"]["message"]
     send_task.assert_not_called()
+
+
+def test_delete_group_cascades_and_keeps_raw_finding(client_env):
+    client, factory = client_env
+    import asyncio
+
+    from sqlalchemy import func, select
+
+    from app.contexts.finding.models import Adjudication, AlertGroup, LeadRun, RawFinding, ReviewAction
+    from app.contexts.task.models import Task
+
+    group_id, task_id = asyncio.run(_seed_review_env(factory))
+    headers = _auth(client)
+
+    async def _attach_pointer_and_review():
+        async with factory() as s:
+            s.add(ReviewAction(alert_group_id=group_id, user_id="u1", action="confirm"))
+            verify = Task(
+                project_address="https://github.com/a/b.git", task_type="verify",
+                vulnerability_description="x", owner_id="u1", status="completed",
+                source_alert_group_id=group_id,
+            )
+            s.add(verify)
+            await s.commit()
+            return verify.id
+
+    verify_id = asyncio.run(_attach_pointer_and_review())
+
+    resp = client.delete(f"/api/v1/findings/groups/{group_id}", headers=headers)
+    assert resp.status_code == 204
+
+    async def _assert_gone():
+        async with factory() as s:
+            assert await s.get(AlertGroup, group_id) is None
+            assert (await s.execute(
+                select(func.count()).select_from(Adjudication).where(Adjudication.alert_group_id == group_id)
+            )).scalar_one() == 0
+            assert (await s.execute(
+                select(func.count()).select_from(ReviewAction).where(ReviewAction.alert_group_id == group_id)
+            )).scalar_one() == 0
+            assert (await s.execute(
+                select(func.count()).select_from(LeadRun).where(LeadRun.alert_group_id == group_id)
+            )).scalar_one() == 0
+            assert (await s.execute(
+                select(func.count()).select_from(RawFinding).where(RawFinding.task_id == task_id)
+            )).scalar_one() == 1
+            verify = await s.get(Task, verify_id)
+            assert verify is not None
+            assert verify.source_alert_group_id is None
+
+    asyncio.run(_assert_gone())
+
+    miss = client.delete(f"/api/v1/findings/groups/{group_id}", headers=headers)
+    assert miss.status_code == 404
+
+
+def test_delete_group_blocks_in_progress_lead(client_env):
+    client, factory = client_env
+    import asyncio
+
+    from sqlalchemy import select
+
+    from app.contexts.finding.models import AlertGroup, LeadRun
+
+    group_id, _task_id = asyncio.run(_seed_review_env(factory))
+
+    async def _mark_lead_running():
+        async with factory() as s:
+            lead = (await s.execute(
+                select(LeadRun).where(LeadRun.alert_group_id == group_id)
+            )).scalars().first()
+            assert lead is not None
+            lead.status = "running"
+            g = await s.get(AlertGroup, group_id)
+            g.status = "dispatched"
+            await s.commit()
+
+    asyncio.run(_mark_lead_running())
+
+    resp = client.delete(f"/api/v1/findings/groups/{group_id}", headers=_auth(client))
+    assert resp.status_code == 409
+
+
+def test_batch_delete_groups_partial(client_env):
+    client, factory = client_env
+    import asyncio
+    import hashlib
+
+    from sqlalchemy import select
+
+    from app.contexts.finding.models import AlertGroup, LeadRun, RawFinding
+
+    group_id, task_id = asyncio.run(_seed_review_env(factory))
+
+    async def _seed_second_and_block_first():
+        async with factory() as s:
+            first = await s.get(AlertGroup, group_id)
+            rep = await s.get(RawFinding, first.representative_finding_id)
+            f = RawFinding(
+                task_id=task_id, scan_run_id=rep.scan_run_id,
+                engine="semgrep", rule_id="other", cwe="CWE-79", severity="warning",
+                file_path="app/xss.py", line_start=1, line_end=1, message="xss",
+                fingerprint=hashlib.sha256(b"other").hexdigest(), raw={},
+            )
+            s.add(f)
+            await s.flush()
+            g2 = AlertGroup(
+                task_id=task_id, group_key="gk2", cwe="CWE-79", file_path="app/xss.py",
+                function_symbol=None, line_span="1-1", member_count=1,
+                representative_finding_id=f.id, engine_set=["semgrep"],
+                status="resolved", clue_grade="F", ai_verdict="fp", resolution="false_positive",
+            )
+            s.add(g2)
+            lead = (await s.execute(
+                select(LeadRun).where(LeadRun.alert_group_id == group_id)
+            )).scalars().first()
+            assert lead is not None
+            lead.status = "queued"
+            first.status = "dispatched"
+            await s.commit()
+            return g2.id
+
+    g2_id = asyncio.run(_seed_second_and_block_first())
+
+    resp = client.post(
+        "/api/v1/findings/groups/batch-delete",
+        headers=_auth(client),
+        json={"ids": [group_id, g2_id, "missing-id"]},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["deleted"] == [g2_id]
+    reasons = {item["id"]: item["reason"] for item in data["skipped"]}
+    assert reasons[group_id] == "in_progress"
+    assert reasons["missing-id"] == "not_found"

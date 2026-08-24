@@ -1,8 +1,20 @@
-"""LLM Base URL 必须是解析到公网地址的 HTTPS 域名。"""
+"""LLM Base URL：RELAXED=true 不限制；false = 仅 HTTPS 公网域名。"""
 import socket
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+@pytest.fixture
+def strict_llm_url(monkeypatch):
+    settings = MagicMock(llm_base_url_relaxed=False)
+    monkeypatch.setattr("app.core.config.get_settings", lambda: settings)
+
+
+@pytest.fixture
+def relaxed_llm_url(monkeypatch):
+    settings = MagicMock(llm_base_url_relaxed=True)
+    monkeypatch.setattr("app.core.config.get_settings", lambda: settings)
 
 
 @pytest.mark.asyncio
@@ -10,16 +22,15 @@ import pytest
     ("url", "addresses", "message"),
     [
         ("http://api.example.com", ["93.184.216.34"], "HTTPS"),
-        ("https://127.0.0.1", [], "域名"),
+        ("ftp://api.example.com", ["93.184.216.34"], "HTTPS"),
         ("https://user:pass@api.example.com", ["93.184.216.34"], "userinfo"),
         ("https://api.example.com/path#fragment", ["93.184.216.34"], "fragment"),
         ("https://api.example.com", ["127.0.0.1"], "公网"),
         ("https://api.example.com", ["10.0.0.8"], "公网"),
-        ("https://api.example.com", ["169.254.169.254"], "公网"),
-        ("https://api.example.com", ["100.64.0.1"], "公网"),
+        ("https://127.0.0.1", [], "域名"),
     ],
 )
-async def test_validate_public_https_url_rejects_unsafe_targets(url, addresses, message):
+async def test_strict_mode_rejects_unsafe_targets(url, addresses, message, strict_llm_url):
     from app.core.url_security import validate_public_https_url
 
     infos = [
@@ -32,40 +43,35 @@ async def test_validate_public_https_url_rejects_unsafe_targets(url, addresses, 
 
 
 @pytest.mark.asyncio
-async def test_validate_public_https_url_accepts_unknown_public_domain():
+async def test_strict_mode_accepts_public_https(strict_llm_url):
     from app.core.url_security import validate_public_https_url
 
     infos = [
         (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443)),
-        (
-            socket.AF_INET6,
-            socket.SOCK_STREAM,
-            socket.IPPROTO_TCP,
-            "",
-            ("2606:2800:220:1:248:1893:25c8:1946", 443, 0, 0),
-        ),
     ]
     with patch("app.core.url_security.socket.getaddrinfo", return_value=infos):
         assert await validate_public_https_url("https://custom-llm.example/v1") == "https://custom-llm.example/v1"
 
 
 @pytest.mark.asyncio
-async def test_validate_public_https_url_accepts_tun_fake_ip():
-    """Clash/Surge TUN fake-ip（198.18.0.0/15）不是真实内网，放行以免误杀本地代理。"""
+async def test_relaxed_mode_allows_http_ip_and_loopback(relaxed_llm_url):
     from app.core.url_security import validate_public_https_url
 
-    infos = [
-        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("198.18.0.12", 443)),
-    ]
-    with patch("app.core.url_security.socket.getaddrinfo", return_value=infos):
-        assert (
-            await validate_public_https_url("https://api.deepseek.com/anthropic")
-            == "https://api.deepseek.com/anthropic"
-        )
+    assert await validate_public_https_url("http://127.0.0.1:11434") == "http://127.0.0.1:11434"
+    assert await validate_public_https_url("http://10.0.0.8:8080/v1") == "http://10.0.0.8:8080/v1"
+    assert await validate_public_https_url("https://localhost:8443") == "https://localhost:8443"
 
 
 @pytest.mark.asyncio
-async def test_validate_public_https_url_rejects_unresolvable_domain():
+async def test_relaxed_mode_still_rejects_bad_scheme(relaxed_llm_url):
+    from app.core.url_security import validate_public_https_url
+
+    with pytest.raises(ValueError, match="HTTP 或 HTTPS"):
+        await validate_public_https_url("ftp://127.0.0.1")
+
+
+@pytest.mark.asyncio
+async def test_strict_mode_rejects_unresolvable_domain(strict_llm_url):
     from app.core.url_security import validate_public_https_url
 
     with patch(

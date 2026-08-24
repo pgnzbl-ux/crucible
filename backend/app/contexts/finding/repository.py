@@ -3,23 +3,27 @@ from __future__ import annotations
 
 from sqlalchemy import String, and_, func, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import Select
 
 from app.contexts.finding.models import AlertGroup, RawFinding, ReviewAction
 from app.contexts.task.models import Task
+
+# 跨页全选一次拉取的硬顶；超出要求用户收窄筛选
+MAX_CROSS_PAGE_IDS = 2000
 
 
 class FindingRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def list_groups(
+    def _filtered_groups_stmt(
         self, *, task_id: str | None = None, status: str | None = None,
         resolution: str | None = None,
         cwe: str | None = None, ai_verdict: str | None = None,
         engine: str | None = None, clue_grade: str | None = None,
         scope: str | None = None, q: str | None = None,
-        limit: int = 50, offset: int = 0, owner_task_ids: list[str] | None = None,
-    ) -> tuple[int, list[AlertGroup]]:
+        owner_task_ids: list[str] | None = None,
+    ) -> Select:
         stmt = select(AlertGroup)
         need_task_join = bool((q or "").strip())
         if need_task_join:
@@ -52,6 +56,21 @@ class FindingRepository:
                 AlertGroup.task_id.ilike(pattern),
                 Task.project_address.ilike(pattern),
             ))
+        return stmt
+
+    async def list_groups(
+        self, *, task_id: str | None = None, status: str | None = None,
+        resolution: str | None = None,
+        cwe: str | None = None, ai_verdict: str | None = None,
+        engine: str | None = None, clue_grade: str | None = None,
+        scope: str | None = None, q: str | None = None,
+        limit: int = 50, offset: int = 0, owner_task_ids: list[str] | None = None,
+    ) -> tuple[int, list[AlertGroup]]:
+        stmt = self._filtered_groups_stmt(
+            task_id=task_id, status=status, resolution=resolution, cwe=cwe,
+            ai_verdict=ai_verdict, engine=engine, clue_grade=clue_grade,
+            scope=scope, q=q, owner_task_ids=owner_task_ids,
+        )
         total = (await self.session.execute(
             select(func.count()).select_from(
                 stmt.with_only_columns(AlertGroup.id).order_by(None).distinct().subquery()
@@ -65,6 +84,38 @@ class FindingRepository:
             ).limit(limit).offset(offset)
         )
         return int(total), list(rows.scalars().unique().all())
+
+    async def list_group_ids(
+        self, *, task_id: str | None = None, status: str | None = None,
+        resolution: str | None = None,
+        cwe: str | None = None, ai_verdict: str | None = None,
+        engine: str | None = None, clue_grade: str | None = None,
+        scope: str | None = None, q: str | None = None,
+        owner_task_ids: list[str] | None = None,
+        max_ids: int = MAX_CROSS_PAGE_IDS,
+    ) -> tuple[int, list[str]]:
+        """当前筛选下全部 id（跨页全选）。超出 max_ids 抛 ValueError。"""
+        stmt = self._filtered_groups_stmt(
+            task_id=task_id, status=status, resolution=resolution, cwe=cwe,
+            ai_verdict=ai_verdict, engine=engine, clue_grade=clue_grade,
+            scope=scope, q=q, owner_task_ids=owner_task_ids,
+        )
+        total = int((await self.session.execute(
+            select(func.count()).select_from(
+                stmt.with_only_columns(AlertGroup.id).order_by(None).distinct().subquery()
+            )
+        )).scalar_one())
+        if total > max_ids:
+            raise ValueError(
+                f"筛选结果共 {total} 条，超过跨页全选上限 {max_ids}，请先收窄筛选"
+            )
+        rows = await self.session.execute(
+            stmt.order_by(
+                AlertGroup.updated_at.desc().nulls_last(),
+                AlertGroup.created_at.desc(),
+            )
+        )
+        return total, [g.id for g in rows.scalars().unique().all()]
 
     @staticmethod
     def engine_member_clause(engine: str):

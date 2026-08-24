@@ -86,11 +86,13 @@ async def llm_complete(
     system: str,
     user: str,
     max_tokens: int = 4096,
-    temperature: float = 0.1,
     session=None,
     provider=None,
 ) -> LlmResult:
-    """单次补全。session 与 provider 至少给一个(测试可直注 provider)。"""
+    """单次补全。session 与 provider 至少给一个(测试可直注 provider)。
+
+    temperature / effort 只读当前 Provider（全局高级设置），禁止调用方硬编码。
+    """
     from app.core.config import get_settings
 
     settings = get_settings()
@@ -110,6 +112,11 @@ async def llm_complete(
 
     import httpx
 
+    from app.contexts.settings.models import (
+        DEFAULT_LLM_EFFORT,
+        DEFAULT_LLM_TEMPERATURE,
+    )
+
     url = provider.base_url.rstrip("/") + "/v1/messages"
     headers = {
         "x-api-key": provider.api_key_encrypted or "",
@@ -117,22 +124,47 @@ async def llm_complete(
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
     }
-    payload = {
+    payload: dict[str, Any] = {
         "model": provider.model,
         "max_tokens": max_tokens,
-        "temperature": temperature,
+        "temperature": float(
+            DEFAULT_LLM_TEMPERATURE
+            if getattr(provider, "temperature", None) is None
+            else provider.temperature
+        ),
         "system": system,
         "messages": [{"role": "user", "content": user}],
+        "output_config": {
+            "effort": getattr(provider, "effort", None) or DEFAULT_LLM_EFFORT,
+        },
     }
     timeout_seconds = min((provider.timeout_ms or 120000) / 1000, 120)
     last_error: Exception | None = None
+    dropped_effort = False
     for attempt in range(3):  # 网络错误指数退避重试 2 次
         try:
             async with httpx.AsyncClient(timeout=timeout_seconds) as client:
                 resp = await client.post(url, headers=headers, json=payload)
             if resp.status_code >= 500:
-                raise httpx.HTTPStatusError(f"上游 {resp.status_code}", request=resp.request)
-            resp.raise_for_status()
+                raise httpx.HTTPStatusError(
+                    f"HTTP {resp.status_code}: {(resp.text or '')[:500]}",
+                    request=resp.request,
+                    response=resp,
+                )
+            if resp.status_code >= 400:
+                body = (resp.text or resp.reason_phrase or "")[:500]
+                # 部分网关不认 output_config.effort：剥掉后重试一次
+                if (
+                    not dropped_effort
+                    and resp.status_code in (400, 422)
+                    and "output_config" in payload
+                ):
+                    payload.pop("output_config", None)
+                    dropped_effort = True
+                    continue
+                raise LlmGatewayConfigError(
+                    f"LLM 网关调用失败({role}): HTTP {resp.status_code}: {body}"
+                )
             data: dict[str, Any] = resp.json()
             blocks = data.get("content") or []
             text = "".join(
@@ -148,6 +180,8 @@ async def llm_complete(
                     "completion_tokens": int(usage_raw.get("output_tokens") or 0),
                 },
             )
+        except LlmGatewayConfigError:
+            raise
         except Exception as e:  # noqa: BLE001 — 4xx 直接失败，5xx/网络重试
             last_error = e
             if attempt < 2 and not isinstance(e, httpx.HTTPStatusError):

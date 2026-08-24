@@ -7,7 +7,7 @@ description: Alembic 迁移生成与执行
 
 规则摘要：`.cursor/rules/db-migrate.mdc`。命令一律用仓库根 `.venv`（见 `.cursor/rules/agent-env.mdc`）。
 
-当前 **head**：`j3e6a7b18c42`（以 `alembic heads` / `_alembic_head()` 为准）。
+当前 **head**：`n7a1c4e53f92`（以 `alembic heads` / `_alembic_head()` 为准）。
 
 ## 1. 空库 / 升级
 
@@ -44,7 +44,8 @@ c18a0e9b4d21 (baseline)
   → e8c3a1b047d2 ─┬→ f3a9c2d18e04 (merge)
   → a1b8c3d049e4 ─┘
   → d4b7e1c08a92 → e7d2b4a10c95 → f8c2a1b03d14
-  → g7b3e9a02c15 → h1c4d8e05f26 → i2d5f6a07b31 → j3e6a7b18c42 (head)
+  → g7b3e9a02c15 → h1c4d8e05f26 → i2d5f6a07b31 → j3e6a7b18c42
+  → k4f7b8c29d53 → l5f8d2c31a70 → m6e0b3c42d81 → n7a1c4e53f92 (head)
 ```
 
 ## 4. 回滚

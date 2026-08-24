@@ -294,6 +294,40 @@ async def test_triage_runner_failure_degrades_to_review(session_factory, tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_triage_llm_balance_failure_aborts_node(session_factory, tmp_path):
+    """余额不足等平台级 LLM 失败必须炸掉 triage，不得降级转人工后继续下游。"""
+    from app.contexts.agent.nodes.triage import TriageNode
+    from app.contexts.finding.models import AlertGroup
+    from app.core.agent_runner import AgentRunnerError
+
+    async with session_factory() as session:
+        ctx, task = await _seed_triage_env(
+            session, tmp_path,
+            [("CWE-89", "high", "A", None), ("CWE-79", "high", "A", None)],
+        )
+
+        async def boom(**kw):
+            raise AgentRunnerError(
+                'AI 节点 triage LLM 调用失败: HTTP 401: {"error":{"code":"1004","message":"余额不足"}}'
+            )
+
+        with patch("app.core.config.get_settings", return_value=_settings()), \
+             patch(
+                 "app.contexts.agent.ai_runner.run_ai_node_with_shape_retry",
+                 new=boom,
+             ):
+            with pytest.raises(AgentRunnerError, match="余额不足"):
+                await TriageNode().execute(ctx, None)
+
+        groups = (await session.execute(
+            select(AlertGroup).where(AlertGroup.task_id == task.id)
+        )).scalars().all()
+        # 未伪装成 needs_review：保持 clustered，便于充值后重跑二审
+        assert all(g.status == "clustered" for g in groups)
+        assert all(g.ai_verdict is None for g in groups)
+
+
+@pytest.mark.asyncio
 async def test_triage_input_hides_engine_conclusion_by_default(session_factory, tmp_path):
     from app.contexts.agent.nodes.triage import TriageNode
 

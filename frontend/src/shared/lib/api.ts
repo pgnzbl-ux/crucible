@@ -315,6 +315,9 @@ export interface LlmProvider {
   has_api_key: boolean
   model: string
   timeout_ms: number
+  temperature: number
+  max_context_tokens: number
+  effort: string
   is_default: boolean
   created_at: string
   updated_at: string
@@ -332,6 +335,9 @@ export interface LlmProviderInput {
   api_key?: string
   model: string
   timeout_ms?: number
+  temperature?: number
+  max_context_tokens?: number
+  effort?: string
   is_default?: boolean
 }
 
@@ -460,6 +466,10 @@ export const api = {
   cancelTask: (id: string) => request<TaskDetail>(`/tasks/${id}/cancel`, { method: 'POST' }),
 
   getTaskEvents: (id: string) => request<AgentEvent[]>(`/tasks/${id}/events?limit=1000`),
+  issueSseTicket: (id: string) =>
+    request<{ ticket: string; expires_in: number }>(`/tasks/${id}/events/ticket`, {
+      method: 'POST',
+    }),
 
   // Reports
   listReports: (params?: Record<string, string>) => {
@@ -516,7 +526,13 @@ export const api = {
   testLlmProvider: (id: string) =>
     request<LlmProviderTestResult>(`/settings/llm/providers/${id}/test`, { method: 'POST' }),
 
-  testLlmConnection: (data: { base_url: string; api_key?: string; model: string }) =>
+  testLlmConnection: (data: {
+    base_url: string
+    api_key?: string
+    model: string
+    temperature?: number
+    effort?: string
+  }) =>
     request<LlmProviderTestResult>('/settings/llm/test', { method: 'POST', body: JSON.stringify(data) }),
 
   // Credentials（P1-6）
@@ -614,7 +630,22 @@ export const api = {
     const suffix = qs.toString() ? `?${qs}` : ''
     return request<AlertGroupListResponse>(`/findings/groups${suffix}`)
   },
+  listAlertGroupIds: (params?: Record<string, string | number | undefined>) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(params ?? {})) {
+      if (v !== undefined && v !== '' && v !== null) qs.set(k, String(v))
+    }
+    const suffix = qs.toString() ? `?${qs}` : ''
+    return request<{ total: number; ids: string[] }>(`/findings/groups/ids${suffix}`)
+  },
   getAlertGroup: (id: string) => request<AlertGroupDetail>(`/findings/groups/${id}`),
+  deleteAlertGroup: (id: string) =>
+    request<void>(`/findings/groups/${id}`, { method: 'DELETE' }),
+  batchDeleteAlertGroups: (ids: string[]) =>
+    request<{ deleted: string[]; skipped: { id: string; reason: string }[] }>(
+      '/findings/groups/batch-delete',
+      { method: 'POST', body: JSON.stringify({ ids }) },
+    ),
   reviewAlertGroup: (
     id: string,
     data: {

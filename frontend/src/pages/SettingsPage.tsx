@@ -3,6 +3,7 @@ import {
   App,
   Button,
   Card,
+  Collapse,
   Drawer,
   Form,
   Input,
@@ -37,6 +38,19 @@ import { PageContainer } from '../shared/components/PageContainer'
 import { RuntimePanel } from '../features/settings/RuntimePanel'
 
 const { Text } = Typography
+
+const DEFAULT_TEMPERATURE = 0.2
+const DEFAULT_MAX_CONTEXT_TOKENS = 200_000
+const DEFAULT_EFFORT = 'high'
+
+const EFFORT_OPTIONS = [
+  { value: 'low', label: 'low' },
+  { value: 'medium', label: 'medium' },
+  { value: 'high', label: 'high' },
+  { value: 'xhigh', label: 'xhigh' },
+  { value: 'max', label: 'max' },
+  { value: 'auto', label: 'auto（模型默认）' },
+]
 
 const PROVIDER_TYPES: Record<string, { label: string; defaultUrl: string; defaultModel: string }> = {
   deepseek: {
@@ -88,11 +102,20 @@ function ProviderFormDrawer({
         base_url: editing.base_url,
         model: editing.model,
         timeout_ms: editing.timeout_ms,
+        temperature: editing.temperature,
+        max_context_tokens: editing.max_context_tokens,
+        effort: editing.effort,
         api_key: undefined,
       })
     } else {
       form.resetFields()
-      form.setFieldsValue({ provider_type: 'deepseek', timeout_ms: 600000 })
+      form.setFieldsValue({
+        provider_type: 'deepseek',
+        timeout_ms: 600000,
+        temperature: DEFAULT_TEMPERATURE,
+        max_context_tokens: DEFAULT_MAX_CONTEXT_TOKENS,
+        effort: DEFAULT_EFFORT,
+      })
     }
     setTestResult(null)
   }, [open, editing, form])
@@ -133,6 +156,8 @@ function ProviderFormDrawer({
               base_url: values.base_url,
               api_key: values.api_key,
               model: values.model,
+              temperature: values.temperature,
+              effort: values.effort,
             })
       setTestResult({ ok: result.ok, message: result.message })
     } catch (e) {
@@ -168,8 +193,13 @@ function ProviderFormDrawer({
         <Form.Item name="name" label="显示名称" rules={[{ required: true }]}>
           <Input placeholder="如 DeepSeek 官方" />
         </Form.Item>
-        <Form.Item name="base_url" label="Base URL (Anthropic 兼容端点)" rules={[{ required: true }]}>
-          <Input placeholder="https://api.deepseek.com/anthropic" />
+        <Form.Item
+          name="base_url"
+          label="Base URL (Anthropic 兼容端点)"
+          rules={[{ required: true }]}
+          extra="LLM_BASE_URL_RELAXED=true 时可用 http/IP；false 时仅 HTTPS 公网域名。"
+        >
+          <Input placeholder="http://127.0.0.1:11434 或 https://api.deepseek.com/anthropic" />
         </Form.Item>
         <Form.Item
           name="model"
@@ -190,6 +220,45 @@ function ProviderFormDrawer({
         <Form.Item name="timeout_ms" label="超时 (ms)">
           <InputNumber min={10000} max={3600000} step={60000} style={{ width: '100%' }} />
         </Form.Item>
+
+        <Collapse
+          ghost
+          style={{ marginBottom: 16 }}
+          items={[
+            {
+              key: 'advanced',
+              label: '高级设置（对本 Provider 全局生效）',
+              children: (
+                <>
+                  <Form.Item
+                    name="temperature"
+                    label="温度"
+                    extra="Messages API / 二审 / 测连接生效；Agent 沙箱受 Claude Agent SDK 限制暂不透传。"
+                    rules={[{ required: true }]}
+                  >
+                    <InputNumber min={0} max={2} step={0.1} style={{ width: '100%' }} />
+                  </Form.Item>
+                  <Form.Item
+                    name="max_context_tokens"
+                    label="最大上下文 (token)"
+                    extra="注入 CLAUDE_CODE_MAX_CONTEXT_TOKENS，供 CLI 按窗口做 autocompact；自定义模型务必填写。"
+                    rules={[{ required: true }]}
+                  >
+                    <InputNumber min={1024} max={2_000_000} step={1000} style={{ width: '100%' }} />
+                  </Form.Item>
+                  <Form.Item
+                    name="effort"
+                    label="思考强度"
+                    extra="Agent 与 Messages 二审均下发（CLAUDE_CODE_EFFORT_LEVEL / output_config.effort）。"
+                    rules={[{ required: true }]}
+                  >
+                    <Select options={EFFORT_OPTIONS} />
+                  </Form.Item>
+                </>
+              ),
+            },
+          ]}
+        />
 
         {testResult && (
           <div style={{ marginBottom: 16 }}>

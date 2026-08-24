@@ -10,10 +10,19 @@ from app.core.agent_runner import AgentRunnerError
 
 from ..base import task_run_cancelled, workspace_repo_path
 
-_CONTEXT_TOKEN_BUDGET = 8_000
+_CONTEXT_TOKEN_BUDGET = 8_000  # 兼容旧引用；新逻辑用 slice_char_budget
 
 
-def extract_slices(ctx, group, representative, index) -> list[Slice]:
+def slice_char_budget(max_context_tokens: int | None) -> int:
+    """按 Provider 窗口换算切片字符预算（约 5% 上下文 × 4 chars/token），夹在 4k–32k。"""
+    ctx = int(max_context_tokens) if max_context_tokens else 200_000
+    ctx = max(8_000, ctx)
+    return max(4_000, min(32_000, (ctx * 4) // 20))
+
+
+def extract_slices(
+    ctx, group, representative, index, *, max_context_tokens: int | None = None
+) -> list[Slice]:
     """按需上下文：source→sink 各位置切所在函数；退化命中行±5 行。"""
     from app.contexts.finding.context_extractor import (
         context_around,
@@ -23,7 +32,7 @@ def extract_slices(ctx, group, representative, index) -> list[Slice]:
 
     repo_root = ctx.source_path
     slices: list[Slice] = []
-    budget = _CONTEXT_TOKEN_BUDGET
+    budget = slice_char_budget(max_context_tokens)
 
     def _add(label: str, text: str | None) -> None:
         nonlocal budget
@@ -60,11 +69,15 @@ def extract_slices(ctx, group, representative, index) -> list[Slice]:
 
 
 async def adjudicate_group(ctx, group, settings) -> bool:
-    """一组判决：起 triage agent-runner；失败转人工，绝不下沉 fp。
+    """一组判决：起 triage agent-runner；单组瞬时失败转人工，绝不下沉 fp。
+
+    平台级 LLM API 失败（余额不足 / 401 / 限流等）向上抛出，由节点中止流程，
+    不得伪装成「已转人工」后继续 dispatch/report。
 
     返回是否记录了判决(降级转人工的组返回 False，不占 adjudicated 计数)。
     """
     from app.contexts.agent.ai_runner import run_ai_node_with_shape_retry
+    from app.contexts.agent.llm_errors import is_llm_api_failure
     from app.contexts.finding.context_extractor import load_index
     from .prompt import load_rubric
 
@@ -75,7 +88,18 @@ async def adjudicate_group(ctx, group, settings) -> bool:
         return False
 
     index = load_index(ctx.host_workdir)
-    slices = extract_slices(ctx, group, representative, index)
+    max_ctx: int | None = None
+    try:
+        from app.contexts.settings.repository import SettingsRepository
+
+        provider = await SettingsRepository(ctx.db_session).get_default()
+        if provider is not None:
+            max_ctx = getattr(provider, "max_context_tokens", None)
+    except Exception:  # noqa: BLE001 — 切片预算兜底，不阻断判决
+        max_ctx = None
+    slices = extract_slices(
+        ctx, group, representative, index, max_context_tokens=max_ctx
+    )
     pack = build_pack(group=group, representative=representative, slices=slices)
     if pack is None:
         await svc.mark_needs_review(group)
@@ -119,11 +143,13 @@ async def adjudicate_group(ctx, group, settings) -> bool:
             task_id=ctx.task_id,
             meta_out=meta,
         )
-    except AgentRunnerError:
+    except AgentRunnerError as e:
         # 取消拆容器产生的 exit=137 不是真实失败：保持 clustered 原状，
         # 由外层逐组取消检查收尾，避免污染成 needs_review
         if await task_run_cancelled(ctx.db_session, ctx.task_id, ctx.run_id):
             return False
+        if is_llm_api_failure(str(e)):
+            raise
         await svc.mark_needs_review(group)
         return False
 

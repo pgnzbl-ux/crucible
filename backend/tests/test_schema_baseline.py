@@ -86,9 +86,14 @@ def test_alembic_chain_from_baseline():
     ).read_text(encoding="utf-8")
     assert 'revision: str = "m6e0b3c42d81"' in budget_ledger
     assert 'down_revision: Union[str, None] = "l5f8d2c31a70"' in budget_ledger
+    llm_advanced = (
+        versions / "n7a1c4e53f92_llm_provider_advanced_settings.py"
+    ).read_text(encoding="utf-8")
+    assert 'revision: str = "n7a1c4e53f92"' in llm_advanced
+    assert 'down_revision: Union[str, None] = "m6e0b3c42d81"' in llm_advanced
     from app.core.database import _alembic_head
 
-    assert _alembic_head() == "m6e0b3c42d81"
+    assert _alembic_head() == "n7a1c4e53f92"
 
 
 @pytest.mark.asyncio
@@ -103,6 +108,7 @@ async def test_create_all_schema_matches_models():
             provider_cols = {c["name"] for c in insp.get_columns("llm_providers")}
             assert "enabled" not in provider_cols
             assert "is_default" in provider_cols
+            assert {"temperature", "max_context_tokens", "effort"} <= provider_cols
             task_cols = {c["name"] for c in insp.get_columns("tasks")}
             assert "lab_id" in task_cols
             project_cols = {c["name"] for c in insp.get_columns("projects")}
@@ -250,6 +256,7 @@ async def test_alembic_upgrade_head_sqlite(tmp_path, monkeypatch):
             assert {"source_type", "default_ref_type"} <= project_cols
             provider_cols = {c["name"] for c in insp.get_columns("llm_providers")}
             assert "role" in provider_cols
+            assert {"temperature", "max_context_tokens", "effort"} <= provider_cols
             # 增量迁移新增的表
             for table in (
                 "platform_settings",

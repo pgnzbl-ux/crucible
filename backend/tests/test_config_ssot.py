@@ -179,11 +179,17 @@ def test_build_runner_env_uses_provider_env(monkeypatch):
         "ANTHROPIC_API_KEY": "sk-from-db",
         "ANTHROPIC_MODEL": "deepseek-v4-flash",
         "API_TIMEOUT_MS": "600000",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "128000",
+        "CLAUDE_CODE_EFFORT_LEVEL": "medium",
+        "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT": "1",
     }
     env = ClaudeSdkAdapter().build_runner_env(provider_env)
     assert env["ANTHROPIC_API_KEY"] == "sk-from-db"
     assert env["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
     assert env["ANTHROPIC_MODEL"] == "deepseek-v4-flash"
+    assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "128000"
+    assert env["CLAUDE_CODE_EFFORT_LEVEL"] == "medium"
+    assert env["CLAUDE_CODE_ALWAYS_ENABLE_EFFORT"] == "1"
 
 
 def test_no_env_llm_seed_module():
