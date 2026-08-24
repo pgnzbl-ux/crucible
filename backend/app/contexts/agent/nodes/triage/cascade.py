@@ -9,6 +9,7 @@ T3 族级审议：同根因族(rule|cwe|目录)只审代表，族内传播（置
 每一层的判决都落 Adjudication 审计行并在 AlertGroup.verdict_source 标记
 来源（agent | fast_model | rule | carryover | propagated），复核台可溯源抽查。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -47,8 +48,7 @@ class TierStats:
 
     def summary(self) -> str:
         return (
-            f"携带 {self.carried} · 规则 {self.rule} · 快审 {self.fast} · "
-            f"族代表 {self.agent} · 传播 {self.propagated}"
+            f"携带 {self.carried} · 规则 {self.rule} · 快审 {self.fast} · 族代表 {self.agent} · 传播 {self.propagated}"
         )
 
 
@@ -60,19 +60,26 @@ class Family:
     @property
     def representative(self) -> AlertGroup:
         """成员数最多者为代表；并列取 group_key 排序保证确定性。"""
-        return sorted(
-            self.members, key=lambda g: (-g.member_count, g.group_key)
-        )[0]
+        return sorted(self.members, key=lambda g: (-g.member_count, g.group_key))[0]
 
 
 def _tier_adjudication(
-    *, verdict: str, confidence: float | None, why: list[str], source: str,
-    detail: dict[str, Any], usage: dict[str, int] | None = None,
+    *,
+    verdict: str,
+    confidence: float | None,
+    why: list[str],
+    source: str,
+    detail: dict[str, Any],
+    usage: dict[str, int] | None = None,
 ) -> Adjudication:
     """非 agent 层的审计行：prompt/response 存判定依据摘要，保住回放可解释性。"""
     return Adjudication(
-        attempt=1, verdict=verdict, confidence=confidence,
-        why=why, evidence=[], need=[],
+        attempt=1,
+        verdict=verdict,
+        confidence=confidence,
+        why=why,
+        evidence=[],
+        need=[],
         context_log=[{"tier": source, **detail}],
         prompt_text=f"[{source}] 级联前置判定，无 LLM/agent 会话",
         response_text=json.dumps(detail, ensure_ascii=False, default=str),
@@ -81,7 +88,10 @@ def _tier_adjudication(
 
 
 async def _apply(
-    svc: FindingService, group: AlertGroup, adjudication: Adjudication, *,
+    svc: FindingService,
+    group: AlertGroup,
+    adjudication: Adjudication,
+    *,
     source: str,
 ) -> None:
     adjudication.alert_group_id = group.id
@@ -91,23 +101,25 @@ async def _apply(
         from app.contexts.agent.usage_ledger import record_usage
 
         await record_usage(
-            svc.session, task_id=group.task_id, run_id=None,
-            node_key="triage", usage=adjudication.usage or {},
+            svc.session,
+            task_id=group.task_id,
+            run_id=None,
+            node_key="triage",
+            usage=adjudication.usage or {},
             source="fast_model",
         )
     await svc.record_adjudication(group=group, adjudication=adjudication)
 
 
-async def rule_by_rep(
-    session, rep_ids: list[str]
-) -> tuple[dict[str, str], dict[str, str]]:
+async def rule_by_rep(session, rep_ids: list[str]) -> tuple[dict[str, str], dict[str, str]]:
     """rep_id → (rule_id, fingerprint) 批量预取。"""
     if not rep_ids:
         return {}, {}
-    rows = (await session.execute(
-        select(RawFinding.id, RawFinding.rule_id, RawFinding.fingerprint)
-        .where(RawFinding.id.in_(rep_ids))
-    )).all()
+    rows = (
+        await session.execute(
+            select(RawFinding.id, RawFinding.rule_id, RawFinding.fingerprint).where(RawFinding.id.in_(rep_ids))
+        )
+    ).all()
     return {rid: rule for rid, rule, _fp in rows}, {rid: fp for rid, _rule, fp in rows}
 
 
@@ -115,7 +127,10 @@ async def rule_by_rep(
 
 
 async def apply_carryover(
-    svc: FindingService, *, groups: list[AlertGroup], project_id: str | None,
+    svc: FindingService,
+    *,
+    groups: list[AlertGroup],
+    project_id: str | None,
     settings,
 ) -> tuple[list[AlertGroup], int]:
     """返回 (仍未决的组, 携带定案数)。
@@ -134,25 +149,27 @@ async def apply_carryover(
     min_conf = settings.triage_carryover_min_confidence
     from app.contexts.task.models import Task
 
-    rows = (await session.execute(
-        select(RawFinding.fingerprint, AlertGroup.ai_verdict, AlertGroup.ai_confidence)
-        .join(AlertGroup, AlertGroup.representative_finding_id == RawFinding.id)
-        .join(Task, Task.id == AlertGroup.task_id)
-        .where(
-            Task.project_id == project_id,
-            AlertGroup.status.in_(("adjudicated", "resolved")),
-            AlertGroup.ai_verdict.in_(("tp", "fp")),
-            AlertGroup.ai_confidence >= min_conf,
-            # 只携带 agent 亲审真值：rule/fast/propagated 入库即成"永久真值"
-            # 会跨任务自举复利（与 T1 统计同口径）
-            or_(
-                AlertGroup.verdict_source.is_(None),
-                AlertGroup.verdict_source == "agent",
-            ),
-            RawFinding.fingerprint.in_(fingerprints),
+    rows = (
+        await session.execute(
+            select(RawFinding.fingerprint, AlertGroup.ai_verdict, AlertGroup.ai_confidence)
+            .join(AlertGroup, AlertGroup.representative_finding_id == RawFinding.id)
+            .join(Task, Task.id == AlertGroup.task_id)
+            .where(
+                Task.project_id == project_id,
+                AlertGroup.status.in_(("adjudicated", "resolved")),
+                AlertGroup.ai_verdict.in_(("tp", "fp")),
+                AlertGroup.ai_confidence >= min_conf,
+                # 只携带 agent 亲审真值：rule/fast/propagated 入库即成"永久真值"
+                # 会跨任务自举复利（与 T1 统计同口径）
+                or_(
+                    AlertGroup.verdict_source.is_(None),
+                    AlertGroup.verdict_source == "agent",
+                ),
+                RawFinding.fingerprint.in_(fingerprints),
+            )
+            .order_by(AlertGroup.ai_confidence.desc())
         )
-        .order_by(AlertGroup.ai_confidence.desc())
-    )).all()
+    ).all()
     history: dict[str, tuple[str, float]] = {}
     for fp, verdict, conf in rows:
         history.setdefault(fp, (verdict, float(conf or 0)))
@@ -166,9 +183,12 @@ async def apply_carryover(
             continue
         verdict, conf = hit
         await _apply(
-            svc, group,
+            svc,
+            group,
             _tier_adjudication(
-                verdict=verdict, confidence=conf, source="carryover",
+                verdict=verdict,
+                confidence=conf,
+                source="carryover",
                 why=[f"同项目同指纹历史判决携带（{verdict}，置信 {conf}）"],
                 detail={"fingerprint": fp, "historical_verdict": verdict},
             ),
@@ -182,7 +202,10 @@ async def apply_carryover(
 
 
 async def rule_fp_rates(
-    session, *, min_samples: int, resolved_weight: float = 3.0,
+    session,
+    *,
+    min_samples: int,
+    resolved_weight: float = 3.0,
 ) -> dict[str, tuple[float, float]]:
     """规则 FP 先验：验证真值(resolution)加权融合 agent 亲审。
 
@@ -207,25 +230,29 @@ async def rule_fp_rates(
         (AlertGroup.ai_verdict == "tp", 1.0),
         else_=0.0,
     )
-    rows = (await session.execute(
-        select(
-            RawFinding.rule_id,
-            func.sum(fp_expr).label("fp_w"),
-            func.sum(tp_expr).label("tp_w"),
-        )
-        .join(AlertGroup, AlertGroup.representative_finding_id == RawFinding.id)
-        .where(or_(
-            AlertGroup.resolution.is_not(None),
-            and_(
-                AlertGroup.ai_verdict.in_(("tp", "fp")),
+    rows = (
+        await session.execute(
+            select(
+                RawFinding.rule_id,
+                func.sum(fp_expr).label("fp_w"),
+                func.sum(tp_expr).label("tp_w"),
+            )
+            .join(AlertGroup, AlertGroup.representative_finding_id == RawFinding.id)
+            .where(
                 or_(
-                    AlertGroup.verdict_source.is_(None),
-                    AlertGroup.verdict_source == "agent",
-                ),
-            ),
-        ))
-        .group_by(RawFinding.rule_id)
-    )).all()
+                    AlertGroup.resolution.is_not(None),
+                    and_(
+                        AlertGroup.ai_verdict.in_(("tp", "fp")),
+                        or_(
+                            AlertGroup.verdict_source.is_(None),
+                            AlertGroup.verdict_source == "agent",
+                        ),
+                    ),
+                )
+            )
+            .group_by(RawFinding.rule_id)
+        )
+    ).all()
     return {
         rule: (float(fp_w or 0) / total, total)
         for rule, fp_w, tp_w in rows
@@ -234,7 +261,10 @@ async def rule_fp_rates(
 
 
 async def calibrated_propagate_factor(
-    session, *, default_factor: float, min_verified: int,
+    session,
+    *,
+    default_factor: float,
+    min_verified: int,
     project_id: str | None = None,
 ) -> float:
     """传播折扣按历史验证一致率自校准。
@@ -251,7 +281,8 @@ async def calibrated_propagate_factor(
                     AlertGroup.ai_verdict == "fp",
                     AlertGroup.resolution.in_(("false_positive", "ignored")),
                 ),
-            ), 1.0,
+            ),
+            1.0,
         ),
         else_=0.0,
     )
@@ -273,27 +304,24 @@ async def calibrated_propagate_factor(
 
 
 async def apply_rule_preverdict(
-    svc: FindingService, *, groups: list[AlertGroup], settings,
+    svc: FindingService,
+    *,
+    groups: list[AlertGroup],
+    settings,
 ) -> tuple[list[AlertGroup], int]:
     """返回 (仍未决的组, 规则前置定案数)。"""
     if not getattr(settings, "triage_rule_enabled", False) or not groups:
         return groups, 0
     session = svc.session
     rates = await rule_fp_rates(
-        session, min_samples=settings.triage_rule_min_samples,
-        resolved_weight=getattr(
-            settings, "triage_feedback_resolved_weight", 3.0
-        ),
+        session,
+        min_samples=settings.triage_rule_min_samples,
+        resolved_weight=getattr(settings, "triage_feedback_resolved_weight", 3.0),
     )
-    hot = {
-        rule: (rate, n) for rule, (rate, n) in rates.items()
-        if rate >= settings.triage_rule_fp_rate_min
-    }
+    hot = {rule: (rate, n) for rule, (rate, n) in rates.items() if rate >= settings.triage_rule_fp_rate_min}
     if not hot:
         return groups, 0
-    rule_of, _ = await rule_by_rep(
-        session, [g.representative_finding_id for g in groups]
-    )
+    rule_of, _ = await rule_by_rep(session, [g.representative_finding_id for g in groups])
     remaining = []
     decided = 0
     for group in groups:
@@ -304,9 +332,12 @@ async def apply_rule_preverdict(
             continue
         rate, n = hit
         await _apply(
-            svc, group,
+            svc,
+            group,
             _tier_adjudication(
-                verdict="fp", confidence=min(rate, 0.99), source="rule",
+                verdict="fp",
+                confidence=min(rate, 0.99),
+                source="rule",
                 why=[f"规则 {rule} 历史 agent 亲审 FP 率 {rate:.0%}（n={n}）"],
                 detail={"rule_id": rule, "fp_rate": rate, "samples": n},
             ),
@@ -346,8 +377,19 @@ def _fast_prompt(pack, group, *, rubric: str | None) -> tuple[str, str]:
     return system, user
 
 
+def _snapshot_provider(provider):
+    """复制轻量 Messages 消费的字段，避免并发协程读取 ORM 对象。"""
+    from app.contexts.settings.provider_runtime import ProviderRuntimeConfig
+
+    return ProviderRuntimeConfig.from_provider(provider)
+
+
 async def fast_screen(
-    ctx, svc: FindingService, *, groups: list[AlertGroup], settings,
+    ctx,
+    svc: FindingService,
+    *,
+    groups: list[AlertGroup],
+    settings,
 ) -> tuple[list[AlertGroup], int]:
     """返回 (升级到 agent 的组, 快审定案数)。快审失败/低置信一律升级，绝不下沉 fp。"""
     from app.core.llm_gateway import llm_complete, parse_verdict_json
@@ -379,7 +421,9 @@ async def fast_screen(
             escalated.append(group)
             continue
         system, user = _fast_prompt(
-            pack, group, rubric=load_rubric(pack.hypothesis_class),
+            pack,
+            group,
+            rubric=load_rubric(pack.hypothesis_class),
         )
         prepared.append((group, system, user))
 
@@ -394,20 +438,15 @@ async def fast_screen(
         return groups, 0
     # ORM 对象并发跨协程读属性是隐性契约（绑定 session 过期即 greenlet 崩）：
     # 快照成纯值再交给并发调用，与解析会话彻底解耦
-    from types import SimpleNamespace
-
-    provider = SimpleNamespace(
-        id=provider.id, model=provider.model, base_url=provider.base_url,
-        api_key_encrypted=provider.api_key_encrypted,
-        timeout_ms=provider.timeout_ms,
-    )
+    provider = _snapshot_provider(provider)
 
     sem = asyncio.Semaphore(FAST_CONCURRENCY)
     # 快审全程可见：每 FAST_PROGRESS_EVERY 次调用播报一次进度
     state = {"done": 0, "tp": 0, "fp": 0, "escalated": 0}
     total = len(prepared)
     emit_phase(
-        ctx, f"快审启动：{total} 组送 screening 模型（并发 {FAST_CONCURRENCY}）",
+        ctx,
+        f"快审启动：{total} 组送 screening 模型（并发 {FAST_CONCURRENCY}）",
         phase="triage",
     )
 
@@ -422,30 +461,36 @@ async def fast_screen(
         if state["done"] % FAST_PROGRESS_EVERY == 0 or state["done"] == total:
             emit_phase(
                 ctx,
-                f"快审 {state['done']}/{total}"
-                f"（tp {state['tp']} · fp {state['fp']} · 升级 {state['escalated']}）",
+                f"快审 {state['done']}/{total}（tp {state['tp']} · fp {state['fp']} · 升级 {state['escalated']}）",
                 phase="triage",
             )
             if ctx.on_event:
-                ctx.on_event({
-                    "type": "triage.progress",
-                    "adjudicated": state["tp"] + state["fp"],
-                    "pending": total - state["done"],
-                    "tiers": {
-                        "carried": 0, "rule": 0,
-                        "fast_model": state["tp"] + state["fp"],
-                        "agent": 0, "propagated": 0,
-                    },
-                    "stage": "fast_screen",
-                })
+                ctx.on_event(
+                    {
+                        "type": "triage.progress",
+                        "adjudicated": state["tp"] + state["fp"],
+                        "pending": total - state["done"],
+                        "tiers": {
+                            "carried": 0,
+                            "rule": 0,
+                            "fast_model": state["tp"] + state["fp"],
+                            "agent": 0,
+                            "propagated": 0,
+                        },
+                        "stage": "fast_screen",
+                    }
+                )
 
     async def _one(item) -> tuple[AlertGroup, tuple | None]:
         group, system, user = item
         async with sem:
             try:
                 result = await llm_complete(
-                    role="screening", system=system, user=user,
-                    provider=provider, max_tokens=1024,
+                    role="screening",
+                    system=system,
+                    user=user,
+                    provider=provider,
+                    max_tokens=1024,
                 )
                 parsed = parse_verdict_json(result.text)
             except Exception as e:  # noqa: BLE001 — 瞬时失败升级；平台级 LLM 失败中止
@@ -453,9 +498,7 @@ async def fast_screen(
                 from app.core.agent_runner import AgentRunnerError
 
                 if is_llm_api_failure(str(e)):
-                    raise AgentRunnerError(
-                        f"AI 节点 triage LLM 调用失败: {e}"
-                    ) from e
+                    raise AgentRunnerError(f"AI 节点 triage LLM 调用失败: {e}") from e
                 logger.info("快审失败升级 agent: %s %s", group.group_key, e)
                 _note_progress(None)
                 return group, None
@@ -485,14 +528,13 @@ async def fast_screen(
 
     results: list[tuple[AlertGroup, tuple | None]] = []
     for start in range(0, len(prepared), FAST_BATCH):
-        batch = prepared[start:start + FAST_BATCH]
+        batch = prepared[start : start + FAST_BATCH]
         results.extend(await asyncio.gather(*[_one(item) for item in batch]))
         exhausted, spent, budget = await budget_state(session, ctx.task_id)
         if exhausted and start + FAST_BATCH < len(prepared):
             emit_phase(
                 ctx,
-                f"token 预算耗尽（{spent}/{budget}），快审中止于"
-                f" {len(results)}/{len(prepared)}，其余升级 agent 审议",
+                f"token 预算耗尽（{spent}/{budget}），快审中止于 {len(results)}/{len(prepared)}，其余升级 agent 审议",
                 phase="triage",
             )
             break
@@ -507,9 +549,12 @@ async def fast_screen(
         verdict, confidence, parsed, result = outcome
         if verdict in ("tp", "fp") and confidence >= threshold:
             await _apply(
-                svc, group,
+                svc,
+                group,
                 _tier_adjudication(
-                    verdict=verdict, confidence=confidence, source="fast_model",
+                    verdict=verdict,
+                    confidence=confidence,
+                    source="fast_model",
                     why=[str(w) for w in (parsed.get("why") or [])][:5],
                     detail={"model": result.model},
                     usage=result.usage,
@@ -536,7 +581,8 @@ def family_key_of(group: AlertGroup, rule_id: str | None) -> str:
 
 
 def group_families(
-    groups: list[AlertGroup], rule_of: dict[str, str],
+    groups: list[AlertGroup],
+    rule_of: dict[str, str],
 ) -> list[Family]:
     families: dict[str, Family] = {}
     for group in groups:
@@ -548,7 +594,11 @@ def group_families(
 
 
 async def propagate_family_verdicts(
-    svc: FindingService, *, family: Family, rep: AlertGroup, settings,
+    svc: FindingService,
+    *,
+    family: Family,
+    rep: AlertGroup,
+    settings,
     factor: float | None = None,
 ) -> tuple[int, int]:
     """代表判决传播到成员。返回 (传播定案数, 转人工数)。
@@ -559,20 +609,15 @@ async def propagate_family_verdicts(
     """
     verdict = rep.ai_verdict
     confidence = float(rep.ai_confidence or 0)
-    discount = (
-        factor if factor is not None
-        else float(getattr(settings, "triage_propagate_confidence_factor", 0.85))
-    )
+    discount = factor if factor is not None else float(getattr(settings, "triage_propagate_confidence_factor", 0.85))
     propagated = review = 0
     for member in family.members:
         if member.id == rep.id:
             continue
-        if (
-            verdict in ("tp", "fp")
-            and confidence >= settings.triage_propagate_min_confidence
-        ):
+        if verdict in ("tp", "fp") and confidence >= settings.triage_propagate_min_confidence:
             await _apply(
-                svc, member,
+                svc,
+                member,
                 _tier_adjudication(
                     verdict=verdict,
                     confidence=round(confidence * discount, 3),

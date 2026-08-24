@@ -3,6 +3,7 @@
 级联的意义：1000+ 组只有少数不确定项走到全价 agent。各层判决必须
 落审计行并标记 verdict_source，取消信号逐层穿透。
 """
+
 import hashlib
 import json
 import os
@@ -59,13 +60,20 @@ def _cascade_settings(**kw):
 
 def _agent_output(verdict="tp", confidence=0.9):
     return {
-        "verdict": verdict, "confidence": confidence,
-        "why": ["x"], "evidence": [{"file": "app.py", "lines": "2-2"}], "need": [],
+        "verdict": verdict,
+        "confidence": confidence,
+        "why": ["x"],
+        "evidence": [{"file": "app.py", "lines": "2-2"}],
+        "need": [],
     }
 
 
 async def _seed_env(
-    factory, tmp_path, *, current: list[dict], prior_groups: list[dict] | None = None,
+    factory,
+    tmp_path,
+    *,
+    current: list[dict],
+    prior_groups: list[dict] | None = None,
 ):
     """current/prior 每项：{rule, file_path, cwe, fingerprint?, verdict?, conf?, source?}。
 
@@ -81,14 +89,18 @@ async def _seed_env(
     repo = tmp_path / "repo"
     (repo / "module").mkdir(parents=True, exist_ok=True)
     (repo / "module" / "db.py").write_text(
-        "def handler(q):\n    return 'SELECT ' + q\n", encoding="utf-8",
+        "def handler(q):\n    return 'SELECT ' + q\n",
+        encoding="utf-8",
     )
 
     async def _add_task(status, groups_spec, *, adjudicated):
         task = Task(
-            project_address="x", task_type="discovery",
-            vulnerability_description=None, owner_id="u1",
-            status=status, project_id="p1",
+            project_address="x",
+            task_type="discovery",
+            vulnerability_description=None,
+            owner_id="u1",
+            status=status,
+            project_id="p1",
         )
         session.add(task)
         await session.flush()
@@ -96,31 +108,46 @@ async def _seed_env(
         session.add(run)
         await session.flush()
         sr = ScanRun(
-            task_id=task.id, run_id=run.id, node_run_id=f"nr-{task.id[:4]}",
-            engine="semgrep", status="completed", config_summary={},
+            task_id=task.id,
+            run_id=run.id,
+            node_run_id=f"nr-{task.id[:4]}",
+            engine="semgrep",
+            status="completed",
+            config_summary={},
         )
         session.add(sr)
         await session.flush()
         for i, spec in enumerate(groups_spec):
             f = RawFinding(
-                task_id=task.id, scan_run_id=sr.id, engine="semgrep",
-                rule_id=spec["rule"], cwe=spec.get("cwe", "CWE-89"),
-                severity="error", file_path=spec["file_path"],
-                line_start=2, line_end=2, message="tainted query",
-                fingerprint=spec.get("fingerprint") or hashlib.sha256(
-                    f"{spec['rule']}:{spec['file_path']}:{i}:{task.id[:4]}".encode()
-                ).hexdigest(),
+                task_id=task.id,
+                scan_run_id=sr.id,
+                engine="semgrep",
+                rule_id=spec["rule"],
+                cwe=spec.get("cwe", "CWE-89"),
+                severity="error",
+                file_path=spec["file_path"],
+                line_start=2,
+                line_end=2,
+                message="tainted query",
+                fingerprint=spec.get("fingerprint")
+                or hashlib.sha256(f"{spec['rule']}:{spec['file_path']}:{i}:{task.id[:4]}".encode()).hexdigest(),
                 raw={},
             )
             session.add(f)
             await session.flush()
             group = AlertGroup(
-                task_id=task.id, group_key=f"gk-{task.id[:4]}-{i}",
-                cwe=spec.get("cwe", "CWE-89"), file_path=spec["file_path"],
-                function_symbol="handler", line_span="1-3", member_count=1,
-                representative_finding_id=f.id, engine_set=["semgrep"],
+                task_id=task.id,
+                group_key=f"gk-{task.id[:4]}-{i}",
+                cwe=spec.get("cwe", "CWE-89"),
+                file_path=spec["file_path"],
+                function_symbol="handler",
+                line_span="1-3",
+                member_count=1,
+                representative_finding_id=f.id,
+                engine_set=["semgrep"],
                 status=spec.get("status", "adjudicated" if adjudicated else "clustered"),
-                clue_grade=spec.get("grade", "B"), priority=spec.get("priority", "high"),
+                clue_grade=spec.get("grade", "B"),
+                priority=spec.get("priority", "high"),
             )
             if adjudicated:
                 group.ai_verdict = spec.get("verdict")
@@ -146,10 +173,16 @@ async def _seed_env(
 
     async with factory() as session:
         ctx = NodeContext(
-            task_id=current_task_id, run_id="r-cur", host_workdir=str(tmp_path),
-            source_path=str(repo), vulnerability_description="",
-            project_address="x", project_ref=None, project_id="p1",
-            db_session=session, node_run_id="nr-triage",
+            task_id=current_task_id,
+            run_id="r-cur",
+            host_workdir=str(tmp_path),
+            source_path=str(repo),
+            vulnerability_description="",
+            project_address="x",
+            project_ref=None,
+            project_id="p1",
+            db_session=session,
+            node_run_id="nr-triage",
             runner_env={"ANTHROPIC_API_KEY": "test"},
         )
         yield ctx, session
@@ -158,10 +191,11 @@ async def _seed_env(
 async def _groups_of(session, task_id):
     from app.contexts.finding.models import AlertGroup
 
-    return (await session.execute(
-        select(AlertGroup).where(AlertGroup.task_id == task_id)
-        .order_by(AlertGroup.group_key)
-    )).scalars().all()
+    return (
+        (await session.execute(select(AlertGroup).where(AlertGroup.task_id == task_id).order_by(AlertGroup.group_key)))
+        .scalars()
+        .all()
+    )
 
 
 @pytest.mark.asyncio
@@ -170,11 +204,17 @@ async def test_t0_carryover_reuses_prior_verdict(factory, tmp_path):
     from app.contexts.agent.nodes.triage import TriageNode
 
     gen = _seed_env(
-        factory, tmp_path,
-        prior_groups=[{
-            "rule": "r.a", "file_path": "module/db.py",
-            "verdict": "fp", "conf": 0.9, "fingerprint": "FP-SAME",
-        }],
+        factory,
+        tmp_path,
+        prior_groups=[
+            {
+                "rule": "r.a",
+                "file_path": "module/db.py",
+                "verdict": "fp",
+                "conf": 0.9,
+                "fingerprint": "FP-SAME",
+            }
+        ],
         current=[{"rule": "r.a", "file_path": "module/db.py", "fingerprint": "FP-SAME"}],
     )
     ctx, session = await gen.__anext__()
@@ -201,12 +241,10 @@ async def test_t1_rule_fp_rate_preverdict(factory, tmp_path):
     """规则历史 agent 亲审 FP 率达标 → 新命中直接判 fp。"""
     from app.contexts.agent.nodes.triage import TriageNode
 
-    noisy = [
-        {"rule": "r.noisy", "file_path": f"module/f{i}.py", "verdict": "fp", "conf": 0.9}
-        for i in range(20)
-    ]
+    noisy = [{"rule": "r.noisy", "file_path": f"module/f{i}.py", "verdict": "fp", "conf": 0.9} for i in range(20)]
     gen = _seed_env(
-        factory, tmp_path,
+        factory,
+        tmp_path,
         prior_groups=noisy,
         current=[
             {"rule": "r.noisy", "file_path": "module/new1.py"},
@@ -240,7 +278,8 @@ async def test_t2_fast_model_decides_and_escalates(factory, tmp_path):
     from app.contexts.agent.nodes.triage import TriageNode
 
     gen = _seed_env(
-        factory, tmp_path,
+        factory,
+        tmp_path,
         current=[
             {"rule": "r.a", "file_path": "module/db.py"},
             {"rule": "r.b", "file_path": "module/db.py"},
@@ -257,7 +296,9 @@ async def test_t2_fast_model_decides_and_escalates(factory, tmp_path):
             else json.dumps({"verdict": "need_more_context", "confidence": 0.3, "why": [], "need": ["入口"]})
         )
         return SimpleNamespace(
-            text=text, model="fast-1", provider_id="pv",
+            text=text,
+            model="fast-1",
+            provider_id="pv",
             usage={"prompt_tokens": 10, "completion_tokens": 5},
         )
 
@@ -266,8 +307,11 @@ async def test_t2_fast_model_decides_and_escalates(factory, tmp_path):
 
     async def fake_provider(session, role):
         return SimpleNamespace(
-            id="pv", model="fast-1", base_url="http://llm.test",
-            api_key_encrypted="", timeout_ms=None,
+            id="pv",
+            model="fast-1",
+            base_url="http://llm.test",
+            api_key_encrypted="",
+            timeout_ms=None,
         )
 
     with (
@@ -286,12 +330,31 @@ async def test_t2_fast_model_decides_and_escalates(factory, tmp_path):
     # 台账：快审与 agent 亲审各记一行消耗
     from app.contexts.task.models import AgentUsage
 
-    rows = (await session.execute(
-        select(AgentUsage).where(AgentUsage.task_id == ctx.task_id)
-    )).scalars().all()
+    rows = (await session.execute(select(AgentUsage).where(AgentUsage.task_id == ctx.task_id))).scalars().all()
     assert {r.source for r in rows} == {"fast_model", "agent"}
     assert any(r.source == "fast_model" and r.prompt_tokens > 0 for r in rows)
     await gen.aclose()
+
+
+def test_fast_provider_snapshot_keeps_request_settings():
+    from app.contexts.agent.nodes.triage.cascade import _snapshot_provider
+
+    provider = SimpleNamespace(
+        id="pv",
+        model="fast-1",
+        base_url="http://llm.test",
+        api_key_encrypted="sk-test",
+        timeout_ms=42_000,
+        temperature=0.7,
+        effort="low",
+    )
+
+    snapshot = _snapshot_provider(provider)
+
+    assert snapshot is not provider
+    assert snapshot.temperature == 0.7
+    assert snapshot.effort == "low"
+    assert snapshot.timeout_ms == 42_000
 
 
 @pytest.mark.asyncio
@@ -302,7 +365,8 @@ async def test_fast_screen_balance_failure_aborts_triage(factory, tmp_path):
     from app.core.llm_gateway import LlmGatewayConfigError
 
     gen = _seed_env(
-        factory, tmp_path,
+        factory,
+        tmp_path,
         current=[
             {"rule": "r.a", "file_path": "module/db.py", "fingerprint": "A"},
             {"rule": "r.b", "file_path": "module/db.py", "fingerprint": "B"},
@@ -317,8 +381,11 @@ async def test_fast_screen_balance_failure_aborts_triage(factory, tmp_path):
 
     async def fake_provider(session, role):
         return SimpleNamespace(
-            id="pv", model="fast-1", base_url="http://llm.test",
-            api_key_encrypted="", timeout_ms=None,
+            id="pv",
+            model="fast-1",
+            base_url="http://llm.test",
+            api_key_encrypted="",
+            timeout_ms=None,
         )
 
     with (
@@ -343,7 +410,8 @@ async def test_t3_family_representative_and_propagation(factory, tmp_path):
     from app.contexts.agent.nodes.triage import TriageNode
 
     gen = _seed_env(
-        factory, tmp_path,
+        factory,
+        tmp_path,
         current=[
             {"rule": "r.a", "file_path": "module/db.py"},
             {"rule": "r.a", "file_path": "module/db2.py"},
@@ -383,7 +451,8 @@ async def test_t3_low_confidence_rep_goes_review(factory, tmp_path):
     from app.contexts.agent.nodes.triage import TriageNode
 
     gen = _seed_env(
-        factory, tmp_path,
+        factory,
+        tmp_path,
         current=[
             {"rule": "r.a", "file_path": "module/db.py"},
             {"rule": "r.a", "file_path": "module/db2.py"},
@@ -414,7 +483,8 @@ async def test_cascade_cancel_penetrates_between_tiers(factory, tmp_path):
     from app.contexts.task.models import Task
 
     gen = _seed_env(
-        factory, tmp_path,
+        factory,
+        tmp_path,
         current=[{"rule": "r.a", "file_path": "module/db.py"}],
     )
     ctx, session = await gen.__anext__()
@@ -448,13 +518,17 @@ async def test_feedback_resolution_truth_weights_rule_prior(factory, tmp_path):
 
     verified_fp = [
         {
-            "rule": "r.noisy", "file_path": f"module/f{i}.py",
-            "verdict": "tp", "conf": 0.9, "resolution": "false_positive",
+            "rule": "r.noisy",
+            "file_path": f"module/f{i}.py",
+            "verdict": "tp",
+            "conf": 0.9,
+            "resolution": "false_positive",
         }
         for i in range(7)
     ]
     gen = _seed_env(
-        factory, tmp_path,
+        factory,
+        tmp_path,
         prior_groups=verified_fp,
         current=[{"rule": "r.noisy", "file_path": "module/new1.py"}],
     )
@@ -483,13 +557,17 @@ async def test_feedback_calibrates_propagation_discount(factory, tmp_path):
 
     disagreeing = [
         {
-            "rule": f"r.d{i}", "file_path": f"module/d{i}.py",
-            "verdict": "tp", "conf": 0.9, "resolution": "false_positive",
+            "rule": f"r.d{i}",
+            "file_path": f"module/d{i}.py",
+            "verdict": "tp",
+            "conf": 0.9,
+            "resolution": "false_positive",
         }
         for i in range(10)
     ]
     gen = _seed_env(
-        factory, tmp_path,
+        factory,
+        tmp_path,
         prior_groups=disagreeing,
         current=[
             {"rule": "r.a", "file_path": "module/db.py"},
@@ -520,11 +598,17 @@ async def test_feedback_low_sample_keeps_default_discount(factory, tmp_path):
     from app.contexts.agent.nodes.triage import TriageNode
 
     gen = _seed_env(
-        factory, tmp_path,
-        prior_groups=[{
-            "rule": "r.d0", "file_path": "module/d0.py",
-            "verdict": "tp", "conf": 0.9, "resolution": "false_positive",
-        }],
+        factory,
+        tmp_path,
+        prior_groups=[
+            {
+                "rule": "r.d0",
+                "file_path": "module/d0.py",
+                "verdict": "tp",
+                "conf": 0.9,
+                "resolution": "false_positive",
+            }
+        ],
         current=[
             {"rule": "r.a", "file_path": "module/db.py"},
             {"rule": "r.a", "file_path": "module/db2.py"},
@@ -555,7 +639,8 @@ async def test_streaming_dispatch_during_triage(factory, tmp_path):
     from app.contexts.finding.models import LeadRun
 
     gen = _seed_env(
-        factory, tmp_path,
+        factory,
+        tmp_path,
         current=[
             {"rule": "r.a", "file_path": "module/db.py", "grade": "A"},
             {"rule": "r.a", "file_path": "module/db2.py", "grade": "A"},
@@ -610,12 +695,18 @@ async def test_t0_rejects_non_agent_provenance(factory, tmp_path):
     from app.contexts.agent.nodes.triage import TriageNode
 
     gen = _seed_env(
-        factory, tmp_path,
-        prior_groups=[{
-            "rule": "r.a", "file_path": "module/db.py",
-            "verdict": "fp", "conf": 0.99, "source": "rule",
-            "fingerprint": "FP-RULE",
-        }],
+        factory,
+        tmp_path,
+        prior_groups=[
+            {
+                "rule": "r.a",
+                "file_path": "module/db.py",
+                "verdict": "fp",
+                "conf": 0.99,
+                "source": "rule",
+                "fingerprint": "FP-RULE",
+            }
+        ],
         current=[{"rule": "r.a", "file_path": "module/db.py", "fingerprint": "FP-RULE"}],
     )
     ctx, session = await gen.__anext__()
@@ -624,7 +715,8 @@ async def test_t0_rejects_non_agent_provenance(factory, tmp_path):
         patch("app.core.config.get_settings", return_value=_cascade_settings(triage_fast_model_enabled=False)),
         patch(
             "app.contexts.agent.ai_runner.run_ai_node_with_shape_retry",
-            new_callable=AsyncMock, return_value=_agent_output("tp", 0.9),
+            new_callable=AsyncMock,
+            return_value=_agent_output("tp", 0.9),
         ) as agent,
     ):
         out = await TriageNode().execute(ctx, None)
@@ -658,9 +750,13 @@ async def test_enqueue_leads_dedupes_by_lead_run_id():
     try:
         items = [{"lead_run_id": "lr1", "group_id": "g1", "run_id": "r1"}]
         first = await lq.enqueue_leads("t1", items)
-        again = await lq.enqueue_leads("t1", items + [
-            {"lead_run_id": "lr2", "group_id": "g2", "run_id": "r1"},
-        ])
+        again = await lq.enqueue_leads(
+            "t1",
+            items
+            + [
+                {"lead_run_id": "lr2", "group_id": "g2", "run_id": "r1"},
+            ],
+        )
         assert (first, again) == (1, 1)  # 第二次只有 lr2 是新的
         queued = [json.loads(p)["lead_run_id"] for p in mem.lists["crucible:lead_verify:t1"]]
         assert sorted(queued) == ["lr1", "lr2"]  # lr1 只有一份
@@ -686,7 +782,8 @@ async def test_t2_empty_slices_escalate_without_fast_call(factory, tmp_path):
     from app.contexts.agent.nodes.triage import TriageNode
 
     gen = _seed_env(
-        factory, tmp_path,
+        factory,
+        tmp_path,
         current=[
             {"rule": "r.a", "file_path": "module/db.py"},
             {"rule": "r.c", "file_path": "module/missing.py"},
@@ -700,7 +797,8 @@ async def test_t2_empty_slices_escalate_without_fast_call(factory, tmp_path):
         fast_users.append(user)
         return SimpleNamespace(
             text=json.dumps({"verdict": "fp", "confidence": 0.9, "why": [], "need": []}),
-            model="fast-1", provider_id="pv",
+            model="fast-1",
+            provider_id="pv",
             usage={"prompt_tokens": 10, "completion_tokens": 5},
         )
 
@@ -709,8 +807,11 @@ async def test_t2_empty_slices_escalate_without_fast_call(factory, tmp_path):
 
     async def fake_provider(session, role):
         return SimpleNamespace(
-            id="pv", model="fast-1", base_url="http://llm.test",
-            api_key_encrypted="", timeout_ms=None,
+            id="pv",
+            model="fast-1",
+            base_url="http://llm.test",
+            api_key_encrypted="",
+            timeout_ms=None,
         )
 
     with (
