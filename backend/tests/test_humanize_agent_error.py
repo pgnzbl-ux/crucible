@@ -38,6 +38,21 @@ from app.contexts.agent.errors import humanize_agent_error
         ("靶场搭建 5 轮全失败: attempt 5 compose up 失败", "5 轮排障"),
         ("AI 节点 reproduce 超时(1800s)", "超时"),
         ("节点 audit 未调用 submit_result(无 .node_output.json)", "没有提交节点结果"),
+        (
+            "AI 节点 canary 未产出 .node_output.json (exit=1): "
+            "bubblewrap is required for subprocess env scrubbing and isolation",
+            "缺少进程隔离依赖",
+        ),
+        (
+            "AI 节点 canary 未产出 .node_output.json (exit=1): "
+            "Sandbox dependencies not available: socat not installed",
+            "缺少沙箱运行依赖",
+        ),
+        (
+            "AI 节点 canary 未产出 .node_output.json (exit=1): "
+            "bwrap: No permissions to create new namespace",
+            "嵌套沙箱被 Docker 拦截",
+        ),
     ],
 )
 def test_humanize_known_errors(raw, expect_title_part):
@@ -89,3 +104,36 @@ def test_runner_module_missing_not_misclassified_as_submit_result():
     assert "入口模块" in title
     assert "重建" in hint
     assert "agent-runner" in hint.lower() or "Dockerfile" in hint
+
+
+def test_runner_bubblewrap_missing_not_misclassified_as_submit_result():
+    raw = (
+        "AI 节点 canary 未产出 .node_output.json (exit=1): "
+        "bubblewrap is required for subprocess env scrubbing and isolation"
+    )
+    title, hint = humanize_agent_error(raw)
+    assert "submit_result" not in title
+    assert "进程隔离依赖" in title
+    assert "bubblewrap" in hint
+
+
+def test_runner_socat_missing_not_misclassified_as_submit_result():
+    raw = (
+        "AI 节点 canary 未产出 .node_output.json (exit=1): "
+        "Sandbox dependencies not available: socat not installed"
+    )
+    title, hint = humanize_agent_error(raw)
+    assert "submit_result" not in title
+    assert "沙箱运行依赖" in title
+    assert "socat" in hint
+
+
+def test_runner_namespace_block_not_misclassified_as_submit_result():
+    raw = (
+        "AI 节点 canary 未产出 .node_output.json (exit=1): "
+        "bwrap: No permissions to create new namespace"
+    )
+    title, hint = humanize_agent_error(raw)
+    assert "submit_result" not in title
+    assert "嵌套沙箱" in title
+    assert "seccomp" in hint

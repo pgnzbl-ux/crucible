@@ -115,7 +115,7 @@ export function RegisterSourceDrawer({ open, mode, onClose }: RegisterSourceDraw
             name="default_ref_type"
             label="默认引用类型"
             rules={[{ required: true, message: '请选择引用类型' }]}
-            extra="点选分支 / 标签 / 提交；登记后创建任务时会沿用同一套选择方式。"
+            extra="选择默认的分支、标签或提交；之后发起审计时可沿用。"
           >
             <GitRefTypeBanners />
           </Form.Item>
@@ -147,7 +147,7 @@ export function RegisterSourceDrawer({ open, mode, onClose }: RegisterSourceDraw
             label="源码包"
             valuePropName="fileList"
             getValueFromEvent={(e) => (Array.isArray(e) ? e : e?.fileList)}
-            extra="zip / tar / tar.gz，最大 200MB。登记后可从本页开验证任务。"
+            extra="支持 zip / tar / tar.gz，最大 200MB。登记后可从此项目发起审计。"
             rules={[
               {
                 validator: async (_, fileList) => {

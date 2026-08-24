@@ -1,6 +1,7 @@
 """配置真相源：连接串只进 .env；产品版本只进 pyproject.toml；LLM 只走后台 Provider；MinIO bucket 写死。"""
-import sys
+
 import os
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,7 +10,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 from app.core.config import Settings
-
 
 _LLM_ENV_FIELDS = (
     "llm_base_url",
@@ -84,7 +84,7 @@ def test_app_version_has_single_source():
     declared = pyproject["project"]["version"]
 
     config_src = (backend_root / "app" / "core" / "config.py").read_text(encoding="utf-8")
-    assert 'app_version: str =' not in config_src
+    assert "app_version: str =" not in config_src
     assert declared not in config_src
 
     assert "app_version" not in Settings.model_fields
@@ -162,6 +162,7 @@ def test_build_runner_env_ignores_settings_llm(monkeypatch):
     assert "ANTHROPIC_AUTH_TOKEN" not in env
     assert "ANTHROPIC_BASE_URL" not in env
     assert env["CLAUDE_SDK_MAX_TURNS"] == "9"
+    assert env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "0"
     assert env["HOME"] != "/workspace"
     assert env["HOME"].startswith("/tmp")
 
@@ -184,12 +185,14 @@ def test_build_runner_env_uses_provider_env(monkeypatch):
         "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT": "1",
     }
     env = ClaudeSdkAdapter().build_runner_env(provider_env)
-    assert env["ANTHROPIC_API_KEY"] == "sk-from-db"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-from-db"
+    assert "ANTHROPIC_API_KEY" not in env
     assert env["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
     assert env["ANTHROPIC_MODEL"] == "deepseek-v4-flash"
     assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "128000"
     assert env["CLAUDE_CODE_EFFORT_LEVEL"] == "medium"
     assert env["CLAUDE_CODE_ALWAYS_ENABLE_EFFORT"] == "1"
+    assert env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "0"
 
 
 def test_no_env_llm_seed_module():

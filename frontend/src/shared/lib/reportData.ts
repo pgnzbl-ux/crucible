@@ -82,6 +82,6 @@ export function formatDenoiseFunnel(rd: Record<string, unknown> | null | undefin
   if (finding != null) parts.push(`原始 ${finding}`)
   if (dropped != null) parts.push(`C档 ${dropped}`)
   if (groups != null) parts.push(`复核组 ${groups}`)
-  if (bypass != null) parts.push(`bypass ${bypass}`)
+  if (bypass != null) parts.push(`依赖情报 ${bypass}`)
   return parts.length ? parts.join(' → ') : null
 }

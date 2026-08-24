@@ -4,7 +4,7 @@ Claude Agent SDK 适配器（worker 侧）。
 职责：
 1. 构造注入 agent-runner 容器的 LLM 环境变量（凭据零落盘）
 2. 拼接最终 prompt（含 system guidance + 任务详情）
-3. 容器内权限/黑白名单实现在 runner/run_one.py（独立进程内本地回调，避免 worker 镜像承担 SDK 类型）
+3. 容器内完整工具能力与 Bash 硬拒绝策略实现在 runner/run_one.py
 
 与 ClaudeCodeAdapter 区别：
 - 旧适配器构造 `claude -p "..." --output-format json` CLI 命令
@@ -43,10 +43,10 @@ class ClaudeSdkAdapter:
     """Claude Agent SDK 适配器（worker 侧）。
 
     对外提供两件事：
-    - build_runner_env() → docker run --env 的 8 个 ANTHROPIC_* 变量 + PYTHONUNBUFFERED
+    - build_runner_env() → docker run --env 的 Provider/SDK 运行变量
     - build_prompt_payload(ctx) → 写入 /workspace/.prompt.json 的 JSON 内容
 
-    canUseTool 黑白名单实现在容器内（runner/run_one.py），不污染 worker 镜像。
+    PreToolUse Bash 策略实现在容器内（runner/run_one.py），不污染 worker 镜像。
     """
 
     def __init__(self) -> None:
@@ -63,12 +63,16 @@ class ClaudeSdkAdapter:
             # HOME 指向容器 tmpfs（/tmp），不落共享 /workspace，避免后续节点读到上一跳 SDK 缓存
             "HOME": "/tmp",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            # 外层 Docker 已是隔离边界；SCRUB=1 的内层 bwrap 在当前 runner
+            # 安全配置下会搞挂 Bash。凭据剥离见 run_one PreToolUse env -u。
+            "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "0",
             "CLAUDE_SDK_MAX_TURNS": str(self.max_turns),
         }
         src = provider_env or {}
 
         base_url = src.get("ANTHROPIC_BASE_URL")
-        api_key = src.get("ANTHROPIC_AUTH_TOKEN") or src.get("ANTHROPIC_API_KEY")
+        auth_token = src.get("ANTHROPIC_AUTH_TOKEN")
+        api_key = src.get("ANTHROPIC_API_KEY")
         model = src.get("ANTHROPIC_MODEL")
         timeout = src.get("API_TIMEOUT_MS")
         max_context = src.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS")
@@ -77,9 +81,9 @@ class ClaudeSdkAdapter:
 
         if base_url:
             env["ANTHROPIC_BASE_URL"] = base_url
-        if api_key:
-            # DeepSeek 官方文档使用 ANTHROPIC_AUTH_TOKEN；同时设置 API_KEY 兼容其他端点
-            env["ANTHROPIC_AUTH_TOKEN"] = api_key
+        if auth_token:
+            env["ANTHROPIC_AUTH_TOKEN"] = auth_token
+        elif api_key:
             env["ANTHROPIC_API_KEY"] = api_key
         if model:
             env["ANTHROPIC_MODEL"] = model

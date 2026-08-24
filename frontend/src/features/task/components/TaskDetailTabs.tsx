@@ -350,8 +350,8 @@ function OverviewTab({
             children: [
               task.project_ref ?? '默认分支',
               task.project_ref_type ? ` (${task.project_ref_type})` : '',
-              task.clone_depth != null && task.clone_depth !== 1
-                ? ` · depth=${task.clone_depth}`
+                task.clone_depth != null && task.clone_depth !== 1
+                ? ` · 克隆深度 ${task.clone_depth === 0 ? '全量' : task.clone_depth}`
                 : '',
             ].join(''),
           },

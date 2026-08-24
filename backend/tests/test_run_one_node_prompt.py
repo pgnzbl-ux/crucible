@@ -1,4 +1,5 @@
 """run_one.py：蒸馏 skill 作 system_prompt；user 只带本轮 JSON；不加载桌面插件。"""
+
 import json
 import os
 import sys
@@ -21,7 +22,6 @@ from runner.run_one import (  # noqa: E402
     NODE_AI_KEYS,
     NODE_INPUT_SCHEMAS,
     _build_node_prompt,
-    _build_options,
     _container_source_dir,
     _load_node_skill,
     _sdk_cwd,
@@ -128,13 +128,16 @@ def test_submit_schema_uses_only_anthropic_tool_subset():
 
 def test_node_skills_exist_and_are_sliced():
     assert NODE_AI_KEYS == frozenset(
-        {"profile", "env_ready", "audit", "reproduce", "report", "triage"}
+        {"canary", "profile", "env_ready", "audit", "reproduce", "report", "triage"}
     )
     for key in NODE_AI_KEYS:
         path = NODE_SKILLS / key / "SKILL.md"
         assert path.is_file(), f"缺少 {path}"
         body = path.read_text(encoding="utf-8")
         assert "submit_result" in body
+        if key == "canary":
+            assert "Read" in body and "Bash" in body
+            assert "credential_visible" in body
         if key == "audit":
             assert "一次 HTTP 请求测" not in body
             assert "不发" in body or "禁止" in body
@@ -218,6 +221,32 @@ def test_build_options_appends_skill_without_desktop_plugin():
     assert isinstance(prompt, dict)
     assert prompt.get("preset") == "claude_code"
     assert "画像" in (prompt.get("append") or "")
+
+
+def test_build_options_keeps_full_automation_and_isolates_repo_config():
+    captured: dict = {}
+
+    class CaptureOptions:
+        def __init__(self, **kwargs):
+            captured.clear()
+            captured.update(kwargs)
+
+    import runner.run_one as run_one
+
+    run_one.ClaudeAgentOptions = CaptureOptions
+    run_one._build_options(model="m", max_turns=8, node_key="audit", cwd="/workspace/x")
+
+    assert captured["permission_mode"] == "bypassPermissions"
+    assert captured["tools"] == {"type": "preset", "preset": "claude_code"}
+    assert captured["setting_sources"] == []
+    assert captured["strict_mcp_config"] is True
+    assert captured["sandbox"] == {"enabled": False}
+    pre_hooks = captured["hooks"]["PreToolUse"]
+    assert len(pre_hooks) == 1
+    assert not isinstance(pre_hooks[0], dict), "裸 dict 会被 SDK 静默丢掉 hooks"
+    assert "crucible" in captured["mcp_servers"]
+    assert "mcp__crucible__submit_result" in captured["allowed_tools"]
+    assert "submit_result" not in captured["allowed_tools"]
 
 
 def test_build_options_sets_effort_from_env(monkeypatch):

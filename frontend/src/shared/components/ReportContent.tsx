@@ -132,7 +132,7 @@ export function ReportContent({ report }: ReportContentProps) {
             children: md ? (
               <MarkdownBody source={md} />
             ) : (
-              <Text type="secondary">报告格式已升级，请重新跑任务</Text>
+              <Text type="secondary">本节暂无内容</Text>
             ),
           }
         })}

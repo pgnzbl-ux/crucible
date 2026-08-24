@@ -80,7 +80,7 @@ describe('ReportContent', () => {
     expect(html).toContain('app/login.py')
     expect(html).toContain('9.8')
     expect(html).toContain('降噪漏斗')
-    expect(html).toContain('原始 40 → C档 12 → 复核组 8 → bypass 3')
+    expect(html).toContain('原始 40 → C档 12 → 复核组 8 → 依赖情报 3')
   })
 
   it('shows verification record notice without poc or cvss', () => {
@@ -128,7 +128,7 @@ describe('ReportContent', () => {
         }}
       />,
     )
-    expect(html).toMatch(/报告格式已升级/)
+    expect(html).toMatch(/本节暂无内容/)
   })
 
   it('renders poc_code fence instead of leftover curl markdown', () => {

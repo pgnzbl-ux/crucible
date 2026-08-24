@@ -64,6 +64,10 @@ _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 # 各 AI 节点的 output schema(校验最小必需字段,见 docs/discovery-spec.md §4.3/§6)
 NODE_OUTPUT_SCHEMAS: dict[str, dict] = {
+    "canary": {
+        "required": ["marker", "probe_completed", "credential_visible", "summary"],
+        "optional": [],
+    },
     "profile": {
         "required": ["is_web"],
         "optional": [
@@ -101,6 +105,13 @@ def rewrite_url_for_agent_container(url: str | None) -> str | None:
 
 def _mock_output(node_key: str, input_json: dict[str, Any]) -> dict[str, Any]:
     """Mock 模式:SDK 未启用时返回模拟 output(通过 schema 校验),供编排链路联调。"""
+    if node_key == "canary":
+        return {
+            "marker": "",
+            "probe_completed": False,
+            "credential_visible": True,
+            "summary": "[Mock] 未运行真实 Agent canary",
+        }
     if node_key == "profile":
         hints = input_json.get("hints") or {}
         return {

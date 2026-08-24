@@ -1,6 +1,7 @@
-"""run_one.py Bash 策略：env_ready 拒绝装依赖与 docker。"""
-import sys
+"""run_one.py Bash 策略：节点黑名单 + Provider 凭据清除。"""
+
 import os
+import sys
 from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -10,7 +11,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
 sys.modules.setdefault("claude_agent_sdk", MagicMock())
 
 import pytest
-from runner.run_one import _allowed_tools_for, _classify_bash
+from runner.run_one import (
+    _allowed_tools_for,
+    _bash_command_without_provider_creds,
+    _classify_bash,
+    _pre_tool_use_hook,
+)
 
 
 @pytest.mark.parametrize(
@@ -67,3 +73,87 @@ def test_audit_allowed_tools_are_read_plus_bash_websearch():
 def test_env_ready_allowed_tools_keep_write():
     tools = _allowed_tools_for("env_ready")
     assert "Write" in tools and "WebFetch" in tools
+
+
+def test_bash_command_strips_provider_creds_via_env_unset():
+    wrapped = _bash_command_without_provider_creds("python /workspace/canary/probe.py")
+    assert wrapped.startswith("env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN")
+    assert "bash --noprofile --norc -c" in wrapped
+    assert "probe.py" in wrapped
+    # 幂等：已包装不再套一层
+    assert _bash_command_without_provider_creds(wrapped) == wrapped
+
+
+@pytest.mark.asyncio
+async def test_pre_tool_use_rewrites_bash_to_scrub_creds(monkeypatch, capsys):
+    monkeypatch.setenv("NODE_KEY", "canary")
+    out = await _pre_tool_use_hook(
+        {"tool_name": "Bash", "tool_input": {"command": "python probe.py", "timeout": 30}},
+        None,
+        None,
+    )
+    assert out is not None
+    specific = out["hookSpecificOutput"]
+    assert specific["permissionDecision"] == "allow"
+    updated = specific["updatedInput"]
+    assert updated["timeout"] == 30  # 原字段保留
+    assert "env -u ANTHROPIC_API_KEY" in updated["command"]
+    logged = capsys.readouterr().out
+    assert '"type": "tool.call.scrubbed"' in logged or '"type":"tool.call.scrubbed"' in logged
+
+
+def test_plain_dict_hooks_silently_drop_under_sdk_hasattr_convert():
+    """SDK _convert_hooks_to_internal_format 用 hasattr(m, 'hooks')；裸 dict 会变 hooks=[]。"""
+    matcher = {"matcher": "Bash", "hooks": [object()]}
+    internal = {
+        "matcher": matcher.matcher if hasattr(matcher, "matcher") else None,
+        "hooks": matcher.hooks if hasattr(matcher, "hooks") else [],
+    }
+    assert internal["matcher"] is None
+    assert internal["hooks"] == []
+
+
+def test_build_options_registers_hook_matcher_surviving_sdk_convert(monkeypatch):
+    """注册必须是 HookMatcher 实例，不能是裸 dict。"""
+    from dataclasses import dataclass, field
+    from pathlib import Path
+
+    captured: dict = {}
+
+    class CaptureOptions:
+        def __init__(self, **kwargs):
+            captured.clear()
+            captured.update(kwargs)
+
+    @dataclass
+    class FakeHookMatcher:
+        matcher: str | None = None
+        hooks: list = field(default_factory=list)
+        timeout: float | None = None
+
+    import runner.run_one as run_one
+
+    root = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv(
+        "NODE_SKILL_DIR",
+        str(root / "infrastructure" / "agent-runner" / "node-skills"),
+    )
+    run_one.ClaudeAgentOptions = CaptureOptions
+    run_one.HookMatcher = FakeHookMatcher
+    run_one._build_options(model="m", max_turns=4, node_key="canary", cwd="/workspace")
+
+    pre = captured["hooks"]["PreToolUse"]
+    assert len(pre) == 1
+    assert isinstance(pre[0], FakeHookMatcher)
+    assert not isinstance(pre[0], dict)
+    assert pre[0].matcher == "Bash"
+    assert pre[0].hooks == [run_one._pre_tool_use_hook]
+
+    m = pre[0]
+    internal = {
+        "matcher": m.matcher if hasattr(m, "matcher") else None,
+        "hooks": m.hooks if hasattr(m, "hooks") else [],
+    }
+    assert internal["matcher"] == "Bash"
+    assert internal["hooks"] == [run_one._pre_tool_use_hook]
+

@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from typing import Literal
 
@@ -13,6 +14,7 @@ from app.core.url_security import normalize_https_domain_url
 _PROVIDER_TYPES = frozenset({"deepseek", "anthropic", "custom"})
 _EFFORT_PATTERN = r"^(low|medium|high|xhigh|max|auto)$"
 LlmEffort = Literal["low", "medium", "high", "xhigh", "max", "auto"]
+LlmAuthMode = Literal["api_key", "bearer"]
 
 
 def normalize_provider_type(value: str) -> str:
@@ -24,16 +26,20 @@ def normalize_provider_type(value: str) -> str:
 
 # ── 请求 ──
 
+
 class LlmProviderCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     provider_type: str = Field("deepseek", pattern=r"^(deepseek|anthropic|custom)$")
+    auth_mode: LlmAuthMode | None = None
     base_url: str = Field(..., min_length=5, max_length=512)
-    api_key: str = Field("", max_length=2048, description="明文 API Key，服务端加密存储")
+    api_key: str = Field("", max_length=2048, description="API Key；列表接口仅回显掩码")
     model: str = Field(..., min_length=1, max_length=100)
     timeout_ms: int = Field(600000, ge=10_000, le=3_600_000)
     temperature: float = Field(DEFAULT_LLM_TEMPERATURE, ge=0, le=2)
     max_context_tokens: int = Field(
-        DEFAULT_LLM_MAX_CONTEXT_TOKENS, ge=1024, le=2_000_000,
+        DEFAULT_LLM_MAX_CONTEXT_TOKENS,
+        ge=1024,
+        le=2_000_000,
     )
     effort: LlmEffort = Field(DEFAULT_LLM_EFFORT, pattern=_EFFORT_PATTERN)
     is_default: bool = False
@@ -48,6 +54,7 @@ class LlmProviderCreateRequest(BaseModel):
 class LlmProviderUpdateRequest(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=100)
     provider_type: str | None = Field(None, pattern=r"^(deepseek|anthropic|custom)$")
+    auth_mode: LlmAuthMode | None = None
     base_url: str | None = Field(None, min_length=5, max_length=512)
     api_key: str | None = Field(None, max_length=2048, description="留空表示不修改")
     model: str | None = Field(None, min_length=1, max_length=100)
@@ -65,7 +72,10 @@ class LlmProviderUpdateRequest(BaseModel):
 
 class LlmProviderTestRequest(BaseModel):
     """测试连接 — 可用已有 Provider 或临时参数"""
+
     base_url: str | None = None
+    provider_type: str | None = Field(None, pattern=r"^(deepseek|anthropic|custom)$")
+    auth_mode: LlmAuthMode | None = None
     api_key: str | None = None
     model: str | None = None
     temperature: float | None = Field(None, ge=0, le=2)
@@ -79,10 +89,12 @@ class LlmProviderTestRequest(BaseModel):
 
 # ── 响应 ──
 
+
 class LlmProviderResponse(BaseModel):
     id: str
     name: str
     provider_type: str
+    auth_mode: LlmAuthMode
     base_url: str
     api_key_masked: str = ""
     has_api_key: bool = False
@@ -108,9 +120,27 @@ class LlmProviderTestResult(BaseModel):
     model: str | None = None
 
 
-# ── Credential（任务级凭据，P1-6） ──
+class LlmAgentCanaryChecks(BaseModel):
+    read_tool: bool = False
+    bash_tool: bool = False
+    mcp_submit: bool = False
+    multi_turn: bool = False
+    credential_isolation: bool = False
+    single_terminal: bool = False
 
-import re
+
+class LlmProviderAgentTestResult(BaseModel):
+    ok: bool
+    message: str
+    checks: LlmAgentCanaryChecks = Field(default_factory=LlmAgentCanaryChecks)
+    provider_id: str
+    model: str
+    duration_ms: int | None = None
+    num_turns: int | None = None
+    usage: dict[str, int] = Field(default_factory=dict)
+
+
+# ── Credential（任务级凭据） ──
 
 _ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,62}$")
 _SAFE_FILE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
@@ -120,7 +150,7 @@ class CredentialCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     kind: str = Field("env_var", pattern=r"^(env_var|file)$")
     target: str = Field(..., min_length=1, max_length=255, description="env_var→环境变量名(大写下划线) / file→文件名")
-    secret: str = Field(..., min_length=1, max_length=8192, description="明文凭据，明文存储（响应层掩码）")
+    secret: str = Field(..., min_length=1, max_length=8192, description="凭据值；列表接口仅回显掩码")
     description: str | None = Field(None, max_length=500)
 
     @field_validator("target")

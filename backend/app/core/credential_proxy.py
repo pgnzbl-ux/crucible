@@ -24,7 +24,7 @@ from app.contexts.settings.models import Credential
 logger = logging.getLogger(__name__)
 
 # 平台注入 / 容器运行时保留名，任务凭据不得覆盖
-RESERVED_ENV_NAMES = frozenset({"HOME", "PATH", "NODE_KEY"})
+RESERVED_ENV_NAMES = frozenset({"HOME", "PATH", "BASH_ENV", "NODE_KEY"})
 RESERVED_ENV_PREFIXES = ("ANTHROPIC_",)
 
 

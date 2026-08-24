@@ -108,7 +108,7 @@ export const NODE_STATUS_META: Record<string, { label: string; color: TagProps['
 export const EVENT_PHASE_LABELS: Record<string, string> = {
   start: '启动分析',
   preflight: '环境准备',
-  credentials: '凭据注入',
+  credentials: '注入凭据',
   running: '执行分析',
   source: '源码获取',
   profile: '项目画像',

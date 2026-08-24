@@ -66,7 +66,7 @@ describe('reportData guards', () => {
           bypass_count: 3,
         },
       },
-    })).toBe('原始 40 → C档 12 → 复核组 8 → bypass 3')
+    })).toBe('原始 40 → C档 12 → 复核组 8 → 依赖情报 3')
     expect(formatDenoiseFunnel({})).toBeNull()
   })
 })

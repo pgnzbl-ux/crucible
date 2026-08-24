@@ -16,6 +16,7 @@
 # - PYTHONUNBUFFERED=1 保证 JSONL 实时 flush
 # - HOME=/tmp（容器 tmpfs）供 SDK/CLI 写 cache；不得用 /workspace，避免节点间共享会话
 # - tini 作为 PID 1，回收 SDK fork 出的孤儿子进程
+# - bubblewrap(+socat)：CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 时 CLI 从 Bash 子进程剥凭据所需
 #
 # 构建（build context = 项目根）：
 #   cd <repo-root>
@@ -33,6 +34,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         tini \
         bash \
+        bubblewrap \
+        socat \
         procps \
         psmisc \
         iproute2 \
@@ -59,7 +62,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gawk \
         tar \
         gzip \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && command -v bwrap \
+    && command -v socat
 
 # Node 20.20.2 + npm（从官方 node 镜像拷二进制，不污染 Python 的 pip）
 COPY --from=nodejs /usr/local/bin/node /usr/local/bin/node
@@ -75,6 +80,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt \
 
 # 非 root 用户（与 worker 端 docker run --user 1000:1000 对齐）
 RUN useradd --create-home --uid 1000 --shell /bin/bash runner \
+    && install -d -o root -g root -m 0755 /home/runner/.local/bin \
     && mkdir -p /workspace /app /node-skill && chown -R runner:runner /workspace /app
 
 # vuln-verify-expert 桌面插件与节点 skill 均不进镜像。
@@ -92,6 +98,7 @@ USER runner
 # PYTHONPATH=/app 让 python -m runner.run_one 找到 /app/runner（不依赖 cwd）
 ENV PYTHONUNBUFFERED=1 \
     HOME=/tmp \
+    BASH_ENV=/app/runner/bash_env.sh \
     PYTHONPATH=/app \
     PATH="/usr/local/bin:/home/runner/.local/bin:${PATH}"
 

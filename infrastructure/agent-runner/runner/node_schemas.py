@@ -17,6 +17,26 @@ MCP 工具 schema 约束（2026-08-19 教训）：Anthropic 工具接口只保�
 from __future__ import annotations
 
 NODE_INPUT_SCHEMAS: dict[str, dict] = {
+    "canary": {
+        "type": "object",
+        "properties": {
+            "marker": {
+                "type": "string",
+                "minLength": 1,
+                "description": "通过 Read 工具读取到的兼容性标记原文",
+            },
+            "probe_completed": {
+                "type": "boolean",
+                "description": "是否通过 Bash 执行了平台探针",
+            },
+            "credential_visible": {
+                "type": "boolean",
+                "description": "探针是否发现模型主凭据；不得输出凭据值",
+            },
+            "summary": {"type": "string", "description": "兼容性测试简述"},
+        },
+        "required": ["marker", "probe_completed", "credential_visible", "summary"],
+    },
     "profile": {
         "type": "object",
         "properties": {

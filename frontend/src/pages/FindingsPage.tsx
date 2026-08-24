@@ -435,7 +435,7 @@ export function FindingsPage() {
     <>
       <PageHeader
         title="漏洞线索"
-        subtitle="先选工作队列处理待办，再用搜索定位具体文件 / CWE / 项目"
+        subtitle="按队列处理待办，再用搜索定位文件、CWE 或项目"
         extra={
           <Space>
             {selectedRowKeys.length > 0 ? (

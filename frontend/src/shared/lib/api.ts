@@ -310,6 +310,7 @@ export interface LlmProvider {
   id: string
   name: string
   provider_type: string
+  auth_mode: 'api_key' | 'bearer'
   base_url: string
   api_key_masked: string
   has_api_key: boolean
@@ -331,6 +332,7 @@ export interface LlmProviderListResponse {
 export interface LlmProviderInput {
   name: string
   provider_type: string
+  auth_mode?: 'api_key' | 'bearer'
   base_url: string
   api_key?: string
   model: string
@@ -348,7 +350,27 @@ export interface LlmProviderTestResult {
   model: string | null
 }
 
-// ── Credential（任务级凭据，P1-6） ──
+export interface LlmAgentCanaryChecks {
+  read_tool: boolean
+  bash_tool: boolean
+  mcp_submit: boolean
+  multi_turn: boolean
+  credential_isolation: boolean
+  single_terminal: boolean
+}
+
+export interface LlmProviderAgentTestResult {
+  ok: boolean
+  message: string
+  checks: LlmAgentCanaryChecks
+  provider_id: string
+  model: string
+  duration_ms: number | null
+  num_turns: number | null
+  usage: Record<string, number>
+}
+
+// ── Credential（任务级凭据） ──
 
 export interface Credential {
   id: string
@@ -526,8 +548,13 @@ export const api = {
   testLlmProvider: (id: string) =>
     request<LlmProviderTestResult>(`/settings/llm/providers/${id}/test`, { method: 'POST' }),
 
+  testLlmProviderAgent: (id: string) =>
+    request<LlmProviderAgentTestResult>(`/settings/llm/providers/${id}/agent-test`, { method: 'POST' }),
+
   testLlmConnection: (data: {
     base_url: string
+    provider_type?: string
+    auth_mode?: 'api_key' | 'bearer'
     api_key?: string
     model: string
     temperature?: number
@@ -535,7 +562,7 @@ export const api = {
   }) =>
     request<LlmProviderTestResult>('/settings/llm/test', { method: 'POST', body: JSON.stringify(data) }),
 
-  // Credentials（P1-6）
+  // Credentials
   listCredentials: () => request<CredentialListResponse>('/settings/credentials'),
 
   createCredential: (data: CredentialInput) =>

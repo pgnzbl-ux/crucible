@@ -12,6 +12,7 @@ from .schemas import (
     CredentialListResponse,
     CredentialResponse,
     CredentialUpdateRequest,
+    LlmProviderAgentTestResult,
     LlmProviderCreateRequest,
     LlmProviderListResponse,
     LlmProviderResponse,
@@ -40,6 +41,7 @@ async def get_settings_service(repo: Annotated[SettingsRepository, Depends(get_s
 
 # ── LLM Provider ──
 
+
 @router.get("/llm/providers", response_model=LlmProviderListResponse, dependencies=[Depends(get_current_admin_id)])
 async def list_providers(
     svc: Annotated[SettingsService, Depends(get_settings_service)],
@@ -48,7 +50,12 @@ async def list_providers(
     return LlmProviderListResponse(items=items, total=total)
 
 
-@router.post("/llm/providers", response_model=LlmProviderResponse, status_code=201, dependencies=[Depends(get_current_admin_id)])
+@router.post(
+    "/llm/providers",
+    response_model=LlmProviderResponse,
+    status_code=201,
+    dependencies=[Depends(get_current_admin_id)],
+)
 async def create_provider(
     request: LlmProviderCreateRequest,
     svc: Annotated[SettingsService, Depends(get_settings_service)],
@@ -59,7 +66,11 @@ async def create_provider(
         raise HTTPException(400, str(e)) from e
 
 
-@router.put("/llm/providers/{provider_id}", response_model=LlmProviderResponse, dependencies=[Depends(get_current_admin_id)])
+@router.put(
+    "/llm/providers/{provider_id}",
+    response_model=LlmProviderResponse,
+    dependencies=[Depends(get_current_admin_id)],
+)
 async def update_provider(
     provider_id: str,
     request: LlmProviderUpdateRequest,
@@ -84,7 +95,11 @@ async def delete_provider(
         raise HTTPException(404, "Provider 不存在")
 
 
-@router.post("/llm/providers/{provider_id}/activate", response_model=LlmProviderResponse, dependencies=[Depends(get_current_admin_id)])
+@router.post(
+    "/llm/providers/{provider_id}/activate",
+    response_model=LlmProviderResponse,
+    dependencies=[Depends(get_current_admin_id)],
+)
 async def activate_provider(
     provider_id: str,
     svc: Annotated[SettingsService, Depends(get_settings_service)],
@@ -95,12 +110,31 @@ async def activate_provider(
     return provider
 
 
-@router.post("/llm/providers/{provider_id}/test", response_model=LlmProviderTestResult, dependencies=[Depends(get_current_admin_id)])
+@router.post(
+    "/llm/providers/{provider_id}/test",
+    response_model=LlmProviderTestResult,
+    dependencies=[Depends(get_current_admin_id)],
+)
 async def test_provider(
     provider_id: str,
     svc: Annotated[SettingsService, Depends(get_settings_service)],
 ) -> LlmProviderTestResult:
     return await svc.test_connection(provider_id=provider_id)
+
+
+@router.post(
+    "/llm/providers/{provider_id}/agent-test",
+    response_model=LlmProviderAgentTestResult,
+    dependencies=[Depends(get_current_admin_id)],
+)
+async def test_provider_agent(
+    provider_id: str,
+    svc: Annotated[SettingsService, Depends(get_settings_service)],
+) -> LlmProviderAgentTestResult:
+    result = await svc.test_agent_compatibility(provider_id)
+    if result is None:
+        raise HTTPException(404, "Provider 不存在")
+    return result
 
 
 @router.post("/llm/test", response_model=LlmProviderTestResult, dependencies=[Depends(get_current_admin_id)])
@@ -111,6 +145,8 @@ async def test_connection(
     """临时参数测试连接（未保存前先验证）"""
     return await svc.test_connection(
         base_url=request.base_url,
+        provider_type=request.provider_type,
+        auth_mode=request.auth_mode,
         api_key=request.api_key,
         model=request.model,
         temperature=request.temperature,
@@ -118,7 +154,8 @@ async def test_connection(
     )
 
 
-# ── Credential（任务级凭据，P1-6 Credential Proxy） ──
+# ── Credential（任务级凭据） ──
+
 
 @router.get("/credentials", response_model=CredentialListResponse)
 async def list_credentials(

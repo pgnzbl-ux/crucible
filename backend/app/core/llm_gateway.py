@@ -4,6 +4,7 @@
 role 仅 screening/final；hunting 是 P2 占位，解析到即抛配置错误。
 Mock 开关 llm_gateway_enabled=False 返回固定判决，供链路联调。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -53,17 +54,13 @@ async def _resolve_provider(session, role: str):
     from app.contexts.settings.models import LlmProvider
 
     if role not in VALID_ROLES:
-        raise LlmGatewayConfigError(
-            f"非法模型角色: {role}（Phase 1 仅 {VALID_ROLES}；hunting 为 P2 占位）"
-        )
+        raise LlmGatewayConfigError(f"非法模型角色: {role}（Phase 1 仅 {VALID_ROLES}；hunting 为 P2 占位）")
     result = await session.execute(
         select(LlmProvider).where(LlmProvider.role == role, LlmProvider.is_default.isnot(True))
     )
     provider = result.scalars().first()
     if provider is None:
-        result = await session.execute(
-            select(LlmProvider).where(LlmProvider.is_default.is_(True))
-        )
+        result = await session.execute(select(LlmProvider).where(LlmProvider.is_default.is_(True)))
         provider = result.scalars().first()
     if provider is None:
         raise LlmGatewayConfigError("未配置任何 LLM Provider（含默认），无法轻量二审")
@@ -71,13 +68,16 @@ async def _resolve_provider(session, role: str):
 
 
 def _mock_verdict_text(role: str) -> str:
-    return json.dumps({
-        "verdict": "need_more_context",
-        "confidence": 0.3,
-        "why": ["[Mock] llm_gateway_enabled=False 固定判决"],
-        "evidence": [],
-        "need": ["[Mock] 无"],
-    }, ensure_ascii=False)
+    return json.dumps(
+        {
+            "verdict": "need_more_context",
+            "confidence": 0.3,
+            "why": ["[Mock] llm_gateway_enabled=False 固定判决"],
+            "evidence": [],
+            "need": ["[Mock] 无"],
+        },
+        ensure_ascii=False,
+    )
 
 
 async def llm_complete(
@@ -104,43 +104,42 @@ async def llm_complete(
             raise LlmGatewayConfigError("需要 session 或 provider")
         provider = await _resolve_provider(session, role)
 
+    from app.contexts.settings.provider_runtime import (
+        ProviderRuntimeConfig,
+        normalize_effort,
+    )
+
+    runtime = provider if isinstance(provider, ProviderRuntimeConfig) else ProviderRuntimeConfig.from_provider(provider)
+
     if not settings.llm_gateway_enabled:
         return LlmResult(
-            text=_mock_verdict_text(role), model=provider.model,
-            provider_id=provider.id, usage={"prompt_tokens": 0, "completion_tokens": 0},
+            text=_mock_verdict_text(role),
+            model=runtime.model,
+            provider_id=runtime.id,
+            usage={"prompt_tokens": 0, "completion_tokens": 0},
         )
 
     import httpx
 
-    from app.contexts.settings.models import (
-        DEFAULT_LLM_EFFORT,
-        DEFAULT_LLM_TEMPERATURE,
-    )
-
-    url = provider.base_url.rstrip("/") + "/v1/messages"
+    url = runtime.base_url.rstrip("/") + "/v1/messages"
     headers = {
-        "x-api-key": provider.api_key_encrypted or "",
-        "authorization": f"Bearer {provider.api_key_encrypted or ''}",
+        **runtime.auth_headers(),
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
     }
     payload: dict[str, Any] = {
-        "model": provider.model,
+        "model": runtime.model,
         "max_tokens": max_tokens,
-        "temperature": float(
-            DEFAULT_LLM_TEMPERATURE
-            if getattr(provider, "temperature", None) is None
-            else provider.temperature
-        ),
+        "temperature": runtime.temperature,
         "system": system,
         "messages": [{"role": "user", "content": user}],
-        "output_config": {
-            "effort": getattr(provider, "effort", None) or DEFAULT_LLM_EFFORT,
-        },
     }
-    timeout_seconds = min((provider.timeout_ms or 120000) / 1000, 120)
+    normalized_effort = normalize_effort(runtime.effort)
+    if normalized_effort is not None:
+        payload["output_config"] = {"effort": normalized_effort}
+    # Provider.timeout_ms 是这条调用链的单一超时配置；不要在网关内再静默截断。
+    timeout_seconds = runtime.timeout_ms / 1000
     last_error: Exception | None = None
-    dropped_effort = False
     for attempt in range(3):  # 网络错误指数退避重试 2 次
         try:
             async with httpx.AsyncClient(timeout=timeout_seconds) as client:
@@ -153,28 +152,15 @@ async def llm_complete(
                 )
             if resp.status_code >= 400:
                 body = (resp.text or resp.reason_phrase or "")[:500]
-                # 部分网关不认 output_config.effort：剥掉后重试一次
-                if (
-                    not dropped_effort
-                    and resp.status_code in (400, 422)
-                    and "output_config" in payload
-                ):
-                    payload.pop("output_config", None)
-                    dropped_effort = True
-                    continue
-                raise LlmGatewayConfigError(
-                    f"LLM 网关调用失败({role}): HTTP {resp.status_code}: {body}"
-                )
+                raise LlmGatewayConfigError(f"LLM 网关调用失败({role}): HTTP {resp.status_code}: {body}")
             data: dict[str, Any] = resp.json()
             blocks = data.get("content") or []
-            text = "".join(
-                b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text"
-            )
+            text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
             usage_raw = data.get("usage") or {}
             return LlmResult(
                 text=text,
-                model=data.get("model") or provider.model,
-                provider_id=provider.id,
+                model=data.get("model") or runtime.model,
+                provider_id=runtime.id,
                 usage={
                     "prompt_tokens": int(usage_raw.get("input_tokens") or 0),
                     "completion_tokens": int(usage_raw.get("output_tokens") or 0),
@@ -182,11 +168,14 @@ async def llm_complete(
             )
         except LlmGatewayConfigError:
             raise
-        except Exception as e:  # noqa: BLE001 — 4xx 直接失败，5xx/网络重试
+        except httpx.HTTPError as e:
             last_error = e
-            if attempt < 2 and not isinstance(e, httpx.HTTPStatusError):
-                await asyncio.sleep(0.5 * (2 ** attempt))
+            if attempt < 2:
+                await asyncio.sleep(0.5 * (2**attempt))
                 continue
+            break
+        except Exception as e:  # noqa: BLE001 — 响应格式等非传输错误不盲目重试
+            last_error = e
             break
     raise LlmGatewayConfigError(f"LLM 网关调用失败({role}): {last_error}")
 
@@ -201,5 +190,5 @@ def parse_verdict_json(text: str) -> dict[str, Any]:
     start = cleaned.find("{")
     end = cleaned.rfind("}")
     if start >= 0 and end > start:
-        cleaned = cleaned[start:end + 1]
+        cleaned = cleaned[start : end + 1]
     return json.loads(cleaned)

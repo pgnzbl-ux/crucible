@@ -33,11 +33,19 @@ from .models import (
     LlmProvider,
     PlatformSetting,
 )
+from .provider_runtime import (
+    ProviderRuntimeConfig,
+    anthropic_auth_headers,
+    default_auth_mode,
+    normalize_effort,
+    resolve_auth_mode,
+)
 from .repository import CredentialRepository, SettingsRepository
 from .schemas import (
     CredentialCreateRequest,
     CredentialResponse,
     CredentialUpdateRequest,
+    LlmProviderAgentTestResult,
     LlmProviderCreateRequest,
     LlmProviderResponse,
     LlmProviderTestResult,
@@ -58,20 +66,15 @@ def to_response(provider: LlmProvider, plain_key: str = "") -> LlmProviderRespon
         id=provider.id,
         name=provider.name,
         provider_type=normalize_provider_type(provider.provider_type),
+        auth_mode=resolve_auth_mode(provider.provider_type, getattr(provider, "auth_mode", None)),
         base_url=provider.base_url,
         api_key_masked=mask_secret(plain_key),
         has_api_key=bool(plain_key),
         model=provider.model,
         timeout_ms=provider.timeout_ms,
-        temperature=(
-            DEFAULT_LLM_TEMPERATURE
-            if provider.temperature is None
-            else float(provider.temperature)
-        ),
+        temperature=(DEFAULT_LLM_TEMPERATURE if provider.temperature is None else float(provider.temperature)),
         max_context_tokens=(
-            DEFAULT_LLM_MAX_CONTEXT_TOKENS
-            if provider.max_context_tokens is None
-            else int(provider.max_context_tokens)
+            DEFAULT_LLM_MAX_CONTEXT_TOKENS if provider.max_context_tokens is None else int(provider.max_context_tokens)
         ),
         effort=provider.effort or DEFAULT_LLM_EFFORT,
         is_default=provider.is_default,
@@ -103,6 +106,7 @@ class SettingsService:
         provider = LlmProvider(
             name=request.name,
             provider_type=request.provider_type,
+            auth_mode=resolve_auth_mode(request.provider_type, request.auth_mode),
             base_url=base_url,
             api_key_encrypted=request.api_key,
             model=request.model,
@@ -116,13 +120,17 @@ class SettingsService:
         provider = await self.repo.create(provider)
         return to_response(provider, request.api_key)
 
-    async def update_provider(
-        self, provider_id: str, request: LlmProviderUpdateRequest
-    ) -> LlmProviderResponse | None:
+    async def update_provider(self, provider_id: str, request: LlmProviderUpdateRequest) -> LlmProviderResponse | None:
         provider = await self.repo.get_by_id(provider_id)
         if not provider:
             return None
-        updates = request.model_dump(exclude_unset=True, exclude={"api_key"})
+        updates = request.model_dump(
+            exclude_unset=True,
+            exclude_none=True,
+            exclude={"api_key"},
+        )
+        if request.provider_type is not None and request.auth_mode is None:
+            updates["auth_mode"] = default_auth_mode(request.provider_type)
         if request.base_url is not None:
             updates["base_url"] = await validate_public_https_url(request.base_url)
         for field, value in updates.items():
@@ -158,13 +166,9 @@ class SettingsService:
         """创建/重试任务前的准入：必须有已激活且带 API Key 的默认 Provider。"""
         provider = await self.get_default_provider()
         if provider is None:
-            raise ValueError(
-                "未配置默认 LLM Provider，请到「设置」配置并激活后再创建或重试任务"
-            )
+            raise ValueError("未配置默认 LLM Provider，请到「设置」配置并激活后再创建或重试任务")
         if not (provider.api_key_encrypted or "").strip():
-            raise ValueError(
-                "默认 LLM Provider 未配置 API Key，请到「设置」补全后再创建或重试任务"
-            )
+            raise ValueError("默认 LLM Provider 未配置 API Key，请到「设置」补全后再创建或重试任务")
         return provider
 
     async def _get_or_create_platform_setting(self) -> PlatformSetting:
@@ -177,7 +181,8 @@ class SettingsService:
             max_concurrent_tasks=1,
             max_concurrent_agent_runners=hard_cap,
             lead_verify_per_task=min(_core_config.get_settings().lead_verify_per_task, hard_cap),
-            reproduce_per_lab=1, task_token_budget=0,
+            reproduce_per_lab=1,
+            task_token_budget=0,
         )
         try:
             async with self.repo.session.begin_nested():
@@ -192,15 +197,9 @@ class SettingsService:
         hard_cap = _core_config.get_settings().agent_runner_concurrency_limit
         # 旧数据或部署硬顶下调后，读取即收敛到一组真正可执行的预算。
         row.max_concurrent_tasks = min(max(1, row.max_concurrent_tasks), hard_cap)
-        row.max_concurrent_agent_runners = min(
-            max(1, row.max_concurrent_agent_runners), hard_cap
-        )
-        row.lead_verify_per_task = min(
-            max(1, row.lead_verify_per_task), row.max_concurrent_agent_runners
-        )
-        row.reproduce_per_lab = min(
-            max(1, row.reproduce_per_lab), row.lead_verify_per_task
-        )
+        row.max_concurrent_agent_runners = min(max(1, row.max_concurrent_agent_runners), hard_cap)
+        row.lead_verify_per_task = min(max(1, row.lead_verify_per_task), row.max_concurrent_agent_runners)
+        row.reproduce_per_lab = min(max(1, row.reproduce_per_lab), row.lead_verify_per_task)
         return RuntimeSettingsResponse(
             max_concurrent_tasks=row.max_concurrent_tasks,
             max_concurrent_agent_runners=row.max_concurrent_agent_runners,
@@ -236,9 +235,7 @@ class SettingsService:
         await self.repo.session.flush()
         return response
 
-    async def update_runtime_settings(
-        self, request: RuntimeSettingsUpdateRequest
-    ) -> RuntimeSettingsResponse:
+    async def update_runtime_settings(self, request: RuntimeSettingsUpdateRequest) -> RuntimeSettingsResponse:
         row = await self._get_or_create_platform_setting()
         updates = request.model_dump(exclude_none=True)
         merged = {
@@ -269,6 +266,8 @@ class SettingsService:
         base_url: str | None = None,
         api_key: str | None = None,
         model: str | None = None,
+        provider_type: str | None = None,
+        auth_mode: str | None = None,
         temperature: float | None = None,
         effort: str | None = None,
     ) -> LlmProviderTestResult:
@@ -281,6 +280,8 @@ class SettingsService:
         resolved_url = base_url
         resolved_key = api_key
         resolved_model = model
+        resolved_provider_type = provider_type
+        resolved_auth_mode = auth_mode
         resolved_temperature = temperature
         resolved_effort = effort
 
@@ -290,6 +291,8 @@ class SettingsService:
                 resolved_url = resolved_url or provider.base_url
                 resolved_key = resolved_key or provider.api_key_encrypted
                 resolved_model = resolved_model or provider.model
+                resolved_provider_type = resolved_provider_type or provider.provider_type
+                resolved_auth_mode = resolved_auth_mode or getattr(provider, "auth_mode", None)
                 if resolved_temperature is None:
                     resolved_temperature = provider.temperature
                 if resolved_effort is None:
@@ -299,6 +302,10 @@ class SettingsService:
             resolved_temperature = DEFAULT_LLM_TEMPERATURE
         if resolved_effort is None:
             resolved_effort = DEFAULT_LLM_EFFORT
+        try:
+            resolved_auth_mode = resolve_auth_mode(resolved_provider_type, resolved_auth_mode)
+        except ValueError as exc:
+            return LlmProviderTestResult(ok=False, message=str(exc))
 
         if not resolved_url or not resolved_key or not resolved_model:
             return LlmProviderTestResult(ok=False, message="缺少 base_url / api_key / model 参数")
@@ -310,19 +317,21 @@ class SettingsService:
 
         endpoint = f"{resolved_url}/v1/messages"
         started = time.time()
-        payload = {
+        payload: dict = {
             "model": resolved_model,
             "max_tokens": 8,
             "temperature": resolved_temperature,
             "messages": [{"role": "user", "content": "ping"}],
-            "output_config": {"effort": resolved_effort},
         }
+        normalized_effort = normalize_effort(resolved_effort)
+        if normalized_effort is not None:
+            payload["output_config"] = {"effort": normalized_effort}
         try:
             async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
                 resp = await client.post(
                     endpoint,
                     headers={
-                        "x-api-key": resolved_key,
+                        **anthropic_auth_headers(resolved_key, resolved_auth_mode),
                         "anthropic-version": "2023-06-01",
                         "content-type": "application/json",
                     },
@@ -334,37 +343,31 @@ class SettingsService:
                     ok=True, message=f"连接成功（{latency}ms）", latency_ms=latency, model=resolved_model
                 )
             body = resp.text[:200]
-            return LlmProviderTestResult(
-                ok=False, message=f"HTTP {resp.status_code}: {body}", latency_ms=latency
-            )
+            return LlmProviderTestResult(ok=False, message=f"HTTP {resp.status_code}: {body}", latency_ms=latency)
         except httpx.HTTPError as e:
             return LlmProviderTestResult(ok=False, message=f"网络错误: {e}")
         except Exception as e:  # noqa: BLE001
             return LlmProviderTestResult(ok=False, message=f"异常: {e}")
 
+    async def test_agent_compatibility(
+        self, provider_id: str
+    ) -> LlmProviderAgentTestResult | None:
+        """用指定 Provider 启动真实 Docker Agent canary。"""
+        provider = await self.repo.get_by_id(provider_id)
+        if provider is None:
+            return None
+        runtime = ProviderRuntimeConfig.from_provider(provider)
+        # canary 最长运行数分钟；先结束只读事务，避免长期占用数据库连接。
+        await self.repo.session.rollback()
+        from .agent_canary import run_provider_agent_canary
+
+        return await run_provider_agent_canary(runtime)
+
     # ── 运行时配置（Agent 调用） ──
 
     def build_env_from_provider(self, provider: LlmProvider) -> dict[str, str]:
         """Provider → 沙箱环境变量（凭据零落盘）"""
-        max_context = (
-            DEFAULT_LLM_MAX_CONTEXT_TOKENS
-            if provider.max_context_tokens is None
-            else int(provider.max_context_tokens)
-        )
-        effort = provider.effort or DEFAULT_LLM_EFFORT
-        return {
-            "ANTHROPIC_BASE_URL": provider.base_url,
-            "ANTHROPIC_AUTH_TOKEN": provider.api_key_encrypted,
-            "ANTHROPIC_API_KEY": provider.api_key_encrypted,
-            "ANTHROPIC_MODEL": provider.model,
-            "ANTHROPIC_SMALL_FAST_MODEL": provider.model,
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL": provider.model,
-            "API_TIMEOUT_MS": str(provider.timeout_ms),
-            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(max_context),
-            "CLAUDE_CODE_EFFORT_LEVEL": effort,
-            "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT": "1",
-        }
+        return ProviderRuntimeConfig.from_provider(provider).agent_env()
 
     # ── Credential CRUD（P1-6 Credential Proxy） ──
 
@@ -373,9 +376,7 @@ class SettingsService:
         creds = await repo.list_by_owner(owner_id)
         return [_credential_to_response(c) for c in creds], len(creds)
 
-    async def create_credential(
-        self, owner_id: str, request: CredentialCreateRequest
-    ) -> CredentialResponse:
+    async def create_credential(self, owner_id: str, request: CredentialCreateRequest) -> CredentialResponse:
         repo = CredentialRepository(self.repo.session)
         cred = Credential(
             owner_id=owner_id,
@@ -412,9 +413,7 @@ class SettingsService:
         await repo.delete(cred)
         return True
 
-    async def resolve_for_task(
-        self, owner_id: str, refs: list[str]
-    ) -> list[Credential]:
+    async def resolve_for_task(self, owner_id: str, refs: list[str]) -> list[Credential]:
         """任务注入用：按 id 批量取凭据(明文)（校验 owner）"""
         repo = CredentialRepository(self.repo.session)
         return await repo.get_by_ids_for_owner(refs, owner_id)

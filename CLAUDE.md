@@ -111,6 +111,6 @@ Celery worker 从默认 Provider 取端点/Key/模型，经 `docker run --env` �
 配置说明：
 - DeepSeek 官方：`https://api.deepseek.com/anthropic`（`deepseek-v4-flash` / `deepseek-v4-pro`；思考 thinking.type=enabled|disabled 默认 enabled，强度 output_config.effort=low|high|max 默认 high）
 - 旧模型名 `deepseek-chat`/`deepseek-reasoner` 已于 2026-07-24 弃用
-- `ClaudeSdkAdapter.build_runner_env()` 注入 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` / `API_TIMEOUT_MS` / `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` / `CLAUDE_CODE_MAX_CONTEXT_TOKENS` / `CLAUDE_CODE_EFFORT_LEVEL` / `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT` / `PYTHONUNBUFFERED=1` 等环境变量（高级设置来自默认 LLM Provider：temperature 仅 Messages 路径；上下文与 effort 进 Agent CLI）
-- 容器内 SDK 通过 `PreToolUse` hook + `allowed_tools` 白名单实现白盒审计黑白名单（只允许 `Read` / `Grep` / `Glob` + 受限的 `Bash` 子集：git-read / curl / python）
+- `ClaudeSdkAdapter.build_runner_env()` 注入 `ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` / `API_TIMEOUT_MS` / `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` / `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0`（内层 bwrap 与锁定 Docker 冲突；Bash 凭据由 runner PreToolUse `env -u` 剥离）/ `CLAUDE_CODE_MAX_CONTEXT_TOKENS` / `PYTHONUNBUFFERED=1` 等变量；凭据按 `auth_mode` 只注入 `ANTHROPIC_AUTH_TOKEN` 或 `ANTHROPIC_API_KEY` 之一，非 auto effort 另注入 CLI effort 变量
+- 容器内 SDK 保留完整 Claude Code 工具集并使用 `bypassPermissions` 实现无人值守自动化；`allowed_tools` 仅为自动批准提示，不是白名单。平台通过 `PreToolUse` Bash 硬拒绝、Docker 隔离、`setting_sources=[]`、strict MCP 与子进程凭据清理建立边界
 - 沙箱镜像：Python 3.11.15 + Node 20.20.2 + 完整 Linux 命令（非 slim）。靶场项目运行时仍在 `.vuln-env`，不在本镜像里装 JDK/Go/PHP/Chromium

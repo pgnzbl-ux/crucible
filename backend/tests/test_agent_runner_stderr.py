@@ -107,6 +107,34 @@ def test_create_passes_dns_and_keeps_egress():
     assert kwargs["network"]
 
 
+def test_create_keeps_default_seccomp_and_drops_linux_capabilities():
+    """纯 Linux runner 依赖外层 Docker 边界，不为内层 bwrap 放宽 seccomp。"""
+    from app.core.agent_runner import AgentRunnerManager, AgentRunnerSpec
+
+    fake_container = MagicMock()
+    fake_container.id = "cid-bwrap"
+    mgr = AgentRunnerManager.__new__(AgentRunnerManager)
+    mgr._client = MagicMock()
+    mgr._client.containers.create.return_value = fake_container
+    mgr._active_ids = set()
+
+    with patch.object(mgr, "_ensure_image"):
+        mgr.create(
+            AgentRunnerSpec(
+                host_workdir="/tmp/x",
+                image="crucible-agent-runner:base",
+            )
+        )
+
+    kwargs = mgr._client.containers.create.call_args.kwargs
+    assert kwargs["user"] == "1000:1000"
+    assert kwargs["read_only"] is True
+    assert kwargs["cap_drop"] == ["ALL"]
+    assert "no-new-privileges" in kwargs["security_opt"]
+    assert "seccomp=unconfined" not in kwargs["security_opt"]
+    assert "cap_add" not in kwargs
+
+
 def test_create_bind_mounts_skill_dir_readonly():
     from app.core.agent_runner import AgentRunnerManager, AgentRunnerSpec
 

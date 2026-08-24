@@ -171,7 +171,7 @@ export function FindingDetailPage() {
                   {data.ai_confidence != null && <Text>{data.ai_confidence.toFixed(2)}</Text>}
                 </Space>
               ) : (
-                '未审（≠ 误报）'
+                '尚未研判'
               )}
             </Descriptions.Item>
             <Descriptions.Item label="引擎">{(data.engine_set ?? []).join(', ')}</Descriptions.Item>
@@ -190,7 +190,7 @@ export function FindingDetailPage() {
         </Card>
 
         {rep && (
-          <Card title="命中代码(脱敏)" size="small">
+          <Card title="命中代码" size="small">
             <Paragraph style={{ marginBottom: 8 }}>
               <Space size={[4, 4]} wrap>
                 <Tag color={evidenceMeta.hasDataflow ? 'blue' : 'default'}>
@@ -279,7 +279,7 @@ export function FindingDetailPage() {
                   <Space wrap>
                     <Tag>{lead.status}</Tag>
                     {lead.verdict && <Tag color={lead.verdict === 'confirmed' ? 'green' : 'orange'}>{lead.verdict}</Tag>}
-                    {lead.gate_verdict && <Text type="secondary">白盒门禁：{lead.gate_verdict}</Text>}
+                    {lead.gate_verdict && <Text type="secondary">白盒结论：{lead.gate_verdict}</Text>}
                     {lead.error && <Text type="danger">{lead.error}</Text>}
                   </Space>
                 </Descriptions.Item>
@@ -289,7 +289,7 @@ export function FindingDetailPage() {
         )}
 
         {(data.reviews ?? []).length > 0 && (
-          <Card title="复核记录(标注数据)" size="small">
+          <Card title="复核记录" size="small">
             {data.reviews.map((r) => (
               <Paragraph key={r.id}>
                 <Tag>{r.action}</Tag>
@@ -311,7 +311,7 @@ export function FindingDetailPage() {
           okButtonProps={{ disabled: !confirmText.trim(), loading: reviewMutation.isPending }}
           onCancel={() => setConfirmOpen(false)}
         >
-          <Paragraph type="secondary">请记录确认依据，便于报告审阅和后续规则评估。</Paragraph>
+          <Paragraph type="secondary">请简要说明确认依据，便于报告审阅。</Paragraph>
           <Input.TextArea
             rows={3}
             placeholder="例如：用户输入可控，数据流可达危险调用，终认已证明影响"
@@ -321,7 +321,7 @@ export function FindingDetailPage() {
         </Modal>
 
         <Modal
-          title="判误报(必须选原因——动作即标注数据)"
+          title="判为误报"
           open={rejectOpen}
           onOk={() =>
             reviewMutation.mutate({
@@ -333,6 +333,7 @@ export function FindingDetailPage() {
           okButtonProps={{ disabled: rejectTags.length === 0 }}
           onCancel={() => setRejectOpen(false)}
         >
+          <Paragraph type="secondary">请至少选择一个原因。</Paragraph>
           <Checkbox.Group
             options={[
               '输入不可控',
@@ -348,7 +349,7 @@ export function FindingDetailPage() {
           <Input.TextArea
             rows={2}
             style={{ marginTop: 8 }}
-            placeholder="补充说明(可选)"
+            placeholder="补充说明（可选）"
             value={rejectText}
             onChange={(e) => setRejectText(e.target.value)}
           />
@@ -365,7 +366,7 @@ export function FindingDetailPage() {
             checked={includeEngine}
             onChange={(e) => setIncludeEngine(e.target.checked)}
           >
-            附带引擎原文(默认不含，防止锚定审计结论)
+            附带引擎原始告警（默认关闭，避免影响独立研判）
           </Checkbox>
         </Modal>
       </Space>

@@ -8,7 +8,8 @@ agent-runner 容器内 entrypoint。
 环境变量由 worker 在 docker run 时通过 --env 注入：
   ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY / ANTHROPIC_MODEL
   ANTHROPIC_SMALL_FAST_MODEL / ANTHROPIC_DEFAULT_HAIKU_MODEL
-  API_TIMEOUT_MS / CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC / PYTHONUNBUFFERED=1
+  API_TIMEOUT_MS / CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+  CLAUDE_CODE_SUBPROCESS_ENV_SCRUB / PYTHONUNBUFFERED=1
 
 退出码：
   0  = 正常完成（含 conclusion=unconfirmed 等业务软失败）
@@ -19,8 +20,8 @@ agent-runner 容器内 entrypoint。
 设计要点：
 - SDK 在容器内解析 Message → 翻译为 dict → json.dumps 到 stdout；
   worker 侧只 json.loads 每行，不感知 SDK 类型。
-- canUseTool 回调实现白/黑名单（白盒审计：只读 + curl + git-read + python PoC），
-  拒绝时输出 tool.call.denied 事件，便于事后审计。
+- 完整 Claude Code 工具集配合 bypassPermissions 实现无人值守自动化；
+  PreToolUse hook 只拦截平台明确禁止的 Bash 命令并输出审计事件。
 - stderr 走 SDK 自身 logging（便于 docker logs 调试），不污染 JSONL 流。
 """
 
@@ -33,31 +34,39 @@ import re
 import sys
 import time
 import traceback
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 
 try:
     from claude_agent_sdk import (
-        query,
-        ClaudeAgentOptions,
         AssistantMessage,
-        UserMessage,
-        SystemMessage,
+        ClaudeAgentOptions,
+        HookMatcher,
         ResultMessage,
+        SystemMessage,
         TextBlock,
-        ToolUseBlock,
         ToolResultBlock,
+        ToolUseBlock,
+        UserMessage,
+        query,
     )
 except ImportError as e:  # 镜像构建失败时给出明确报错
-    print(json.dumps({
-        "type": "agent.failed",
-        "error": f"claude_agent_sdk 导入失败: {e}",
-        "title": "容器内缺少 Claude Agent SDK",
-        "hint": "agent-runner 镜像不完整，请重新构建镜像。",
-        "exception": type(e).__name__,
-        "sequence": 0,
-        "timestamp": time.time(),
-    }), file=sys.stdout, flush=True)
+    print(
+        json.dumps(
+            {
+                "type": "agent.failed",
+                "error": f"claude_agent_sdk 导入失败: {e}",
+                "title": "容器内缺少 Claude Agent SDK",
+                "hint": "agent-runner 镜像不完整，请重新构建镜像。",
+                "exception": type(e).__name__,
+                "sequence": 0,
+                "timestamp": time.time(),
+            }
+        ),
+        file=sys.stdout,
+        flush=True,
+    )
     sys.exit(2)
 
 try:
@@ -68,10 +77,11 @@ except ImportError:
 
 # ── Bash 黑名单（核心安全规则，PreToolUse hook 消费） ──
 #
-# 策略（v0.2）：黑名单 deny + 工具白名单（allowed_tools）双层模型。
+# 策略（v0.3）：完整工具能力 + PreToolUse 黑名单。
 # - Bash：黑名单拦截破坏性命令（rm/mv/chmod/dd/mkfs/|bash/>/etc//proc//sys），
 #   其余放开（插件工作流需要 git / curl / python / node / 常规 Linux 命令）
-# - 工具类型白名单：allowed_tools 限定（Write/Edit/WebFetch 等显式列出）
+# - allowed_tools 仅是自动批准提示，不是工具白名单；bypassPermissions 下未列出的
+#   工具仍可执行。真正的硬拒绝由本 hook 和容器边界负责。
 # - can_use_tool 不再用：bypassPermissions 会 shadow 它（SDK CanUseToolShadowedWarning）；
 #   PreToolUse hook 在所有 permission_mode 下都执行（CLI 原生消费 permissionDecision）
 
@@ -117,8 +127,10 @@ REPRODUCE_DENY_RES = [
     (re.compile(r"\bdocker\b"), "docker"),
 ]
 
-
 def _allowed_tools_for(node_key: str | None) -> list[str]:
+    """返回节点常用工具的自动批准提示；不作为能力或安全边界。"""
+    if node_key == "canary":
+        return ["Read", "Bash"]
     if node_key == "profile":
         return ["Read", "Grep", "Glob"]
     if node_key == "triage":
@@ -148,8 +160,10 @@ def _classify_bash(cmd: str, node_key: str | None = None) -> tuple[str, str | No
     return ("allow", None)
 
 
-async def _pre_tool_use_hook(hook_input: Any, _tool_use_id: str | None, _ctx: Any) -> dict | None:
-    """PreToolUse hook：Bash 黑名单拦截，其余放行。
+async def _pre_tool_use_hook(
+    hook_input: Any, _tool_use_id: str | None, _ctx: Any
+) -> dict | None:
+    """PreToolUse hook：Bash 黑名单拦截；放行时剥离 Provider 凭据后再执行。
 
     SDK 0.2.x 的 hooks 字段直接接受 async 回调（非 shell command），返回
     SyncHookJSONOutput。permissionDecision 由 _bundled/claude CLI 原生消费，
@@ -158,22 +172,38 @@ async def _pre_tool_use_hook(hook_input: Any, _tool_use_id: str | None, _ctx: An
     matcher 限定 Bash，故本回调只处理 Bash；Write/Edit/WebFetch 等不触发。
     """
     # hook_input 是 PreToolUseHookInput（TypedDict），按字段取
-    tool_name = (hook_input.get("tool_name") if isinstance(hook_input, dict) else getattr(hook_input, "tool_name", "")) or ""
-    tool_input = hook_input.get("tool_input") if isinstance(hook_input, dict) else getattr(hook_input, "tool_input", {})
+    tool_name = (
+        hook_input.get("tool_name")
+        if isinstance(hook_input, dict)
+        else getattr(hook_input, "tool_name", "")
+    ) or ""
+    tool_input = (
+        hook_input.get("tool_input")
+        if isinstance(hook_input, dict)
+        else getattr(hook_input, "tool_input", {})
+    )
     if tool_name != "Bash":
-        return None  # 非 Bash 不处理（matcher 已限定，兜底）
+        return {}  # 非 Bash 不处理（matcher 已限定，兜底）
 
-    cmd = tool_input.get("command", "") if isinstance(tool_input, dict) else str(tool_input)
+    if not isinstance(tool_input, dict):
+        tool_input = {"command": str(tool_input)}
+    cmd = str(tool_input.get("command", "") or "")
     decision, reason = _classify_bash(cmd, os.environ.get("NODE_KEY"))
     if decision == "deny":
         # 审计事件（worker 侧落 AgentEvent，前端可见）
-        print(json.dumps({
-            "type": "tool.call.denied",
-            "tool": tool_name,
-            "reason": reason,
-            "input": cmd[:200],
-            "timestamp": time.time(),
-        }, ensure_ascii=False), flush=True)
+        print(
+            json.dumps(
+                {
+                    "type": "tool.call.denied",
+                    "tool": tool_name,
+                    "reason": reason,
+                    "input": cmd[:200],
+                    "timestamp": time.time(),
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -181,18 +211,61 @@ async def _pre_tool_use_hook(hook_input: Any, _tool_use_id: str | None, _ctx: An
                 "permissionDecisionReason": reason or "denied by policy",
             }
         }
-    # allow：返回 None 走默认流程（bypassPermissions 自动批准）
-    return None
+    # 放行：用 env -u 剥凭据，避免 SCRUB=1/bwrap 在锁定 Docker 内搞挂 Bash。
+    # updatedInput 是整对象替换，必须带回全部原字段。
+    scrubbed = _bash_command_without_provider_creds(cmd)
+    if scrubbed != cmd:
+        print(
+            json.dumps(
+                {
+                    "type": "tool.call.scrubbed",
+                    "tool": tool_name,
+                    "input": cmd[:200],
+                    "timestamp": time.time(),
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+    updated = {**tool_input, "command": scrubbed}
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "updatedInput": updated,
+        }
+    }
+
+
+_CRED_UNSET_PREFIX = (
+    "env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN "
+    "bash --noprofile --norc -c "
+)
+
+
+def _bash_command_without_provider_creds(cmd: str) -> str:
+    """Bash 子进程看不到 Provider 主凭据；CLI 父进程环境仍保留供 API。"""
+    import shlex
+
+    text = (cmd or "").strip()
+    if not text:
+        return cmd
+    if text.startswith(_CRED_UNSET_PREFIX) or f" {_CRED_UNSET_PREFIX}" in f" {text}":
+        return cmd
+    return f"{_CRED_UNSET_PREFIX}{shlex.quote(text)}"
 
 
 # ── SDK Message → 统一事件结构翻译 ──
+
 
 def _safe_get(obj: Any, *path: str, default: Any = None) -> Any:
     """嵌套字段安全访问（兼容 SDK 不同版本的属性差异）"""
     cur = obj
     for key in path:
         try:
-            cur = getattr(cur, key, None) or (cur.get(key) if isinstance(cur, dict) else None)
+            cur = getattr(cur, key, None) or (
+                cur.get(key) if isinstance(cur, dict) else None
+            )
         except (AttributeError, KeyError):
             return default
         if cur is None:
@@ -236,33 +309,77 @@ def humanize_container_error(raw: str) -> tuple[str, str]:
     """容器内失败 → (标题, 下一步)。与 worker 侧 errors.py 对齐。"""
     text = (raw or "").strip() or "未知错误"
     low = text.lower()
+    if "bubblewrap is required" in low:
+        return (
+            "Agent 运行环境缺少进程隔离依赖",
+            "请重建 Agent 运行镜像（需包含 bubblewrap）后重试。",
+        )
+    if "sandbox dependencies not available" in low:
+        return (
+            "Agent 运行环境缺少沙箱运行依赖",
+            "请重建 Agent 运行镜像（需包含 bubblewrap 与 socat）后重试。",
+        )
+    if "no permissions to create new namespace" in low:
+        return (
+            "Agent 嵌套沙箱被 Docker 拦截",
+            "当前安全策略阻止了沙箱命名空间（seccomp）。请更新并重启 API 与 Worker 后重试。",
+        )
+    if any(
+        marker in low
+        for marker in (
+            "context size has been exceeded",
+            "context window exceeded",
+            "maximum context length",
+            "prompt is too long",
+        )
+    ):
+        return (
+            "LLM 上下文窗口不足",
+            "调低 Provider 最大上下文，或减少单轮工具输出后重试。",
+        )
     if "余额不足" in text or '"code":"1004"' in text or '"code": "1004"' in text:
         return (
             "LLM 账户余额不足",
-            "到 LLM 服务商控制台充值或更换有余额的 API Key，再在「设置 → LLM Provider」更新后重试。",
+            "到服务商控制台充值，或更换可用的 API Key，再在「设置 → LLM Provider」更新后重试。",
         )
     if "http 401" in low:
         return (
             "LLM 接口鉴权失败（401）",
-            "检查 API Key、Base URL 与账户余额；401 也可能是余额不足。",
+            "检查 API Key、Base URL 与账户状态；部分网关在余额不足时也会返回 401。",
         )
     if "error result: success" in low:
         return (
             "LLM 会话异常结束",
-            "多为 LLM API 报错（余额不足、模型不存在），但被 SDK 误报。查看较早的 agent.failed。",
+            "多为上游接口报错（余额不足、模型不可用等）。请查看本节点更早的失败事件，并核对 Provider 配置。",
         )
     rules = [
-        ("未调用 submit_result", "Agent 没有提交节点结果就结束了", "模型未调用 submit_result。检查节点 prompt 或 MCP 工具注入。"),
-        ("claude_agent_sdk 导入失败", "容器内缺少 Claude Agent SDK", "重新构建 agent-runner 镜像。"),
-        ("NameError", "容器入口代码异常", "更新 run_one.py 后必须重建镜像。"),
+        (
+            "未调用 submit_result",
+            "Agent 没有提交节点结果",
+            "本轮分析未完成结构化回传。可从本节点重试；若反复出现，请检查 Provider 是否通过 Agent 测试。",
+        ),
+        (
+            "claude_agent_sdk 导入失败",
+            "Agent 运行环境不完整",
+            "请重建 Agent 运行镜像后重试。",
+        ),
+        ("NameError", "Agent 运行入口异常", "请更新代码并重建 Agent 运行镜像后重试。"),
         ("Authentication", "LLM 鉴权失败", "检查 API Key 与 Base URL。"),
-        (".node.json 解析失败", "节点输入文件损坏", "worker 写入的 .node.json 不是合法 JSON。"),
-        ("既无 .node.json 也无 .prompt.json", "容器没拿到任务输入", "检查 host_workdir 是否正确 bind mount 到 /workspace。"),
+        (
+            ".node.json 解析失败",
+            "节点输入文件损坏",
+            "请从本节点重试；持续失败时联系管理员检查任务调度。",
+        ),
+        (
+            "既无 .node.json 也无 .prompt.json",
+            "容器未收到任务输入",
+            "请从本节点重试；持续失败时检查任务工作目录挂载是否正常。",
+        ),
     ]
     for needle, title, hint in rules:
         if needle.lower() in low:
             return title, hint
-    return text[:240], "查看本条事件的原文与 traceback，对照失败发生在思考、工具还是收尾。"
+    return text[:240], "查看本节点事件流中的错误与工具输出，定位失败步骤后重试。"
 
 
 def _is_llm_api_failure(text: str) -> bool:
@@ -270,8 +387,20 @@ def _is_llm_api_failure(text: str) -> bool:
     if not low.strip():
         return False
     needles = (
-        "http 401", "http 403", "http 429", "余额不足", '"code":"1004"',
-        "error result: success", "model_not_found", "rate limit",
+        "http 401",
+        "http 403",
+        "http 429",
+        "余额不足",
+        '"code":"1004"',
+        "api error: 4",
+        "api error: 5",
+        "error result: success",
+        "model_not_found",
+        "rate limit",
+        "context size has been exceeded",
+        "context window exceeded",
+        "maximum context length",
+        "prompt is too long",
     )
     return any(n in low for n in needles)
 
@@ -292,11 +421,32 @@ def _classify_conclusion(text: str) -> str:
     if not text:
         return "unconfirmed"
     lowered = text.lower()
-    if any(k in lowered for k in ("漏洞存在", "确认存在", "reproduced", "confirmed", "vulnerable",
-                                    "is exploitable", "结论：存在", "存在漏洞")):
+    if any(
+        k in lowered
+        for k in (
+            "漏洞存在",
+            "确认存在",
+            "reproduced",
+            "confirmed",
+            "vulnerable",
+            "is exploitable",
+            "结论：存在",
+            "存在漏洞",
+        )
+    ):
         return "exists"
-    if any(k in lowered for k in ("不存在", "无法确认", "not vulnerable", "not exploitable",
-                                    "unconfirmed", "结论：不存在", "误报")):
+    if any(
+        k in lowered
+        for k in (
+            "不存在",
+            "无法确认",
+            "not vulnerable",
+            "not exploitable",
+            "unconfirmed",
+            "结论：不存在",
+            "误报",
+        )
+    ):
         return "not_exists"
     return "unconfirmed"
 
@@ -353,7 +503,9 @@ async def _stream_messages(
             if isinstance(message, SystemMessage):
                 if sid and sid != session_id_seen:
                     session_id_seen = sid
-                event = _system_phase_event(message, seq=seq, timestamp=ts, session_id=sid)
+                event = _system_phase_event(
+                    message, seq=seq, timestamp=ts, session_id=sid
+                )
                 if event:
                     yield event
                 continue
@@ -433,7 +585,9 @@ async def _stream_messages(
                         raw_content = getattr(block, "content", "") or ""
                         if isinstance(raw_content, list):
                             raw_content = " ".join(
-                                getattr(b, "text", "") for b in raw_content if hasattr(b, "text")
+                                getattr(b, "text", "")
+                                for b in raw_content
+                                if hasattr(b, "text")
                             )
                         yield {
                             "type": "tool.call.completed",
@@ -457,16 +611,22 @@ async def _stream_messages(
                         sequence=seq,
                         timestamp=ts,
                     )
+                    # 一个 SDK 会话只能有一个终态。失败结果不能继续伪装成 completed。
+                    continue
                 yield {
                     "type": "agent.completed",
-                    **({"conclusion": _classify_conclusion(result_text)} if not node_key else {}),
+                    **(
+                        {"conclusion": _classify_conclusion(result_text)}
+                        if not node_key
+                        else {}
+                    ),
                     "reasoning": result_text,
                     "session_id": sid,
                     "duration_ms": getattr(message, "duration_ms", None),
                     "total_cost_usd": getattr(message, "total_cost_usd", None),
                     "num_turns": getattr(message, "num_turns", None),
                     "usage": getattr(message, "usage", None),
-                    "is_error": is_error,
+                    "is_error": False,
                     "sequence": seq,
                     "timestamp": ts,
                 }
@@ -517,7 +677,9 @@ def _build_prompt(task: dict[str, Any]) -> str:
         parts.append("")
         parts.append("平台已为本次任务注入以下凭据（按需使用，勿外泄）:")
         if envcreds:
-            parts.append("- 环境变量: " + ", ".join(s.get("target", "?") for s in envcreds))
+            parts.append(
+                "- 环境变量: " + ", ".join(s.get("target", "?") for s in envcreds)
+            )
         if filecreds:
             parts.append("- 密钥文件（容器内路径，权限 600）:")
             for s in filecreds:
@@ -525,8 +687,10 @@ def _build_prompt(task: dict[str, Any]) -> str:
                 parts.append(f"    {s.get('path', '?')}{desc}")
 
     parts.append("")
-    parts.append("请按你的工作流（阶段 A→B→C→D）验证上述漏洞是否真实存在，并用 phase.updated "
-                 "事件记录每个阶段进度，最终产出中文报告。")
+    parts.append(
+        "请按你的工作流（阶段 A→B→C→D）验证上述漏洞是否真实存在，并用 phase.updated "
+        "事件记录每个阶段进度，最终产出中文报告。"
+    )
     return "\n".join(parts)
 
 
@@ -540,7 +704,7 @@ def _container_source_dir(
     raw = str((input_json or {}).get("source_path") or "").strip().replace("\\", "/")
     name = ""
     if raw.startswith("/workspace/"):
-        name = raw[len("/workspace/"):].strip("/")
+        name = raw[len("/workspace/") :].strip("/")
     elif raw:
         name = raw.rstrip("/").split("/")[-1]
 
@@ -565,7 +729,11 @@ def _sdk_cwd(
     """SDK cwd 必须是已存在的目录，否则 subprocess 直接炸 Working directory does not exist。"""
     root = Path(workspace_root)
     mapped = _container_source_dir(input_json, workspace_root=workspace_root)
-    rel = mapped[len("/workspace/"):].strip("/") if mapped.startswith("/workspace/") else ""
+    rel = (
+        mapped[len("/workspace/") :].strip("/")
+        if mapped.startswith("/workspace/")
+        else ""
+    )
     if rel:
         on_disk = root / rel
         if on_disk.is_dir():
@@ -583,7 +751,8 @@ def _discover_workspace_repo(root: Path) -> Path | None:
         return None
     skip = {".secrets", ".git"}
     found = [
-        p for p in sorted(root.iterdir())
+        p
+        for p in sorted(root.iterdir())
         if p.is_dir() and not p.name.startswith(".") and p.name not in skip
     ]
     return found[0] if found else None
@@ -602,7 +771,9 @@ def _build_node_prompt(node_key: str, input_json: dict[str, Any]) -> str:
 # 生产：worker -v 挂当前节点目录 → /node-skill:ro，只读 SKILL.md。
 # 单测：可设 NODE_SKILL_DIR 指向仓库 node-skills/ 做回退。
 
-NODE_AI_KEYS = frozenset({"profile", "env_ready", "audit", "reproduce", "report", "triage"})
+NODE_AI_KEYS = frozenset(
+    {"canary", "profile", "env_ready", "audit", "reproduce", "report", "triage"}
+)
 
 
 def _load_node_skill(node_key: str) -> str:
@@ -632,9 +803,10 @@ def _system_prompt_for(node_key: str | None) -> dict[str, str] | None:
         "append": _load_node_skill(node_key),
     }
 
+
 # submit_result 工具 input schema —— 单一真相在 runner.node_schemas，
 # 容器与后端共用同一份，禁止在此重新定义副本（历史上两份手工同步已多次漂移）。
-from runner.node_schemas import NODE_INPUT_SCHEMAS  # noqa: E402
+from runner.node_schemas import NODE_INPUT_SCHEMAS
 
 
 def _make_submit_result_tool(schema: dict):
@@ -644,11 +816,19 @@ def _make_submit_result_tool(schema: dict):
     """
     from claude_agent_sdk import tool
 
-    @tool(name="submit_result", description="提交本节点的结构化结果。完成后必须调用此工具。", input_schema=schema)
+    @tool(
+        name="submit_result",
+        description="提交本节点的结构化结果。完成后必须调用此工具。",
+        input_schema=schema,
+    )
     async def submit_result(input: dict) -> dict:
         # input 已按 schema 校验;写文件供 worker 读取
-        out_path = Path(os.environ.get("NODE_OUTPUT_PATH", "/workspace/.node_output.json"))
-        out_path.write_text(json.dumps(input, ensure_ascii=False, default=str), encoding="utf-8")
+        out_path = Path(
+            os.environ.get("NODE_OUTPUT_PATH", "/workspace/.node_output.json")
+        )
+        out_path.write_text(
+            json.dumps(input, ensure_ascii=False, default=str), encoding="utf-8"
+        )
         return {"status": "submitted", "fields": list(input.keys())}
 
     return submit_result
@@ -669,11 +849,24 @@ def _build_options(
         "model": model,
         "max_turns": max_turns,
         "cwd": cwd or "/workspace",
+        "tools": {"type": "preset", "preset": "claude_code"},
         "permission_mode": "bypassPermissions",
         "allowed_tools": _allowed_tools_for(node_key),
+        # 待审计仓库只作为数据读取，不加载其 CLAUDE.md/.claude 配置。
+        "setting_sources": [],
+        # 只使用平台显式传入的 MCP，忽略项目/用户/插件 MCP。
+        "strict_mcp_config": True,
+        # 文件、网络与进程边界由一次性 Docker runner 负责。Provider 凭据由
+        # PreToolUse 对 Bash 包 env -u 剥离（SCRUB=1/bwrap 与当前 Docker 安全配置冲突）。
+        # sandbox/bwrap 关闭：外层已是一次性容器。
+        #
+        # 必须用 HookMatcher 实例：SDK _convert_hooks_to_internal_format 用
+        # hasattr(matcher, "hooks")；裸 dict 没有该属性，会静默变成 hooks=[]，
+        # 导致黑名单与凭据剥离全部不生效。
+        "sandbox": {"enabled": False},
         "hooks": {
             "PreToolUse": [
-                {"matcher": "Bash", "hooks": [_pre_tool_use_hook]},
+                HookMatcher(matcher="Bash", hooks=[_pre_tool_use_hook]),
             ],
         },
     }
@@ -686,36 +879,23 @@ def _build_options(
         common["effort"] = effort
 
     if node_key and node_key in NODE_INPUT_SCHEMAS:
-        try:
-            from claude_agent_sdk import create_sdk_mcp_server
+        from claude_agent_sdk import create_sdk_mcp_server
 
-            schema = NODE_INPUT_SCHEMAS[node_key]
-            submit_tool = _make_submit_result_tool(schema)
-            server = create_sdk_mcp_server(name="crucible", tools=[submit_tool])
-            common["mcp_servers"] = {"crucible": server}
-            common["allowed_tools"] = common["allowed_tools"] + ["submit_result"]
-        except (ImportError, TypeError, Exception) as e:  # noqa: BLE001
-            print(json.dumps({
-                "type": "agent.warning",
-                "message": f"submit_result MCP 注入失败,降级文本模式: {type(e).__name__}: {e}",
-                "timestamp": time.time(),
-            }, ensure_ascii=False), flush=True)
+        schema = NODE_INPUT_SCHEMAS[node_key]
+        submit_tool = _make_submit_result_tool(schema)
+        server = create_sdk_mcp_server(name="crucible", tools=[submit_tool])
+        common["mcp_servers"] = {"crucible": server}
+        common["allowed_tools"] = common["allowed_tools"] + [
+            "mcp__crucible__submit_result"
+        ]
 
-    try:
-        return ClaudeAgentOptions(**common)
-    except (TypeError, ValueError):
-        # 旧 SDK 可能不接受 system_prompt dict / mcp_servers / effort
-        if isinstance(common.get("system_prompt"), dict):
-            common["system_prompt"] = common["system_prompt"].get("append") or ""
-        common.pop("mcp_servers", None)
-        try:
-            return ClaudeAgentOptions(**common)
-        except (TypeError, ValueError):
-            common.pop("effort", None)
-            return ClaudeAgentOptions(**common)
+    # SDK 版本已在镜像中固定。关键参数不再静默降级；构造失败由顶层统一
+    # 输出 agent.failed，避免 MCP/effort 被悄悄移除后继续运行。
+    return ClaudeAgentOptions(**common)
 
 
 # ── Main ──
+
 
 async def _main() -> int:
     # 节点模式(阶段 2):优先读 .node.json;兼容模式:读 .prompt.json
@@ -732,22 +912,46 @@ async def _main() -> int:
             input_json = _payload.get("input_json", {})
             task = input_json
         except (json.JSONDecodeError, OSError) as e:
-            print(json.dumps(_failed_event(
-                f".node.json 解析失败: {e}", sequence=0, timestamp=time.time(),
-            ), ensure_ascii=False), flush=True)
+            print(
+                json.dumps(
+                    _failed_event(
+                        f".node.json 解析失败: {e}",
+                        sequence=0,
+                        timestamp=time.time(),
+                    ),
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
             return 2
     elif prompt_path.exists():
         try:
             task = json.loads(prompt_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as e:
-            print(json.dumps(_failed_event(
-                f".prompt.json 解析失败: {e}", sequence=0, timestamp=time.time(),
-            ), ensure_ascii=False), flush=True)
+            print(
+                json.dumps(
+                    _failed_event(
+                        f".prompt.json 解析失败: {e}",
+                        sequence=0,
+                        timestamp=time.time(),
+                    ),
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
             return 2
     else:
-        print(json.dumps(_failed_event(
-            "既无 .node.json 也无 .prompt.json", sequence=0, timestamp=time.time(),
-        ), ensure_ascii=False), flush=True)
+        print(
+            json.dumps(
+                _failed_event(
+                    "既无 .node.json 也无 .prompt.json",
+                    sequence=0,
+                    timestamp=time.time(),
+                ),
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
         return 2
 
     model = os.environ.get("ANTHROPIC_MODEL", "deepseek-v4-flash")
@@ -767,7 +971,9 @@ async def _main() -> int:
 
     # 审计链 sidecar：真实 prompt/skill/usage 回传 worker（spec §4.2 全量审计）
     meta: dict[str, Any] = {
-        "node_key": node_key, "model": model, "prompt": prompt,
+        "node_key": node_key,
+        "model": model,
+        "prompt": prompt,
     }
     if node_key and node_key in NODE_AI_KEYS:
         try:
@@ -789,7 +995,13 @@ async def _main() -> int:
             saw_completion = True
             if event.get("is_error"):
                 saw_failure = True
-            for k in ("usage", "num_turns", "duration_ms", "total_cost_usd", "session_id"):
+            for k in (
+                "usage",
+                "num_turns",
+                "duration_ms",
+                "total_cost_usd",
+                "session_id",
+            ):
                 if event.get(k) is not None:
                     meta[k] = event[k]
         elif et == "agent.failed":
@@ -799,20 +1011,29 @@ async def _main() -> int:
     meta["assistant_text"] = "\n".join(assistant_texts)[-8000:]
     try:
         Path(os.environ.get("NODE_META_PATH", "/workspace/.node_meta.json")).write_text(
-            json.dumps(meta, ensure_ascii=False, default=str), encoding="utf-8",
+            json.dumps(meta, ensure_ascii=False, default=str),
+            encoding="utf-8",
         )
     except OSError:
         pass  # sidecar 失败不影响节点主流程
 
     # 节点模式:校验 submit_result 是否被调用(.node_output.json 存在)
     if node_key and node_key in NODE_AI_KEYS:
-        output_path = Path(os.environ.get("NODE_OUTPUT_PATH", "/workspace/.node_output.json"))
+        output_path = Path(
+            os.environ.get("NODE_OUTPUT_PATH", "/workspace/.node_output.json")
+        )
         if not output_path.exists() and not saw_llm_failure:
-            print(json.dumps(_failed_event(
-                f"节点 {node_key} 未调用 submit_result(无 .node_output.json)",
-                sequence=999,
-                timestamp=time.time(),
-            ), ensure_ascii=False), flush=True)
+            print(
+                json.dumps(
+                    _failed_event(
+                        f"节点 {node_key} 未调用 submit_result(无 .node_output.json)",
+                        sequence=999,
+                        timestamp=time.time(),
+                    ),
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
             return 1
 
     if saw_failure and not saw_completion:
@@ -829,12 +1050,18 @@ if __name__ == "__main__":
         sys.exit(code)
     except SystemExit:
         raise
-    except BaseException as e:
+    except Exception as e:  # noqa: BLE001
         # 兜底：任何未被 _stream_messages 捕获的异常都输出失败事件
-        print(json.dumps(_failed_event(
-            str(e)[:500],
-            exception=type(e).__name__,
-            sequence=0,
-            timestamp=time.time(),
-        ), ensure_ascii=False), flush=True)
+        print(
+            json.dumps(
+                _failed_event(
+                    str(e)[:500],
+                    exception=type(e).__name__,
+                    sequence=0,
+                    timestamp=time.time(),
+                ),
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
         sys.exit(1)
