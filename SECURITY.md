@@ -53,6 +53,7 @@ Crucible 是漏洞验证平台——**平台在目标仓库中分析出的漏洞
 
 ## 安全部署提醒
 
-- 生产环境必须设置足够强的 `AUTH_SECRET`，并修改 PostgreSQL / Redis / MinIO 的默认口令
-- 不要将开发实例直接暴露到公网
+- 生产环境必须设置足够强的 `AUTH_SECRET`，并修改 PostgreSQL / Redis / MinIO 的默认口令（`infrastructure/.env`，勿沿用示例值）
+- 基础设施端口默认仅绑定 `127.0.0.1`；不要将开发实例直接暴露到公网
+- Redis 已启用 `requirepass`：后端 `REDIS_URL` / Celery URL 须带同一密码（见 `backend/.env.example`）
 - 凭据与隔离机制的详细说明见 [README.md](README.md) 的「凭据与安全」章节

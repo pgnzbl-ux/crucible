@@ -19,6 +19,48 @@ _SENSITIVE_ROOTS = ("/proc", "/sys", "/dev")
 # 靶场容器是攻击目标，AI 写一行 volumes 就能把明文凭据挂进靶场
 _FORBIDDEN_WORKDIR_BINDS = (".secrets",)
 _WINDOWS_BIND_RE = re.compile(r"^([A-Za-z]:[\\/][^:]*):")
+# Compose 会从进程环境插值 ${VAR} / $VAR；靶场子进程若继承平台 env 即泄密
+_INTERP_RE = re.compile(
+    r"\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)"
+)
+# compose 子进程仅保留跑 Docker CLI 所需变量，禁止继承 DATABASE_URL / AUTH_SECRET 等
+_COMPOSE_ENV_ALLOW = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "DOCKER_HOST",
+        "DOCKER_CONTEXT",
+        "DOCKER_CERT_PATH",
+        "DOCKER_TLS_VERIFY",
+        "DOCKER_BUILDKIT",
+        "BUILDKIT_PROGRESS",
+        "COMPOSE_DOCKER_CLI_BUILD",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    }
+)
+_DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def compose_subprocess_env() -> dict[str, str]:
+    """docker compose 子进程环境：白名单，避免 ${VAR} 插值读到平台密钥。"""
+    env = {k: v for k, v in os.environ.items() if k in _COMPOSE_ENV_ALLOW}
+    env.setdefault("PATH", _DEFAULT_PATH)
+    env.setdefault("BUILDKIT_PROGRESS", "plain")
+    env.setdefault("DOCKER_BUILDKIT", "1")
+    return env
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -147,6 +189,61 @@ def _validate_build(
         )
 
 
+def _reject_interpolation(raw: str) -> None:
+    """拒绝 Compose 进程环境插值，切断平台密钥经 ${VAR} 进靶场的通道。"""
+    cleaned = (raw or "").replace("$$", "")
+    if _INTERP_RE.search(cleaned):
+        raise ComposePolicyError("禁止 Compose 环境变量插值（${VAR} / $VAR）")
+
+
+def _validate_top_level(document: dict[str, Any]) -> None:
+    if document.get("include") is not None:
+        raise ComposePolicyError("禁止 include")
+    if document.get("extends") is not None:
+        raise ComposePolicyError("禁止顶层 extends")
+    networks = document.get("networks")
+    if isinstance(networks, dict):
+        for name, cfg in networks.items():
+            if cfg is True or cfg is None:
+                continue
+            if not isinstance(cfg, dict):
+                raise ComposePolicyError(f"网络 {name} 配置必须是对象")
+            if cfg.get("external"):
+                raise ComposePolicyError(f"网络 {name} 禁止 external（不可接入平台网络）")
+    volumes = document.get("volumes")
+    if isinstance(volumes, dict):
+        for name, cfg in volumes.items():
+            if cfg is True or cfg is None:
+                continue
+            if not isinstance(cfg, dict):
+                raise ComposePolicyError(f"卷 {name} 配置必须是对象")
+            if cfg.get("driver_opts"):
+                raise ComposePolicyError(f"卷 {name} 禁止 driver_opts")
+            if cfg.get("external"):
+                raise ComposePolicyError(f"卷 {name} 禁止 external")
+
+
+def _validate_service_extras(name: str, service: dict[str, Any]) -> None:
+    if service.get("env_file") is not None:
+        raise ComposePolicyError(f"服务 {name} 禁止 env_file")
+    if service.get("extends") is not None:
+        raise ComposePolicyError(f"服务 {name} 禁止 extends")
+    if service.get("security_opt"):
+        raise ComposePolicyError(f"服务 {name} 禁止 security_opt")
+    if service.get("userns_mode"):
+        raise ComposePolicyError(f"服务 {name} 禁止 userns_mode")
+    # user: root / 0 可削弱隔离；一律拒绝自定义 user
+    if service.get("user") is not None:
+        raise ComposePolicyError(f"服务 {name} 禁止自定义 user")
+    deploy = service.get("deploy")
+    if isinstance(deploy, dict):
+        resources = deploy.get("resources")
+        if isinstance(resources, dict):
+            reservations = resources.get("reservations")
+            if isinstance(reservations, dict) and reservations.get("devices"):
+                raise ComposePolicyError(f"服务 {name} 禁止 deploy.resources.reservations.devices")
+
+
 def validate_compose_file(compose_path: str, workdir: str) -> None:
     """解析并拒绝可直接突破宿主边界的 Compose 能力。"""
     path = Path(compose_path).resolve()
@@ -154,11 +251,17 @@ def validate_compose_file(compose_path: str, workdir: str) -> None:
     if not _inside(path, root):
         raise ComposePolicyError("Compose 文件越出 Lab 工作目录")
     try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ComposePolicyError(f"Compose 无法安全解析: {exc}") from exc
+    _reject_interpolation(raw)
+    try:
+        document = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
         raise ComposePolicyError(f"Compose 无法安全解析: {exc}") from exc
     if not isinstance(document, dict) or not isinstance(document.get("services"), dict):
         raise ComposePolicyError("Compose 必须包含 services 对象")
+    _validate_top_level(document)
     for name, service in document["services"].items():
         if not isinstance(service, dict):
             raise ComposePolicyError(f"服务 {name} 配置必须是对象")
@@ -171,6 +274,7 @@ def validate_compose_file(compose_path: str, workdir: str) -> None:
             raise ComposePolicyError(f"服务 {name} 禁止 devices")
         if service.get("cap_add"):
             raise ComposePolicyError(f"服务 {name} 禁止 cap_add")
+        _validate_service_extras(str(name), service)
         _validate_volumes(
             service.get("volumes"),
             compose_dir=path.parent,

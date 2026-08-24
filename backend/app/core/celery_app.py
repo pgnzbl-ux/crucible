@@ -20,6 +20,7 @@ def create_celery_app() -> Celery:
         task_acks_late=True,
         task_reject_on_worker_lost=True,
         task_time_limit=settings.celery_task_time_limit,
+        task_soft_time_limit=settings.celery_task_soft_time_limit,
         worker_prefetch_multiplier=1,  # 一次只取一个任务，配合 acks_late 保证不丢
         broker_transport_options={
             # Redis 消息租约不是执行超时；取足够长以免长任务仍在运行时被重复投递。

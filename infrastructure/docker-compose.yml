@@ -1,13 +1,11 @@
 # Crucible 基础设施 — PostgreSQL 16 + Redis 7 + MinIO
 #
-# 端口约定：与宿主机默认端口错开（5432/6379 已被占用，改用 5433/6380）
-#   - PostgreSQL  5433:5432
-#   - Redis       6380:6379
-#   - MinIO API   9000 / Console 9001
+# 端口仅绑回环（127.0.0.1），避免开发机局域网/公网误暴露。
+# 口令与映射端口由同目录 .env 注入（见 .env.example）；勿把含生产密钥的 .env 提交进库。
 #
 # 使用：
-#   cd infrastructure && docker compose up -d
-#   docker compose ps   # 查看健康状态
+#   cd infrastructure && cp -n .env.example .env && docker compose up -d
+#   docker compose ps
 
 name: crucible-infra
 
@@ -16,15 +14,15 @@ services:
     image: postgres:16-alpine
     container_name: crucible-postgres
     environment:
-      POSTGRES_USER: crucible
-      POSTGRES_PASSWORD: crucible_secret
-      POSTGRES_DB: crucible
+      POSTGRES_USER: ${POSTGRES_USER:-crucible}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-crucible_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-crucible}
     ports:
-      - "5433:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U crucible -d crucible"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -35,13 +33,24 @@ services:
   redis:
     image: redis:7-alpine
     container_name: crucible-redis
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy noeviction
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-crucible_redis}
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - noeviction
+      - --requirepass
+      - ${REDIS_PASSWORD:-crucible_redis}
     ports:
-      - "6380:6379"
+      - "127.0.0.1:${REDIS_PORT:-6380}:6379"
     volumes:
       - redisdata:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -54,11 +63,11 @@ services:
     container_name: crucible-minio
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:${MINIO_API_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - miniodata:/data
     healthcheck:
@@ -77,9 +86,12 @@ services:
     depends_on:
       minio:
         condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
     entrypoint: >
       /bin/sh -c "
-      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc alias set local http://minio:9000 \"$$MINIO_ROOT_USER\" \"$$MINIO_ROOT_PASSWORD\" &&
       mc mb --ignore-existing local/crucible-durable &&
       mc mb --ignore-existing local/crucible-task &&
       mc mb --ignore-existing local/crucible-public &&

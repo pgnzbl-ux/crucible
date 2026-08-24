@@ -19,6 +19,7 @@ uv.lock
 .env
 .env.*
 !backend/.env.example
+!infrastructure/.env.example
 *.local
 
 # 数据库 / 本地持久化

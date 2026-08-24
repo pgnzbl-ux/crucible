@@ -109,10 +109,20 @@ class Settings(BaseSettings):
     # 不再等整个 triage 跑完（首批确认漏洞的到达时间大幅提前）──
     triage_stream_dispatch_enabled: bool = True
 
+    # ── 任务级 wall-clock（Celery soft/hard；子步骤另有局部超时）──
+    # soft 触发 SoftTimeLimitExceeded 走失败收尾；hard 为 SIGKILL 兜底
+    celery_task_soft_time_limit_seconds: int = Field(3 * 60 * 60 + 30 * 60, ge=60)  # 3.5h
+    celery_task_time_limit_seconds: int = Field(4 * 60 * 60, ge=120)  # 4h
+
     @property
-    def celery_task_time_limit(self) -> None:
-        """Agent 任务不按总运行时长强制终止；取消操作仍会主动拆容器。"""
-        return None
+    def celery_task_time_limit(self) -> int:
+        return self.celery_task_time_limit_seconds
+
+    @property
+    def celery_task_soft_time_limit(self) -> int:
+        soft = self.celery_task_soft_time_limit_seconds
+        hard = self.celery_task_time_limit_seconds
+        return soft if soft < hard else max(60, hard - 60)
 
     cors_origins: str = "http://localhost:5173,http://localhost:4173,http://localhost:3000"
 

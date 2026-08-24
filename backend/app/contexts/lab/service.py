@@ -728,8 +728,20 @@ class LabService:
                 lab.compose_project, compose_file, workdir_root
             )
         except Exception as exc:
+            from .compose_policy import ComposePolicyError
+
             lab.status = "failed"
-            lab.error_message = str(exc)
+            if isinstance(exc, ComposePolicyError):
+                lab.error_message = f"安全策略拒绝: {exc}"[:500]
+                # 隔离被拒现场文件，避免再次 rebuild 命中同款旁路
+                try:
+                    rejected = Path(compose_file)
+                    if rejected.is_file():
+                        rejected.rename(rejected.with_suffix(rejected.suffix + ".rejected"))
+                except OSError:
+                    logger.warning("隔离被拒 compose 失败 path=%s", compose_file, exc_info=True)
+            else:
+                lab.error_message = str(exc)[:500]
             await self.session.commit()
             raise
         mapped, mapping_error = await self._refresh_target_url_from_runtime(lab)

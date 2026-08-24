@@ -149,8 +149,8 @@ Celery Worker
 git clone https://github.com/pgnzbl-ux/crucible.git Crucible && cd Crucible
 python3.12 -m venv .venv && source .venv/bin/activate
 
-# 1. PostgreSQL + Redis + MinIO
-cd infrastructure && docker compose up -d && cd ..
+# 1. PostgreSQL + Redis + MinIO（端口仅绑 127.0.0.1；口令见 infrastructure/.env）
+cd infrastructure && cp -n .env.example .env && docker compose up -d && cd ..
 
 # 2. 构建 Agent 镜像（首次，或改了 agent-runner / 节点 skill 之后）
 #    必须在仓库根目录构建，否则镜像里会缺节点 skill
@@ -241,9 +241,10 @@ CLAUDE_AGENT_SDK_ENABLED=true
 **进程与端口**
 
 - 必须同时跑 **API + Worker + 前端**。只开 API 时任务会停在队列里
-- **并发与资源**：控制台「设置」可分别调整同时运行任务、全局 AI 容器、单任务线索终认和同靶场复现。超过全局槽位的 AI 会等待，不会因等待或总运行时长被强制停止
+- **并发与资源**：控制台「设置」可分别调整同时运行任务、全局 AI 容器、单任务线索终认和同靶场复现。超过全局槽位的 AI 会等待；单任务另有 Celery soft/hard wall-clock（默认 3.5h / 4h）防止永久占满 Worker
 - `AGENT_RUNNER_CONCURRENCY_LIMIT` 只作为部署硬顶和 Worker prefork 进程数；日常并发不再靠 `.env` 调整。Worker 用 `python run_worker.py`
-- 端口刻意避开本机常见占用：API `8010`、前端 `5173`、Postgres `5433`、Redis `6380`、MinIO `9000/9001`
+- 端口刻意避开本机常见占用：API `8010`、前端 `5173`、Postgres `5433`、Redis `6380`、MinIO `9000/9001`（基础设施默认仅监听 `127.0.0.1`）
+- Redis 启用 `requirepass`：`backend/.env` 中 `REDIS_URL` / Celery URL 须与 `infrastructure/.env` 的 `REDIS_PASSWORD` 一致（见 `.env.example`）
 - `python app/main.py` 默认不是 8010，请用快速开始里的 uvicorn 命令
 
 **数据库**

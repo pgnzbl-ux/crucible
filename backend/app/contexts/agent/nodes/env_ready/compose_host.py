@@ -242,8 +242,8 @@ async def docker_compose_up(
     ]
 
     def _run() -> tuple[int, str, bool]:
-        env = os.environ.copy()
-        env.setdefault("BUILDKIT_PROGRESS", "plain")
+        from app.contexts.lab.compose_policy import compose_subprocess_env
+
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -252,7 +252,7 @@ async def docker_compose_up(
             encoding="utf-8",
             errors="replace",
             bufsize=1,
-            env=env,
+            env=compose_subprocess_env(),
         )
 
         def _forward(text: str) -> None:

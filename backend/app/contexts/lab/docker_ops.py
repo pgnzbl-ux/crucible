@@ -14,14 +14,17 @@ async def _run(
     *,
     cwd: str | None = None,
     timeout: int = 120,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
-    kwargs = {
+    kwargs: dict = {
         "capture_output": True,
         "text": True,
         "timeout": timeout,
     }
     if cwd is not None:
         kwargs["cwd"] = cwd
+    if env is not None:
+        kwargs["env"] = env
     result = await asyncio.to_thread(
         subprocess.run,
         cmd,
@@ -108,8 +111,12 @@ async def compose_stop(project: str) -> None:
 
 
 async def compose_up_build(project: str, compose_file: str, workdir: str) -> None:
+    """重建路径与创建路径共用：先策略校验，再以白名单 env 执行 compose。"""
     if not (project or "").strip():
         raise ValueError("compose project 不能为空")
+    from .compose_policy import compose_subprocess_env, validate_compose_file
+
+    validate_compose_file(compose_file, workdir)
     await _run(
         [
             "docker",
@@ -127,6 +134,7 @@ async def compose_up_build(project: str, compose_file: str, workdir: str) -> Non
         ],
         cwd=workdir,
         timeout=600,
+        env=compose_subprocess_env(),
     )
 
 

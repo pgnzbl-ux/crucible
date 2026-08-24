@@ -465,7 +465,58 @@ async def _platform_preflight_minimal(session: AsyncSession) -> tuple[bool, str 
 @celery_app.task(bind=True, name="agent.run_analysis", max_retries=None)
 def run_analysis(self, task_id: str, run_id: str) -> dict:
     """漏洞分析主任务"""
-    return asyncio.run(_run_analysis(task_id, run_id, celery_task=self))
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    try:
+        return asyncio.run(_run_analysis(task_id, run_id, celery_task=self))
+    except SoftTimeLimitExceeded:
+        logger.error(
+            "任务超过 Celery soft time limit，强制失败收尾 task_id=%s run_id=%s",
+            task_id,
+            run_id,
+        )
+        try:
+            return asyncio.run(_fail_on_wall_clock_timeout(task_id, run_id))
+        except Exception:  # noqa: BLE001
+            logger.exception("soft time limit 收尾失败 task_id=%s", task_id)
+            return {
+                "task_id": task_id,
+                "run_id": run_id,
+                "status": "failed",
+                "error": "task time limit exceeded",
+            }
+
+
+async def _fail_on_wall_clock_timeout(task_id: str, run_id: str) -> dict:
+    """soft time limit：标失败、拆容器、释放槽（asyncio.run 被信号打断时的兜底）。"""
+    engine = _worker_engine()
+    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            run = await session.get(TaskRun, run_id)
+            task = await session.get(Task, task_id)
+            msg = "任务超过最大执行时长，已自动终止"
+            if run or task:
+                await apply_analysis_failure(session, task, run, format_agent_error(msg))
+                await session.commit()
+        try:
+            await release_slot(run_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("timeout 收尾释放槽失败 run=%s", run_id, exc_info=True)
+        try:
+            from app.contexts.agent.runtime_cleanup import teardown_task_runtime
+
+            await teardown_task_runtime(task_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("timeout 收尾拆容器失败", exc_info=True)
+    finally:
+        await engine.dispose()
+    return {
+        "task_id": task_id,
+        "run_id": run_id,
+        "status": "failed",
+        "error": "task time limit exceeded",
+    }
 
 
 async def _run_analysis(task_id: str, run_id: str, *, celery_task: object) -> dict:
