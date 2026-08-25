@@ -1,7 +1,7 @@
 """WP2 · 扫描节点与 SARIF+ 归一化测试(discovery-spec §6.1 / §8.2)。
 
-覆盖：三引擎 fixture 归一化、codeFlows→source_to_sink、gitleaks 脱敏、
-RawFinding 幂等、引擎失败隔离(ScanRun=failed 但节点完成)、不适用 skip。
+覆盖：三引擎 fixture 归一化、codeFlows→source_to_sink、gitleaks 命中原文、
+OSV 可读摘要、RawFinding 幂等、引擎失败隔离(ScanRun=failed 但节点完成)、不适用 skip。
 """
 import sys
 import os
@@ -128,35 +128,48 @@ def test_semgrep_normalize_reads_confidence_and_category():
     assert f["raw"]["has_dataflow"] is False
 
 
-# ---------- gitleaks SARIF 归一化 + 脱敏 ----------
+# ---------- gitleaks SARIF 归一化（线索台保留原文） ----------
 
 GITLEAKS_SARIF = {
     "runs": [{
+        "tool": {"driver": {"rules": [{
+            "id": "aws-access-token-id",
+            "name": "AWS Access Key ID",
+            "shortDescription": {"text": "AWS Access Key ID"},
+        }]}},
         "results": [{
             "ruleId": "aws-access-token-id",
             "level": "error",
-            "message": {"text": "AWS Access Key: AKIAIOSFODNN7EXAMPLE"},
+            "message": {"text": "aws-access-token-id has detected secret for file config/prod.env."},
             "locations": [{"physicalLocation": {
                 "artifactLocation": {"uri": "config/prod.env"},
-                "region": {"startLine": 8, "snippet": {"text": "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE"}},
+                "region": {"startLine": 8, "snippet": {"text": "AKIAIOSFODNN7EXAMPLE"}},
             }}],
+            "partialFingerprints": {
+                "commitSha": "abc123def",
+                "author": "alice",
+                "email": "alice@example.com",
+                "date": "2024-01-02T03:04:05Z",
+            },
         }],
     }]
 }
 
 
-def test_gitleaks_secret_redacted_in_message_and_snippet():
+def test_gitleaks_keeps_secret_in_snippet():
     from app.contexts.finding.sarif import normalize_gitleaks
 
     f = normalize_gitleaks(GITLEAKS_SARIF)[0]
     assert f["cwe"] == "CWE-798"
     assert f["file_path"] == "config/prod.env"
-    # 完整秘密不得出现在任何入库字段
-    assert "AKIAIOSFODNN7EXAMPLE" not in f["message"]
-    assert "AKIAIOSFODNN7EXAMPLE" not in (f["code_snippet"] or "")
-    # 保留前4+…+后4 与长度
-    assert "AKIA" in f["message"] and "…" in f["message"] and "len=20" in f["message"]
+    assert "AKIAIOSFODNN7EXAMPLE" in (f["code_snippet"] or "")
+    assert "REDACTED" not in (f["code_snippet"] or "")
+    assert "config/prod.env:8" in f["message"]
+    assert "AWS Access Key ID" in f["message"]
     assert f["raw"]["rule_class"] == "known"
+    assert f["raw"]["description"] == "AWS Access Key ID"
+    assert f["raw"]["commit"] == "abc123def"
+    assert f["raw"]["author"] == "alice"
 
 
 def test_gitleaks_generic_rule_class_and_entropy():
@@ -222,11 +235,52 @@ def test_osv_normalize_maps_dependencies():
     assert f["cwe"] is None  # 依赖情报直报，不占 CWE
     assert f["raw"]["dependency_name"] == "jinja2"
     assert "CVE-2024-22195" in f["message"]
+    assert "jinja2" in f["message"]
+    assert "依赖漏洞" in f["message"] or "JinjaXSS" in f["message"]
     assert f["severity"] == "warning"  # 5.4 → medium → SARIF warning
     assert len(f["severity"] or "") <= 20
     assert f["raw"]["called"] is None  # fixture 无 call analysis
+    assert f["raw"]["summary"] == "JinjaXSS"
+    assert f["code_snippet"] and "jinja2 2.11.3" in f["code_snippet"]
+    assert "https://osv.dev/vulnerability/GHSA-7ww5-4wqc-8m2g" in f["code_snippet"]
     # 同一依赖两条漏洞 fingerprint 不同
     assert len({f["fingerprint"] for f in findings}) == 2
+
+
+def test_osv_missing_summary_still_human_readable():
+    from app.contexts.finding.sarif import normalize_osv
+
+    report = {
+        "results": [{
+            "source": {"path": "/abs/workspace/repo/go.mod"},
+            "packages": [{
+                "package": {"name": "github.com/foo/bar", "version": "1.0.0", "ecosystem": "Go"},
+                "vulnerabilities": [{
+                    "id": "GO-2021-0053",
+                    "aliases": ["CVE-2021-3121"],
+                    "details": "A panic can be triggered by malformed input.\n\nSee advisory.",
+                    "affected": [{
+                        "package": {"name": "github.com/foo/bar", "ecosystem": "Go"},
+                        "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "1.3.2"}]}],
+                    }],
+                    "database_specific": {"cwe_ids": ["CWE-20"]},
+                    "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"}],
+                }],
+            }],
+        }],
+    }
+    f = normalize_osv(report)[0]
+    assert "github.com/foo/bar" in f["message"]
+    assert "CVE-2021-3121" in f["message"]
+    assert "REDACTED" not in f["message"]
+    assert f["raw"]["ecosystem"] == "Go"
+    assert f["raw"]["fixed_versions"] == ["1.3.2"]
+    assert f["cwe"] is None  # 依赖情报直报，不占 CWE 聚类
+    assert f["raw"].get("cwe") == "CWE-20"
+    assert f["code_snippet"]
+    assert "修复版本" in f["code_snippet"]
+    assert "https://osv.dev/vulnerability/GO-2021-0053" in f["code_snippet"]
+    assert f["raw"]["cvss_score"] == 7.5
 
 
 def test_osv_normalize_called_and_unimportant():
@@ -459,7 +513,7 @@ async def test_scan_node_rerun_idempotent_findings(session_factory, tmp_path):
         )).scalars().all()
         assert len(findings) == 1  # 重跑不重复
         assert findings[0].engine == "gitleaks"
-        assert "AKIAIOSFODNN7EXAMPLE" not in findings[0].message
+        assert "AKIAIOSFODNN7EXAMPLE" in (findings[0].code_snippet or findings[0].message)
 
 
 @pytest.mark.asyncio
@@ -535,6 +589,23 @@ async def test_osv_command_uses_v2_format_json(session_factory, tmp_path):
         assert "-json" not in argv
         assert argv[:4] == ["/opt/osv-scanner", "scan", "--format=json", "-r"]
         assert argv[-1] == str(tmp_path / "repo")
+
+
+@pytest.mark.asyncio
+async def test_gitleaks_command_does_not_redact(session_factory, tmp_path):
+    """线索台要看命中原文；--redact 会把 SARIF snippet 写成 REDACTED。"""
+    from unittest.mock import MagicMock, patch
+
+    from app.contexts.agent.nodes.scan import GitleaksNode
+
+    async with session_factory() as session:
+        ctx, task, run = await _make_ctx(session, tmp_path)
+        node = GitleaksNode()
+        settings = MagicMock()
+        with patch.object(node, "_binary", return_value="/opt/gitleaks"):
+            argv = node.build_command(ctx, _gitleaks_input(tmp_path), settings)
+        assert "--redact" not in argv
+        assert "detect" in argv
 
 
 @pytest.mark.asyncio

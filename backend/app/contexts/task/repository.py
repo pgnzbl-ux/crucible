@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import select, func, delete
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -222,6 +222,43 @@ class TaskRepository:
             out.setdefault(lab_id, []).append(task_id)
         return out
 
+    async def collect_object_keys(self, task_id: str) -> list[str]:
+        """硬删前收集 MinIO key（SARIF 不在任务前缀下，必须按行删除）。"""
+        from app.contexts.discovery.models import ScanRun
+        from app.contexts.report.models import Evidence, Report
+
+        keys: list[str] = []
+        for row in (
+            await self.session.execute(
+                select(Evidence.object_key).where(Evidence.task_id == task_id)
+            )
+        ).scalars():
+            if row:
+                keys.append(row)
+        for artifact_key, md_key, docx_key in (
+            await self.session.execute(
+                select(Report.artifact_key, Report.md_artifact_key, Report.docx_artifact_key).where(
+                    Report.task_id == task_id
+                )
+            )
+        ).all():
+            keys.extend(k for k in (artifact_key, md_key, docx_key) if k)
+        for bundle in (
+            await self.session.execute(
+                select(NodeRunFailure.bundle_key).where(NodeRunFailure.task_id == task_id)
+            )
+        ).scalars():
+            if bundle:
+                keys.append(bundle)
+        for sarif in (
+            await self.session.execute(
+                select(ScanRun.sarif_key).where(ScanRun.task_id == task_id)
+            )
+        ).scalars():
+            if sarif:
+                keys.append(sarif)
+        return keys
+
     async def delete_hard(self, task: Task) -> None:
         """物理删除任务 + 级联清理全部子表。
 
@@ -238,9 +275,13 @@ class TaskRepository:
             RawFinding,
             ReviewAction,
         )
+        from app.contexts.lab.models import Lab
         from app.contexts.report.models import Evidence, Report
 
         task_id = task.id
+        await self.session.execute(
+            update(Lab).where(Lab.creator_task_id == task_id).values(creator_task_id=None)
+        )
         run_ids = [
             row for row in (
                 await self.session.execute(

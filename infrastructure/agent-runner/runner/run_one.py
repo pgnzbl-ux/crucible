@@ -626,8 +626,8 @@ async def _stream_messages(
                     "duration_ms": getattr(message, "duration_ms", None),
                     "total_cost_usd": getattr(message, "total_cost_usd", None),
                     "num_turns": getattr(message, "num_turns", None),
-                    "usage": getattr(message, "usage", None),
-                    "model_usage": getattr(message, "model_usage", None),
+                    "usage": _usage_jsonable(getattr(message, "usage", None)),
+                    "model_usage": _usage_jsonable(getattr(message, "model_usage", None)),
                     "is_error": False,
                     "sequence": seq,
                     "timestamp": ts,
@@ -772,10 +772,12 @@ def _build_node_prompt(node_key: str, input_json: dict[str, Any]) -> str:
 # ── 节点蒸馏 skill（system_prompt）──
 # 生产：worker -v 挂当前节点目录 → /node-skill:ro，只读 SKILL.md。
 # 单测：可设 NODE_SKILL_DIR 指向仓库 node-skills/ 做回退。
+# 集合与 submit schema 同源，禁止再手抄一份（漏 api_hunt 会让猎洞走兼容 prompt、
+# 且不校验 submit_result）。
 
-NODE_AI_KEYS = frozenset(
-    {"canary", "profile", "env_ready", "audit", "reproduce", "report", "triage"}
-)
+from runner.node_schemas import NODE_INPUT_SCHEMAS
+
+NODE_AI_KEYS = frozenset(NODE_INPUT_SCHEMAS)
 
 
 def _load_node_skill(node_key: str) -> str:
@@ -806,9 +808,44 @@ def _system_prompt_for(node_key: str | None) -> dict[str, str] | None:
     }
 
 
-# submit_result 工具 input schema —— 单一真相在 runner.node_schemas，
-# 容器与后端共用同一份，禁止在此重新定义副本（历史上两份手工同步已多次漂移）。
-from runner.node_schemas import NODE_INPUT_SCHEMAS
+def _usage_jsonable(value: Any) -> Any:
+    """把 SDK usage / model_usage 收成可 json.dumps 的 dict，禁止 default=str。
+
+    ResultMessage.usage 通常已是 dict；model_usage 值为 ModelUsage TypedDict
+    （运行时也是 dict）。兼容网关/未来 SDK 若给出对象，必须抽出 token 字段，
+    否则 sidecar 写成字符串后台账 isinstance(dict) 丢弃 → 画像/靶场/猎洞全 0。
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _usage_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_usage_jsonable(v) for v in value]
+    extracted: dict[str, Any] = {}
+    for key in (
+        "inputTokens",
+        "outputTokens",
+        "cacheReadInputTokens",
+        "cacheCreationInputTokens",
+        "input_tokens",
+        "output_tokens",
+        "prompt_tokens",
+        "completion_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "costUSD",
+        "cost_usd",
+    ):
+        v = getattr(value, key, None)
+        if v is not None:
+            extracted[key] = v
+    if extracted:
+        return extracted
+    if hasattr(value, "__dict__"):
+        public = {k: v for k, v in vars(value).items() if not k.startswith("_")}
+        if public:
+            return _usage_jsonable(public)
+    return value
 
 
 def _make_submit_result_tool(schema: dict):

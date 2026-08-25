@@ -2,8 +2,9 @@
 
 - semgrep：SARIF 2.1.6；必须解析 codeFlows/threadFlows 为 source_to_sink
   (--dataflow-traces)，无 traces 则 None，不得丢弃已有 traces。
-- gitleaks：SARIF 输出 + `--redact` 双保险；入库前再过本地脱敏(§8.2)。
-- osv-scanner：原生 JSON(osv 结果不是 SARIF)，按依赖组件映射。
+- gitleaks：SARIF 输出，命中原文入库供线索台研判；不得 `--redact`。
+- osv-scanner：原生 JSON(osv 结果不是 SARIF)，按依赖组件映射为可读摘要。
+发给 LLM / 日志的脱敏见 redact_secrets（discovery-spec §8.2）。
 """
 from __future__ import annotations
 
@@ -243,8 +244,51 @@ def _gitleaks_entropy(result: dict) -> float | None:
     return None
 
 
+def _gitleaks_rule_description(rule_meta: dict) -> str:
+    short = rule_meta.get("shortDescription")
+    if isinstance(short, dict) and short.get("text"):
+        return str(short["text"]).strip()
+    name = rule_meta.get("name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    return ""
+
+
+def _gitleaks_meta(result: dict) -> dict[str, str]:
+    """从 partialFingerprints / properties 抽出提交信息。"""
+    fps = result.get("partialFingerprints") or {}
+    props = result.get("properties") or {}
+    out: dict[str, str] = {}
+
+    def _pick(*names: str) -> str:
+        for name in names:
+            val = fps.get(name)
+            if val is None:
+                val = props.get(name)
+            if val is None or val == "":
+                continue
+            text = str(val).strip()
+            if text:
+                return text
+        return ""
+
+    mapping = {
+        "commit": ("commitSha", "commit", "commitHash"),
+        "author": ("author", "Author"),
+        "email": ("email", "Email"),
+        "date": ("date", "Date"),
+        "commit_message": ("commitMessage", "message"),
+    }
+    for key, names in mapping.items():
+        val = _pick(*names)
+        if val:
+            out[key] = val
+    return out
+
+
 def normalize_gitleaks(sarif: dict) -> list[dict]:
     findings: list[dict] = []
+    rules = _semprep_rule_index(sarif)
     for run in sarif.get("runs") or []:
         for result in run.get("results") or []:
             rule_id = result.get("ruleId") or "gitleaks.generic"
@@ -252,14 +296,22 @@ def normalize_gitleaks(sarif: dict) -> list[dict]:
             uri = (loc.get("artifactLocation") or {}).get("uri") or ""
             region = loc.get("region") or {}
             line_start = region.get("startLine")
-            message = redact_secrets((result.get("message") or {}).get("text") or "")
+            original_message = (result.get("message") or {}).get("text") or ""
             snippet_obj = region.get("snippet")
             snippet = snippet_obj.get("text") if isinstance(snippet_obj, dict) else snippet_obj
+            snippet = (snippet or original_message or "").strip() or None
             rule_class = gitleaks_rule_class(rule_id)
             entropy = _gitleaks_entropy(result)
+            description = _gitleaks_rule_description(rules.get(rule_id, {}))
+            locus = f"{uri}:{line_start}" if line_start else uri
+            label = description or rule_id
+            message = f"{label} 命中 {locus}".strip() if locus else label
             raw: dict[str, Any] = {"rule_id": rule_id, "rule_class": rule_class}
             if entropy is not None:
                 raw["entropy"] = entropy
+            if description:
+                raw["description"] = description
+            raw.update(_gitleaks_meta(result))
             findings.append({
                 "engine": "gitleaks",
                 "rule_id": rule_id,
@@ -270,7 +322,7 @@ def normalize_gitleaks(sarif: dict) -> list[dict]:
                 "line_end": region.get("endLine", line_start),
                 "message": message[:4000],
                 "source_to_sink": None,
-                "code_snippet": (redact_secrets(snippet or "") or "")[:8000] or None,
+                "code_snippet": (snippet or "")[:8000] or None,
                 "fingerprint": fingerprint("gitleaks", rule_id, uri, line_start, "CWE-798"),
                 "raw": raw,
             })
@@ -446,6 +498,172 @@ def _osv_unimportant(vuln: dict) -> bool | None:
     return None
 
 
+def _osv_numeric_score(value: object) -> float | None:
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    upper = text.upper()
+    if upper.startswith("CVSS:4"):
+        return _cvss4_heuristic_score(text)
+    if upper.startswith("CVSS:"):
+        return _cvss3_base_score(text)
+    return None
+
+
+def _osv_best_score(vuln: dict) -> float | None:
+    ds = vuln.get("database_specific") if isinstance(vuln.get("database_specific"), dict) else {}
+    candidates: list[object] = [ds.get("nvd_cvss_score"), ds.get("cvss_score")]
+    for entry in vuln.get("severity") or []:
+        if isinstance(entry, dict):
+            candidates.append(entry.get("score"))
+    best: float | None = None
+    for candidate in candidates:
+        score = _osv_numeric_score(candidate)
+        if score is None:
+            continue
+        if best is None or score > best:
+            best = score
+    return best
+
+
+_SEVERITY_ZH = {"error": "高危", "warning": "中危", "note": "低危", "info": "提示"}
+
+
+def _severity_zh(level: str, score: float | None = None) -> str:
+    if score is not None:
+        if score >= 9.0:
+            return "严重"
+        if score >= 7.0:
+            return "高危"
+        if score >= 4.0:
+            return "中危"
+        if score > 0:
+            return "低危"
+    return _SEVERITY_ZH.get(level, "")
+
+
+def _osv_summary_text(vuln: dict) -> str:
+    summary = str(vuln.get("summary") or "").strip()
+    if summary:
+        return summary
+    details = str(vuln.get("details") or "").strip()
+    if not details:
+        return ""
+    return details.split("\n", 1)[0].strip()[:240]
+
+
+def _osv_advisory_cwe(vuln: dict) -> str | None:
+    """仅写入 raw 供展示；finding.cwe 保持空，避免改动 osv 聚类/bypass。"""
+    ds = vuln.get("database_specific") if isinstance(vuln.get("database_specific"), dict) else {}
+    for key in ("cwe_ids", "cwe", "CWE"):
+        val = ds.get(key)
+        if isinstance(val, list):
+            found = _cwe_from_text(" ".join(str(x) for x in val))
+        elif val:
+            found = _cwe_from_text(str(val))
+        else:
+            found = None
+        if found:
+            return found
+    return _cwe_from_text(vuln.get("summary"), str(vuln.get("details") or "")[:800])
+
+
+def _osv_fixed_versions(vuln: dict, dep_name: str) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for aff in vuln.get("affected") or []:
+        if not isinstance(aff, dict):
+            continue
+        pkg = (aff.get("package") or {}).get("name") if isinstance(aff.get("package"), dict) else None
+        if pkg and dep_name and pkg != dep_name:
+            continue
+        for rng in aff.get("ranges") or []:
+            if not isinstance(rng, dict):
+                continue
+            for event in rng.get("events") or []:
+                if not isinstance(event, dict):
+                    continue
+                fixed = event.get("fixed")
+                if not fixed:
+                    continue
+                text = str(fixed).strip()
+                if text and text not in seen:
+                    seen.add(text)
+                    out.append(text)
+    return out[:8]
+
+
+def _osv_human_message(
+    *,
+    dep_name: str,
+    version: str,
+    ecosystem: str,
+    summary: str,
+    vid: str,
+    cve: str,
+    severity_label: str,
+) -> str:
+    pkg = f"{dep_name} {version}".strip()
+    eco = f"（{ecosystem}）" if ecosystem else ""
+    title = summary or vid
+    ids = " / ".join(part for part in (cve, vid) if part)
+    sev = f"，{severity_label}" if severity_label else ""
+    id_bit = f"（{ids}{sev}）" if ids or sev else ""
+    return f"{pkg}{eco} 存在依赖漏洞：{title}{id_bit}".strip()
+
+
+def _osv_advisory_text(
+    *,
+    dep_name: str,
+    version: str,
+    ecosystem: str,
+    lockfile: str,
+    vid: str,
+    cve: str,
+    aliases: list,
+    summary: str,
+    details: str,
+    severity_label: str,
+    cvss_score: float | None,
+    fixed_versions: list[str],
+    called: bool | None,
+) -> str:
+    pkg = f"{dep_name} {version}".strip()
+    lines = [f"依赖：{pkg}" + (f"（{ecosystem}）" if ecosystem else "")]
+    if lockfile:
+        lines.append(f"清单：{lockfile}")
+    ids = " / ".join(part for part in (vid, cve) if part)
+    if ids:
+        lines.append(f"漏洞：{ids}")
+    extra_aliases = [str(a) for a in aliases if a and a not in {vid, cve}]
+    if extra_aliases:
+        lines.append("别名：" + "、".join(extra_aliases[:8]))
+    if severity_label or cvss_score is not None:
+        score_bit = f"（CVSS {cvss_score}）" if cvss_score is not None else ""
+        lines.append(f"严重度：{severity_label}{score_bit}")
+    if summary:
+        lines.append(f"摘要：{summary}")
+    if details and details.strip() != summary:
+        lines.append(f"说明：{details.strip()[:2000]}")
+    if fixed_versions:
+        lines.append("修复版本：" + "、".join(fixed_versions))
+    if called is True:
+        lines.append("可达性：受影响代码已被调用")
+    elif called is False:
+        lines.append("可达性：受影响代码未被调用")
+    if vid:
+        lines.append(f"查阅：https://osv.dev/vulnerability/{vid}")
+    return "\n".join(lines)
+
+
 def normalize_osv(report: dict) -> list[dict]:
     """osv-scanner scan --format=json → 每个依赖组件一条 finding(直报，不进 triage)。"""
     findings: list[dict] = []
@@ -456,42 +674,73 @@ def normalize_osv(report: dict) -> list[dict]:
             package = pkg.get("package") or {}
             dep_name = package.get("name") or "unknown"
             version = package.get("version") or ""
+            ecosystem = str(package.get("ecosystem") or "").strip()
             called_by_id = _osv_called_index(pkg)
             for vuln in pkg.get("vulnerabilities") or []:
                 vid = vuln.get("id") or ""
                 if not vid:
                     continue
-                aliases = vuln.get("aliases") or []
+                aliases = [str(a) for a in (vuln.get("aliases") or []) if a]
                 cve = next((a for a in aliases if a.startswith("CVE-")), "")
                 called = called_by_id.get(vid)
                 if called is None:
-                    # 别名组内任一 id 有分析则回填
                     for aid in aliases:
                         if aid in called_by_id:
                             called = called_by_id[aid]
                             break
                 unimportant = _osv_unimportant(vuln)
+                summary = _osv_summary_text(vuln)
+                details = str(vuln.get("details") or "").strip()
+                cvss_score = _osv_best_score(vuln)
+                level = _osv_severity(vuln)
+                if not level and cvss_score is not None:
+                    level = _level_from_score(cvss_score)
+                severity_label = _severity_zh(level, cvss_score)
+                fixed_versions = _osv_fixed_versions(vuln, dep_name)
+                advisory_cwe = _osv_advisory_cwe(vuln)
                 raw: dict[str, Any] = {
                     "rule_id": vid, "dependency_name": dep_name, "version": version,
-                    "cve": cve, "aliases": aliases[:5],
+                    "cve": cve, "aliases": aliases[:8],
                     "cvss": _osv_cvss_raw(vuln),
                     "called": called,  # bool | None
+                    "osv_url": f"https://osv.dev/vulnerability/{vid}",
                 }
+                if ecosystem:
+                    raw["ecosystem"] = ecosystem
+                if summary:
+                    raw["summary"] = summary[:500]
+                if details:
+                    raw["details"] = details[:2000]
+                if cvss_score is not None:
+                    raw["cvss_score"] = cvss_score
+                if severity_label:
+                    raw["severity_label"] = severity_label
+                if fixed_versions:
+                    raw["fixed_versions"] = fixed_versions
+                if advisory_cwe:
+                    raw["cwe"] = advisory_cwe
                 if unimportant is not None:
                     raw["unimportant"] = unimportant
                 findings.append({
                     "engine": "osv",
                     "rule_id": vid,
                     "cwe": None,  # osv 不稳定提供 CWE；依赖情报直报
-                    "severity": _osv_severity(vuln),
+                    "severity": level,
                     "file_path": lockfile,
                     "line_start": None,
                     "line_end": None,
-                    "message": redact_secrets(
-                        f"{dep_name} {version}: {vuln.get('summary') or vid} {cve}".strip()
+                    "message": _osv_human_message(
+                        dep_name=dep_name, version=version, ecosystem=ecosystem,
+                        summary=summary, vid=vid, cve=cve, severity_label=severity_label,
                     )[:4000],
                     "source_to_sink": None,
-                    "code_snippet": None,
+                    "code_snippet": _osv_advisory_text(
+                        dep_name=dep_name, version=version, ecosystem=ecosystem,
+                        lockfile=lockfile, vid=vid, cve=cve, aliases=aliases,
+                        summary=summary, details=details, severity_label=severity_label,
+                        cvss_score=cvss_score, fixed_versions=fixed_versions,
+                        called=called,
+                    )[:8000] or None,
                     "fingerprint": fingerprint("osv", vid, f"{lockfile}#{dep_name}", None, None),
                     "raw": raw,
                 })

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -58,15 +58,14 @@ async def _get_repo(session: Annotated[AsyncSession, Depends(get_db_session)]) -
     return FindingRepository(session)
 
 
-async def _owner_task_ids(session: AsyncSession, user_id: str, task_id: str | None) -> list[str] | None:
-    """owner 隔离：指定 task_id 也必须与当前用户取交集。"""
-    if task_id:
-        owned = await session.scalar(
-            select(Task.id).where(Task.id == task_id, Task.owner_id == user_id)
-        )
-        return [owned] if owned else ["__none__"]
-    rows = await session.execute(select(Task.id).where(Task.owner_id == user_id))
-    return [r for r in rows.scalars().all()] or ["__none__"]
+async def _owned_task_id(session: AsyncSession, user_id: str, task_id: str | None) -> str | None:
+    """指定 task_id 时必须属于当前用户；未指定则不过滤任务。"""
+    if not task_id:
+        return None
+    owned = await session.scalar(
+        select(Task.id).where(Task.id == task_id, Task.owner_id == user_id)
+    )
+    return owned or "__none__"
 
 
 def _summary(
@@ -78,9 +77,13 @@ def _summary(
     engine = representative.engine if representative else ((g.engine_set or [None])[0])
     rule_id = representative.rule_id if representative else ""
     message = representative.message if representative else ""
+    raw = representative.raw if representative and isinstance(representative.raw, dict) else {}
+    dependency_name = raw.get("dependency_name") if isinstance(raw.get("dependency_name"), str) else None
     effective_cwe = infer_cwe(
         cwe=g.cwe, rule_id=rule_id, message=message, engine=engine or "",
     )
+    if not effective_cwe and engine == "osv" and isinstance(raw.get("cwe"), str):
+        effective_cwe = raw["cwe"]
     cwe_source = (
         "scanner" if representative and representative.cwe
         else "inferred" if effective_cwe
@@ -92,6 +95,7 @@ def _summary(
         file_path=g.file_path,
         vulnerability_title=vulnerability_title(
             cwe=effective_cwe, rule_id=rule_id, message=message, engine=engine or "",
+            dependency_name=dependency_name,
         ),
         representative_rule_id=rule_id or None,
         representative_message=(message or "")[:500] or None,
@@ -124,6 +128,8 @@ def _adjudication_detail(a: Adjudication) -> AdjudicationDetail:
         why=[str(w) for w in (a.why or [])],
         evidence=[e if isinstance(e, dict) else {"detail": str(e)} for e in (a.evidence or [])],
         need=[str(n) for n in (a.need or [])],
+        summary=getattr(a, "summary", None),
+        reasoning=getattr(a, "reasoning", None),
         prompt_text=a.prompt_text, response_text=a.response_text,
         usage=numeric_usage(a.usage), created_at=a.created_at,
     )
@@ -134,13 +140,12 @@ async def finding_stats(
     repo: Annotated[FindingRepository, Depends(_get_repo)],
     user_id: CurrentUserId,
 ) -> FindingStatsResponse:
-    task_ids = await _owner_task_ids(repo.session, user_id, None) or ["__none__"]
-    by_status, by_resolution = await repo.group_stats(task_ids)
+    by_status, by_resolution = await repo.group_stats(user_id)
     return FindingStatsResponse(
         total=sum(by_status.values()),
         by_status=by_status,
         by_resolution=by_resolution,
-        by_queue=await repo.group_queue_stats(task_ids),
+        by_queue=await repo.group_queue_stats(user_id),
     )
 
 
@@ -150,12 +155,14 @@ async def list_groups(
     repo: Annotated[FindingRepository, Depends(_get_repo)],
     user_id: CurrentUserId,
 ) -> AlertGroupListResponse:
+    owned_task = await _owned_task_id(repo.session, user_id, req.task_id)
     total, groups = await repo.list_groups(
-        task_id=req.task_id, status=req.status, resolution=req.resolution, cwe=req.cwe,
+        task_id=owned_task if req.task_id else None,
+        status=req.status, resolution=req.resolution, cwe=req.cwe,
         ai_verdict=req.ai_verdict, engine=req.engine, clue_grade=req.clue_grade,
         scope=req.scope or "workbench", q=req.q,
         limit=req.limit, offset=req.offset,
-        owner_task_ids=await _owner_task_ids(repo.session, user_id, req.task_id),
+        owner_id=user_id,
     )
     task_ids = {g.task_id for g in groups}
     representative_ids = {g.representative_finding_id for g in groups}
@@ -201,11 +208,13 @@ async def list_group_ids(
 ) -> AlertGroupIdsResponse:
     """当前筛选下全部告警组 id（跨页全选）。超出上限返回 400。"""
     try:
+        owned_task = await _owned_task_id(repo.session, user_id, req.task_id)
         total, ids = await repo.list_group_ids(
-            task_id=req.task_id, status=req.status, resolution=req.resolution,
+            task_id=owned_task if req.task_id else None,
+            status=req.status, resolution=req.resolution,
             cwe=req.cwe, ai_verdict=req.ai_verdict, engine=req.engine,
             clue_grade=req.clue_grade, scope=req.scope or "workbench", q=req.q,
-            owner_task_ids=await _owner_task_ids(repo.session, user_id, req.task_id),
+            owner_id=user_id,
         )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
@@ -241,6 +250,44 @@ async def delete_group(
     if reason == "in_progress":
         raise HTTPException(409, "该线索正在终认中，请待结束后再删")
     raise HTTPException(404, "告警组不存在")
+
+
+@router.get("/groups/{group_id}/report/export")
+async def export_group_vuln_report(
+    group_id: str,
+    repo: Annotated[FindingRepository, Depends(_get_repo)],
+    user_id: CurrentUserId,
+    format: str = Query("json", pattern="^(json|md)$"),
+):
+    """已确认/代码可达线索的独立漏洞报告导出（§9.1 / §11.1）。"""
+    from fastapi.responses import JSONResponse, PlainTextResponse
+
+    from app.contexts.finding.vuln_report import vuln_report_to_markdown
+
+    svc = FindingService(repo.session)
+    group = await svc.get_group(group_id)
+    if group is None:
+        raise HTTPException(404, "告警组不存在")
+    task = await repo.session.get(Task, group.task_id)
+    if task is None or task.owner_id != user_id:
+        raise HTTPException(404, "告警组不存在")
+    report = group.vuln_report if isinstance(group.vuln_report, dict) else None
+    if report is None:
+        raise HTTPException(404, "尚未生成漏洞报告")
+    if format == "md":
+        return PlainTextResponse(
+            vuln_report_to_markdown(report),
+            media_type="text/markdown; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="vuln-{group_id[:8]}.md"',
+            },
+        )
+    return JSONResponse(
+        content=report,
+        headers={
+            "Content-Disposition": f'attachment; filename="vuln-{group_id[:8]}.json"',
+        },
+    )
 
 
 @router.get("/groups/{group_id}", response_model=AlertGroupDetail)
@@ -296,13 +343,17 @@ async def get_group_detail(
         lead_runs=[
             LeadRunSummary(
                 id=lead.id, status=lead.status, verdict=lead.verdict,
-                gate_verdict=lead.gate_verdict, error=lead.error,
+                gate_verdict=lead.gate_verdict,
+                verification_basis=getattr(lead, "verification_basis", None),
+                error=lead.error,
                 created_at=lead.created_at, updated_at=lead.updated_at,
             )
             for lead in lead_runs
         ],
         verification_task_id=verification_task.id if verification_task else None,
         verification_verdict=getattr(verification_task, "verdict", None) if verification_task else None,
+        verification_basis=getattr(group, "verification_basis", None),
+        vuln_report=group.vuln_report if isinstance(getattr(group, "vuln_report", None), dict) else None,
     )
 
 
@@ -384,11 +435,14 @@ async def manual_dispatch(
     task = await repo.session.get(Task, group.task_id)
     if task is None or task.owner_id != user_id:
         raise HTTPException(404, "告警组不存在")
-    if group.status == "dispatched":
-        # 幂等守卫：重复点击会创建第二个 verify 任务并覆盖 source_alert_group 指针
+    prev_status = group.status
+    claimed = await svc.try_claim_dispatch(group.id)
+    if claimed is None:
         raise HTTPException(409, "该告警组已投递验证任务，请勿重复投递")
+    group = claimed
     rep = await repo.get_representative(group)
     if rep is None:
+        await svc.release_dispatch_claim(group.id, restore_status=prev_status)
         raise HTTPException(409, "组缺少代表成员，无法组装验证描述")
     adj_rows = await repo.session.execute(
         select(Adjudication)
@@ -416,15 +470,17 @@ async def manual_dispatch(
             user_id,
         )
     except TaskDispatchError:
-        raise HTTPException(502, "验证任务已创建但投递失败，请稍后重试")
+        await svc.release_dispatch_claim(group.id, restore_status=prev_status)
+        await repo.session.commit()
+        raise HTTPException(503, "验证任务已创建但投递失败，请稍后重试")
     except ValueError as e:
+        await svc.release_dispatch_claim(group.id, restore_status=prev_status)
         raise HTTPException(409, str(e))
 
     await svc.record_review_action(
         group_id=group.id, user_id=user_id, action="dispatch",
         reason_text=f"manual_dispatch→{detail.id}",
     )
-    await svc.mark_dispatched(group)
     from app.contexts.task.service import TaskService as _TS
 
     await _TS(TaskRepository(repo.session)).set_source_alert_group(detail.id, group.id)

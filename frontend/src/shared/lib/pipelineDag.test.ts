@@ -276,6 +276,8 @@ describe('pipelineDag 运行流程', () => {
 
     expect(layout.nodes.some((n) => n.key === 'cluster')).toBe(false)
     expect(layout.nodes.some((n) => n.key === 'dispatch')).toBe(false)
+    expect(layout.nodes.some((n) => n.key === 'api_inventory')).toBe(false)
+    expect(layout.nodes.some((n) => n.key === 'api_hunt')).toBe(false)
     expect(node('env_ready').x).toBeLessThan(node('audit').x)
     expect(node('audit').x).toBeLessThan(node('reproduce').x)
     expect(layout.nodes.some((n) => n.key === 'is_web')).toBe(false)

@@ -9,6 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.contexts.finding.sarif import redact_secrets
+
 CWE_NAMES = {
     "CWE-89": "SQL 注入",
     "CWE-78": "命令注入",
@@ -125,7 +127,7 @@ def build_lead_description(*, group, representative, adjudication) -> str:
     """
     flow = "\n".join(representative.source_to_sink or []) or "无（引擎未给出数据流）"
     why = "\n".join(f"- {w}" for w in ((adjudication.why if adjudication else None) or [])) or "- 无"
-    snippet = (representative.code_snippet or "").strip() or "（见位置行段）"
+    snippet = redact_secrets((representative.code_snippet or "").strip()) or "（见位置行段）"
     return LEAD_DESCRIPTION_TEMPLATE.format(
         cwe_name=CWE_NAMES.get(group.cwe or "", "疑似漏洞"),
         cwe=group.cwe or "CWE-?",

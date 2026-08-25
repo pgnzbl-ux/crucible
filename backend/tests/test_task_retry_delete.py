@@ -31,6 +31,8 @@ async def session_factory():
         from app.contexts.task.models import Task, TaskRun, NodeRun, AgentEvent  # noqa: F401
         from app.contexts.report.models import Report  # noqa: F401
         from app.contexts.settings.models import LlmProvider  # noqa: F401
+        from app.contexts.discovery.models import ScanRun  # noqa: F401
+        from app.contexts.finding.models import AlertGroup, RawFinding  # noqa: F401
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -139,6 +141,8 @@ async def test_retry_from_triage_copies_screen_without_rerun(session_factory):
             ("scan_gitleaks", "completed", "{}"),
             ("scan_osv", "completed", "{}"),
             ("scan_semgrep", "completed", "{}"),
+            ("api_inventory", "completed", "{}"),
+            ("api_hunt", "completed", "{}"),
             ("env_ready", "completed", "{}"),
             ("cluster", "completed", "{}"),
             ("screen", "completed", '{"escalated_count":2,"fast_model_count":3}'),
@@ -202,6 +206,8 @@ async def test_retry_from_triage_rejects_missing_screen(session_factory):
                 ("scan_gitleaks", "completed"),
                 ("scan_osv", "completed"),
                 ("scan_semgrep", "completed"),
+                ("api_inventory", "completed"),
+                ("api_hunt", "completed"),
                 ("env_ready", "completed"),
                 ("cluster", "completed"),
                 ("triage", "failed"),
@@ -801,3 +807,56 @@ async def test_soft_delete_rejects_already_archived(session_factory):
         svc = TaskService(TaskRepository(session))
         with pytest.raises(ValueError, match="已归档"):
             await svc.delete_task(task.id, "u1")
+
+
+@pytest.mark.asyncio
+async def test_retry_full_purges_discovery_findings(session_factory):
+    """整轮 retry 清掉 findings/groups，避免 fingerprint unique 撞车。"""
+    from unittest.mock import patch
+
+    from sqlalchemy import select
+
+    from app.contexts.discovery.models import ScanRun
+    from app.contexts.finding.models import AlertGroup, RawFinding
+    from app.contexts.task.models import Task, TaskRun
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+
+    async with session_factory() as session:
+        task = Task(
+            project_address="x",
+            task_type="discovery",
+            vulnerability_description=None,
+            owner_id="u1",
+            status="failed",
+        )
+        session.add(task)
+        await session.flush()
+        run = TaskRun(task_id=task.id, status="failed")
+        session.add(run)
+        await session.flush()
+        scan = ScanRun(
+            task_id=task.id, run_id=run.id, node_run_id="nr", engine="semgrep",
+            status="completed", config_summary={},
+        )
+        session.add(scan)
+        await session.flush()
+        finding = RawFinding(
+            task_id=task.id, scan_run_id=scan.id, engine="semgrep", rule_id="r",
+            severity="error", file_path="a.py", line_start=1, line_end=1,
+            message="m", fingerprint="fp-retry", raw={},
+        )
+        session.add(finding)
+        await session.flush()
+        session.add(AlertGroup(
+            task_id=task.id, group_key="gk", file_path="a.py",
+            member_count=1, representative_finding_id=finding.id,
+            engine_set=["semgrep"], status="clustered",
+        ))
+        await session.flush()
+        svc = TaskService(TaskRepository(session))
+        with patch("app.core.celery_app.celery_app.send_task"):
+            await svc.retry_task(task.id, "u1")
+        assert (await session.execute(select(RawFinding))).scalars().all() == []
+        assert (await session.execute(select(AlertGroup))).scalars().all() == []
+        assert (await session.execute(select(ScanRun))).scalars().all() == []

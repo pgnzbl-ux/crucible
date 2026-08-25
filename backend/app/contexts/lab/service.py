@@ -915,6 +915,7 @@ class LabService:
         else:
             await self._confirm_not_busy(lab.id)
         await docker_ops.compose_down(lab.compose_project)
+        await self._task_service().unbind_lab(lab.id)
         lab.status = "destroyed"
         await self._touch_and_commit(lab)
         return lab.status

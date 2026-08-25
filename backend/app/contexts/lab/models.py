@@ -11,12 +11,12 @@ class Lab(BaseModel):
 
     __tablename__ = "labs"
 
-    owner_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"))
-    project_id: Mapped[str] = mapped_column(String(36), ForeignKey("projects.id"))
+    owner_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), index=True)
+    project_id: Mapped[str] = mapped_column(String(36), ForeignKey("projects.id"), index=True)
     commit_sha: Mapped[str] = mapped_column(
         String(64), comment="git SHA-1 或上传包 sha256"
     )
-    status: Mapped[str] = mapped_column(String(20), default="creating")
+    status: Mapped[str] = mapped_column(String(20), default="creating", index=True)
     compose_project: Mapped[str] = mapped_column(String(255))
     workdir: Mapped[str] = mapped_column(String(1024))
     target_url: Mapped[str | None] = mapped_column(String(1024))

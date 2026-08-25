@@ -1102,6 +1102,9 @@ body,
   z-index: 2;
   top: 9px;
   left: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   padding: 2px 8px;
   border: 1px solid color-mix(in srgb, var(--crucible-primary) 25%, var(--crucible-border));
   border-radius: 999px;
@@ -1110,6 +1113,11 @@ body,
   font-size: 11px;
   font-weight: 600;
   line-height: 18px;
+}
+.crucible-dag-overview__total {
+  color: var(--crucible-text-secondary);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 .crucible-dag-overview__track {
   display: flex;

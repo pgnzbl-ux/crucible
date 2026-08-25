@@ -5,10 +5,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation, useParams } from 'wouter'
 
 import { api } from '../shared/lib/api'
+import { downloadAuthenticated } from '../shared/lib/download'
 import { PageContainer } from '../shared/components/PageContainer'
 import { useErrorToast } from '../shared/hooks/useErrorToast'
-import { getVerdictMeta, getAiVerdictMeta } from '../shared/lib/meta'
-import { formatSourceToSink, evidenceMetaFromFinding, ruleClassLabel } from '../shared/lib/findingEvidence'
+import { getVerdictMeta, getAiVerdictMeta, formatFindingEngines } from '../shared/lib/meta'
+import { displaySourcePath, formatSourceToSink, evidenceMetaFromFinding, findingEvidenceView, ruleClassLabel } from '../shared/lib/findingEvidence'
+import { safeHttpUrl } from '../shared/lib/safeUrl'
 
 const { Text, Paragraph } = Typography
 
@@ -77,6 +79,7 @@ export function FindingDetailPage() {
   const sourceToSink = formatSourceToSink(rep?.source_to_sink)
   const evidenceMeta = evidenceMetaFromFinding(rep)
   const ruleLabel = ruleClassLabel(evidenceMeta.ruleClass)
+  const evidence = rep ? findingEvidenceView(rep) : null
 
   return (
     <PageContainer>
@@ -118,7 +121,7 @@ export function FindingDetailPage() {
             <Descriptions.Item label="CWE">{data.cwe ?? '-'}</Descriptions.Item>
             <Descriptions.Item label="线索等级">{data.clue_grade ?? '-'}</Descriptions.Item>
             <Descriptions.Item label="位置" span={2}>
-              {data.file_path}
+              {displaySourcePath(data.file_path)}
               {data.function_symbol ? ` · ${data.function_symbol}()` : ''}
               {data.line_span ? ` L${data.line_span}` : ''}
             </Descriptions.Item>
@@ -142,7 +145,7 @@ export function FindingDetailPage() {
                 '尚未研判'
               )}
             </Descriptions.Item>
-            <Descriptions.Item label="引擎">{(data.engine_set ?? []).join(', ')}</Descriptions.Item>
+            <Descriptions.Item label="引擎">{formatFindingEngines(data.engine_set)}</Descriptions.Item>
             <Descriptions.Item label="成员数">{data.member_count}</Descriptions.Item>
             {data.verification_task_id && (
               <Descriptions.Item label="定向验证" span={2}>
@@ -157,36 +160,64 @@ export function FindingDetailPage() {
           </Descriptions>
         </Card>
 
-        {rep && (
-          <Card title="命中代码" size="small">
-            <Paragraph style={{ marginBottom: 8 }}>
-              <Space size={[4, 4]} wrap>
-                <Tag color={evidenceMeta.hasDataflow ? 'blue' : 'default'}>
-                  {evidenceMeta.hasDataflow ? '有数据流' : '无数据流'}
-                </Tag>
-                {evidenceMeta.confidence ? (
-                  <Tag>规则置信 {evidenceMeta.confidence}</Tag>
-                ) : null}
-                {ruleLabel ? <Tag color={evidenceMeta.ruleClass === 'known' ? 'orange' : 'default'}>{ruleLabel}</Tag> : null}
-              </Space>
-            </Paragraph>
+        {rep && evidence && (
+          <Card title={evidence.cardTitle} size="small">
+            {rep.engine === 'semgrep' ? (
+              <Paragraph style={{ marginBottom: 8 }}>
+                <Space size={[4, 4]} wrap>
+                  <Tag color={evidenceMeta.hasDataflow ? 'blue' : 'default'}>
+                    {evidenceMeta.hasDataflow ? '有数据流' : '无数据流'}
+                  </Tag>
+                  {evidenceMeta.confidence ? (
+                    <Tag>规则置信 {evidenceMeta.confidence}</Tag>
+                  ) : null}
+                  {ruleLabel ? <Tag color={evidenceMeta.ruleClass === 'known' ? 'orange' : 'default'}>{ruleLabel}</Tag> : null}
+                </Space>
+              </Paragraph>
+            ) : null}
             {sourceToSink ? (
               <Paragraph>
                 <Text type="secondary">数据流：</Text>
                 {sourceToSink}
               </Paragraph>
             ) : null}
-            <pre
-              style={{
-                background: 'var(--crucible-bg)',
-                padding: 12,
-                borderRadius: 8,
-                fontSize: 12,
-                overflow: 'auto',
-              }}
-            >
-              {rep.code_snippet ?? rep.message}
-            </pre>
+            {evidence.fields.length > 0 ? (
+              <Descriptions column={1} size="small" style={{ marginBottom: evidence.body ? 8 : 0 }}>
+                {evidence.fields.map((field) => (
+                  <Descriptions.Item key={field.label} label={field.label}>
+                    {field.value}
+                  </Descriptions.Item>
+                ))}
+              </Descriptions>
+            ) : null}
+            {evidence.redacted ? (
+              <Paragraph type="warning">
+                当前记录在扫描时被脱敏。请从该任务的敏感信息检测节点重跑，即可查看命中原文。
+              </Paragraph>
+            ) : null}
+            {evidence.body ? (
+              <pre
+                style={{
+                  background: 'var(--crucible-bg)',
+                  padding: 12,
+                  borderRadius: 8,
+                  fontSize: 12,
+                  overflow: 'auto',
+                  whiteSpace: 'pre-wrap',
+                }}
+              >
+                {evidence.body}
+              </pre>
+            ) : null}
+            {evidence.links.map((link) => {
+              const href = safeHttpUrl(link.href)
+              if (!href) return null
+              return (
+                <Paragraph key={href} style={{ marginTop: 8, marginBottom: 0 }}>
+                  <a href={href} target="_blank" rel="noreferrer">{link.label}</a>
+                </Paragraph>
+              )
+            })}
           </Card>
         )}
 
@@ -199,6 +230,18 @@ export function FindingDetailPage() {
               </Tag>
               {latestAdj.confidence != null && <Text>{latestAdj.confidence.toFixed(2)}</Text>}
             </Paragraph>
+            {latestAdj.summary && (
+              <Paragraph>
+                <Text strong>简述：</Text>
+                {latestAdj.summary}
+              </Paragraph>
+            )}
+            {latestAdj.reasoning && (
+              <Paragraph>
+                <Text strong>推理：</Text>
+                <span style={{ whiteSpace: 'pre-wrap' }}>{latestAdj.reasoning}</span>
+              </Paragraph>
+            )}
             <Paragraph>
               <Text strong>理由：</Text>
               <ul style={{ margin: '4px 0', paddingLeft: 20 }}>
@@ -236,6 +279,51 @@ export function FindingDetailPage() {
                 ),
               }]}
             />
+          </Card>
+        )}
+
+        {data.vuln_report && (
+          <Card
+            title="独立漏洞报告"
+            size="small"
+            extra={
+              <Space>
+                {data.verification_basis && (
+                  <Tag>{data.verification_basis === 'lab' ? '靶场验证' : '代码闭环'}</Tag>
+                )}
+                <Button
+                  size="small"
+                  onClick={async () => {
+                    try {
+                      await downloadAuthenticated(
+                        api.exportFindingVulnUrl(data.id, 'md'),
+                        `vuln-${data.id.slice(0, 8)}.md`,
+                      )
+                    } catch (e) {
+                      message.error(e instanceof Error ? e.message : '导出失败')
+                    }
+                  }}
+                >
+                  导出
+                </Button>
+              </Space>
+            }
+          >
+            <Paragraph>
+              <Text strong>简述：</Text>
+              {String(data.vuln_report.summary || '—')}
+            </Paragraph>
+            <Paragraph>
+              <Text strong>终认：</Text>
+              {String(data.vuln_report.final_verdict || data.resolution || '—')}
+            </Paragraph>
+            <Button
+              type="link"
+              style={{ padding: 0 }}
+              onClick={() => navigate(`/reports/audits/${data.task_id}/vulns/${data.id}`)}
+            >
+              在漏洞报告中打开
+            </Button>
           </Card>
         )}
 

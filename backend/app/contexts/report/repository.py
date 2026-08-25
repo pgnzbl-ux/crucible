@@ -42,11 +42,23 @@ class ReportRepository:
         status: str | None = None,
         verdict: str | None = None,
         query: str | None = None,
+        task_type: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[Report], int]:
+        from app.contexts.task.models import Task
+
         stmt = select(Report).where(Report.owner_id == owner_id)
         count_stmt = select(func.count(Report.id)).where(Report.owner_id == owner_id)
+        if task_type:
+            stmt = stmt.join(Task, Task.id == Report.task_id).where(
+                Task.owner_id == owner_id,
+                Task.task_type == task_type,
+            )
+            count_stmt = count_stmt.join(Task, Task.id == Report.task_id).where(
+                Task.owner_id == owner_id,
+                Task.task_type == task_type,
+            )
         if status:
             stmt = stmt.where(Report.status == status)
             count_stmt = count_stmt.where(Report.status == status)

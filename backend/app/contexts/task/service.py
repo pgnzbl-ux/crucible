@@ -362,6 +362,7 @@ class TaskService:
         from app.contexts.agent.runtime_cleanup import schedule_teardown_task_runtime
 
         schedule_teardown_task_runtime(task_id)
+        await self._clear_lead_queue(task_id)
 
         return self._to_detail(task, task.runs)
 
@@ -407,6 +408,11 @@ class TaskService:
         task.lab_id = lab_id
         if commit:
             await self.session.commit()
+
+    async def unbind_lab(self, lab_id: str) -> None:
+        await self.repo.session.execute(
+            update(Task).where(Task.lab_id == lab_id).values(lab_id=None)
+        )
 
     async def retry_task(
         self, task_id: str, owner_id: str, from_node: str | None = None
@@ -461,6 +467,13 @@ class TaskService:
             raise
 
         await self.repo.session.flush()
+        from app.contexts.finding.service import FindingService
+
+        await FindingService(self.session).purge_for_retry(task.id, from_node)
+        if from_node is None or from_node in (
+            "scan_semgrep", "scan_gitleaks", "scan_osv", "api_hunt", "cluster",
+        ):
+            await self._clear_lead_queue(task.id)
         await self.repo.session.commit()
 
         # 投 Celery(用新 run.id 作 celery task_id,cancel 时可精确 revoke)
@@ -589,12 +602,43 @@ class TaskService:
         except Exception:  # noqa: BLE001
             logger.warning("删除任务时拆容器失败(best-effort) task=%s", task_id, exc_info=True)
 
+        await self._clear_lead_queue(task_id)
         if hard:
+            await self._purge_task_objects(task)
             await self.repo.delete_hard(task)
         else:
             task.status = "archived"
             await self.repo.session.flush()
         return True
+
+    async def _clear_lead_queue(self, task_id: str) -> None:
+        try:
+            from app.contexts.agent.lead_queue import clear_task_queue
+
+            await clear_task_queue(task_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("清理终认队列失败(best-effort) task=%s", task_id, exc_info=True)
+
+    async def _purge_task_objects(self, task: Task) -> None:
+        """硬删：按任务前缀扫桶 + 删除 DB 中登记但不在前缀下的对象（SARIF）。"""
+        from app.shared.object_store import (
+            get_object_store,
+            stored_kind,
+            task_artifact_prefixes,
+        )
+
+        extra_keys = await self.repo.collect_object_keys(task.id)
+        store = get_object_store()
+        try:
+            for kind, prefix in task_artifact_prefixes(task.owner_id, task.id):
+                store.delete_prefix(kind, prefix)
+            for key in extra_keys:
+                kind = stored_kind(key)
+                if kind is None:
+                    continue
+                store.delete_at(kind, key)
+        except Exception:  # noqa: BLE001
+            logger.warning("清理任务对象存储失败(best-effort) task=%s", task.id, exc_info=True)
 
     async def get_run_nodes(
         self, task_id: str, run_id: str, owner_id: str

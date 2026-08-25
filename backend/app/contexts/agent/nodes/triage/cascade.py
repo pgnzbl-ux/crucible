@@ -71,8 +71,13 @@ def _tier_adjudication(
     source: str,
     detail: dict[str, Any],
     usage: dict[str, int] | None = None,
+    summary: str | None = None,
+    reasoning: str | None = None,
 ) -> Adjudication:
     """非 agent 层的审计行：prompt/response 存判定依据摘要，保住回放可解释性。"""
+    from app.contexts.finding.narrative import narrative_from_why
+
+    syn_s, syn_r = narrative_from_why(why)
     return Adjudication(
         attempt=1,
         verdict=verdict,
@@ -80,6 +85,8 @@ def _tier_adjudication(
         why=why,
         evidence=[],
         need=[],
+        summary=(summary or syn_s)[:800],
+        reasoning=(reasoning or syn_r)[:8000],
         context_log=[{"tier": source, **detail}],
         prompt_text=f"[{source}] 级联前置判定，无 LLM/agent 会话",
         response_text=json.dumps(detail, ensure_ascii=False, default=str),

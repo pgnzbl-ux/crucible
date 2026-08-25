@@ -450,6 +450,7 @@ async def test_reconcile_six_verdict_mapping(session_factory, tmp_path):
 
     async with session_factory() as session:
         ctx, task, inp = await _seed(session, tmp_path, [("CWE-89", "A", "tp", 0.9, "high")])
+        task.task_type = "verify"
         groups = (await session.execute(
             select(AlertGroup).where(AlertGroup.task_id == task.id)
         )).scalars().all()
@@ -502,6 +503,26 @@ async def test_reconcile_six_verdict_mapping(session_factory, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_reconcile_from_task_skips_discovery(session_factory, tmp_path):
+    """discovery 聚合任务的 verdict 不得回写溯源组。"""
+    from app.contexts.finding.models import AlertGroup
+    from app.contexts.finding.service import FindingService
+
+    async with session_factory() as session:
+        ctx, task, inp = await _seed(session, tmp_path, [("CWE-89", "A", "tp", 0.9, "high")])
+        group = (await session.execute(
+            select(AlertGroup).where(AlertGroup.task_id == task.id)
+        )).scalars().one()
+        task.source_alert_group_id = group.id
+        task.task_type = "discovery"
+        group.status = "dispatched"
+        task.status, task.verdict = "completed", "confirmed"
+        out = await FindingService(session).reconcile_from_task(task)
+        assert out is None
+        assert group.status == "dispatched"
+
+
+@pytest.mark.asyncio
 async def test_reconcile_stale_groups_sweeper(session_factory, tmp_path):
     """丢事件兜底：dispatched 组按 Task 最新 verdict 补写。"""
     from app.contexts.finding.models import AlertGroup
@@ -509,6 +530,7 @@ async def test_reconcile_stale_groups_sweeper(session_factory, tmp_path):
 
     async with session_factory() as session:
         ctx, task, inp = await _seed(session, tmp_path, [("CWE-89", "A", "tp", 0.9, "high")])
+        task.task_type = "verify"
         group = (await session.execute(
             select(AlertGroup).where(AlertGroup.task_id == task.id)
         )).scalars().one()
@@ -675,3 +697,58 @@ async def test_dispatch_recovers_lost_leads_after_crash(session_factory, tmp_pat
             assert all(lr.run_id == run2.id for lr in leads)  # 绑回当前 run
     finally:
         set_redis_client(None)
+
+
+@pytest.mark.asyncio
+async def test_reps_and_adjudications_picks_highest_attempt(session_factory):
+    from app.contexts.discovery.models import ScanRun
+    from app.contexts.finding.models import Adjudication, AlertGroup, RawFinding
+    from app.contexts.finding.service import FindingService
+    from app.contexts.task.models import Task, TaskRun
+
+    async with session_factory() as session:
+        task = Task(
+            project_address="x", task_type="discovery",
+            vulnerability_description=None, owner_id="u1", status="running",
+        )
+        session.add(task)
+        await session.flush()
+        run = TaskRun(task_id=task.id, status="running")
+        session.add(run)
+        await session.flush()
+        scan_run = ScanRun(
+            task_id=task.id, run_id=run.id, node_run_id="nr-s",
+            engine="semgrep", status="completed", config_summary={},
+        )
+        session.add(scan_run)
+        await session.flush()
+        finding = RawFinding(
+            task_id=task.id, scan_run_id=scan_run.id, engine="semgrep",
+            rule_id="python.sqli", cwe="CWE-89", severity="error",
+            file_path="app/db.py", line_start=1, line_end=2, message="sqli",
+            fingerprint="a" * 64, raw={},
+        )
+        session.add(finding)
+        await session.flush()
+        group = AlertGroup(
+            task_id=task.id, group_key="gk-1", cwe="CWE-89",
+            file_path="app/db.py", line_span="1-2", member_count=1,
+            representative_finding_id=finding.id, engine_set=["semgrep"],
+            status="adjudicated", clue_grade="A", ai_verdict="tp",
+        )
+        session.add(group)
+        await session.flush()
+        session.add(Adjudication(
+            alert_group_id=group.id, attempt=1, verdict="need_more_context",
+            confidence=0.4, prompt_text="p", response_text="r",
+        ))
+        session.add(Adjudication(
+            alert_group_id=group.id, attempt=2, verdict="tp",
+            confidence=0.9, prompt_text="p2", response_text="r2",
+        ))
+        await session.flush()
+
+        reps, adjs = await FindingService(session).reps_and_adjudications([group])
+        assert reps[group.id].id == finding.id
+        assert adjs[group.id].attempt == 2
+        assert adjs[group.id].verdict == "tp"

@@ -21,7 +21,7 @@ Crucible 是一个 AI 驱动的漏洞自动验证平台。安全研究员提交�
 - **事件驱动** — Context 间通过 Redis Pub/Sub 异步通信
 - **Agent GateWay** — Agent 执行抽象为平台能力而非胶水代码
 - **Agent 平台 13 节点编排** — Celery worker 的 `orchestrator.py` 按 `DEFAULT_PIPELINE` 驱动 13 节点(source/profile/scan_gitleaks/scan_osv/scan_semgrep/env_ready/cluster/screen/triage/dispatch/audit/reproduce/report)。验证任务(`task_type=verify`)跑其中 6 个终认节点、扫描/聚类/轻量快审/AI 二审/调度 `VERIFY_MODE` skip；审计任务(`discovery`)跑全图、dispatch 把合格可疑真洞入 Redis db3 终认队（LeadWorker 复用同一套 audit/reproduce）。AI 节点用独立 agent-runner 容器 + `submit_result` 回传结构化 output
-- **Security by Default** — 沙箱真隔离、Agent 零信任。LLM 凭据通过 `docker run --env` 注入容器(容器销毁 env 消失,这部分零落盘成立);**注意:LLM API Key 当前明文存库**(`settings/service.py` 明文存取,响应层 `mask_secret` 掩码),`core/crypto.py` 的 Fernet 工具遗留未用
+- **Security by Default** — 沙箱真隔离、Agent 零信任。LLM 凭据通过 `docker run --env` 注入容器(容器销毁 env 消失,这部分零落盘成立)。LLM API Key / 任务凭据 **Fernet 加密落库**（`seal_secret` / `reveal_secret`，存量明文可读），响应层 `mask_secret` 掩码。
 
 ## 快速启动
 

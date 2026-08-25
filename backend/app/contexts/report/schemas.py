@@ -79,6 +79,48 @@ class ReportListResponse(BaseModel):
     offset: int
 
 
+class AuditTaskSummary(BaseModel):
+    """审计报告 Tab：按 discovery 任务聚合。"""
+    task_id: str
+    project_id: str | None = None
+    project_address: str | None = None
+    project_ref: str | None = None
+    task_status: str
+    report_id: str | None = None
+    report_status: str | None = None
+    confirmed_count: int = 0
+    code_reachable_count: int = 0
+    vuln_report_count: int = 0
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    published_at: datetime | None = None
+
+
+class AuditTaskListResponse(BaseModel):
+    items: list[AuditTaskSummary]
+    total: int
+    limit: int
+    offset: int
+
+
+class VulnReportSummary(BaseModel):
+    alert_group_id: str
+    task_id: str
+    summary: str
+    final_verdict: str | None = None
+    verification_basis: str | None = None
+    primary_engine: str | None = None
+    cwe: str | None = None
+    file_path: str | None = None
+    generated_at: str | None = None
+
+
+class VulnReportListResponse(BaseModel):
+    task_id: str
+    items: list[VulnReportSummary]
+    total: int
+
+
 # ── 请求 ──
 
 class ReportUpdateRequest(BaseModel):

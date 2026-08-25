@@ -19,7 +19,7 @@ class FindingSummary(BaseModel):
     message: str
     source_to_sink: list[Any] | None = None
     code_snippet: str | None = None
-    # 降噪/二审证据元数据（已脱敏）；非引擎结论措辞
+    # 降噪/二审证据元数据；gitleaks 含命中原文，osv 含可读摘要
     raw: dict[str, Any] | None = None
 
 
@@ -118,6 +118,8 @@ class AdjudicationDetail(BaseModel):
     why: list[str] = Field(default_factory=list)
     evidence: list[dict[str, Any]] = Field(default_factory=list)
     need: list[str] = Field(default_factory=list)
+    summary: str | None = None
+    reasoning: str | None = None
     prompt_text: str
     response_text: str
     usage: dict[str, int] = Field(default_factory=dict)
@@ -138,6 +140,7 @@ class LeadRunSummary(BaseModel):
     status: str
     verdict: str | None = None
     gate_verdict: str | None = None
+    verification_basis: str | None = None
     error: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -151,6 +154,8 @@ class AlertGroupDetail(AlertGroupSummary):
     lead_runs: list[LeadRunSummary] = Field(default_factory=list)
     verification_task_id: str | None = None
     verification_verdict: str | None = None
+    verification_basis: str | None = None
+    vuln_report: dict[str, Any] | None = None
 
 
 class ReviewRequest(BaseModel):

@@ -5,11 +5,49 @@ screen / triage 共用；phase 文案跟调用方 node_key。
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 from typing import Any
 
 from sqlalchemy import select
 
 from ..base import emit_phase
+
+_ENV_READY_ABSENT_GRACE = 0.2
+_ENV_READY_WAIT_SECONDS = 1800.0
+
+
+async def _resolve_env_ready(session_factory, run_id: str, fallback: Any) -> Any:
+    """drain 时读库内 env_ready 终态，避免与 screen 并行时用 spawn 快照。"""
+    from app.contexts.task.models import NodeRun
+
+    started = time.monotonic()
+    saw_row = False
+    while True:
+        async with session_factory() as session:
+            row = (
+                await session.execute(
+                    select(NodeRun).where(
+                        NodeRun.run_id == run_id, NodeRun.node_key == "env_ready",
+                    )
+                )
+            ).scalar_one_or_none()
+        if row is not None:
+            saw_row = True
+            if row.status in ("completed", "skipped"):
+                try:
+                    parsed = json.loads(row.output_json or "null")
+                except (ValueError, TypeError):
+                    return fallback
+                return parsed if parsed else fallback
+            if row.status in ("failed", "cancelled"):
+                return None
+        elapsed = time.monotonic() - started
+        if not saw_row and elapsed >= _ENV_READY_ABSENT_GRACE:
+            return fallback
+        if elapsed >= _ENV_READY_WAIT_SECONDS:
+            return fallback
+        await asyncio.sleep(0.25)
 
 
 class LeadStreamer:
@@ -26,18 +64,24 @@ class LeadStreamer:
         self.drain_task: asyncio.Task | None = None
         self.enqueued = 0
 
-    async def _is_qualified(self, g) -> bool:
-        if g.status != "adjudicated":
-            return False
+    async def _qualified(self, groups: list) -> list:
+        pending = [g for g in groups if g.status == "adjudicated"]
+        if not pending:
+            return []
         from app.contexts.finding.qualify import is_qualified_lead
         from app.contexts.finding.service import FindingService
 
         svc = FindingService(self.ctx.db_session)
-        rep = await svc.representative_of(g)
-        adj = await svc.latest_adjudication(g.id)
-        return is_qualified_lead(
-            g, representative=rep, adjudication=adj, high_confidence=self.high,
-        )
+        reps, adjs = await svc.reps_and_adjudications(pending)
+        return [
+            g for g in pending
+            if is_qualified_lead(
+                g,
+                representative=reps.get(g.id),
+                adjudication=adjs.get(g.id),
+                high_confidence=self.high,
+            )
+        ]
 
     async def poll(self) -> int:
         """库内全量扫一遍达门槛未派发的组建 LeadRun 入队（幂等）。"""
@@ -52,12 +96,12 @@ class LeadStreamer:
                 populate_existing=True,
             )
         )).scalars().all()
-        qualified = [g for g in rows if await self._is_qualified(g)]
+        qualified = await self._qualified(rows)
         return await self._enqueue(qualified)
 
     async def offer(self, groups: list) -> int:
         """对刚判完的组（内存态已刷新）做入队判断，避免全量重查。"""
-        qualified = [g for g in groups if await self._is_qualified(g)]
+        qualified = await self._qualified(groups)
         return await self._enqueue(qualified)
 
     async def _enqueue(self, qualified: list) -> int:
@@ -72,12 +116,16 @@ class LeadStreamer:
         svc = FindingService(ctx.db_session)
         items: list[dict[str, str]] = []
         seen: set[str] = set()
-        for pos, g in enumerate(qualified):
+        unique = []
+        for g in qualified:
             if g.id in seen:
                 continue
             seen.add(g.id)
-            rep = await svc.representative_of(g)
-            adj = await svc.latest_adjudication(g.id)
+            unique.append(g)
+        reps, adjs = await svc.reps_and_adjudications(unique)
+        for pos, g in enumerate(unique):
+            rep = reps.get(g.id)
+            adj = adjs.get(g.id)
             lead_run = await _get_or_create_lead_run(
                 ctx.db_session,
                 task_id=ctx.task_id, run_id=ctx.run_id,
@@ -139,11 +187,15 @@ class LeadStreamer:
 
         prev = self.ctx.previous_outputs or {}
         ctx = self.ctx
+        run_id = ctx.run_id
 
         async def _drain():
             from app.contexts.settings.repository import SettingsRepository
             from app.contexts.settings.service import SettingsService
 
+            env_ready = await _resolve_env_ready(
+                ctx.session_factory, run_id, fallback=prev.get("env_ready") or None,
+            )
             async with ctx.session_factory() as s:
                 runtime = await SettingsService(
                     SettingsRepository(s)
@@ -156,7 +208,7 @@ class LeadStreamer:
                 runner_env=ctx.runner_env or {},
                 source=prev.get("source"),
                 profile=prev.get("profile") or {},
-                env_ready=prev.get("env_ready") or None,
+                env_ready=env_ready,
                 on_event=ctx.on_event,
                 lab_id=ctx.lab_id,
                 concurrency=runtime.lead_verify_per_task,

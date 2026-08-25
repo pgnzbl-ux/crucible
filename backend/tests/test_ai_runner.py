@@ -24,6 +24,7 @@ from app.contexts.agent.ai_runner import (
     _mock_output,
     _summarize_submit,
     apply_poc_to_report_output,
+    apply_stream_usage_fallback,
     authoritative_verdict,
     render_poc_markdown,
     rewrite_url_for_agent_container,
@@ -600,6 +601,7 @@ def test_mock_report_needs_review_for_uncertain_audit():
 def test_validate_triage_rejects_fake_tp():
     ok, err = validate_output("triage", {
         "verdict": "tp", "confidence": 0.9, "why": ["x"],
+        "summary": "简述", "reasoning": "推理",
         "evidence": [{"file": "a.py", "lines": "1-1"}],
         "attacker_controlled": True, "reaches_sink": True, "sanitizer": "effective",
     })
@@ -608,21 +610,33 @@ def test_validate_triage_rejects_fake_tp():
 
     ok2, _ = validate_output("triage", {
         "verdict": "tp", "confidence": 0.9, "why": ["x"],
+        "summary": "简述", "reasoning": "推理",
         "evidence": [{"file": "a.py", "lines": "1-1"}],
         "attacker_controlled": True, "reaches_sink": True, "sanitizer": "none",
     })
     assert ok2
 
     ok3, err3 = validate_output("triage", {
-        "verdict": "tp", "confidence": 0.9, "why": ["x"], "evidence": [],
+        "verdict": "tp", "confidence": 0.9, "why": ["x"],
+        "summary": "简述", "reasoning": "推理",
+        "evidence": [],
         "attacker_controlled": True, "reaches_sink": True, "sanitizer": "none",
     })
     assert not ok3
 
     ok4, _ = validate_output("triage", {
         "verdict": "fp", "confidence": 0.9, "why": ["不是漏洞"],
+        "summary": "误报简述", "reasoning": "路径不可达",
     })
     assert ok4
+
+    ok5, err5 = validate_output("triage", {
+        "verdict": "tp", "confidence": 0.9, "why": ["x"],
+        "evidence": [{"file": "a.py", "lines": "1-1"}],
+        "attacker_controlled": True, "reaches_sink": True, "sanitizer": "none",
+    })
+    assert not ok5
+    assert "summary" in (err5 or "")
 
 
 def test_validate_api_hunt_requires_qualify_fields():
@@ -630,6 +644,8 @@ def test_validate_api_hunt_requires_qualify_fields():
         "file_path": "app/api.py",
         "endpoint_id": "GET:/items/{id}",
         "why": ["无 ownership 校验"],
+        "summary": "对象级越权：可改 id 读他人资源",
+        "reasoning": "path 参数可控且 handler 无租户校验即读库",
         "evidence": [{"file": "app/api.py", "lines": "10-20"}],
         "attacker_controlled": True,
         "reaches_sink": True,
@@ -660,6 +676,14 @@ def test_validate_api_hunt_requires_qualify_fields():
 
     ok4, _ = validate_output("api_hunt", {"suspects": [], "reviewed_count": 0})
     assert ok4
+
+    missing_narrative = {**base}
+    del missing_narrative["summary"]
+    ok5, err5 = validate_output(
+        "api_hunt", {"suspects": [missing_narrative], "reviewed_count": 1},
+    )
+    assert not ok5
+    assert "summary" in (err5 or "")
 
 
 def test_validate_profile_requires_is_web():
@@ -920,13 +944,13 @@ def test_summarize_submit_truncates_and_tags():
 
 
 def test_light_workstation_env_filter():
-    """轻工位（triage/profile）凭据最小化：runner_env 只保留 SDK 必需键（spec §7.4）。"""
+    """轻工位（triage/profile/api_hunt）凭据最小化：runner_env 只保留 SDK 必需键（spec §7.4）。"""
     from app.contexts.agent.ai_runner import (
         _LIGHT_WORKSTATION_NODES,
         _is_sdk_env_key,
     )
 
-    assert _LIGHT_WORKSTATION_NODES == frozenset({"triage", "profile"})
+    assert _LIGHT_WORKSTATION_NODES == frozenset({"triage", "profile", "api_hunt"})
     assert _is_sdk_env_key("ANTHROPIC_API_KEY")
     assert _is_sdk_env_key("ANTHROPIC_BASE_URL")
     assert _is_sdk_env_key("CLAUDE_SDK_MAX_TURNS")
@@ -942,3 +966,30 @@ def test_agent_runner_spec_hide_workspace_paths():
     spec = AgentRunnerSpec(host_workdir="/tmp/x", hide_workspace_paths=("/workspace/.secrets",))
     assert spec.hide_workspace_paths == ("/workspace/.secrets",)
     assert AgentRunnerSpec(host_workdir="/tmp/x").hide_workspace_paths == ()
+
+
+def test_apply_stream_usage_fallback_fills_missing_dict():
+    """sidecar 缺 usage dict（写失败或被 default=str）时用 stdout agent.completed 兜底。"""
+    meta: dict = {"node_key": "profile", "prompt": "x"}
+    apply_stream_usage_fallback(
+        meta,
+        {"usage": {"input_tokens": 15, "output_tokens": 2}, "model_usage": {"m": {"inputTokens": 15}}},
+    )
+    assert meta["usage"]["input_tokens"] == 15
+    assert meta["model_usage"]["m"]["inputTokens"] == 15
+
+
+def test_apply_stream_usage_fallback_does_not_double_count_sidecar():
+    """同一轮 sidecar 已有 dict 时禁止再叠 stdout，否则回喂累加会把本轮算两遍。"""
+    meta = {"usage": {"prompt_tokens": 10, "completion_tokens": 1}}
+    apply_stream_usage_fallback(
+        meta,
+        {"usage": {"prompt_tokens": 10, "completion_tokens": 1}},
+    )
+    assert meta["usage"]["prompt_tokens"] == 10
+
+
+def test_apply_stream_usage_fallback_replaces_stringified_usage():
+    meta = {"usage": "{'input_tokens': 9}"}
+    apply_stream_usage_fallback(meta, {"usage": {"input_tokens": 9, "output_tokens": 1}})
+    assert meta["usage"] == {"input_tokens": 9, "output_tokens": 1}

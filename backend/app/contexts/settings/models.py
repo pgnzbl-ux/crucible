@@ -12,8 +12,8 @@ DEFAULT_LLM_EFFORT = "high"
 class LlmProvider(BaseModel):
     """LLM Provider 配置 — 后台可管理的模型接入点
 
-    api_key 明文存储,列表接口仅回显掩码。
-    is_default 全局唯一（通过 service 保证），即当前启用项；Agent 任务只读默认 Provider。
+    api_key Fernet 加密存储,列表接口仅回显掩码。存量明文由 reveal_secret 兼容读取。
+    is_default 全局唯一（部分唯一索引 + service 保证），即当前启用项；Agent 任务只读默认 Provider。
     """
 
     __tablename__ = "llm_providers"
@@ -32,7 +32,7 @@ class LlmProvider(BaseModel):
         comment="认证方式 api_key(X-Api-Key) | bearer(Authorization)",
     )
     base_url: Mapped[str] = mapped_column(String(512), nullable=False, comment="Anthropic 兼容端点")
-    api_key_encrypted: Mapped[str] = mapped_column(Text, default="", comment="明文 API Key(响应层掩码)")
+    api_key_encrypted: Mapped[str] = mapped_column(Text, default="", comment="Fernet 密文 API Key(响应层掩码；存量明文可读)")
     model: Mapped[str] = mapped_column(String(100), nullable=False, comment="模型名，如 deepseek-v4-flash")
     timeout_ms: Mapped[int] = mapped_column(Integer, default=600000, comment="API_TIMEOUT_MS")
     temperature: Mapped[float] = mapped_column(
@@ -64,6 +64,13 @@ class LlmProvider(BaseModel):
     __table_args__ = (
         Index("idx_llm_providers_default", "is_default"),
         Index(
+            "uq_llm_providers_one_default",
+            "is_default",
+            unique=True,
+            sqlite_where=text("is_default = 1"),
+            postgresql_where=text("is_default IS TRUE"),
+        ),
+        Index(
             "idx_llm_providers_role",
             "role",
             unique=True,
@@ -77,7 +84,7 @@ class LlmProvider(BaseModel):
 
 
 class Credential(BaseModel):
-    """任务级凭据 — 明文存储,任务运行时注入 agent-runner 容器(零落盘)。
+    """任务级凭据 — Fernet 加密存储,任务运行时注入 agent-runner 容器(零落盘)。
 
     kind=env_var：注入为容器环境变量（target=变量名[大写下划线]，secret=值）
     kind=file：   写为容器内 /workspace/.secrets/<target>（权限 600），
@@ -96,7 +103,7 @@ class Credential(BaseModel):
         nullable=False,
         comment="env_var→环境变量名(大写下划线) / file→容器内文件名(.secrets/<target>)",
     )
-    secret_encrypted: Mapped[str] = mapped_column(Text, default="", comment="明文凭据值(响应层掩码)")
+    secret_encrypted: Mapped[str] = mapped_column(Text, default="", comment="Fernet 密文凭据值(响应层掩码；存量明文可读)")
     description: Mapped[str | None] = mapped_column(String(500))
 
     __table_args__ = (Index("idx_credentials_owner", "owner_id"),)

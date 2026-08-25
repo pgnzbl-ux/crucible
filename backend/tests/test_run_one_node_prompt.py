@@ -128,7 +128,10 @@ def test_submit_schema_uses_only_anthropic_tool_subset():
 
 def test_node_skills_exist_and_are_sliced():
     assert NODE_AI_KEYS == frozenset(
-        {"canary", "profile", "env_ready", "audit", "reproduce", "report", "triage"}
+        {
+            "canary", "profile", "env_ready", "api_hunt",
+            "audit", "reproduce", "report", "triage",
+        }
     )
     for key in NODE_AI_KEYS:
         path = NODE_SKILLS / key / "SKILL.md"
@@ -164,6 +167,9 @@ def test_node_skills_exist_and_are_sliced():
             assert "tp" in body and "fp" in body
             assert "need_more_context" in body
             assert "禁止" in body
+        if key == "api_hunt":
+            assert "submit_result" in body
+            assert "HTTP" in body or "http" in body
 
 
 def test_load_node_skill_reads_distilled_file():

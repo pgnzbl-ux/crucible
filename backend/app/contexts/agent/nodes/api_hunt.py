@@ -79,6 +79,14 @@ async def _adjudicate_hunt_groups(
             or qualify.get("sanitizer") not in ("none", "bypassable")
         ):
             continue
+        from app.contexts.finding.narrative import narrative_from_why
+
+        summary = str(raw.get("summary") or "").strip() or None
+        reasoning = str(raw.get("reasoning") or "").strip() or None
+        if not summary or not reasoning:
+            syn_s, syn_r = narrative_from_why(why, fallback=f"API 猎洞嫌疑 {raw.get('endpoint_id') or ''}")
+            summary = summary or syn_s
+            reasoning = reasoning or syn_r
         group.verdict_source = "agent"
         await svc.record_adjudication(
             group=group,
@@ -92,6 +100,8 @@ async def _adjudicate_hunt_groups(
                 why=why,
                 evidence=evidence,
                 need=[],
+                summary=summary,
+                reasoning=reasoning,
                 context_log=[{
                     "round": 1,
                     "via": "api_hunt",
@@ -109,6 +119,8 @@ async def _adjudicate_hunt_groups(
                         "endpoint_id": raw.get("endpoint_id"),
                         "why": why,
                         "qualify": qualify,
+                        "summary": summary,
+                        "reasoning": reasoning,
                     },
                     ensure_ascii=False,
                     default=str,
@@ -279,6 +291,8 @@ class ApiHuntNode:
                 "hunt_verdict": "suspect",
                 "why": why,
                 "evidence": evidence,
+                "summary": str(s.get("summary") or "").strip() or None,
+                "reasoning": str(s.get("reasoning") or "").strip() or None,
                 "qualify": {
                     "attacker_controlled": True,
                     "reaches_sink": True,
@@ -421,6 +435,7 @@ class ApiHuntNode:
             f"审资源批 {batch[0].get('resource_key', '')[:8]}…（{len(batch)} 端点）",
             phase=self.node_key,
         )
+        meta: dict[str, Any] = {}
         try:
             output = await run_ai_node(
                 node_key="api_hunt",
@@ -430,6 +445,7 @@ class ApiHuntNode:
                 on_event=ctx.on_event,
                 task_id=ctx.task_id,
                 validate=True,
+                meta_out=meta,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("api_hunt batch 失败，本批跳过: %s", e)
@@ -438,6 +454,9 @@ class ApiHuntNode:
                 "suspects": [],
                 "budget_exhausted": False,
             }
+        from app.contexts.agent.usage_ledger import record_node_usage
+
+        await record_node_usage(ctx, "api_hunt", meta)
 
         suspects = list(output.get("suspects") or [])
         by_ep = {e.get("endpoint_id"): e for e in batch}

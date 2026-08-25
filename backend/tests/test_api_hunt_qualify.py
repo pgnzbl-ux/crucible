@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -133,3 +134,63 @@ async def test_adjudicate_hunt_qualifies_high_confidence(session_factory):
         assert group.ai_verdict == "tp"
         assert group.verdict_source == "agent"
         assert float(group.ai_confidence) >= 0.8
+
+
+@pytest.mark.asyncio
+async def test_hunt_batch_records_usage(session_factory, tmp_path):
+    """api_hunt 每批 Docker 会话必须入台账，否则任务 token 总计漏猎洞。"""
+    from sqlalchemy import select
+
+    from app.contexts.agent.nodes.api_hunt import ApiHuntNode
+    from app.contexts.agent.nodes.base import NodeContext
+    from app.contexts.task.models import AgentUsage, Task
+
+    async with session_factory() as session:
+        task = Task(
+            project_address="x",
+            task_type="discovery",
+            vulnerability_description=None,
+            owner_id="u1",
+            status="running",
+        )
+        session.add(task)
+        await session.flush()
+        ctx = NodeContext(
+            task_id=task.id,
+            run_id="r1",
+            host_workdir=str(tmp_path),
+            source_path=str(tmp_path),
+            vulnerability_description="",
+            project_address="x",
+            project_ref=None,
+            db_session=session,
+        )
+        batch = [{
+            "endpoint_id": "GET /items/{id}",
+            "method": "GET",
+            "path_template": "/items/{id}",
+            "handler_file": "app.py",
+            "handler_symbol": "get_item",
+            "line_start": 10,
+            "id_params": ["id"],
+            "auth_observed": [],
+            "resource_key": "item",
+            "has_object_id": True,
+        }]
+
+        async def fake_run(**kwargs):
+            meta = kwargs.get("meta_out")
+            assert meta is not None
+            meta.update({"usage": {"prompt_tokens": 40, "completion_tokens": 8}})
+            return {"suspects": [], "reviewed_count": 1}
+
+        with patch("app.contexts.agent.ai_runner.run_ai_node", new=fake_run):
+            out = await ApiHuntNode()._hunt_batch(ctx, batch, object())
+
+        assert out["reviewed_count"] == 1
+        rows = (await session.execute(select(AgentUsage))).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].node_key == "api_hunt"
+        assert rows[0].prompt_tokens == 40
+        assert rows[0].completion_tokens == 8
+        assert rows[0].run_id == "r1"

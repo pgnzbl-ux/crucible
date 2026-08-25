@@ -48,12 +48,11 @@ Runner 的 reproduce 节点通过 `host.docker.internal` 访问宿主映射的 L
 - AI 生成 Compose 在宿主执行前必须经过 `lab/compose_policy.py`；拒绝 privileged、host namespace、devices、cap_add、运行时 socket、越界 bind mount/build context
 - 配方上传或 Lab ready 落库失败必须补偿 `compose down`；巡检兜底回收终态 Lab 运行时
 
-## 3. 凭据存储(当前状态)
+## 3. 凭据存储
 
-- **当前为明文存储**:`settings/service.py` 的 build_env_from_provider/create_provider/test_connection 全程明文存取,响应层 `mask_secret` 掩码
-- `core/crypto.py` 的 `encrypt_secret/decrypt_secret` 仍在但**已不被 settings/credential 调用**,属遗留
+- **Fernet 落库**：`seal_secret` 写入；`reveal_secret` 读取（密文解密，存量明文原样返回）
 - 列表接口只回显掩码(`***{last4}`)
-- 待办:如需恢复加密,重新接入 `core/crypto.py`;当前 `SETTINGS_ENCRYPT_KEY` 配置未生效
+- 生产应显式配置 `SETTINGS_ENCRYPT_KEY`；未配置时从 `AUTH_SECRET` 派生
 
 ## 4. 生产环境强校验（`core/config.py` validator）
 
@@ -66,7 +65,7 @@ Runner 的 reproduce 节点通过 `host.docker.internal` 访问宿主映射的 L
 - `METRICS_TOKEN` 非空（保护 `/metrics`）
 - `CORS_ORIGINS` 精确域名白名单（禁止 `*`）
 
-`SETTINGS_ENCRYPT_KEY` 因 Fernet 未接入而不生效（见 §3；明文 Key 暂保留）。dev 环境跳过这些校验。
+`SETTINGS_ENCRYPT_KEY` 用于 Fernet 主密钥；未配置时从 `AUTH_SECRET` 派生。dev 环境跳过这些校验。
 
 SSE：前端先 `POST /tasks/{id}/events/ticket` 取短命票，EventSource 用 `?ticket=`；生产拒绝 `?token=` 传 access JWT。
 

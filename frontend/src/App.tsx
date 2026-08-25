@@ -13,6 +13,8 @@ const FindingsPage = lazy(() => import('./pages/FindingsPage').then((module) => 
 const FindingDetailPage = lazy(() => import('./pages/FindingDetailPage').then((module) => ({ default: module.FindingDetailPage })))
 const ReportsPage = lazy(() => import('./pages/ReportsPage').then((module) => ({ default: module.ReportsPage })))
 const ReportDetailPage = lazy(() => import('./pages/ReportDetailPage').then((module) => ({ default: module.ReportDetailPage })))
+const AuditReportPage = lazy(() => import('./pages/AuditReportPage').then((module) => ({ default: module.AuditReportPage })))
+const AuditVulnReportPage = lazy(() => import('./pages/AuditReportPage').then((module) => ({ default: module.AuditVulnReportPage })))
 const SettingsPage = lazy(() => import('./pages/SettingsPage').then((module) => ({ default: module.SettingsPage })))
 const ProjectsPage = lazy(() => import('./pages/ProjectsPage').then((module) => ({ default: module.ProjectsPage })))
 const ProjectDetailPage = lazy(() => import('./pages/ProjectDetailPage').then((module) => ({ default: module.ProjectDetailPage })))
@@ -38,6 +40,8 @@ function AuthenticatedShell() {
           <Route path="/findings" component={FindingsPage} />
           <Route path="/tasks/:id" component={TaskDetailPage} />
           <Route path="/tasks" component={TasksPage} />
+          <Route path="/reports/audits/:taskId/vulns/:groupId" component={AuditVulnReportPage} />
+          <Route path="/reports/audits/:taskId" component={AuditReportPage} />
           <Route path="/reports/:id" component={ReportDetailPage} />
           <Route path="/reports" component={ReportsPage} />
           <Route path="/projects/:id" component={ProjectDetailPage} />

@@ -72,7 +72,18 @@ def test_alembic_chain_from_baseline():
     cache_tokens = (versions / "p9c3e6d75b14_agent_usage_cache_tokens.py").read_text(encoding="utf-8")
     assert 'revision: str = "p9c3e6d75b14"' in cache_tokens
     assert 'down_revision: Union[str, None] = "o8b2d5c64a03"' in cache_tokens
-    assert _alembic_head() == "p9c3e6d75b14"
+    narrative = (versions / "q0d4f7e86c25_vuln_narrative_and_report.py").read_text(encoding="utf-8")
+    assert 'revision: str = "q0d4f7e86c25"' in narrative
+    assert 'down_revision: Union[str, None] = "p9c3e6d75b14"' in narrative
+    health = (versions / "r1e8a0b97d36_health_audit_fixes.py").read_text(encoding="utf-8")
+    assert 'revision: str = "r1e8a0b97d36"' in health
+    assert 'down_revision: Union[str, None] = "q0d4f7e86c25"' in health
+    uniques = (versions / "s2f9c1a08e47_unique_owner_name_and_adjudication.py").read_text(
+        encoding="utf-8",
+    )
+    assert 'revision: str = "s2f9c1a08e47"' in uniques
+    assert 'down_revision: Union[str, None] = "r1e8a0b97d36"' in uniques
+    assert _alembic_head() == "s2f9c1a08e47"
 
 
 @pytest.mark.asyncio
@@ -99,6 +110,10 @@ async def test_create_all_schema_matches_models():
             assert "ix_tasks_lab_id" in task_indexes
             uniques = {tuple(u["column_names"]) for u in insp.get_unique_constraints("source_artifacts")}
             assert ("owner_id", "git_host", "project_key", "ref_type", "ref_name") in uniques
+            project_uniques = {tuple(u["column_names"]) for u in insp.get_unique_constraints("projects")}
+            assert ("owner_id", "name") in project_uniques
+            adj_uniques = {tuple(u["column_names"]) for u in insp.get_unique_constraints("adjudications")}
+            assert ("alert_group_id", "attempt") in adj_uniques
             fks = {(tuple(f["constrained_columns"]), f["referred_table"]) for f in insp.get_foreign_keys("tasks")}
             assert (("lab_id",), "labs") in fks
             assert "node_run_failures" in insp.get_table_names()
@@ -130,6 +145,8 @@ async def test_create_all_schema_matches_models():
                 "cache_read_input_tokens",
                 "cache_creation_input_tokens",
             } <= usage_cols
+            finding_cols = {c["name"] for c in insp.get_columns("raw_findings")}
+            assert "alert_group_id" in finding_cols
 
         await conn.run_sync(_check)
     await engine.dispose()
@@ -247,7 +264,8 @@ async def test_alembic_upgrade_head_sqlite(tmp_path, monkeypatch):
             provider_cols = {c["name"] for c in insp.get_columns("llm_providers")}
             assert "role" in provider_cols
             assert {"temperature", "max_context_tokens", "effort", "auth_mode"} <= provider_cols
-            # 增量迁移新增的表
+            finding_cols = {c["name"] for c in insp.get_columns("raw_findings")}
+            assert "alert_group_id" in finding_cols
             for table in (
                 "platform_settings",
                 "scan_runs",
@@ -260,6 +278,10 @@ async def test_alembic_upgrade_head_sqlite(tmp_path, monkeypatch):
             # 关键唯一约束
             uniques = {tuple(u["column_names"]) for u in insp.get_unique_constraints("source_artifacts")}
             assert ("owner_id", "git_host", "project_key", "ref_type", "ref_name") in uniques
+            project_uniques = {tuple(u["column_names"]) for u in insp.get_unique_constraints("projects")}
+            assert ("owner_id", "name") in project_uniques
+            adj_uniques = {tuple(u["column_names"]) for u in insp.get_unique_constraints("adjudications")}
+            assert ("alert_group_id", "attempt") in adj_uniques
 
         await conn.run_sync(_check)
     await engine.dispose()

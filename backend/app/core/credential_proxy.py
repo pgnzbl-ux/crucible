@@ -20,6 +20,7 @@ import os
 from typing import Any
 
 from app.contexts.settings.models import Credential
+from app.core.crypto import reveal_secret
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ def inject_credentials(
     secret_dir = os.path.join(host_workdir, SECRET_DIR_NAME)
 
     for cred in credentials:
-        plain = cred.secret_encrypted
+        plain = reveal_secret(cred.secret_encrypted)
         if not plain:
             # 空值跳过,不阻断任务
             continue

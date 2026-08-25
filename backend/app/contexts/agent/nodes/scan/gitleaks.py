@@ -1,7 +1,7 @@
 """gitleaks 适配器(discovery-spec §6.1)。
 
 默认扫全 git 历史；无 .git(本地上传包)降级 files 模式。
-`--redact` + 本地 redact_secrets 双保险(§8.2)。
+命中原文入库供线索台研判，不得 `--redact`（§8.2）。
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ class GitleaksNode(EngineScanNode):
             self._binary(settings), "detect",
             "--source", self._repo_root(inp, ctx),
             "--report-format", "sarif", "--report-path", "-",
-            "--redact", "--exit-code", "0",
+            "--exit-code", "0",
         ]
         if not (Path(self._repo_root(inp, ctx)) / ".git").exists():
             argv.append("--no-git")  # 本地上传包：files 模式

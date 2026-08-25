@@ -22,9 +22,24 @@ sys.modules.setdefault("claude_agent_sdk", MagicMock())
 from runner.run_one import (  # noqa: E402
     _failed_event,
     _system_phase_event,
+    _usage_jsonable,
     extract_thinking_text,
     humanize_container_error,
 )
+
+
+def test_usage_jsonable_converts_objects_for_sidecar():
+    """usage / model_usage 若是对象，sidecar 不得 default=str 成不可解析字符串。"""
+    import json
+
+    obj = SimpleNamespace(inputTokens=12, outputTokens=3, cacheReadInputTokens=40)
+    blob = _usage_jsonable({"deepseek-v4-flash": obj})
+    dumped = json.dumps(blob)
+    parsed = json.loads(dumped)
+    assert parsed["deepseek-v4-flash"]["inputTokens"] == 12
+    assert parsed["deepseek-v4-flash"]["outputTokens"] == 3
+    assert parsed["deepseek-v4-flash"]["cacheReadInputTokens"] == 40
+    assert isinstance(_usage_jsonable(obj), dict)
 
 
 def test_extract_thinking_from_attr():

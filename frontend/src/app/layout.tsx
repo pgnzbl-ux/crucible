@@ -35,7 +35,7 @@ const NAV_ITEMS = [
       { key: '/projects', icon: <CodeOutlined />, label: '项目资产' },
       { key: '/tasks', icon: <BugOutlined />, label: '代码审计' },
       { key: '/findings', icon: <AlertOutlined />, label: '漏洞线索' },
-      { key: '/reports', icon: <FileProtectOutlined />, label: '审计报告' },
+      { key: '/reports', icon: <FileProtectOutlined />, label: '漏洞报告' },
       { key: '/labs', icon: <CloudServerOutlined />, label: '验证环境' },
     ],
   },

@@ -37,6 +37,12 @@ class SettingsRepository:
         await self.session.refresh(provider)
         return provider
 
+    async def lock_all_providers(self) -> None:
+        """激活默认项前锁全表，避免并发双默认。SQLite 忽略 FOR UPDATE。"""
+        await self.session.execute(
+            select(LlmProvider.id).order_by(LlmProvider.id).with_for_update()
+        )
+
     async def clear_default(self) -> None:
         """清除所有默认标记（激活切换前调用）"""
         await self.session.execute(update(LlmProvider).values(is_default=False))

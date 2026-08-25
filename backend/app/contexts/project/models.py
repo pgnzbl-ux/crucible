@@ -42,6 +42,7 @@ class Project(BaseModel):
 
     __table_args__ = (
         Index("idx_projects_owner", "owner_id"),
+        UniqueConstraint("owner_id", "name", name="uq_projects_owner_name"),
     )
 
     def __repr__(self) -> str:

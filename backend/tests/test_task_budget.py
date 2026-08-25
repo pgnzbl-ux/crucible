@@ -212,6 +212,62 @@ async def test_missing_cache_fields_are_zero(factory):
     ] == 0
 
 
+def test_normalize_usage_accepts_camel_case_usage_dict():
+    """部分网关把 Result.usage 填成 ModelUsage camelCase；不得记成 0。"""
+    from app.contexts.agent.usage_ledger import normalize_usage
+
+    parts = normalize_usage({
+        "inputTokens": 21,
+        "outputTokens": 4,
+        "cacheReadInputTokens": 80,
+        "cacheCreationInputTokens": 3,
+    })
+    assert parts == {
+        "prompt_tokens": 21,
+        "completion_tokens": 4,
+        "cache_read_input_tokens": 80,
+        "cache_creation_input_tokens": 3,
+    }
+
+
+def test_normalize_usage_parses_json_string():
+    """sidecar json.dumps(default=str) 可能把 usage 整棵写成字符串。"""
+    import json
+
+    from app.contexts.agent.usage_ledger import normalize_usage
+
+    blob = json.dumps({"input_tokens": 9, "output_tokens": 2, "cache_read_input_tokens": 11})
+    parts = normalize_usage(blob)
+    assert parts["prompt_tokens"] == 9
+    assert parts["completion_tokens"] == 2
+    assert parts["cache_read_input_tokens"] == 11
+
+
+@pytest.mark.asyncio
+async def test_record_node_usage_accepts_json_string(factory):
+    """画像/靶场/猎洞共用 record_node_usage：字符串 usage 也必须入台账。"""
+    import json
+    from types import SimpleNamespace
+
+    from app.contexts.agent.usage_ledger import record_node_usage, task_usage_summary
+
+    await _seed_task(factory)
+    async with factory() as s:
+        ctx = SimpleNamespace(db_session=s, task_id="t1", run_id="r1", on_event=None)
+        await record_node_usage(ctx, "profile", {
+            "usage": json.dumps({"input_tokens": 21, "output_tokens": 4}),
+            "model_usage": json.dumps({
+                "deepseek-v4-flash": {"inputTokens": 21, "outputTokens": 4},
+            }),
+        })
+        await s.commit()
+    async with factory() as s:
+        summary = await task_usage_summary(s, "t1")
+    assert summary["prompt_tokens"] == 21
+    assert summary["completion_tokens"] == 4
+    assert summary["sessions"] == 1
+
+
 @pytest.mark.asyncio
 async def test_budget_state_unlimited_and_exhausted(factory):
     from app.contexts.agent.usage_ledger import budget_state, record_usage

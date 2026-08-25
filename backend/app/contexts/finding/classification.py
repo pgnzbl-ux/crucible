@@ -95,7 +95,24 @@ def infer_cwe(*, cwe: str | None, rule_id: str, message: str, engine: str) -> st
     return None
 
 
-def vulnerability_title(*, cwe: str | None, rule_id: str, message: str, engine: str) -> str:
+def vulnerability_title(
+    *,
+    cwe: str | None,
+    rule_id: str,
+    message: str,
+    engine: str,
+    dependency_name: str | None = None,
+) -> str:
+    if engine == "osv":
+        dep = (dependency_name or "").strip()
+        normalized_cwe = (cwe or "").upper()
+        if normalized_cwe in CWE_TITLES:
+            return f"{dep} · {CWE_TITLES[normalized_cwe]}" if dep else CWE_TITLES[normalized_cwe]
+        semantic = _semantic_match(rule_id, message)
+        if semantic:
+            return f"{dep} · {semantic[0]}" if dep else semantic[0]
+        return f"{dep} 依赖漏洞" if dep else "存在漏洞依赖"
+
     normalized_cwe = (cwe or "").upper()
     if normalized_cwe in CWE_TITLES:
         return CWE_TITLES[normalized_cwe]
@@ -106,6 +123,4 @@ def vulnerability_title(*, cwe: str | None, rule_id: str, message: str, engine: 
 
     if engine == "gitleaks":
         return "敏感信息泄露"
-    if engine == "osv":
-        return "存在漏洞依赖"
     return _humanize_rule(rule_id)

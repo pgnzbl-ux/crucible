@@ -1,16 +1,13 @@
 """
 敏感凭据加密 — Fernet 对称加密。
 
-用途：LLM API Key 等敏感配置加密后落库，列表接口仅回显掩码。
+用途：LLM API Key / 任务凭据加密后落库，列表接口仅回显掩码。
+写入走 seal_secret；读取走 reveal_secret（兼容存量明文）。
 
 Key 来源：
 - 优先 settings.settings_encrypt_key（生产必须显式配置）
 - 开发环境从 auth_secret 派生（SHA256 → urlsafe base64），保证稳定性且无需额外配置
 """
-
-# ⚠️ DEPRECATED: 明文存储改造后遗留,仅 mask_secret 仍在用;
-# encrypt_secret/decrypt_secret 已不被 settings/credential 调用。
-
 
 from __future__ import annotations
 
@@ -51,13 +48,28 @@ def encrypt_secret(plaintext: str) -> str:
 
 
 def decrypt_secret(ciphertext: str) -> str:
-    """解密敏感值；解密失败（key 变更）返回空串并给出提示"""
+    """解密敏感值；密钥不匹配时返回空串（不把密文当明文）。"""
     if not ciphertext:
         return ""
     try:
         return _get_fernet().decrypt(ciphertext.encode("utf-8")).decode("utf-8")
     except InvalidToken:
         return ""
+
+
+def seal_secret(plaintext: str) -> str:
+    """写入落库：明文 → Fernet 密文。空串保持空串。"""
+    return encrypt_secret(plaintext)
+
+
+def reveal_secret(stored: str) -> str:
+    """读出：Fernet 则解密；InvalidToken 视为升级前明文原样返回。"""
+    if not stored:
+        return ""
+    try:
+        return _get_fernet().decrypt(stored.encode("utf-8")).decode("utf-8")
+    except InvalidToken:
+        return stored
 
 
 def mask_secret(plaintext: str, visible: int = 4) -> str:

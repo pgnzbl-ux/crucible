@@ -44,6 +44,7 @@ async def _seed_full_chain(factory) -> None:
     from app.contexts.report.models import Evidence, Report
     from app.contexts.task.models import (
         AgentEvent,
+        AgentUsage,
         NodeRun,
         NodeRunFailure,
         Task,
@@ -99,6 +100,10 @@ async def _seed_full_chain(factory) -> None:
             task_id="t1", run_id="r1", alert_group_id=group.id,
             lead_description="lead", status="completed",
         ))
+        s.add(AgentUsage(
+            task_id="t1", run_id="r1", node_key="source", source="agent",
+            prompt_tokens=1, completion_tokens=1,
+        ))
         report = Report(task_id="t1", run_id="r1", owner_id="u1", status="generated")
         s.add(report)
         await s.flush()
@@ -121,7 +126,7 @@ async def test_delete_hard_clears_every_child_table(factory):
         ReviewAction,
     )
     from app.contexts.report.models import Evidence, Report
-    from app.contexts.task.models import AgentEvent, NodeRun, NodeRunFailure, Task, TaskRun
+    from app.contexts.task.models import AgentEvent, AgentUsage, NodeRun, NodeRunFailure, Task, TaskRun
     from app.contexts.task.repository import TaskRepository
 
     async with factory() as s:
@@ -133,9 +138,59 @@ async def test_delete_hard_clears_every_child_table(factory):
 
     survivors = (
         Evidence, Report, Adjudication, ReviewAction, LeadRun, AlertGroup,
-        RawFinding, ScanRun, NodeRunFailure, AgentEvent, NodeRun, TaskRun, Task,
+        RawFinding, ScanRun, NodeRunFailure, AgentEvent, NodeRun, TaskRun, Task, AgentUsage,
     )
     async with factory() as s:
         for model in survivors:
             rows = (await s.execute(select(model.id))).scalars().all()
             assert rows == [], f"{model.__tablename__} 残留 {len(rows)} 行"
+
+
+@pytest.mark.asyncio
+async def test_delete_task_hard_clears_queue_and_objects(factory):
+    await _seed_full_chain(factory)
+
+    from unittest.mock import patch
+
+    from app.contexts.agent import lead_queue
+    from app.contexts.discovery.models import ScanRun
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+    from app.shared.object_store import MemoryObjectStore, set_object_store_for_tests
+
+    class _QueueRedis:
+        def __init__(self) -> None:
+            self.deleted: list[str] = []
+
+        async def delete(self, *keys):
+            self.deleted.extend(keys)
+
+    fake = _QueueRedis()
+    lead_queue.set_redis_client(fake)
+    store = MemoryObjectStore()
+    store.put_at(
+        "evidence", "evidence/u1/t1/e1/a.bin", b"x", content_type="application/octet-stream",
+    )
+    store.put_at(
+        "node_run", "node_run/scan-sarif/orphan.json", b"{}", content_type="application/json",
+    )
+    set_object_store_for_tests(store)
+    try:
+        async with factory() as s:
+            scan = (await s.execute(select(ScanRun))).scalar_one()
+            scan.sarif_key = "node_run/scan-sarif/orphan.json"
+            await s.flush()
+            with patch(
+                "app.contexts.agent.runtime_cleanup.teardown_task_runtime",
+                return_value=None,
+            ):
+                ok = await TaskService(TaskRepository(s)).delete_task("t1", "u1", hard=True)
+            await s.commit()
+        assert ok is True
+        assert fake.deleted
+        leftover = [key for (_bucket, key) in store._data]
+        assert leftover == []
+    finally:
+        lead_queue.set_redis_client(None)
+        set_object_store_for_tests(None)
+

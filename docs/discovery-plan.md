@@ -8,7 +8,7 @@
 - Finding Context 持有 RawFinding、AlertGroup、Adjudication、ReviewAction、LeadRun。误报组不长期占 `alert_groups`。
 - Agent Context 持有声明式拓扑、Handoff 契约、扫描/聚类/二审/终认执行器。合格门为 Finding Context 纯函数，`dispatch` 与 `LeadStreamer` 共用。
 - 合格线索 + 终认队在 Redis db3（`REDIS_CLUE_URL`）；事件/槽位仍 db0，Celery 仍 db1/2。
-- Report Context 持有用户可见的审计报告；报告不直接读取 Redis 队列，读 LeadRun 终态与节点漏斗计数。
+- Report Context 持有用户可见的**聚合审计报告**；另在 Finding/Lead 路径上为每个 `confirmed|partial|code_reachable` 线索生成**独立漏洞报告**（discovery-spec §11.1）。报告不直接读取 Redis 队列，读 LeadRun 终态与节点漏斗计数。
 - Context 间仅通过 ID、服务方法和结构化 Handoff 交接。
 
 ## 2. 执行策略
@@ -17,20 +17,21 @@
 2. 三个扫描器独立写 ScanRun 与 RawFinding（本期不把 raw 搬进 Redis）。
 3. cluster 形成工作集 AlertGroup；screen/triage 按 T0–T3 裁剪。T2 只允许定 fp 或升级 T3。
 4. dispatch 按 §2.7 合格门幂等创建 LeadRun，投递 Redis db3 队列（禁止复用 db0）。
-5. LeadWorker 有界并发复用 AuditNode/ReproduceNode。无 `target_url` 时只跑 audit。
-6. 仅 `confirmed/partial/code_reachable` 长期回写 Postgres 线索台 + 报告；终认证伪与误报只进漏斗。
+5. LeadWorker 有界并发复用 AuditNode/ReproduceNode。无 `target_url` 时只跑 audit；落 `verification_basis`（`lab`|`code_path`）。
+6. 仅 `confirmed/partial/code_reachable` 长期回写 Postgres 线索台，并**生成一漏洞一份独立报告**；终认证伪与误报只进漏斗。
 7. `env_ready` 失败返回 `{ok:false, target_url:null}` 且节点 `completed`，不得杀整任务。
-8. report 汇总画像、扫描、漏斗与终认数据；`code_reachable` 进正文；零确认也生成审计报告。
+8. 聚合 report 汇总画像、扫描、漏斗与终认清单，并索引/嵌入各漏洞报告；`code_reachable` 进正文；零确认也生成审计总报告。
 
 ## 2.1 扫描降噪与 AI 二审入口
 
-对应规格 §2.4 / §2.5 / §2.7 / §6.2。不新增编排节点；降噪在 Finding Context，由 cluster 节点调用。
+对应规格 §2.3.1 / §2.4 / §2.5 / §2.7 / §6.2。不新增编排节点；降噪在 Finding Context，由 cluster 节点调用。
 
 1. **归一化富化**：Semgrep/Gitleaks/OSV 信号写入 `RawFinding.raw`。
 2. **确定性降噪 + C 档**：`denoise.py` 表驱动过滤后再 `cluster_findings`。
-3. **收紧 AI 入口**：triage 只审 A/B；HypothesisPack 可带证据元数据（非引擎结论）。
-4. **合格门**：T3 schema 强制 why/evidence/`attacker_controlled`/`reaches_sink`/`sanitizer`；dispatch 删除 A 级+Web 硬门槛。
-5. **评估与报告**：漏斗与线索台同一套数；OSV `called=false` 排除在终认外。
+3. **收紧 AI 入口**：triage 只审 A/B；HypothesisPack 可带证据元数据（非引擎结论）；T3/`api_hunt` 输出必填 `summary`/`reasoning`。
+4. **OSV**：bypass + 模板叙事；仅 `called=true` 可入终认。
+5. **合格门**：T3 schema 强制 why/evidence/叙事/三布尔；dispatch 删除 A 级+Web 硬门槛。
+6. **评估与报告**：漏斗与线索台同一套数；终局漏洞报告结构四来源一致。
 
 非目标：密钥出网核验、Semgrep Pro、把 2530 条 raw 或 cluster 工作集整体迁 Redis、回填禅道旧瘦字段。
 
@@ -60,6 +61,7 @@
 - Finding API 默认 `scope=workbench`；对外文案「可疑真洞 / 误报 / 二审未决」。
 - 前端线索台主队列：验证中 + 已确认 + 代码可达。去掉已降噪/待复核主入口；去掉误报复活按钮。
 - 用户进度使用稳定业务阶段；节点 DAG 作为诊断详情。
+- **漏洞报告页**：一级导航改为「漏洞报告」；页内 Tab「审计报告 | 验证报告」。审计报告先按 discovery 任务（项目/版本）列表，再进任务内单漏洞报告列表；验证报告保持一次 verify 一份。
 
 ## 4. 验证
 

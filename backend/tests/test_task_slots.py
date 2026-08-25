@@ -50,6 +50,17 @@ class FakeRedis:
         self.kv[key] = value
         return True
 
+    async def delete(self, *keys):
+        n = 0
+        for key in keys:
+            if key in self.kv:
+                del self.kv[key]
+                n += 1
+            if key in self.sets:
+                del self.sets[key]
+                n += 1
+        return n
+
 
 @pytest.fixture
 def fake_redis():
@@ -94,6 +105,22 @@ async def test_release_slot(fake_redis):
 async def test_sweeper_lock_nx(fake_redis):
     assert await try_sweeper_lock() is True
     assert await try_sweeper_lock() is False
+
+
+@pytest.mark.asyncio
+async def test_orch_lock_is_exclusive(fake_redis):
+    from app.contexts.agent.task_slots import (
+        ORCH_LOCK_PREFIX,
+        release_orch_lock,
+        try_acquire_orch_lock,
+    )
+
+    run_id = "run-1"
+    assert await try_acquire_orch_lock(run_id) is True
+    assert await try_acquire_orch_lock(run_id) is False
+    await release_orch_lock(run_id)
+    assert f"{ORCH_LOCK_PREFIX}{run_id}" not in fake_redis.kv
+    assert await try_acquire_orch_lock(run_id) is True
 
 
 def test_acquire_survives_successive_asyncio_run():

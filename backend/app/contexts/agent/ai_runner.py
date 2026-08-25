@@ -41,6 +41,20 @@ def resolve_node_skill_dir(node_key: str) -> Path:
         raise AgentRunnerError(f"节点 skill 不存在: {skill_file}")
     return skill_dir
 
+
+def apply_stream_usage_fallback(meta_out: dict[str, Any] | None, stream: dict[str, Any]) -> None:
+    """sidecar 未给出 usage dict 时，用 stdout 的 agent.completed 回填。
+
+    同一轮 sidecar 已是 dict 则不动——形状回喂累加依赖 prev/fresh 两份 sidecar，
+    再叠本轮 stdout 会把这一轮算两遍。
+    """
+    if meta_out is None or not isinstance(stream, dict):
+        return
+    if not isinstance(meta_out.get("usage"), dict) and isinstance(stream.get("usage"), dict):
+        meta_out["usage"] = stream["usage"]
+    if meta_out.get("model_usage") is None and stream.get("model_usage") is not None:
+        meta_out["model_usage"] = stream["model_usage"]
+
 REPORT_SECTION_KEYS = (
     "product_intro", "vulnerability", "impact", "details",
     "reproduction", "poc_commands", "fix_suggestions", "reporting_decision",
@@ -92,7 +106,7 @@ NODE_OUTPUT_SCHEMAS: dict[str, dict] = {
         "optional": ["cvss", "vulnerable_file"],
     },
     "triage": {
-        "required": ["verdict", "confidence", "why"],
+        "required": ["verdict", "confidence", "why", "summary", "reasoning"],
         "optional": [
             "evidence", "need", "attacker_controlled", "reaches_sink", "sanitizer",
         ],
@@ -202,6 +216,8 @@ def _mock_output(node_key: str, input_json: dict[str, Any]) -> dict[str, Any]:
             "verdict": "tp",
             "confidence": 0.85,
             "why": ["[Mock] llm_gateway 已退役；SDK 未启用时的固定二审"],
+            "summary": "[Mock] 可疑真洞：模拟入口可达危险点。",
+            "reasoning": "[Mock] 攻击者可控输入经未消毒路径到达 sink。",
             "evidence": [{"file": "app.py", "lines": "1-1"}],
             "need": [],
             "attacker_controlled": True,
@@ -582,13 +598,19 @@ def validate_initial_creds(value: Any) -> tuple[bool, str | None]:
 
 
 def _validate_triage_output(output: dict) -> tuple[bool, str | None]:
-    """T3 二审形状：why 必填；可疑真洞还要证据与合格门字段（Agent 输出不可信）。"""
+    """T3 二审形状：why + 叙事必填；可疑真洞还要证据与合格门字段（Agent 输出不可信）。"""
     verdict = output.get("verdict")
     if verdict not in ("tp", "fp", "need_more_context"):
         return False, "verdict 必须是 tp|fp|need_more_context"
     why = output.get("why")
     if not isinstance(why, list) or not any(isinstance(x, str) and x.strip() for x in why):
         return False, "why 必须为非空字符串数组"
+    summary = output.get("summary")
+    if not (isinstance(summary, str) and summary.strip()):
+        return False, "summary 必须为非空字符串（§2.3.1）"
+    reasoning = output.get("reasoning")
+    if not (isinstance(reasoning, str) and reasoning.strip()):
+        return False, "reasoning 必须为非空字符串（§2.3.1）"
     if verdict != "tp":
         return True, None
     evidence = output.get("evidence")
@@ -657,6 +679,12 @@ def _validate_api_hunt_output(output: dict) -> tuple[bool, str | None]:
             return False, f"suspects[{i}].sanitizer 必须是 none 或 bypassable"
         if _normalize_hunt_confidence(s.get("confidence")) is None:
             return False, f"suspects[{i}].confidence 必须是 0–1 或 HIGH/MEDIUM/LOW"
+        summary = s.get("summary")
+        if not (isinstance(summary, str) and summary.strip()):
+            return False, f"suspects[{i}].summary 必须为非空字符串（§2.3.1）"
+        reasoning = s.get("reasoning")
+        if not (isinstance(reasoning, str) and reasoning.strip()):
+            return False, f"suspects[{i}].reasoning 必须为非空字符串（§2.3.1）"
     return True, None
 
 
@@ -757,10 +785,15 @@ async def _run_one_container_unthrottled(
     last_fail = ""
     llm_fail = ""
     dsml_leak = False
+    stream_usage: dict[str, Any] = {}
 
     def _on_event(event: dict) -> None:
         nonlocal last_fail, llm_fail, dsml_leak
         et = event.get("type")
+        if et == "agent.completed":
+            for k in ("usage", "model_usage"):
+                if event.get(k) is not None:
+                    stream_usage[k] = event[k]
         if et in ("agent.message", "agent.thinking", "agent.completed"):
             blob = " ".join(
                 str(event.get(k) or "")
@@ -839,18 +872,34 @@ async def _run_one_container_unthrottled(
                         return 0
 
                     meta_out["usage"] = {
-                        "prompt_tokens": _u(prev_usage, "prompt_tokens", "input_tokens")
-                        + _u(fresh_meta["usage"], "prompt_tokens", "input_tokens"),
-                        "completion_tokens": _u(prev_usage, "completion_tokens", "output_tokens")
-                        + _u(fresh_meta["usage"], "completion_tokens", "output_tokens"),
+                        "prompt_tokens": _u(
+                            prev_usage, "prompt_tokens", "input_tokens", "inputTokens",
+                        )
+                        + _u(
+                            fresh_meta["usage"], "prompt_tokens", "input_tokens", "inputTokens",
+                        ),
+                        "completion_tokens": _u(
+                            prev_usage, "completion_tokens", "output_tokens", "outputTokens",
+                        )
+                        + _u(
+                            fresh_meta["usage"],
+                            "completion_tokens", "output_tokens", "outputTokens",
+                        ),
                         "cache_read_input_tokens": _u(
-                            prev_usage, "cache_read_input_tokens",
+                            prev_usage, "cache_read_input_tokens", "cacheReadInputTokens",
                         )
-                        + _u(fresh_meta["usage"], "cache_read_input_tokens"),
+                        + _u(
+                            fresh_meta["usage"],
+                            "cache_read_input_tokens", "cacheReadInputTokens",
+                        ),
                         "cache_creation_input_tokens": _u(
-                            prev_usage, "cache_creation_input_tokens",
+                            prev_usage,
+                            "cache_creation_input_tokens", "cacheCreationInputTokens",
                         )
-                        + _u(fresh_meta["usage"], "cache_creation_input_tokens"),
+                        + _u(
+                            fresh_meta["usage"],
+                            "cache_creation_input_tokens", "cacheCreationInputTokens",
+                        ),
                     }
                 fresh_mu = fresh_meta.get("model_usage")
                 if prev_mu is not None and fresh_mu is not None:
@@ -871,6 +920,9 @@ async def _run_one_container_unthrottled(
             node_meta_path.unlink()
         except OSError:
             pass
+
+    if meta_out is not None:
+        apply_stream_usage_fallback(meta_out, stream_usage)
 
     return output
 

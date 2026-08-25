@@ -46,7 +46,12 @@ from app.contexts.project.models import Project, SourceArtifact  # noqa: F401 �
 from app.contexts.report.models import Report, Evidence  # noqa: F401 — 注册 reports/evidences 表
 from app.contexts.report.repository import ReportRepository
 from app.contexts.report.service import ReportService
-from app.contexts.agent.task_slots import release_slot, try_acquire_slot
+from app.contexts.agent.task_slots import (
+    release_orch_lock,
+    release_slot,
+    try_acquire_orch_lock,
+    try_acquire_slot,
+)
 from app.contexts.settings.models import LlmProvider, PlatformSetting  # noqa: F401 — 注册 llm_providers / platform_settings
 from app.contexts.task.models import AgentEvent, Task, TaskRun, NodeRun  # noqa: F401 — NodeRun 注册(阶段 1)
 from app.contexts.agent.errors import (
@@ -225,9 +230,12 @@ async def admit_task_run(
     )
     if not await try_acquire_slot(run_id, runtime.max_concurrent_tasks):
         raise celery_task.retry(countdown=15)  # type: ignore[attr-defined]
+    if not await try_acquire_orch_lock(run_id):
+        raise celery_task.retry(countdown=10)  # type: ignore[attr-defined]
 
     claimed_task, claimed_run, err = await claim_task_run(session, task_id, run_id)
     if err:
+        await release_orch_lock(run_id)
         await release_slot(run_id)
         return claimed_task, claimed_run, err, False
     return claimed_task, claimed_run, None, True
@@ -503,6 +511,10 @@ async def _fail_on_wall_clock_timeout(task_id: str, run_id: str) -> dict:
             await release_slot(run_id)
         except Exception:  # noqa: BLE001
             logger.warning("timeout 收尾释放槽失败 run=%s", run_id, exc_info=True)
+        try:
+            await release_orch_lock(run_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("timeout 收尾释放编排锁失败 run=%s", run_id, exc_info=True)
         try:
             from app.contexts.agent.runtime_cleanup import teardown_task_runtime
 
@@ -826,6 +838,10 @@ async def _run_analysis(task_id: str, run_id: str, *, celery_task: object) -> di
                 await release_slot(run_id)
             except Exception:  # noqa: BLE001
                 logger.warning("释放运行槽失败 run=%s", run_id, exc_info=True)
+            try:
+                await release_orch_lock(run_id)
+            except Exception:  # noqa: BLE001
+                logger.warning("释放编排锁失败 run=%s", run_id, exc_info=True)
         # 9. 清理容器与 host_workdir（成功/失败都拆容器；失败才留目录排查）
         try:
             from app.contexts.agent.runtime_cleanup import teardown_task_runtime

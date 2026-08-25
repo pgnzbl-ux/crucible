@@ -162,7 +162,10 @@ describe('NodeSteps audit detail wiring', () => {
 
     expect(html).toContain('crucible-node-progress__summary')
     expect(html).toContain('role="progressbar"')
-    expect(html).toContain('aria-valuenow="13"')
+    expect(html).toContain('aria-valuenow="17"')
+    expect(html).toContain('显示跳过的节点(9)')
+    expect(html).not.toContain('data-node-key="api_hunt"')
+    expect(html).not.toContain('data-node-key="api_inventory"')
     expect(html).toContain('正在执行：项目画像')
     expect(html).toContain('阶段 01 · 准备源码')
     expect(html).toContain('crucible-node-list__connector')
@@ -591,6 +594,65 @@ describe('NodeSteps compact topology', () => {
       expect(discoveryDetailed).toContain(label)
     }
     expect(discoveryDetailed).toContain('data-edge-from="triage"')
+  })
+
+  it('discovery overview totals include hunt plus merged lead_verify usage', () => {
+    const usage = (
+      prompt: number,
+      completion: number,
+      cacheRead = 0,
+    ) => ({
+      prompt_tokens: prompt,
+      completion_tokens: completion,
+      cache_read_input_tokens: cacheRead,
+      cache_creation_input_tokens: 0,
+      total_tokens: prompt + completion + cacheRead,
+    })
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    qc.setQueryData(['run-nodes', 't1', 'r1'], [
+      {
+        id: 'n-profile', node_index: 1, node_key: 'profile', status: 'completed',
+        attempt: 1, error_message: null, started_at: null, finished_at: null,
+        output: {}, usage: usage(10, 2),
+      },
+      {
+        id: 'n-hunt', node_index: 8, node_key: 'api_hunt', status: 'completed',
+        attempt: 1, error_message: null, started_at: null, finished_at: null,
+        output: { qualified_count: 1 }, usage: usage(40, 8),
+      },
+      {
+        id: 'n-dispatch', node_index: 11, node_key: 'dispatch', status: 'completed',
+        attempt: 1, error_message: null, started_at: null, finished_at: null,
+        output: { has_lead: true, queued_count: 1 },
+      },
+      {
+        id: 'n-audit', node_index: 12, node_key: 'audit', status: 'skipped',
+        attempt: 1, error_message: null, started_at: null, finished_at: null,
+        output: {}, usage: usage(100, 20, 50),
+      },
+      {
+        id: 'n-repro', node_index: 13, node_key: 'reproduce', status: 'skipped',
+        attempt: 1, error_message: null, started_at: null, finished_at: null,
+        output: {}, usage: usage(30, 5),
+      },
+      {
+        id: 'n-report', node_index: 14, node_key: 'report', status: 'completed',
+        attempt: 1, error_message: null, started_at: null, finished_at: null,
+        output: {},
+      },
+    ] satisfies NodeRun[])
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={qc}>
+        <App>
+          <NodeSteps taskId="t1" runId="r1" compact taskType="discovery" />
+        </App>
+      </QueryClientProvider>,
+    )
+    expect(html).toContain('data-stage-key="clues"')
+    expect(html).toContain('data-ai="true"')
+    // 10+2 + 40+8 + 100+20+50 + 30+5 = 265
+    expect(html).toContain('crucible-dag-overview__total')
+    expect(html).toContain('265 tok')
   })
 
   it('discovery compact shows LeadWorker running after dispatch queues leads', () => {

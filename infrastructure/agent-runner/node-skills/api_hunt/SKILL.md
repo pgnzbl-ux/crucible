@@ -37,6 +37,8 @@ description: Crucible 节点 api_hunt。只审确定性 API 清单给出的端�
 | `file_path` | 相对仓库根 |
 | `endpoint_id` | 与清单一致 |
 | `why` | 非空字符串数组 |
+| `summary` | 1～3 句人读简述（是什么端点、缺什么校验、何害）；必填 |
+| `reasoning` | 代码推理（参数可控→未校验→危险操作）；必填 |
 | `evidence` | 非空数组（字符串或 `{file, lines}`） |
 | `attacker_controlled` | 必须 `true` |
 | `reaches_sink` | 必须 `true` |
@@ -45,4 +47,4 @@ description: Crucible 节点 api_hunt。只审确定性 API 清单给出的端�
 
 建议字段：`cwe`（CWE-639 / CWE-863）、`function_symbol`、`line_start`、`evidence_kind`、`owasp_api`、`resource_key`、`method`、`path_template`。
 
-平台会拒收缺合格门字段的嫌疑；禁止把「可能」「大概」写成嫌疑；`effective` 消毒不得进列表。
+平台会拒收缺合格门字段或缺叙事的嫌疑；禁止把「可能」「大概」写成嫌疑；`effective` 消毒不得进列表。

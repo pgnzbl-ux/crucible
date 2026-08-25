@@ -26,11 +26,14 @@ total_input ≈ input_tokens + cache_creation_input_tokens + cache_read_input_to
 ## Crucible 落库
 
 - 表 `agent_usage` 一行 = 一次 Agent `query()` 或一次快模型 HTTP。
-- 字段：`prompt_tokens`←`input_tokens`；`completion_tokens`←`output_tokens`；`cache_read_input_tokens` / `cache_creation_input_tokens`（缺省 0）。
+- 写入节点：`profile` / `env_ready` / `api_hunt` / `triage`（Agent）；`screen`（T2 快模型）；`audit` / `reproduce`（DAG 或 LeadWorker 同节点）。`report` 仅 `task_type=verify` 调模型；discovery 聚合报告不入台账。
+- 容器 `NODE_AI_KEYS` 必须等于 `NODE_INPUT_SCHEMAS`（含 `api_hunt`）。漏节点会走兼容 prompt、不挂蒸馏 skill、不校验 `submit_result`。
+- 字段：`prompt_tokens`←`input_tokens` / `inputTokens`；`completion_tokens`←`output_tokens` / `outputTokens`；`cache_read_input_tokens` / `cache_creation_input_tokens`（及 camelCase；缺省 0）。sidecar 若把 usage 写成 JSON 字符串，台账先解析再记。
 - **整树优先** `model_usage`；若其 cache 为 0 而同次 `usage` 带回 `cache_*`（部分兼容网关），台账保留 `usage` 侧回传值——仍是 API 数据，禁止自算。
+- 回传路径：sidecar `.node_meta.json` 为主；stdout `agent.completed` 仅在 sidecar 缺 usage dict 时回填（同一轮禁止相加，避免形状回喂把本轮算两遍）。
 - 任务合计：`total_tokens = prompt + completion + cache_read + cache_creation`（体积口径；预算软停用此值）。
 - 多轮形状回喂：各轮回传字段相加（含 cache）。
 - 实时：会话完成后 SSE `usage.updated`（不转发 `thinking_tokens`）。
-- **部署注意：** 改台账后须重启 Celery worker；仅升级 API 进程不会让正在跑的 worker 写入 `cache_*`。
+- **部署注意：** 改台账后须重启 Celery worker；改 `infrastructure/agent-runner/runner/` 后须重建 `crucible-agent-runner:base`。仅升级 API 进程不会让正在跑的 worker / 旧镜像写入正确用量。
 
 实现入口：`backend/app/contexts/agent/usage_ledger.py`。

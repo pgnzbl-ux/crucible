@@ -147,7 +147,17 @@ async def process_one_lead(
             lead.verdict = authoritative_verdict(None, audit_out)
 
         lead.status = "completed"
+        basis = "lab" if repro_out is not None else "code_path"
+        lead.verification_basis = basis
         await _reconcile_group(session, lead.alert_group_id, lead.verdict)
+        from app.contexts.finding.vuln_report import is_vuln_report_verdict
+
+        if is_vuln_report_verdict(lead.verdict):
+            group = await session.get(AlertGroup, lead.alert_group_id)
+            if group is not None:
+                await FindingService(session).attach_vuln_report(
+                    group=group, lead=lead, verification_basis=basis,
+                )
         await session.flush()
         return lead
     except Exception as e:  # noqa: BLE001

@@ -31,12 +31,14 @@ description: Crucible 节点 triage。告警组轻量二审：封闭问题 + 切
 | `verdict` | `tp` \| `fp` \| `need_more_context`（内部码；对用户分别是可疑真洞 / 误报 / 二审未决） |
 | `confidence` | 0–1 |
 | `why` | 非空字符串数组 |
+| `summary` | 1～3 句人读简述（是什么、在哪、何害）；必填 |
+| `reasoning` | 代码推理（入口→路径→危险点→消毒/可达结论）；必填 |
 | `evidence` | `tp` 必须非空 `[{file, lines}]` |
 | `need` | 工具仍看不到而必须确认的符号；能补则先补再交，勿轻易 `need_more_context` |
 | `attacker_controlled` | `tp` 必须为 true：存在攻击者可控来源（gitleaks known 密钥暴露可视为满足） |
 | `reaches_sink` | `tp` 必须为 true：能指到危险点 |
 | `sanitizer` | `tp` 必须是 `none` 或 `bypassable`。消毒有效（`effective`）不得报 `tp` |
 
-平台会拒收不合格的可疑真洞（无证据、消毒有效仍报 tp、三布尔缺失）。
+平台会拒收不合格的可疑真洞（无证据、消毒有效仍报 tp、三布尔缺失、缺叙事）。
 
 `need_more_context`：仅当关键事实在仓库内仍不可达或输入严重残缺时使用。不是误报。

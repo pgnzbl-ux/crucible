@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest'
 
-import { AI_NODE_KEYS, formatTokenCount, getAiVerdictMeta, isAiNode, mergeTokenUsage } from './meta'
+import {
+  AI_NODE_KEYS,
+  FINDING_ENGINE_LABELS,
+  VERIFY_MODE_SKIPPED_KEYS,
+  formatFindingEngines,
+  formatTokenCount,
+  getAiVerdictMeta,
+  isAiNode,
+  mergeTokenUsage,
+} from './meta'
 
 describe('AI_NODE_KEYS', () => {
   it('marks model-using pipeline nodes', () => {
@@ -18,6 +27,22 @@ describe('AI_NODE_KEYS', () => {
     expect(isAiNode('api_hunt')).toBe(true)
     expect(isAiNode('lead_verify')).toBe(true)
     expect(isAiNode('cluster')).toBe(false)
+  })
+})
+
+describe('VERIFY_MODE_SKIPPED_KEYS', () => {
+  it('hides discovery-only nodes including inventory and hunt', () => {
+    expect([...VERIFY_MODE_SKIPPED_KEYS].sort()).toEqual([
+      'api_hunt',
+      'api_inventory',
+      'cluster',
+      'dispatch',
+      'scan_gitleaks',
+      'scan_osv',
+      'scan_semgrep',
+      'screen',
+      'triage',
+    ])
   })
 })
 
@@ -45,6 +70,19 @@ describe('mergeTokenUsage', () => {
       cache_creation_input_tokens: 3,
       total_tokens: 141,
     })
+  })
+})
+
+describe('FINDING_ENGINE_LABELS', () => {
+  it('includes api_hunt alongside scan engines', () => {
+    expect(Object.keys(FINDING_ENGINE_LABELS).sort()).toEqual([
+      'api_hunt',
+      'gitleaks',
+      'osv',
+      'semgrep',
+    ])
+    expect(formatFindingEngines(['api_hunt'])).toBe('API 鉴权猎洞')
+    expect(formatFindingEngines(['semgrep', 'api_hunt'])).toBe('Semgrep 静态 + API 鉴权猎洞')
   })
 })
 

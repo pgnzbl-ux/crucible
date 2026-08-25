@@ -13,6 +13,7 @@ lead 领取等"反复起会话"的循环在每次开工前自查。
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Callable
 
 from sqlalchemy import func, select
@@ -27,6 +28,44 @@ def _tok(raw: dict[str, Any], *keys: str) -> int:
     return 0
 
 
+def coerce_usage_blob(raw: Any) -> dict[str, Any] | None:
+    """sidecar / SSE / 对象 → dict。JSON 字符串与 token 字段对象都收；解析失败给 None。"""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+    if isinstance(raw, dict):
+        return raw
+    extracted: dict[str, Any] = {}
+    for key in (
+        "inputTokens",
+        "outputTokens",
+        "cacheReadInputTokens",
+        "cacheCreationInputTokens",
+        "input_tokens",
+        "output_tokens",
+        "prompt_tokens",
+        "completion_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    ):
+        v = getattr(raw, key, None)
+        if v is not None:
+            extracted[key] = v
+    if extracted:
+        return extracted
+    if hasattr(raw, "__dict__"):
+        public = {k: v for k, v in vars(raw).items() if not k.startswith("_")}
+        return public or None
+    return None
+
+
 def _sum_model_usage(model_usage: Any) -> dict[str, int] | None:
     """ResultMessage.model_usage：对各模型 ModelUsage camelCase 求和。
 
@@ -37,6 +76,11 @@ def _sum_model_usage(model_usage: Any) -> dict[str, int] | None:
     """
     if model_usage is None:
         return None
+    if isinstance(model_usage, str):
+        try:
+            model_usage = json.loads(model_usage)
+        except json.JSONDecodeError:
+            return None
 
     if isinstance(model_usage, list):
         acc = {
@@ -139,12 +183,16 @@ def normalize_usage(
     缺省为 0 而 ResultMessage.usage 带有 API 回传 cache，则补上 usage 侧
     （仍是回传字段，禁止自算）。部分网关只在 usage 里填 cache_read。
     """
-    raw = usage if isinstance(usage, dict) else {}
+    raw = coerce_usage_blob(usage) or {}
     from_usage = {
-        "prompt_tokens": _tok(raw, "prompt_tokens", "input_tokens"),
-        "completion_tokens": _tok(raw, "completion_tokens", "output_tokens"),
-        "cache_read_input_tokens": _tok(raw, "cache_read_input_tokens"),
-        "cache_creation_input_tokens": _tok(raw, "cache_creation_input_tokens"),
+        "prompt_tokens": _tok(raw, "prompt_tokens", "input_tokens", "inputTokens"),
+        "completion_tokens": _tok(raw, "completion_tokens", "output_tokens", "outputTokens"),
+        "cache_read_input_tokens": _tok(
+            raw, "cache_read_input_tokens", "cacheReadInputTokens",
+        ),
+        "cache_creation_input_tokens": _tok(
+            raw, "cache_creation_input_tokens", "cacheCreationInputTokens",
+        ),
     }
     summed = _sum_model_usage(model_usage)
     if summed is None:
@@ -353,7 +401,7 @@ async def record_node_usage(
             task_id=getattr(ctx, "task_id", "") or "",
             run_id=getattr(ctx, "run_id", None),
             node_key=node_key,
-            usage=meta.get("usage") if isinstance(meta.get("usage"), dict) else None,
+            usage=meta.get("usage"),
             model_usage=meta.get("model_usage"),
             source=source,
             on_event=getattr(ctx, "on_event", None),

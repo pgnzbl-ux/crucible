@@ -47,8 +47,13 @@ def _tp_output():
         "verdict": "tp",
         "confidence": 0.9,
         "why": ["x"],
+        "summary": "可疑真洞简述",
+        "reasoning": "入口可达危险点且无有效消毒",
         "evidence": [{"file": "app.py", "lines": "2-2"}],
         "need": [],
+        "attacker_controlled": True,
+        "reaches_sink": True,
+        "sanitizer": "none",
     }
 
 

@@ -1113,14 +1113,19 @@ async def test_env_ready_occupied_host_port_skips_compose_up(tmp_path):
 
 
 def test_ai_nodes_import_ok():
-    """5 个 AI 节点都能 import。"""
-    from app.contexts.agent.nodes.profile import ProfileNode
-    from app.contexts.agent.nodes.env_ready import EnvReadyNode
+    """Docker Agent 节点都能 import，且 is_ai=True（screen 走快模型网关，不算在此）。"""
+    from app.contexts.agent.nodes.api_hunt import ApiHuntNode
     from app.contexts.agent.nodes.audit import AuditNode
-    from app.contexts.agent.nodes.reproduce import ReproduceNode
+    from app.contexts.agent.nodes.env_ready import EnvReadyNode
+    from app.contexts.agent.nodes.profile import ProfileNode
     from app.contexts.agent.nodes.report import ReportNode
+    from app.contexts.agent.nodes.reproduce import ReproduceNode
+    from app.contexts.agent.nodes.triage import TriageNode
 
-    for cls in (ProfileNode, EnvReadyNode, AuditNode, ReproduceNode, ReportNode):
+    for cls in (
+        ProfileNode, EnvReadyNode, ApiHuntNode, TriageNode,
+        AuditNode, ReproduceNode, ReportNode,
+    ):
         instance = cls()
         assert instance.is_ai is True
 

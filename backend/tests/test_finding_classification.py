@@ -8,6 +8,14 @@ def test_known_cwe_has_human_title():
 def test_missing_cwe_uses_engine_and_rule_semantics():
     assert vulnerability_title(cwe=None, rule_id="generic-api-key", message="secret found", engine="gitleaks") == "敏感信息泄露"
     assert vulnerability_title(cwe=None, rule_id="GHSA-abcd", message="affected package", engine="osv") == "存在漏洞依赖"
+    assert vulnerability_title(
+        cwe=None, rule_id="GHSA-abcd", message="affected package", engine="osv",
+        dependency_name="jinja2",
+    ) == "jinja2 依赖漏洞"
+    assert vulnerability_title(
+        cwe="CWE-79", rule_id="GHSA-abcd", message="", engine="osv",
+        dependency_name="jinja2",
+    ) == "jinja2 · 跨站脚本（XSS）"
     assert vulnerability_title(cwe=None, rule_id="python.lang.security.audit.subprocess-shell-true", message="", engine="semgrep") == "命令注入"
 
 

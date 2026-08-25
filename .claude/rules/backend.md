@@ -26,7 +26,7 @@ paths: ["backend/app/contexts/**/*.py", "backend/app/shared/**/*.py", "backend/a
 | `report` | reports / evidences | 报告生成 + 状态机 + MinIO 归档 |
 | `finding` | raw_findings / alert_groups / adjudications / review_actions | 告警复核台：归一化告警、指纹分组、AI 二审、人工复核、revive、人工 dispatch |
 | `discovery` | scan_runs | 扫描运行登记：一引擎一节点一 ScanRun，SARIF 归档 |
-| `settings` | llm_providers / credentials | LLM Provider + 凭据后台 CRUD（**明文存取 + 响应掩码 + 激活唯一性**） |
+| `settings` | llm_providers / credentials | LLM Provider + 凭据后台 CRUD（**Fernet 落库 + 响应掩码 + 激活唯一性**） |
 
 `finding` 与 `task` 只走逻辑指针（`Task.source_alert_group_id`，**无 FK 无 relationship**）；判决回流经领域事件 + 惰性对账，禁止 task/report 直写 `alert_groups`。
 
@@ -60,7 +60,7 @@ paths: ["backend/app/contexts/**/*.py", "backend/app/shared/**/*.py", "backend/a
 
 ## 6. Settings / LLM Provider（`settings` context）
 
-- API Key 当前**明文入库**(`settings/service.py` 存 `api_key_encrypted`),列表接口走 `mask_secret` 掩码。`core/crypto.py::encrypt_secret` 遗留未用
+- API Key **Fernet 入库**(`seal_secret` 写入 `api_key_encrypted`),列表接口走 `mask_secret` 掩码。存量明文由 `reveal_secret` 兼容
 - 同一时刻**仅一个** Provider 的 `is_default=true`（Agent 只读默认项）。不设独立 `enabled`；列表状态由 `is_default` 派生（默认 / 备用），启用走 `POST /llm/providers/{id}/activate`
 - 测试连接真实打 Provider 的 `base_url`（不 Mock），便于配置阶段就发现端点 / 凭据错误
 

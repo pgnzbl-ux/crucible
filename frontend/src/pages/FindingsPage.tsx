@@ -9,7 +9,7 @@ import { api, type AlertGroupSummary } from '../shared/lib/api'
 import { PageHeader } from '../shared/components/PageHeader'
 import { PageContainer } from '../shared/components/PageContainer'
 import { useErrorToast } from '../shared/hooks/useErrorToast'
-import { getPriorityMeta, AI_VERDICT_META } from '../shared/lib/meta'
+import { getPriorityMeta, AI_VERDICT_META, FINDING_ENGINE_LABELS, formatFindingEngines } from '../shared/lib/meta'
 import { findingStatusLabel, projectLabel, screeningStatusMeta, sourceVersionLabel } from '../shared/lib/tablePresentation'
 import {
   buildFindingsSearch,
@@ -21,6 +21,7 @@ import {
   type FindingScope,
 } from '../shared/lib/findingsListQuery'
 import { tableRowNavigateProps } from '../shared/lib/tableRowNavigate'
+import { displaySourcePath } from '../shared/lib/findingEvidence'
 
 const { Text } = Typography
 
@@ -37,12 +38,6 @@ const GRADE_META: Record<string, { label: string; color: string }> = {
   A: { label: 'A · 证据充分', color: 'red' },
   B: { label: 'B · 建议复核', color: 'orange' },
   F: { label: 'F · 疑似误报', color: 'default' },
-}
-
-const ENGINE_LABELS: Record<string, string> = {
-  semgrep: 'Semgrep 静态',
-  gitleaks: 'Gitleaks 密钥',
-  osv: 'OSV 依赖',
 }
 
 const PAGE_SIZE = 20
@@ -306,7 +301,7 @@ export function FindingsPage() {
       ellipsis: true,
       render: (v: string, row: AlertGroupSummary) => (
         <Text>
-          {v}
+          {displaySourcePath(v)}
           {row.function_symbol ? ` · ${row.function_symbol}()` : ''}
           {row.line_span ? ` L${row.line_span}` : ''}
         </Text>
@@ -325,7 +320,7 @@ export function FindingsPage() {
               <Text type="secondary" style={{ fontSize: 12 }}>
                 {row.member_count > 1 ? `已合并 ${row.member_count} 个规则命中` : '单个规则命中'}
                 {' · '}
-                {(row.engine_set ?? []).map((e) => ENGINE_LABELS[e] ?? e).join(' + ') || '未知引擎'}
+                {formatFindingEngines(row.engine_set)}
               </Text>
             </div>
           </div>
@@ -476,10 +471,10 @@ export function FindingsPage() {
           <Select
             allowClear
             placeholder="发现引擎"
-            style={{ width: 150 }}
+            style={{ width: 170 }}
             value={engine}
             onChange={(v) => { setEngine(v); setPage(1) }}
-            options={Object.entries(ENGINE_LABELS).map(([value, label]) => ({ value, label }))}
+            options={Object.entries(FINDING_ENGINE_LABELS).map(([value, label]) => ({ value, label }))}
           />
           <Select
             allowClear

@@ -399,6 +399,15 @@ def test_finding_stats_are_owner_scoped(client_env):
     import asyncio
 
     asyncio.run(_seed_review_env(factory))
+
+    async def _other():
+        from app.contexts.identity.models import User
+
+        async with factory() as s:
+            s.add(User(id="u2", email="u2@x.test", password_hash="x", display_name="U2"))
+            await s.commit()
+
+    asyncio.run(_other())
     own = client.get("/api/v1/findings/stats", headers=_auth(client))
     assert own.status_code == 200
     assert own.json()["total"] == 1
@@ -415,6 +424,15 @@ def test_list_groups_task_filter_still_requires_owner(client_env):
     import asyncio
 
     _group_id, task_id = asyncio.run(_seed_review_env(factory))
+
+    async def _other():
+        from app.contexts.identity.models import User
+
+        async with factory() as s:
+            s.add(User(id="u2", email="u2@x.test", password_hash="x", display_name="U2"))
+            await s.commit()
+
+    asyncio.run(_other())
     resp = client.get(
         "/api/v1/findings/groups",
         headers=_auth_as("u2"),
@@ -440,6 +458,7 @@ def test_group_detail_lazy_reconcile(client_env):
             g.status = "dispatched"
             t = await s.get(Task, task_id)
             t.source_alert_group_id = group_id
+            t.task_type = "verify"
             t.status, t.verdict = "completed", "confirmed"
             await s.commit()
 
@@ -659,6 +678,45 @@ def test_manual_dispatch_rejects_already_dispatched_group(client_env):
     assert resp.status_code == 409
     assert "已投递" in resp.json()["error"]["message"]
     send_task.assert_not_called()
+
+
+def test_manual_dispatch_broker_failure_returns_503(client_env):
+    """Celery 投递失败对齐创建任务契约：503，并把组状态滚回以便重试。"""
+    import asyncio
+
+    from app.contexts.finding.models import AlertGroup
+
+    client, factory = client_env
+    group_id, _task_id = asyncio.run(_seed_review_env(factory))
+
+    async def _open():
+        async with factory() as s:
+            g = await s.get(AlertGroup, group_id)
+            g.status = "needs_review"
+            await s.commit()
+
+    asyncio.run(_open())
+
+    with (
+        patch("app.core.agent_runner.agent_runner_manager.image_exists", return_value=True),
+        patch(
+            "app.core.celery_app.celery_app.send_task",
+            side_effect=RuntimeError("broker down"),
+        ),
+    ):
+        resp = client.post(
+            f"/api/v1/findings/groups/{group_id}/dispatch", headers=_auth(client),
+            json={"include_engine_conclusion": False},
+        )
+    assert resp.status_code == 503, resp.text
+    assert "投递失败" in resp.json()["error"]["message"]
+
+    async def _check():
+        async with factory() as s:
+            g = await s.get(AlertGroup, group_id)
+            assert g.status == "needs_review"
+
+    asyncio.run(_check())
 
 
 def test_delete_group_cascades_and_keeps_raw_finding(client_env):

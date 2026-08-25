@@ -61,6 +61,46 @@ class FindingService:
         rows = result.scalars().all()
         return rows[0] if rows else None
 
+    async def reps_and_adjudications(
+        self, groups: list[AlertGroup],
+    ) -> tuple[dict[str, RawFinding], dict[str, Adjudication]]:
+        """一批组的代表成员 + 最高 attempt 判决，避免 dispatch/streamer 2N。"""
+        if not groups:
+            return {}, {}
+        rep_ids = [g.representative_finding_id for g in groups if g.representative_finding_id]
+        group_ids = [g.id for g in groups]
+        reps_by_finding: dict[str, RawFinding] = {}
+        if rep_ids:
+            rows = await self.session.execute(
+                select(RawFinding).where(RawFinding.id.in_(rep_ids))
+            )
+            reps_by_finding = {f.id: f for f in rows.scalars().all()}
+        reps = {
+            g.id: reps_by_finding[g.representative_finding_id]
+            for g in groups
+            if g.representative_finding_id in reps_by_finding
+        }
+        latest: dict[str, Adjudication] = {}
+        if group_ids:
+            max_attempt = (
+                select(
+                    Adjudication.alert_group_id,
+                    func.max(Adjudication.attempt).label("mx"),
+                )
+                .where(Adjudication.alert_group_id.in_(group_ids))
+                .group_by(Adjudication.alert_group_id)
+            ).subquery()
+            adj_rows = await self.session.execute(
+                select(Adjudication).join(
+                    max_attempt,
+                    (Adjudication.alert_group_id == max_attempt.c.alert_group_id)
+                    & (Adjudication.attempt == max_attempt.c.mx),
+                )
+            )
+            for adj in adj_rows.scalars().all():
+                latest.setdefault(adj.alert_group_id, adj)
+        return reps, latest
+
     async def list_groups(self, task_id: str, *, status: str | None = None) -> list[AlertGroup]:
         stmt = select(AlertGroup).where(AlertGroup.task_id == task_id)
         if status:
@@ -121,6 +161,7 @@ class FindingService:
                         await self.session.flush()
                     existing[g["group_key"]] = row
                     created += 1
+                    self._bind_group_members(row, g, finding_by_id)
                     continue
                 except IntegrityError:
                     # 并发(重投双跑)撞 uq_alert_groups_task_key：复用已有行合并，
@@ -140,21 +181,110 @@ class FindingService:
             row.engine_set = sorted(engines)
             row.priority = g.get("priority") or row.priority
             row.clue_grade = g.get("clue_grade") or row.clue_grade
+            self._bind_group_members(row, g, finding_by_id)
         await self.session.flush()
         return created
 
+    @staticmethod
+    def _bind_group_members(
+        row: AlertGroup, group: dict[str, Any], finding_by_id: dict[str, RawFinding],
+    ) -> None:
+        ids = list(group.get("member_ids") or [])
+        rep_id = group.get("representative_finding_id") or row.representative_finding_id
+        if rep_id and rep_id not in ids:
+            ids.append(rep_id)
+        for fid in ids:
+            finding = finding_by_id.get(fid)
+            if finding is not None:
+                finding.alert_group_id = row.id
+
     async def mark_bypass_groups(self, task_id: str) -> int:
-        """osv 组：clustered → adjudicated(bypass 直报，跳过 triage)。"""
+        """osv 组：clustered → adjudicated(bypass 直报，跳过 triage) + 模板叙事。"""
+        from app.contexts.finding.models import Adjudication
+        from app.contexts.finding.narrative import osv_template_narrative
+
         groups = await self.list_groups(task_id)
         n = 0
         for g in groups:
-            if "osv" in (g.engine_set or []) and g.status == "clustered":
-                g.status = "adjudicated"
-                g.ai_verdict = "bypass"
-                g.priority = g.priority or "medium"
-                n += 1
+            if "osv" not in (g.engine_set or []) or g.status != "clustered":
+                continue
+            g.status = "adjudicated"
+            g.ai_verdict = "bypass"
+            g.priority = g.priority or "medium"
+            g.verdict_source = g.verdict_source or "rule"
+            rep = await self.representative_of(g)
+            raw = rep.raw if rep and isinstance(rep.raw, dict) else {}
+            summary, reasoning = osv_template_narrative(
+                message=(rep.message if rep else "") or "",
+                raw=raw,
+                file_path=(rep.file_path if rep else g.file_path) or "",
+                rule_id=(rep.rule_id if rep else "") or "",
+            )
+            why = [
+                f"依赖情报 bypass：{raw.get('rule_id') or (rep.rule_id if rep else g.group_key)}",
+            ]
+            if raw.get("called") is True:
+                why.append("调用分析 called=true")
+            elif raw.get("called") is False:
+                why.append("调用分析 called=false（默认不入终认）")
+            else:
+                why.append("无调用分析（默认不入终认）")
+            evidence: list[dict] = []
+            if rep and rep.file_path:
+                lines = (
+                    f"{rep.line_start}-{rep.line_end or rep.line_start}"
+                    if rep.line_start is not None
+                    else "1-1"
+                )
+                evidence.append({"file": rep.file_path, "lines": lines})
+            self.session.add(Adjudication(
+                alert_group_id=g.id,
+                attempt=1,
+                provider_id=None,
+                model=None,
+                verdict="bypass",
+                confidence=None,
+                why=why,
+                evidence=evidence,
+                need=[],
+                summary=summary,
+                reasoning=reasoning,
+                context_log=[{"via": "osv_bypass", "called": raw.get("called")}],
+                prompt_text="[osv] 依赖情报 bypass，确定性模板叙事，未走 triage",
+                response_text=summary[:2000],
+                usage={},
+            ))
+            n += 1
         await self.session.flush()
         return n
+
+    async def attach_vuln_report(
+        self,
+        *,
+        group: AlertGroup,
+        lead: LeadRun,
+        verification_basis: str,
+    ) -> dict | None:
+        """终局成功时写入一漏洞一份报告；非成功态清空。"""
+        from app.contexts.finding.vuln_report import build_vuln_report, is_vuln_report_verdict
+
+        if not is_vuln_report_verdict(lead.verdict):
+            return None
+        rep = await self.representative_of(group)
+        adjs = await self.list_adjudications(group.id)
+        adj = adjs[-1] if adjs else None
+        report = build_vuln_report(
+            group=group,
+            lead=lead,
+            representative=rep,
+            adjudication=adj,
+            verification_basis=verification_basis,
+        )
+        group.vuln_report = report
+        group.verification_basis = verification_basis
+        lead.verification_basis = verification_basis
+        await self.session.flush()
+        return report
 
     # ── triage 侧：判决落库 ──
 
@@ -173,6 +303,26 @@ class FindingService:
         return len(groups)
 
     # ── dispatch / 复核侧 ──
+
+    async def try_claim_dispatch(self, group_id: str) -> AlertGroup | None:
+        """CAS：仅当尚未 dispatched 时抢占。并发第二次返回 None。"""
+        result = await self.session.execute(
+            update(AlertGroup)
+            .where(AlertGroup.id == group_id, AlertGroup.status != "dispatched")
+            .values(status="dispatched")
+        )
+        if result.rowcount == 0:
+            return None
+        return await self.get_group(group_id)
+
+    async def release_dispatch_claim(self, group_id: str, *, restore_status: str) -> None:
+        """投递失败时把 CAS 抢占滚回，允许稍后重试本接口。"""
+        await self.session.execute(
+            update(AlertGroup)
+            .where(AlertGroup.id == group_id, AlertGroup.status == "dispatched")
+            .values(status=restore_status)
+        )
+        await self.session.flush()
 
     async def mark_dispatched(self, group: AlertGroup) -> None:
         group.status = "dispatched"
@@ -197,6 +347,9 @@ class FindingService:
     async def discard_false_positive(self, group: AlertGroup) -> None:
         """明确误报：级联删组与判决，保留 RawFinding。线索台无对象。"""
         gid = group.id
+        await self.session.execute(
+            update(RawFinding).where(RawFinding.alert_group_id == gid).values(alert_group_id=None)
+        )
         await self.session.execute(
             delete(Adjudication).where(Adjudication.alert_group_id == gid)
         )
@@ -233,8 +386,12 @@ class FindingService:
         - false_positive → 丢弃组（漏斗计数，不展示）
         - code_smell/not_reproduced → 退回 needs_review（线索台默认不展示）
         - 任务 needs_review(status) → 组退回 needs_review
+        仅 verify 任务（人工/派生终认）按 Task.verdict 回写；discovery 聚合
+        任务的 verdict 会错写队列第一条组，改由 LeadWorker 按组回流。
         幂等：组已 resolved 且映射未变则 no-op。丢事件兜底走 reconcile_stale_groups。
         """
+        if (getattr(task, "task_type", None) or "verify") != "verify":
+            return None
         group_id = getattr(task, "source_alert_group_id", None)
         if not group_id:
             return None
@@ -263,23 +420,25 @@ class FindingService:
         return group
 
     async def reconcile_stale_groups(self, *, owner_id: str | None = None) -> int:
-        """低频 sweeper(§4.4 丢事件兜底)：dispatched 组按 Task 最新 verdict 补写。"""
+        """低频 sweeper(§4.4 丢事件兜底)：dispatched 组按关联 verify Task 的 verdict 补写。"""
         from sqlalchemy import select
 
         from app.contexts.task.models import Task
 
-        result = await self.session.execute(
-            select(AlertGroup).where(AlertGroup.status == "dispatched")
-        )
-        stale = [g for g in result.scalars().all()]
-        fixed = 0
-        for group in stale:
-            task_rows = await self.session.execute(
-                select(Task).where(Task.source_alert_group_id == group.id)
+        stmt = (
+            select(AlertGroup, Task)
+            .join(Task, Task.source_alert_group_id == AlertGroup.id)
+            .where(
+                AlertGroup.status == "dispatched",
+                Task.task_type == "verify",
+                Task.status.in_(("completed", "needs_review", "failed")),
             )
-            task = task_rows.scalars().first()
-            if task is None:
-                continue
+        )
+        if owner_id:
+            stmt = stmt.where(Task.owner_id == owner_id)
+        rows = (await self.session.execute(stmt)).all()
+        fixed = 0
+        for group, task in rows:
             before = group.status
             await self.reconcile_from_task(task)
             if group.status != before:
@@ -359,6 +518,11 @@ class FindingService:
             .values(source_alert_group_id=None)
         )
         await self.session.execute(
+            update(RawFinding)
+            .where(RawFinding.alert_group_id.in_(deletable))
+            .values(alert_group_id=None)
+        )
+        await self.session.execute(
             delete(Adjudication).where(Adjudication.alert_group_id.in_(deletable))
         )
         await self.session.execute(
@@ -372,6 +536,64 @@ class FindingService:
         )
         await self.session.flush()
         return deletable, skipped
+
+    _SCAN_RETRY_ENGINES = {
+        "scan_semgrep": "semgrep",
+        "scan_gitleaks": "gitleaks",
+        "scan_osv": "osv",
+        "api_hunt": "api_hunt",
+    }
+
+    async def purge_for_retry(self, task_id: str, from_node: str | None) -> None:
+        """整轮或扫描重试时清掉会撞 unique 的发现子树；from_node=cluster 只清组。"""
+        from app.contexts.discovery.models import ScanRun
+
+        if from_node is None:
+            await self._purge_groups_tree(task_id)
+            await self.session.execute(delete(RawFinding).where(RawFinding.task_id == task_id))
+            await self.session.execute(delete(ScanRun).where(ScanRun.task_id == task_id))
+            await self.session.flush()
+            return
+        if from_node == "cluster":
+            await self._purge_groups_tree(task_id)
+            await self.session.flush()
+            return
+        engine = self._SCAN_RETRY_ENGINES.get(from_node)
+        if engine is None:
+            return
+        await self._purge_groups_tree(task_id)
+        await self.session.execute(
+            delete(RawFinding).where(
+                RawFinding.task_id == task_id, RawFinding.engine == engine,
+            )
+        )
+        await self.session.execute(
+            delete(ScanRun).where(ScanRun.task_id == task_id, ScanRun.engine == engine)
+        )
+        await self.session.flush()
+
+    async def _purge_groups_tree(self, task_id: str) -> None:
+        group_ids = list(
+            (await self.session.execute(
+                select(AlertGroup.id).where(AlertGroup.task_id == task_id)
+            )).scalars()
+        )
+        if not group_ids:
+            await self.session.execute(delete(LeadRun).where(LeadRun.task_id == task_id))
+            return
+        await self.session.execute(
+            delete(Adjudication).where(Adjudication.alert_group_id.in_(group_ids))
+        )
+        await self.session.execute(
+            delete(ReviewAction).where(ReviewAction.alert_group_id.in_(group_ids))
+        )
+        await self.session.execute(delete(LeadRun).where(LeadRun.task_id == task_id))
+        await self.session.execute(
+            update(RawFinding)
+            .where(RawFinding.task_id == task_id)
+            .values(alert_group_id=None)
+        )
+        await self.session.execute(delete(AlertGroup).where(AlertGroup.task_id == task_id))
 
     async def count_groups(self, task_id: str) -> int:
         result = await self.session.execute(

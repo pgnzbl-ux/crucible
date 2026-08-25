@@ -230,6 +230,24 @@
 
 报告详情、按任务读取、发布、导出和证据列表均只允许 owner 访问；非 owner 与不存在统一返回 404。`GET /api/v1/reports/task/{task_id}` 在同一任务有多份报告时返回 **最新 run** 的那一份。
 
+### GET `/api/v1/reports/audits`
+
+审计报告 Tab：当前用户的 `task_type=discovery` 任务聚合（有 Report 或有终局漏洞报告即可出现）。Query：`q` / `limit`（默认 50，最大 200）/ `offset`。同一任务多份 Report 只保留最新一份。
+
+响应 `{ items, total, limit, offset }`。每条 `AuditTaskSummary`：`task_id / project_id / project_address / project_ref / task_status / report_id / report_status / confirmed_count / code_reachable_count / vuln_report_count / created_at / updated_at / published_at`。
+
+### GET `/api/v1/reports/audits/{task_id}`
+
+单条审计任务摘要。非 owner / 非 discovery / 不存在 → **404**。
+
+### GET `/api/v1/reports/audits/{task_id}/vulns`
+
+该任务下单漏洞报告卡片列表。响应 `{ task_id, items, total }`。
+
+### GET `/api/v1/reports/audits/{task_id}/vulns/{group_id}`
+
+单份漏洞报告。Query `format=json|md`（默认 json）。`md` 为附件下载。不存在 / 非 owner → **404**。
+
 ### GET `/api/v1/reports/{id}/export?format=json|md`
 
 **已实现**。format=json 返回 `document_kind` + 对应 8 键对象（值为 Markdown 字符串）+ 索引字段;format=md 按文档类型加 `## N.` 标题后拼接。验证记录标题为「漏洞验证记录」。**不生成 docx/pdf**。
@@ -251,6 +269,12 @@ owner 校验：所有环境均要求 `report.owner_id` 匹配当前用户。报�
 仓库审计（`task_type=discovery`）产出的合格线索与终认结果。仅 owner 可访问，非 owner 与不存在统一 404。
 
 对用户文案必须用「可疑真洞 / 误报 / 二审未决」，禁止把内部码 `tp`/`fp` 当标签原文。`ai_verdict` 字段仍返回内部码，由 UI 翻译。
+
+### GET `/api/v1/findings/stats`
+
+当前用户任务下告警组计数。工作台卡片一次查询，不要对 `/groups` 连打。
+
+响应 `{ total, by_status, by_resolution, by_queue }`。`by_queue` 键为 `workbench` / `verifying` / `confirmed` / `reachable`（语义同列表 `scope`）。未登录 → **401**。
 
 ### GET `/api/v1/findings/groups`
 
@@ -302,6 +326,8 @@ owner 校验：所有环境均要求 `report.owner_id` 匹配当前用户。报�
 ### POST `/api/v1/findings/groups/{group_id}/dispatch`
 
 人工次级入口：另开 `task_type=verify`（同 project/ref，Lab 复用；同一套终认节点，不是第二套产品）。请求体 `{ "include_engine_conclusion": false }`——勾选才在描述追加【引擎线索】原文（默认不锚定）。响应 `{ group_id, verification_task_id }`。组随后 `dispatched`，验证任务终态经事件回流写回该组（`confirmed` / `code_reachable` 可见；终认证伪不展示）。
+
+已 `dispatched` 重复投递 → **409**。组缺少代表成员 → **409**。Celery 投递失败 → **503**（验证任务已落库为 `failed`；组状态滚回抢占前，可重试本接口）。与 `POST /tasks` Broker 失败同为 503，不是 502。
 
 ---
 
@@ -411,7 +437,7 @@ Provider **没有独立启用/停用字段**。Agent 运行时只读取唯一的
 
 ### POST `/api/v1/settings/llm/providers`
 
-新建。`api_key` **明文落库**(存 `api_key_encrypted` 字段),响应层 `mask_secret` 掩码。当前尚无默认项时，新建的第一条自动 `is_default=true`。请求体可带 `is_default` 显式抢默认。未传高级字段时用全局默认（0.2 / 200000 / high）。
+新建。`api_key` **Fernet 加密落库**(存 `api_key_encrypted` 字段；存量明文可读),响应层 `mask_secret` 掩码。当前尚无默认项时，新建的第一条自动 `is_default=true`。请求体可带 `is_default` 显式抢默认。未传高级字段时用全局默认（0.2 / 200000 / high）。
 
 ### PUT `/api/v1/settings/llm/providers/{id}`
 
@@ -426,6 +452,10 @@ Provider **没有独立启用/停用字段**。Agent 运行时只读取唯一的
 ### POST `/api/v1/settings/llm/providers/{id}/test`
 
 使用该 Provider 已存的 temperature / effort 发测连接请求。
+
+### POST `/api/v1/settings/llm/providers/{id}/agent-test`
+
+管理员：用该 Provider 起一次真实 Docker Agent canary（校验 Bash / MCP `submit_result` / 多轮 / 凭据隔离）。不存在 → **404**。响应 `{ ok, message, checks, provider_id, model, duration_ms, num_turns, usage }`。
 
 ### POST `/api/v1/settings/llm/test`
 
@@ -455,8 +485,8 @@ Provider **没有独立启用/停用字段**。Agent 运行时只读取唯一的
 
 `GET /api/v1/settings/credentials`（列表，`{items,total}`）、`POST`（新建，201）、`PUT /api/v1/settings/credentials/{id}`、`DELETE .../{id}`（204）。
 
-- 字段：`name` / `kind`（`env_var|file`）/ `target`（env_var→大写下划线变量名；file→`.secrets/<target>` 文件名）/ `secret`（明文）/ `description`
-- **明文存取**（存 `secret_encrypted` 列，列名为历史遗留；响应只回 `secret_masked` + `has_secret`），与 LLM Provider Key 同策略
+- 字段：`name` / `kind`（`env_var|file`）/ `target`（env_var→大写下划线变量名；file→`.secrets/<target>` 文件名）/ `secret`（写入明文，**Fernet 加密落库**）/ `description`
+- **Fernet 落库**（存 `secret_encrypted`；`seal_secret` 写入、`reveal_secret` 读取并兼容存量明文；响应只回 `secret_masked` + `has_secret`），与 LLM Provider Key 同策略
 - 注入：任务引用凭据后由 Credential Proxy 按 kind 注入 agent-runner（env → 容器环境变量；file → `/workspace/.secrets/` 600），任务结束销毁
 
 ---

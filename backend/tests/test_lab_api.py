@@ -280,6 +280,8 @@ async def test_destroy_creating_lab_without_live_task(session):
     assert status == "destroyed"
     down.assert_awaited_once_with(result.compose_project)
     assert (await session.get(Lab, result.lab_id)).status == "destroyed"
+    await session.refresh(task)
+    assert task.lab_id is None
 
 
 @pytest.mark.asyncio

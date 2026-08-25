@@ -18,7 +18,7 @@ class ScanRun(BaseModel):
     task_id: Mapped[str] = mapped_column(String(36), ForeignKey("tasks.id"), index=True)
     run_id: Mapped[str] = mapped_column(String(36), ForeignKey("task_runs.id"), index=True)
     node_run_id: Mapped[str] = mapped_column(String(36), index=True)  # 逻辑指向 node_runs.id
-    engine: Mapped[str] = mapped_column(String(20), comment="semgrep | gitleaks | osv")
+    engine: Mapped[str] = mapped_column(String(20), comment="semgrep | gitleaks | osv | api_hunt")
     status: Mapped[str] = mapped_column(
         String(20), default="running",
         comment="running | completed | failed | skipped",

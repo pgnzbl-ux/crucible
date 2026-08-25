@@ -1,15 +1,55 @@
 """finding context repository — 过滤查询。"""
 from __future__ import annotations
 
-from sqlalchemy import String, and_, func, or_, select
+from sqlalchemy import String, and_, case, func, or_, select, type_coerce
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql import Select
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.sql import Select, bindparam
+from sqlalchemy.sql.expression import ColumnElement
+from sqlalchemy.types import Boolean
 
 from app.contexts.finding.models import AlertGroup, RawFinding, ReviewAction
 from app.contexts.task.models import Task
 
 # 跨页全选一次拉取的硬顶；超出要求用户收窄筛选
 MAX_CROSS_PAGE_IDS = 2000
+
+
+class _JsonArrayHas(ColumnElement[bool]):
+    """JSON 数组是否含某字符串元素。PG 走 jsonb `?`，SQLite 走 json_each。"""
+
+    inherit_cache = False
+
+    def __init__(self, column, value: str):
+        super().__init__()
+        self.column = column
+        self.value = value
+        self.type = Boolean()
+
+
+@compiles(_JsonArrayHas, "postgresql")
+def _json_array_has_pg(element, compiler, **kw):
+    return compiler.process(
+        type_coerce(element.column, JSONB).has_key(element.value), **kw,
+    )
+
+
+@compiles(_JsonArrayHas, "sqlite")
+def _json_array_has_sqlite(element, compiler, **kw):
+    col = compiler.process(element.column, **kw)
+    val = compiler.process(bindparam(None, element.value, unique=True), **kw)
+    return f"EXISTS (SELECT 1 FROM json_each({col}) WHERE json_each.value = {val})"
+
+
+@compiles(_JsonArrayHas)
+def _json_array_has_default(element, compiler, **kw):
+    escaped = (
+        element.value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    )
+    return compiler.process(
+        element.column.cast(String).like(f'%"{escaped}"%', escape="\\"), **kw,
+    )
 
 
 class FindingRepository:
@@ -22,13 +62,16 @@ class FindingRepository:
         cwe: str | None = None, ai_verdict: str | None = None,
         engine: str | None = None, clue_grade: str | None = None,
         scope: str | None = None, q: str | None = None,
+        owner_id: str | None = None,
         owner_task_ids: list[str] | None = None,
     ) -> Select:
         stmt = select(AlertGroup)
-        need_task_join = bool((q or "").strip())
+        need_task_join = bool((q or "").strip()) or owner_id is not None
         if need_task_join:
             stmt = stmt.join(Task, Task.id == AlertGroup.task_id)
-        if owner_task_ids is not None:
+        if owner_id is not None:
+            stmt = stmt.where(Task.owner_id == owner_id)
+        elif owner_task_ids is not None:
             stmt = stmt.where(AlertGroup.task_id.in_(owner_task_ids))
         if task_id:
             stmt = stmt.where(AlertGroup.task_id == task_id)
@@ -64,12 +107,13 @@ class FindingRepository:
         cwe: str | None = None, ai_verdict: str | None = None,
         engine: str | None = None, clue_grade: str | None = None,
         scope: str | None = None, q: str | None = None,
-        limit: int = 50, offset: int = 0, owner_task_ids: list[str] | None = None,
+        limit: int = 50, offset: int = 0, owner_id: str | None = None,
+        owner_task_ids: list[str] | None = None,
     ) -> tuple[int, list[AlertGroup]]:
         stmt = self._filtered_groups_stmt(
             task_id=task_id, status=status, resolution=resolution, cwe=cwe,
             ai_verdict=ai_verdict, engine=engine, clue_grade=clue_grade,
-            scope=scope, q=q, owner_task_ids=owner_task_ids,
+            scope=scope, q=q, owner_id=owner_id, owner_task_ids=owner_task_ids,
         )
         total = (await self.session.execute(
             select(func.count()).select_from(
@@ -91,6 +135,7 @@ class FindingRepository:
         cwe: str | None = None, ai_verdict: str | None = None,
         engine: str | None = None, clue_grade: str | None = None,
         scope: str | None = None, q: str | None = None,
+        owner_id: str | None = None,
         owner_task_ids: list[str] | None = None,
         max_ids: int = MAX_CROSS_PAGE_IDS,
     ) -> tuple[int, list[str]]:
@@ -98,7 +143,7 @@ class FindingRepository:
         stmt = self._filtered_groups_stmt(
             task_id=task_id, status=status, resolution=resolution, cwe=cwe,
             ai_verdict=ai_verdict, engine=engine, clue_grade=clue_grade,
-            scope=scope, q=q, owner_task_ids=owner_task_ids,
+            scope=scope, q=q, owner_id=owner_id, owner_task_ids=owner_task_ids,
         )
         total = int((await self.session.execute(
             select(func.count()).select_from(
@@ -119,11 +164,8 @@ class FindingRepository:
 
     @staticmethod
     def engine_member_clause(engine: str):
-        """engine_set 是 json 列（没有 jsonb 的 @> 包含运算符），转文本后按
-        JSON 字符串元素精确匹配：带引号保证 "osv" 不会命中 "osv-scanner"，
-        LIKE 通配符转义保证筛选值不会被当成模式。"""
-        escaped = engine.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        return AlertGroup.engine_set.cast(String).like(f'%"{escaped}"%', escape="\\")
+        """engine_set JSON 数组按元素精确包含："osv" 不命中 "osv-scanner"。"""
+        return _JsonArrayHas(AlertGroup.engine_set, engine)
 
     @staticmethod
     def queue_scope_clause(scope: str):
@@ -145,30 +187,45 @@ class FindingRepository:
         }
         return clauses[scope]
 
-    async def group_queue_stats(self, owner_task_ids: list[str]) -> dict[str, int]:
-        result: dict[str, int] = {}
-        for scope in ("workbench", "verifying", "confirmed", "reachable"):
-            count = await self.session.scalar(
-                select(func.count(AlertGroup.id)).where(
-                    AlertGroup.task_id.in_(owner_task_ids),
-                    self.queue_scope_clause(scope),
+    async def group_queue_stats(self, owner_id: str) -> dict[str, int]:
+        verifying = self.queue_scope_clause("verifying")
+        confirmed = self.queue_scope_clause("confirmed")
+        reachable = self.queue_scope_clause("reachable")
+        workbench = self.queue_scope_clause("workbench")
+        row = (
+            await self.session.execute(
+                select(
+                    func.coalesce(func.sum(case((workbench, 1), else_=0)), 0),
+                    func.coalesce(func.sum(case((verifying, 1), else_=0)), 0),
+                    func.coalesce(func.sum(case((confirmed, 1), else_=0)), 0),
+                    func.coalesce(func.sum(case((reachable, 1), else_=0)), 0),
                 )
+                .select_from(AlertGroup)
+                .join(Task, Task.id == AlertGroup.task_id)
+                .where(Task.owner_id == owner_id)
             )
-            result[scope] = int(count or 0)
-        return result
+        ).one()
+        return {
+            "workbench": int(row[0] or 0),
+            "verifying": int(row[1] or 0),
+            "confirmed": int(row[2] or 0),
+            "reachable": int(row[3] or 0),
+        }
 
     async def group_stats(
-        self, owner_task_ids: list[str],
+        self, owner_id: str,
     ) -> tuple[dict[str, int], dict[str, int]]:
         status_rows = await self.session.execute(
             select(AlertGroup.status, func.count(AlertGroup.id))
-            .where(AlertGroup.task_id.in_(owner_task_ids))
+            .join(Task, Task.id == AlertGroup.task_id)
+            .where(Task.owner_id == owner_id)
             .group_by(AlertGroup.status)
         )
         resolution_rows = await self.session.execute(
             select(AlertGroup.resolution, func.count(AlertGroup.id))
+            .join(Task, Task.id == AlertGroup.task_id)
             .where(
-                AlertGroup.task_id.in_(owner_task_ids),
+                Task.owner_id == owner_id,
                 AlertGroup.resolution.is_not(None),
             )
             .group_by(AlertGroup.resolution)
@@ -179,6 +236,14 @@ class FindingRepository:
         )
 
     async def list_group_members(self, group: AlertGroup) -> list[RawFinding]:
+        bound = await self.session.execute(
+            select(RawFinding).where(RawFinding.alert_group_id == group.id).order_by(
+                RawFinding.created_at
+            )
+        )
+        members = list(bound.scalars().all())
+        if members:
+            return members
         rows = await self.session.execute(
             select(RawFinding).where(
                 RawFinding.task_id == group.task_id,

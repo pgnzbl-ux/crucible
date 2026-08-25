@@ -28,7 +28,7 @@ class Task(BaseModel):
     )
     source_type: Mapped[str] = mapped_column(String(20), default="git", comment="git | local_upload")
     task_type: Mapped[str] = mapped_column(
-        String(20), default="verify", comment="verify(漏洞验证) | discovery(仓库审计)",
+        String(20), default="verify", index=True, comment="verify(漏洞验证) | discovery(仓库审计)",
     )
     vulnerability_description: Mapped[str | None] = mapped_column(Text, nullable=True, comment="漏洞描述；task_type=discovery 时为空")
     vulnerability_reasoning: Mapped[str | None] = mapped_column(Text, comment="漏洞推理过程")

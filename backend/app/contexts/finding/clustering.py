@@ -167,6 +167,10 @@ def cluster_findings(findings: list[dict[str, Any]], index: list[dict[str, Any]]
             # 补函数名：后到的成员若反查到符号，写回组
             if not g.get("function_symbol") and function_symbol:
                 g["function_symbol"] = function_symbol
+        g.setdefault("member_ids", [])
+        fid = f.get("id")
+        if fid and fid not in g["member_ids"]:
+            g["member_ids"].append(fid)
         g["member_count"] += 1
         if f.get("engine") and f["engine"] not in g["engine_set"]:
             g["engine_set"].append(f["engine"])

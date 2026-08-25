@@ -132,10 +132,26 @@ function DagOverview({
 }) {
   const byKey = new Map(nodes.map((node) => [node.key, node]))
   const stages = pipelineOverviewStages(mode)
+  const totalUsage = mergeTokenUsage(
+    ...nodes.filter((node) => node.key !== 'over').map((node) => node.usage),
+  )
   return (
     <div className="crucible-dag-overview" role="group" aria-label="任务业务阶段流程图">
       <div className="crucible-dag-overview__mode">
         {mode === 'discovery' ? '仓库审计' : '定向验证'}
+        {totalUsage && totalUsage.total_tokens > 0 ? (
+          <span
+            className="crucible-dag-overview__total"
+            title={[
+              `prompt ${totalUsage.prompt_tokens}`,
+              `completion ${totalUsage.completion_tokens}`,
+              `cache_read ${totalUsage.cache_read_input_tokens}`,
+              `cache_creation ${totalUsage.cache_creation_input_tokens}`,
+            ].join(' · ')}
+          >
+            {formatTokenCount(totalUsage.total_tokens)} tok
+          </span>
+        ) : null}
       </div>
       <div className="crucible-dag-overview__track">
         {stages.map((stage, index) => {

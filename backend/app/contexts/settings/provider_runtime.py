@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, cast
 
+from app.core.crypto import reveal_secret
+
 from .models import (
     DEFAULT_LLM_EFFORT,
     DEFAULT_LLM_MAX_CONTEXT_TOKENS,
@@ -69,7 +71,7 @@ class ProviderRuntimeConfig:
             provider_type=provider_type,
             auth_mode=resolve_auth_mode(provider_type, getattr(provider, "auth_mode", None)),
             base_url=str(getattr(provider, "base_url", "") or ""),
-            credential=str(getattr(provider, "api_key_encrypted", "") or ""),
+            credential=reveal_secret(str(getattr(provider, "api_key_encrypted", "") or "")),
             model=str(getattr(provider, "model", "") or ""),
             timeout_ms=int(getattr(provider, "timeout_ms", None) or 120_000),
             temperature=float(

@@ -186,6 +186,9 @@ async def adjudicate_group(ctx, group, settings) -> bool:
         "reaches_sink": output.get("reaches_sink"),
         "sanitizer": output.get("sanitizer"),
     }
+    from app.contexts.finding.narrative import narrative_from_agent
+
+    summary, reasoning = narrative_from_agent(output)
     await svc.record_adjudication(
         group=group,
         adjudication=Adjudication(
@@ -196,6 +199,8 @@ async def adjudicate_group(ctx, group, settings) -> bool:
             why=list(output.get("why") or []),
             evidence=list(output.get("evidence") or []),
             need=list(output.get("need") or []),
+            summary=summary,
+            reasoning=reasoning,
             context_log=[{
                 "round": 1, "slices": len(slices), "via": "agent-runner",
                 "qualify": qualify,

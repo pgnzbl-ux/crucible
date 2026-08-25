@@ -509,6 +509,23 @@ export const api = {
     return request<{ items: ReportSummary[]; total: number; limit: number; offset: number }>(`/reports/${qs}`)
   },
 
+  listAuditTasks: (params?: Record<string, string>) => {
+    const qs = params ? '?' + new URLSearchParams(params).toString() : ''
+    return request<{ items: AuditTaskSummary[]; total: number; limit: number; offset: number }>(
+      `/reports/audits${qs}`,
+    )
+  },
+
+  getAuditTask: (taskId: string) => request<AuditTaskSummary>(`/reports/audits/${taskId}`),
+
+  listAuditVulnReports: (taskId: string) =>
+    request<{ task_id: string; items: VulnReportSummary[]; total: number }>(
+      `/reports/audits/${taskId}/vulns`,
+    ),
+
+  getAuditVulnReport: (taskId: string, groupId: string) =>
+    request<Record<string, unknown>>(`/reports/audits/${taskId}/vulns/${groupId}`),
+
   getReport: (reportId: string) => request<ReportDetail>(`/reports/${reportId}`),
 
   getReportByTask: (taskId: string) =>
@@ -608,6 +625,12 @@ export const api = {
   // Reports — 导出（带鉴权，避免 window.open 丢 token）
   exportReportUrl: (reportId: string, format: 'json' | 'md' = 'json') =>
     `${API_BASE}/reports/${reportId}/export?format=${format}`,
+
+  exportAuditVulnUrl: (taskId: string, groupId: string, format: 'json' | 'md' = 'json') =>
+    `${API_BASE}/reports/audits/${taskId}/vulns/${groupId}?format=${format}`,
+
+  exportFindingVulnUrl: (groupId: string, format: 'json' | 'md' = 'json') =>
+    `${API_BASE}/findings/groups/${groupId}/report/export?format=${format}`,
 
   // Projects — 阶段 1 新增
   listProjects: (params?: Record<string, string>) => {
@@ -726,8 +749,24 @@ export interface FindingEvidenceRaw {
   has_dataflow?: boolean
   rule_class?: string
   entropy?: number
+  description?: string
+  commit?: string
+  author?: string
+  date?: string
   called?: boolean | null
   unimportant?: boolean
+  dependency_name?: string
+  version?: string
+  ecosystem?: string
+  cve?: string
+  aliases?: string[]
+  cvss?: string | number | null
+  cvss_score?: number | null
+  severity_label?: string
+  summary?: string
+  details?: string
+  fixed_versions?: string[]
+  osv_url?: string
   [key: string]: unknown
 }
 
@@ -743,7 +782,7 @@ export interface FindingSummary {
   message: string
   source_to_sink?: unknown[] | null
   code_snippet?: string | null
-  /** 降噪/二审证据元数据（已脱敏）；非引擎结论措辞 */
+  /** 降噪/二审证据元数据；gitleaks 命中原文、osv 可读摘要也走这里 */
   raw?: FindingEvidenceRaw | null
 }
 
@@ -799,6 +838,8 @@ export interface AdjudicationDetail {
   why: string[]
   evidence: { file?: string; lines?: string }[]
   need: string[]
+  summary: string | null
+  reasoning: string | null
   prompt_text: string
   response_text: string
   usage: Record<string, number>
@@ -819,6 +860,7 @@ export interface LeadRunSummary {
   status: string
   verdict: string | null
   gate_verdict: string | null
+  verification_basis: string | null
   error: string | null
   created_at: string | null
   updated_at: string | null
@@ -832,4 +874,34 @@ export interface AlertGroupDetail extends AlertGroupSummary {
   lead_runs: LeadRunSummary[]
   verification_task_id: string | null
   verification_verdict: string | null
+  verification_basis: string | null
+  vuln_report: Record<string, unknown> | null
+}
+
+export interface AuditTaskSummary {
+  task_id: string
+  project_id: string | null
+  project_address: string | null
+  project_ref: string | null
+  task_status: string
+  report_id: string | null
+  report_status: string | null
+  confirmed_count: number
+  code_reachable_count: number
+  vuln_report_count: number
+  created_at: string | null
+  updated_at: string | null
+  published_at: string | null
+}
+
+export interface VulnReportSummary {
+  alert_group_id: string
+  task_id: string
+  summary: string
+  final_verdict: string | null
+  verification_basis: string | null
+  primary_engine: string | null
+  cwe: string | null
+  file_path: string | null
+  generated_at: string | null
 }

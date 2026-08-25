@@ -183,6 +183,10 @@ class ObjectStore(Protocol):
 
     def get_at(self, kind: str, key: str) -> bytes: ...
 
+    def delete_prefix(self, kind: str, prefix: str) -> int: ...
+
+    def delete_at(self, kind: str, key: str) -> None: ...
+
 
 def _assert_writable(kind: str) -> KindSpec:
     spec = _kind_spec(kind)
@@ -201,6 +205,26 @@ def _assert_presign(ref: ObjectRef) -> KindSpec:
 def _assert_key_prefix(kind: str, key: str) -> None:
     if not key.startswith(f"{kind}/"):
         raise UnsafeKeyError(f"key 必须以 {kind}/ 开头")
+
+
+def stored_kind(key: str) -> str | None:
+    """按注册表前缀识别已归档对象的 kind；无法识别则 None。"""
+    raw = (key or "").strip()
+    for kind in KIND_REGISTRY:
+        if raw.startswith(f"{kind}/"):
+            return kind
+    return None
+
+
+def task_artifact_prefixes(owner_id: str, task_id: str) -> list[tuple[str, str]]:
+    """任务级对象前缀（证据 / 报告 / 节点产物）。SARIF 不在此前缀下。"""
+    owner = _safe_id(owner_id, "owner_id")
+    tid = _safe_id(task_id, "task_id")
+    return [
+        ("evidence", f"evidence/{owner}/{tid}/"),
+        ("report", f"report/{owner}/{tid}/"),
+        ("node_run", f"node_run/{owner}/{tid}/"),
+    ]
 
 
 class MemoryObjectStore:
@@ -252,6 +276,20 @@ class MemoryObjectStore:
 
     def delete(self, ref: ObjectRef) -> None:
         self._data.pop((ref.bucket, ref.key), None)
+
+    def delete_at(self, kind: str, key: str) -> None:
+        spec = _kind_spec(kind)
+        self.delete(ObjectRef(kind=kind, bucket=spec.bucket, key=key))
+
+    def delete_prefix(self, kind: str, prefix: str) -> int:
+        spec = _kind_spec(kind)
+        _assert_key_prefix(kind, prefix)
+        n = 0
+        for bucket, key in list(self._data):
+            if bucket == spec.bucket and key.startswith(prefix):
+                del self._data[(bucket, key)]
+                n += 1
+        return n
 
     def presign(self, ref: ObjectRef, expires_seconds: int = 3600) -> str:
         _assert_presign(ref)
@@ -367,7 +405,31 @@ class MinioObjectStore:
         try:
             self._minio().remove_object(ref.bucket, ref.key)
         except S3Error as exc:
+            if exc.code in {"NoSuchKey", "NoSuchBucket", "NoSuchObject"}:
+                return
             raise ObjectStoreError(str(exc)) from exc
+
+    def delete_at(self, kind: str, key: str) -> None:
+        spec = _kind_spec(kind)
+        self.delete(ObjectRef(kind=kind, bucket=spec.bucket, key=key))
+
+    def delete_prefix(self, kind: str, prefix: str) -> int:
+        spec = _kind_spec(kind)
+        _assert_key_prefix(kind, prefix)
+        n = 0
+        try:
+            client = self._minio()
+            if not client.bucket_exists(spec.bucket):
+                return 0
+            for obj in client.list_objects(spec.bucket, prefix=prefix, recursive=True):
+                name = getattr(obj, "object_name", None)
+                if not name:
+                    continue
+                client.remove_object(spec.bucket, name)
+                n += 1
+        except S3Error as exc:
+            raise ObjectStoreError(str(exc)) from exc
+        return n
 
     def presign(self, ref: ObjectRef, expires_seconds: int = 3600) -> str:
         _assert_presign(ref)

@@ -64,6 +64,8 @@ def _agent_output(verdict="tp", confidence=0.9):
         "verdict": verdict,
         "confidence": confidence,
         "why": ["x"],
+        "summary": f"[{verdict}] 测试简述",
+        "reasoning": "测试推理：入口→路径→结论",
         "evidence": [{"file": "app.py", "lines": "2-2"}],
         "need": [],
     }

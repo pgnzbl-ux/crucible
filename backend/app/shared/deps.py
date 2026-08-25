@@ -39,9 +39,19 @@ def _dev_system_fallback(request: Request) -> str | None:
     return None
 
 
+async def _require_active_user(session: AsyncSession, user_id: str) -> str:
+    from app.contexts.identity.models import User
+
+    user = await session.get(User, user_id)
+    if user is None or not user.is_active:
+        raise HTTPException(401, "用户不存在或已停用")
+    return user_id
+
+
 async def get_current_user_id(
     request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> str:
     """解析当前登录用户 id（仅 Authorization Bearer access JWT）。
 
@@ -50,7 +60,7 @@ async def get_current_user_id(
     if credentials and credentials.credentials:
         payload = decode_access_token(credentials.credentials)
         if payload and payload.get("sub"):
-            return str(payload["sub"])
+            return await _require_active_user(session, str(payload["sub"]))
         raise HTTPException(401, "凭据无效或已过期")
 
     fallback = _dev_system_fallback(request)
@@ -62,6 +72,7 @@ async def get_current_user_id(
 async def get_sse_user_id(
     request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
     ticket: Annotated[
         str | None,
         Query(description="短命 SSE ticket（POST .../events/ticket 领取）"),
@@ -83,7 +94,7 @@ async def get_sse_user_id(
     if credentials and credentials.credentials:
         payload = decode_access_token(credentials.credentials)
         if payload and payload.get("sub"):
-            return str(payload["sub"])
+            return await _require_active_user(session, str(payload["sub"]))
         raise HTTPException(401, "凭据无效或已过期")
 
     if ticket:
@@ -92,7 +103,7 @@ async def get_sse_user_id(
             raise HTTPException(401, "SSE ticket 无效或已过期")
         # task_id 与票面绑定在端点内再核（Depends 拿不到 path 参数时由端点调用 assert）
         request.state.sse_ticket_task_id = str(payload["tid"])
-        return str(payload["sub"])
+        return await _require_active_user(session, str(payload["sub"]))
 
     if token_query:
         if settings.environment == "production":
@@ -102,7 +113,7 @@ async def get_sse_user_id(
             )
         payload = decode_access_token(token_query)
         if payload and payload.get("sub"):
-            return str(payload["sub"])
+            return await _require_active_user(session, str(payload["sub"]))
         raise HTTPException(401, "凭据无效或已过期")
 
     fallback = _dev_system_fallback(request)

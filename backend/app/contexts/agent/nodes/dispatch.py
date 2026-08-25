@@ -144,6 +144,7 @@ class DispatchNode:
 
         candidates: list = []
         review_count = archived_count = unaudited = 0
+        qualify_pool: list = []
 
         for g in groups:
             verdict = g.ai_verdict
@@ -163,12 +164,17 @@ class DispatchNode:
             if verdict == "need_more_context":
                 review_count += 1
                 continue
-            rep = await svc.representative_of(g)
-            adj = await svc.latest_adjudication(g.id)
-            from app.contexts.finding.qualify import is_qualified_lead
+            qualify_pool.append(g)
 
+        reps, adjs = await svc.reps_and_adjudications(qualify_pool)
+        from app.contexts.finding.qualify import is_qualified_lead
+
+        for g in qualify_pool:
             if is_qualified_lead(
-                g, representative=rep, adjudication=adj, high_confidence=high,
+                g,
+                representative=reps.get(g.id),
+                adjudication=adjs.get(g.id),
+                high_confidence=high,
             ):
                 candidates.append(g)
             else:
@@ -177,10 +183,10 @@ class DispatchNode:
 
         ordered: list = []
         if candidates:
-            rep_severity: dict[str, str | None] = {}
-            for g in candidates:
-                rep = await svc.representative_of(g)
-                rep_severity[g.id] = (rep.severity if rep else None) or ""
+            rep_severity = {
+                g.id: ((reps[g.id].severity if g.id in reps else None) or "")
+                for g in candidates
+            }
             ordered = _sort_candidates(candidates, rep_severity)
 
         queued_ids: list[str] = []
@@ -189,8 +195,8 @@ class DispatchNode:
         lead_group_id = None
 
         for pos, g in enumerate(ordered):
-            rep = await svc.representative_of(g)
-            adj = await svc.latest_adjudication(g.id)
+            rep = reps.get(g.id)
+            adj = adjs.get(g.id)
             desc = build_lead_description(group=g, representative=rep, adjudication=adj)
             lead_run = await _get_or_create_lead_run(
                 ctx.db_session,
