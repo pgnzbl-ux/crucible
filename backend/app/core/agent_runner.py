@@ -624,6 +624,8 @@ def git_clone_to_workdir(
     """在 host 上 git clone 到 workdir/{dest_dirname}（仓库名，而非固定 project）。
 
     ref_type 可选 branch|tag|commit；省略则自动推断。clone_depth=0 时不加 --depth（全量 clone）。
+    commit 不能 ``git fetch origin <SHA>``：短 SHA 不是远端 ref（fatal: couldn't find remote ref）。
+    按 commit 检出时忽略浅克隆，全量 clone 后再 checkout（短/长 SHA 都能用）。
     返回 (ok, error_or_empty)。失败信息带「源码克隆失败」前缀，便于节点 0 展示。
     """
     from app.contexts.project.git_url import resolve_ref_type
@@ -651,13 +653,12 @@ def git_clone_to_workdir(
     rt, rn = resolve_ref_type(ref_type, project_ref)
     depth = 1 if clone_depth is None else clone_depth
     cmd = ["git", "clone"]
-    if depth > 0:
+    # commit SHA 不是 refs/heads|tags 上的名字；浅克隆后再 fetch origin <短SHA> 必失败
+    if depth > 0 and rt != "commit":
         cmd += ["--depth", str(depth)]
     if rn and rt != "commit" and rn.upper() != "HEAD":
         cmd += ["--branch", rn]
     cmd += [project_address, project_dir]
-
-    fetch_depth = depth if depth > 0 else 1
 
     try:
         result = subprocess.run(
@@ -671,21 +672,15 @@ def git_clone_to_workdir(
         if result.returncode != 0:
             return False, _classify_clone_error(result.stderr or result.stdout)
         if rt == "commit" and rn:
-            co = subprocess.run(
-                [
-                    "git", "-C", project_dir, "fetch",
-                    "--depth", str(fetch_depth), "origin", rn,
-                ],
-                capture_output=True, text=True, timeout=120, env=git_env,
-            )
-            if co.returncode != 0:
-                return False, _classify_clone_error(co.stderr or co.stdout or "无法获取指定 commit")
             ck = subprocess.run(
                 ["git", "-C", project_dir, "checkout", rn],
                 capture_output=True, text=True, timeout=60, env=git_env,
             )
             if ck.returncode != 0:
-                return False, f"源码克隆失败: 引用不存在或无法检出: {(ck.stderr or ck.stdout)[:300]}"
+                return False, (
+                    "源码克隆失败: 指定 commit 不存在或无法检出: "
+                    f"{(ck.stderr or ck.stdout)[:300]}"
+                )
         if not os.path.isdir(project_dir):
             return False, f"源码克隆失败: clone 返回 0 但目录不存在: {project_dir}"
         entries = [e for e in os.listdir(project_dir) if e != ".git"]
@@ -718,8 +713,8 @@ def _classify_clone_error(stderr: str) -> str:
         return f"源码克隆失败: 网络错误（无法解析主机）: {snippet}"
     if "timed out" in low or "timeout" in low or "failed to connect" in low or "connection refused" in low:
         return f"源码克隆失败: 网络错误: {snippet}"
-    if "remote branch" in low and "not found" in low:
-        return f"源码克隆失败: 分支/tag 不存在: {snippet}"
+    if "couldn't find remote ref" in low or ("remote branch" in low and "not found" in low):
+        return f"源码克隆失败: 找不到该远端引用: {snippet}"
     if "not found" in low or "authentication failed" in low or "permission denied" in low or "could not read username" in low:
         return f"源码克隆失败: 仓库不存在或无权访问: {snippet}"
     return f"源码克隆失败: {snippet or '未知 git 错误'}"
