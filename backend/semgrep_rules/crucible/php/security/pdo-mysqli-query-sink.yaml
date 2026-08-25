@@ -1,0 +1,93 @@
+rules:
+  - id: pdo-mysqli-query-sink
+    languages:
+      - php
+    severity: ERROR
+    mode: taint
+    message: >-
+      User-controlled data reaches a raw SQL execution API (PDO/mysqli or a
+      query* wrapper). Prefer prepared statements / bound parameters instead of
+      concatenating or interpolating input into the query string.
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp:
+        - A01:2017 - Injection
+        - A03:2021 - Injection
+      category: security
+      technology:
+        - php
+        - pdo
+        - mysqli
+      subcategory:
+        - vuln
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      crucible-overlay: true
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_COOKIE
+          - pattern: $_REQUEST
+          - pattern: file_get_contents('php://input')
+          - pattern: file_get_contents("php://input")
+    pattern-propagators:
+      - pattern: $TO = json_decode($FROM, ...)
+        from: $FROM
+        to: $TO
+      - pattern: $TO = implode(..., $FROM)
+        from: $FROM
+        to: $TO
+      - pattern: $TO = sprintf(..., $FROM, ...)
+        from: $FROM
+        to: $TO
+      - pattern: $TO = $FROM . $X
+        from: $FROM
+        to: $TO
+      - pattern: $TO = $X . $FROM
+        from: $FROM
+        to: $TO
+      - pattern: $TO .= $FROM
+        from: $FROM
+        to: $TO
+      - pattern: $TO = $ARR[$FROM]
+        from: $ARR
+        to: $TO
+      - pattern: $TO = $ARR[...]
+        from: $ARR
+        to: $TO
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: mysqli_real_escape_string(...)
+          - pattern: real_escape_string(...)
+          - pattern: $MYSQLI->real_escape_string(...)
+          - pattern: PDO::quote(...)
+          - pattern: $PDO->quote(...)
+    pattern-sinks:
+      - pattern-either:
+          - patterns:
+              - pattern: PDO::query($SINK, ...)
+              - focus-metavariable: $SINK
+          - patterns:
+              - pattern: PDO::exec($SINK, ...)
+              - focus-metavariable: $SINK
+          - patterns:
+              - pattern: $PDO->query($SINK, ...)
+              - focus-metavariable: $SINK
+          - patterns:
+              - pattern: $PDO->exec($SINK, ...)
+              - focus-metavariable: $SINK
+          - patterns:
+              - pattern: mysqli_query($DB, $SINK, ...)
+              - focus-metavariable: $SINK
+          - patterns:
+              - pattern: $MYSQLI->query($SINK, ...)
+              - focus-metavariable: $SINK
+          - patterns:
+              - pattern: $OBJ->queryWithDriver(..., $SINK, ...)
+              - focus-metavariable: $SINK
+          - patterns:
+              - pattern: $OBJ->queryWithDriver($SINK, ...)
+              - focus-metavariable: $SINK

@@ -2,6 +2,7 @@
 
 硬规则：禁止自动创建 task_type=verify；禁止回填 vulnerability_description；
 禁止把多条线索拼进同一次 audit prompt；无合格线索 has_lead=False(节点仍 completed)。
+合格门见 finding.qualify（discovery-spec §2.7），不再用 A 级 ∧ is_web。
 """
 from __future__ import annotations
 
@@ -139,7 +140,6 @@ class DispatchNode:
         await ctx.db_session.get(Task, ctx.task_id)
 
         groups = await svc.list_groups(ctx.task_id)
-        is_web = getattr(inp.profile, "is_web", None) is True
         high = float(settings.triage_high_confidence)
 
         candidates: list = []
@@ -156,19 +156,23 @@ class DispatchNode:
             if verdict is None:
                 unaudited += 1
                 continue
-            if verdict == "need_more_context":
-                await svc.mark_needs_review(g)
-                review_count += 1
-                continue
             if verdict == "fp":
+                await svc.discard_false_positive(g)
                 archived_count += 1
                 continue
-            conf = float(g.ai_confidence or 0.0)
-            grade = (g.clue_grade or "B")
-            if conf >= high and grade == "A" and is_web:
+            if verdict == "need_more_context":
+                review_count += 1
+                continue
+            rep = await svc.representative_of(g)
+            adj = await svc.latest_adjudication(g.id)
+            from app.contexts.finding.qualify import is_qualified_lead
+
+            if is_qualified_lead(
+                g, representative=rep, adjudication=adj, high_confidence=high,
+            ):
                 candidates.append(g)
             else:
-                await svc.mark_needs_review(g)
+                # 不合格可疑真洞（T2/传播/无证据等）进漏斗，不转人工主队列
                 review_count += 1
 
         ordered: list = []
@@ -248,7 +252,7 @@ class DispatchNode:
         elif active_leads:
             emit_phase(ctx, f"线索已在终认队列（{active_leads} 条），无需重复入队", phase=self.node_key)
         else:
-            emit_phase(ctx, "无合格主线索，终认将跳过", phase=self.node_key)
+            emit_phase(ctx, "无合格线索，终认将跳过", phase=self.node_key)
 
         return {
             "has_lead": bool(queued_ids) or active_leads > 0,

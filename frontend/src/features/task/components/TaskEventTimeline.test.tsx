@@ -124,6 +124,15 @@ describe('TaskEventTimeline 事件流窗口', () => {
           event_type: 'triage.progress',
           payload: { adjudicated: 10, pending: 3, reason: 'budget' },
         }),
+        event(3, {
+          event_type: 'triage.progress',
+          payload: {
+            node_key: 'triage',
+            message: '二审 3/12：CWE-89 app/db.py（族内 2 组）',
+            done: 3,
+            total: 12,
+          },
+        }),
       ],
       false,
     )
@@ -131,6 +140,7 @@ describe('TaskEventTimeline 事件流窗口', () => {
     expect(html).toContain('启动 gitleaks')
     expect(html).toContain('二审进度')
     expect(html).toContain('已审 10')
+    expect(html).toContain('二审 3/12：CWE-89 app/db.py（族内 2 组）')
   })
 
   it('renders profile phase labels in the stream', () => {

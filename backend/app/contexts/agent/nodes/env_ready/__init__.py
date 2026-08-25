@@ -94,6 +94,26 @@ class EnvReadyNode:
         )
 
     async def execute(self, ctx: NodeContext, node_input=None) -> dict[str, Any]:
+        try:
+            return await self._execute_lab(ctx, node_input)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — 靶场失败降级，白盒终认继续
+            if "任务已取消" in str(e):
+                raise
+            logger.exception("env_ready 降级：靶场未就绪")
+            _emit(ctx, "靶场未就绪，白盒终认继续")
+            return {
+                "ok": False,
+                "target_url": None,
+                "compose_path": None,
+                "transport_shape": {},
+                "initial_creds": {"note": "靶场未就绪，白盒终认继续"},
+                "started_containers": [],
+                "error": str(e)[:8000],
+            }
+
+    async def _execute_lab(self, ctx: NodeContext, node_input=None) -> dict[str, Any]:
         inp = self._resolve_input(ctx, node_input)
         ctx.node_input = inp
 

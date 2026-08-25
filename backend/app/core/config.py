@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     redis_url: str
     celery_broker_url: str
     celery_result_backend: str
+    redis_clue_url: str
 
     auth_secret: str = ""
     auth_algorithm: str = "HS256"
@@ -74,8 +75,11 @@ class Settings(BaseSettings):
     scanner_gitleaks_timeout_seconds: int = 600
     scanner_osv_timeout_seconds: int = 300
     scanner_output_max_bytes: int = 64 * 1024 * 1024  # 子进程输出上限(防超大仓库)
-    # 空 = worker git clone 到当前前缀 share/crucible-semgrep-rules。可指你 clone 的 semgrep-rules 仓库根
+    # 规则包根：社区语言目录 + crucible/ 叠加。推荐 backend/semgrep_rules
+    # 空 = 优先用 backend/semgrep_rules，否则 worker git clone 到 share/crucible-semgrep-rules
     scanner_semgrep_rules_dir: str = ""
+    # 叠加根。空 = {scanner_semgrep_rules_dir}/crucible
+    scanner_semgrep_overlay_dir: str = ""
 
     # ── 轻量 LLM 网关 / triage(discovery-spec §7 / §2.4) ──
     llm_gateway_enabled: bool = True  # False = mock 固定判决(链路联调)

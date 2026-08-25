@@ -86,10 +86,130 @@ async def test_record_and_summary(factory):
 
     async with factory() as s:
         summary = await task_usage_summary(s, "t1")
+    # cache_read 来自 SDK 回传，必须计入 total（禁止忽略）
+    cache_read = 976896
     assert summary == {
-        "prompt_tokens": 100 + 10 + 27890, "completion_tokens": 50 + 5 + 7061,
-        "total_tokens": 165 + 27890 + 7061, "sessions": 3,
+        "prompt_tokens": 100 + 10 + 27890,
+        "completion_tokens": 50 + 5 + 7061,
+        "cache_read_input_tokens": cache_read,
+        "cache_creation_input_tokens": 0,
+        "total_tokens": 165 + 27890 + 7061 + cache_read,
+        "sessions": 3,
     }
+
+
+@pytest.mark.asyncio
+async def test_prefer_model_usage_over_usage(factory):
+    from app.contexts.agent.usage_ledger import record_usage, task_usage_summary
+
+    await _seed_task(factory)
+    async with factory() as s:
+        await record_usage(
+            s, task_id="t1", run_id="r1", node_key="triage",
+            usage={"input_tokens": 1, "output_tokens": 1, "cache_read_input_tokens": 9},
+            model_usage={
+                "deepseek-v4-flash": {
+                    "inputTokens": 100,
+                    "outputTokens": 20,
+                    "cacheReadInputTokens": 500,
+                    "cacheCreationInputTokens": 50,
+                },
+            },
+            source="agent",
+        )
+        await s.commit()
+    async with factory() as s:
+        summary = await task_usage_summary(s, "t1")
+    assert summary["prompt_tokens"] == 100
+    assert summary["completion_tokens"] == 20
+    assert summary["cache_read_input_tokens"] == 500
+    assert summary["cache_creation_input_tokens"] == 50
+    assert summary["total_tokens"] == 100 + 20 + 500 + 50
+
+
+@pytest.mark.asyncio
+async def test_model_usage_fills_cache_from_usage_when_missing(factory):
+    """部分网关只在 ResultMessage.usage 填 cache_*；model_usage 无 cache 时不得冲掉。"""
+    from app.contexts.agent.usage_ledger import normalize_usage, record_usage, task_usage_summary
+
+    parts = normalize_usage(
+        {
+            "input_tokens": 45311,
+            "output_tokens": 8888,
+            "cache_read_input_tokens": 221952,
+            "cache_creation_input_tokens": 0,
+        },
+        {
+            "deepseek/deepseek-v4-flash": {
+                "inputTokens": 45311,
+                "outputTokens": 8888,
+            },
+        },
+    )
+    assert parts["prompt_tokens"] == 45311
+    assert parts["completion_tokens"] == 8888
+    assert parts["cache_read_input_tokens"] == 221952
+
+    await _seed_task(factory)
+    async with factory() as s:
+        await record_usage(
+            s, task_id="t1", run_id="r1", node_key="triage",
+            usage={
+                "input_tokens": 45311,
+                "output_tokens": 8888,
+                "cache_read_input_tokens": 221952,
+            },
+            model_usage={
+                "deepseek/deepseek-v4-flash": {
+                    "inputTokens": 45311,
+                    "outputTokens": 8888,
+                },
+            },
+            source="agent",
+        )
+        await s.commit()
+    async with factory() as s:
+        summary = await task_usage_summary(s, "t1")
+    assert summary["cache_read_input_tokens"] == 221952
+    assert summary["total_tokens"] == 45311 + 8888 + 221952
+
+
+@pytest.mark.asyncio
+async def test_record_usage_emits_sse(factory):
+    from app.contexts.agent.usage_ledger import record_usage
+
+    await _seed_task(factory)
+    events: list[dict] = []
+    async with factory() as s:
+        await record_usage(
+            s, task_id="t1", run_id="r1", node_key="triage",
+            usage={"prompt_tokens": 10, "completion_tokens": 2, "cache_read_input_tokens": 100},
+            source="agent",
+            on_event=events.append,
+        )
+        await s.commit()
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["type"] == "usage.updated"
+    assert ev["node_key"] == "triage"
+    assert ev["usage"]["total_tokens"] == 112
+    assert ev["cumulative"]["total_tokens"] == 112
+    assert ev["cumulative"]["cache_read_input_tokens"] == 100
+
+
+@pytest.mark.asyncio
+async def test_missing_cache_fields_are_zero(factory):
+    from app.contexts.agent.usage_ledger import normalize_usage
+
+    assert normalize_usage({"prompt_tokens": 3}) == {
+        "prompt_tokens": 3,
+        "completion_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+    }
+    assert normalize_usage({"input_tokens": "x", "cache_read_input_tokens": None})[
+        "prompt_tokens"
+    ] == 0
 
 
 @pytest.mark.asyncio
@@ -122,7 +242,7 @@ async def test_budget_state_unlimited_and_exhausted(factory):
 
 @pytest.mark.asyncio
 async def test_triage_soft_stops_on_budget(factory, tmp_path):
-    """预算耗尽：不再起 agent，未审组经兜底转 needs_review，任务照常收尾。"""
+    """预算耗尽：不再起 agent，未审组保持 clustered（不标误报、不转人工主队列）。"""
     from app.contexts.agent.nodes.triage import TriageNode
     from app.contexts.discovery.models import ScanRun
     from app.contexts.finding.models import AlertGroup, RawFinding
@@ -186,7 +306,8 @@ async def test_triage_soft_stops_on_budget(factory, tmp_path):
         assert agent.await_count == 0
         assert out["budget_exhausted"] is True
         group = (await s.execute(select(AlertGroup))).scalars().one()
-        assert group.status == "needs_review"
+        assert group.status == "clustered"
+        assert group.ai_verdict is None
 
 
 @pytest.mark.asyncio
@@ -206,5 +327,6 @@ async def test_get_task_includes_usage(factory):
     assert detail is not None
     assert detail.usage == {
         "prompt_tokens": 7, "completion_tokens": 3,
+        "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
         "total_tokens": 10, "sessions": 1,
     }

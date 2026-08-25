@@ -51,6 +51,7 @@ from .nodes.profile import ProfileNode
 from .nodes.report import ReportNode
 from .nodes.reproduce import ReproduceNode
 from .nodes.scan import GitleaksNode, OsvScanNode, SemgrepNode
+from .nodes.screen import ScreenNode
 from .nodes.source import SourceNode
 from .nodes.triage import TriageNode
 
@@ -65,6 +66,7 @@ _NODE_EXECUTORS = {
     "scan_semgrep": SemgrepNode(),
     "env_ready": EnvReadyNode(),
     "cluster": ClusterNode(),
+    "screen": ScreenNode(),
     "triage": TriageNode(),
     "dispatch": DispatchNode(),
     "audit": AuditNode(),

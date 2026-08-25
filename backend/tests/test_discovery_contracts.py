@@ -81,10 +81,12 @@ def test_discovery_ready_waves_parallel_scans():
     wave4 = {s.key for s in compute_ready(DEFAULT_PIPELINE, after_env_semgrep)}
     assert wave4 == {"cluster"}
 
-    # cluster → triage → dispatch → audit(线性收窄段)
+    # cluster → screen → triage → dispatch → audit(线性收窄段)
     after_cluster = after_env_semgrep | {"cluster"}
-    assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_cluster)} == {"triage"}
-    after_triage = after_cluster | {"triage"}
+    assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_cluster)} == {"screen"}
+    after_screen = after_cluster | {"screen"}
+    assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_screen)} == {"triage"}
+    after_triage = after_screen | {"triage"}
     assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_triage)} == {"dispatch"}
     after_dispatch = after_triage | {"dispatch"}
     assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_dispatch)} == {"audit"}
@@ -96,7 +98,7 @@ def test_verify_mode_skip_signals():
     from app.contexts.agent.orchestrator import _evaluate_skip
 
     store = HandoffStore()  # 无任何输出
-    for key in ("scan_gitleaks", "scan_osv", "scan_semgrep", "cluster", "triage", "dispatch"):
+    for key in ("scan_gitleaks", "scan_osv", "scan_semgrep", "cluster", "screen", "triage", "dispatch"):
         assert _evaluate_skip(node_by_key(key), store, verify_mode=True) == SkipWhen.VERIFY_MODE
         assert _evaluate_skip(node_by_key(key), store, verify_mode=False) is None
     # is_web 未定/False 时 env_ready 等仍按 NON_WEB 出口
@@ -358,7 +360,7 @@ async def test_verify_task_skips_discovery_nodes(session_factory):
         by_key = {n.node_key: n.status for n in nodes}
         assert by_key["source"] == "completed"
         assert by_key["profile"] == "completed"
-        for key in ("scan_gitleaks", "scan_osv", "scan_semgrep", "cluster", "triage",
+        for key in ("scan_gitleaks", "scan_osv", "scan_semgrep", "cluster", "screen", "triage",
                     "dispatch", "env_ready", "reproduce"):
             assert by_key[key] == "skipped", f"{key} 应 skip"
         assert by_key["audit"] == "completed"
@@ -495,7 +497,7 @@ def test_to_detail_discovery_null_description():
 def test_retryable_from_nodes_cover_discovery():
     from app.contexts.task.service import _RETRYABLE_FROM_NODES
 
-    for key in ("scan_gitleaks", "scan_osv", "scan_semgrep", "cluster", "triage",
+    for key in ("scan_gitleaks", "scan_osv", "scan_semgrep", "cluster", "screen", "triage",
                 "dispatch", "env_ready", "audit", "reproduce", "report"):
         assert key in _RETRYABLE_FROM_NODES
     assert "source" not in _RETRYABLE_FROM_NODES

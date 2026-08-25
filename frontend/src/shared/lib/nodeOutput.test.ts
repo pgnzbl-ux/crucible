@@ -318,4 +318,90 @@ describe('overlayFromSseEvents', () => {
       output: { progress: '二审 2/12：CWE-89 app/db.py' },
     })
   })
+
+  it('ignores concurrent triage start phases and prefers triage.progress caption', () => {
+    const map = overlayFromSseEvents([
+      { type: 'node.updated', event: { node_key: 'triage', status: 'running' } },
+      {
+        type: 'phase.updated',
+        event: { phase: 'triage', message: '开始审议：? www/static/js/a.js（族内 5 组）' },
+      },
+      {
+        type: 'triage.progress',
+        event: {
+          node_key: 'triage',
+          done: 3,
+          total: 12,
+          label: 'CWE-89 app/db.py',
+          family_size: 2,
+          adjudicated: 3,
+          pending: 9,
+          message: '二审 3/12：CWE-89 app/db.py（族内 2 组）',
+        },
+      },
+    ])
+    expect(map.get('triage')).toEqual({
+      status: 'running',
+      output: { progress: '二审 3/12：CWE-89 app/db.py（族内 2 组）' },
+    })
+  })
+
+  it('does not paint screen fast-review triage.progress onto AI triage', () => {
+    const map = overlayFromSseEvents([
+      { type: 'node.updated', event: { node_key: 'triage', status: 'running' } },
+      {
+        type: 'triage.progress',
+        event: {
+          node_key: 'screen',
+          stage: 'fast_screen',
+          adjudicated: 10,
+          pending: 3,
+          message: '快审不应出现在二审',
+        },
+      },
+    ])
+    expect(map.get('triage')).toEqual({ status: 'running' })
+  })
+
+  it('summarizes completed triage from output counts', () => {
+    expect(
+      summarizeNodeOutput(
+        'triage',
+        { adjudicated_count: 40, family_count: 12 },
+        'completed',
+      ),
+    ).toBe('已审 40 · 12 族')
+  })
+
+  it('stacks usage.updated cumulative onto the node', () => {
+    const map = overlayFromSseEvents([
+      {
+        type: 'usage.updated',
+        event: {
+          node_key: 'triage',
+          usage: {
+            prompt_tokens: 10,
+            completion_tokens: 2,
+            cache_read_input_tokens: 100,
+            cache_creation_input_tokens: 0,
+            total_tokens: 112,
+          },
+          cumulative: {
+            prompt_tokens: 30,
+            completion_tokens: 6,
+            cache_read_input_tokens: 500,
+            cache_creation_input_tokens: 0,
+            total_tokens: 536,
+          },
+        },
+      },
+    ])
+    expect(map.get('triage')?.usage).toEqual({
+      prompt_tokens: 30,
+      completion_tokens: 6,
+      cache_read_input_tokens: 500,
+      cache_creation_input_tokens: 0,
+      total_tokens: 536,
+    })
+  })
 })

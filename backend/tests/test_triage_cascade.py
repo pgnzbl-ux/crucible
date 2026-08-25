@@ -53,19 +53,23 @@ def _cascade_settings(**kw):
         triage_concurrency=2,
         triage_feedback_resolved_weight=3.0,
         triage_feedback_min_verified=10,
+        triage_stream_dispatch_enabled=False,
     )
     base.update(kw)
     return MagicMock(**base)
 
 
 def _agent_output(verdict="tp", confidence=0.9):
-    return {
+    out = {
         "verdict": verdict,
         "confidence": confidence,
         "why": ["x"],
         "evidence": [{"file": "app.py", "lines": "2-2"}],
         "need": [],
     }
+    if verdict == "tp":
+        out.update(attacker_controlled=True, reaches_sink=True, sanitizer="none")
+    return out
 
 
 async def _seed_env(
@@ -201,7 +205,7 @@ async def _groups_of(session, task_id):
 @pytest.mark.asyncio
 async def test_t0_carryover_reuses_prior_verdict(factory, tmp_path):
     """同项目同代表指纹：历史 tp 判决直接携带，不起 agent、不调快模型。"""
-    from app.contexts.agent.nodes.triage import TriageNode
+    from app.contexts.agent.nodes.screen import ScreenNode
 
     gen = _seed_env(
         factory,
@@ -224,21 +228,62 @@ async def test_t0_carryover_reuses_prior_verdict(factory, tmp_path):
         patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", new_callable=AsyncMock) as agent,
         patch("app.core.llm_gateway.llm_complete", new_callable=AsyncMock) as fast,
     ):
-        out = await TriageNode().execute(ctx, None)
+        out = await ScreenNode().execute(ctx, None)
 
     assert out["carried_count"] == 1
-    assert out["adjudicated_count"] == 0
+    assert out["escalated_count"] == 0
     agent.assert_not_called()
     fast.assert_not_called()
     groups = await _groups_of(session, ctx.task_id)
-    assert groups[0].ai_verdict == "fp"
-    assert groups[0].verdict_source == "carryover"
+    assert groups == []  # 携带误报已丢弃
+    await gen.aclose()
+
+
+@pytest.mark.asyncio
+async def test_screen_cascade_off_escalates_queue_intact(factory, tmp_path):
+    """triage_cascade_enabled=false：screen 仍跑 skip_llm，其余组原样升级 triage。"""
+    from app.contexts.agent.nodes.screen import ScreenNode
+    from app.contexts.agent.nodes.triage import TriageNode
+
+    gen = _seed_env(
+        factory,
+        tmp_path,
+        current=[
+            {"rule": "r.a", "file_path": "module/db.py"},
+            {"rule": "r.b", "file_path": "module/db2.py"},
+        ],
+    )
+    ctx, session = await gen.__anext__()
+
+    async def agent_side_effect(**kw):
+        return _agent_output("tp", 0.9)
+
+    with (
+        patch(
+            "app.core.config.get_settings",
+            return_value=_cascade_settings(
+                triage_cascade_enabled=False,
+                triage_fast_model_enabled=True,
+            ),
+        ),
+        patch("app.core.llm_gateway.llm_complete", new_callable=AsyncMock) as fast,
+        patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", new=agent_side_effect),
+    ):
+        screen_out = await ScreenNode().execute(ctx, None)
+        ctx.previous_outputs = {"screen": screen_out}
+        out = await TriageNode().execute(ctx, None)
+
+    assert screen_out["escalated_count"] == 2
+    assert screen_out["fast_model_count"] == 0
+    fast.assert_not_called()
+    assert out["adjudicated_count"] == 2
     await gen.aclose()
 
 
 @pytest.mark.asyncio
 async def test_t1_rule_fp_rate_preverdict(factory, tmp_path):
     """规则历史 agent 亲审 FP 率达标 → 新命中直接判 fp。"""
+    from app.contexts.agent.nodes.screen import ScreenNode
     from app.contexts.agent.nodes.triage import TriageNode
 
     noisy = [{"rule": "r.noisy", "file_path": f"module/f{i}.py", "verdict": "fp", "conf": 0.9} for i in range(20)]
@@ -260,12 +305,13 @@ async def test_t1_rule_fp_rate_preverdict(factory, tmp_path):
         patch("app.core.config.get_settings", return_value=_cascade_settings(triage_fast_model_enabled=False)),
         patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", new=agent_side_effect),
     ):
+        screen_out = await ScreenNode().execute(ctx, None)
+        ctx.previous_outputs = {"screen": screen_out}
         out = await TriageNode().execute(ctx, None)
 
-    assert out["rule_count"] == 1
+    assert screen_out["rule_count"] == 1
     groups = {g.file_path: g for g in await _groups_of(session, ctx.task_id)}
-    assert groups["module/new1.py"].ai_verdict == "fp"
-    assert groups["module/new1.py"].verdict_source == "rule"
+    assert "module/new1.py" not in groups  # 规则误报已丢弃
     # 非热规则不受影响，走 agent 亲审
     assert groups["module/new2.py"].verdict_source == "agent"
     assert out["adjudicated_count"] == 1
@@ -273,8 +319,9 @@ async def test_t1_rule_fp_rate_preverdict(factory, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_t2_fast_model_decides_and_escalates(factory, tmp_path):
-    """快审高置信定案(fast_model)；低置信升级 agent 亲审。"""
+async def test_t2_fast_model_fp_decides_tp_escalates(factory, tmp_path):
+    """快审高置信误报定案；快审 tp 必须升级 T3，禁止入队。"""
+    from app.contexts.agent.nodes.screen import ScreenNode
     from app.contexts.agent.nodes.triage import TriageNode
 
     gen = _seed_env(
@@ -288,12 +335,11 @@ async def test_t2_fast_model_decides_and_escalates(factory, tmp_path):
     ctx, session = await gen.__anext__()
 
     async def fast_side_effect(*, role, system, user, **kw):
-        # 第一组高置信 tp 定案；第二组低置信升级 agent
         calls = fast_side_effect._n = getattr(fast_side_effect, "_n", 0) + 1
         text = (
-            json.dumps({"verdict": "tp", "confidence": 0.9, "why": ["切片证实"], "need": []})
+            json.dumps({"verdict": "fp", "confidence": 0.9, "why": ["测试代码"], "need": []})
             if calls == 1
-            else json.dumps({"verdict": "need_more_context", "confidence": 0.3, "why": [], "need": ["入口"]})
+            else json.dumps({"verdict": "tp", "confidence": 0.9, "why": ["切片证实"], "need": []})
         )
         return SimpleNamespace(
             text=text,
@@ -320,18 +366,17 @@ async def test_t2_fast_model_decides_and_escalates(factory, tmp_path):
         patch("app.core.llm_gateway.llm_complete", new=fast_side_effect),
         patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", new=agent_side_effect),
     ):
+        screen_out = await ScreenNode().execute(ctx, None)
+        ctx.previous_outputs = {"screen": screen_out}
         out = await TriageNode().execute(ctx, None)
 
-    assert out["fast_model_count"] == 1
-    assert out["adjudicated_count"] == 1  # 低置信升级的那组由 agent 亲审
-    groups = sorted(await _groups_of(session, ctx.task_id), key=lambda g: g.group_key)
-    sources = {g.verdict_source for g in groups}
-    assert sources == {"fast_model", "agent"}
-    # 台账：快审与 agent 亲审各记一行消耗
+    assert screen_out["fast_model_count"] == 1  # 只有误报定案
+    assert out["adjudicated_count"] == 1  # 快审 tp 升级后由 agent 亲审
+    groups = await _groups_of(session, ctx.task_id)
+    # 误报组已丢弃，不占线索台
+    assert all(g.verdict_source != "fast_model" or g.ai_verdict != "fp" for g in groups)
     from app.contexts.task.models import AgentUsage
-
     rows = (await session.execute(select(AgentUsage).where(AgentUsage.task_id == ctx.task_id))).scalars().all()
-    assert {r.source for r in rows} == {"fast_model", "agent"}
     assert any(r.source == "fast_model" and r.prompt_tokens > 0 for r in rows)
     await gen.aclose()
 
@@ -359,8 +404,8 @@ def test_fast_provider_snapshot_keeps_request_settings():
 
 @pytest.mark.asyncio
 async def test_fast_screen_balance_failure_aborts_triage(factory, tmp_path):
-    """快审遇到余额不足必须中止 triage，不得静默升级 agent 继续烧。"""
-    from app.contexts.agent.nodes.triage import TriageNode
+    """快审遇到余额不足必须中止 screen，不得静默升级 agent 继续烧。"""
+    from app.contexts.agent.nodes.screen import ScreenNode
     from app.core.agent_runner import AgentRunnerError
     from app.core.llm_gateway import LlmGatewayConfigError
 
@@ -398,7 +443,7 @@ async def test_fast_screen_balance_failure_aborts_triage(factory, tmp_path):
         ) as agent,
     ):
         with pytest.raises(AgentRunnerError, match="余额不足"):
-            await TriageNode().execute(ctx, None)
+            await ScreenNode().execute(ctx, None)
 
     agent.assert_not_called()
     await gen.aclose()
@@ -479,7 +524,7 @@ async def test_t3_low_confidence_rep_goes_review(factory, tmp_path):
 
 @pytest.mark.asyncio
 async def test_cascade_cancel_penetrates_between_tiers(factory, tmp_path):
-    from app.contexts.agent.nodes.triage import TriageNode
+    from app.contexts.agent.nodes.screen import ScreenNode
     from app.contexts.task.models import Task
 
     gen = _seed_env(
@@ -503,7 +548,7 @@ async def test_cascade_cancel_penetrates_between_tiers(factory, tmp_path):
         ),
         patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", new_callable=AsyncMock) as agent,
     ):
-        out = await TriageNode().execute(ctx, None)
+        out = await ScreenNode().execute(ctx, None)
 
     assert out["status"] == "cancelled"
     agent.assert_not_called()
@@ -514,7 +559,7 @@ async def test_cascade_cancel_penetrates_between_tiers(factory, tmp_path):
 async def test_feedback_resolution_truth_weights_rule_prior(factory, tmp_path):
     """验证真值回流规则先验：7 条已验证 fp(×3 权重=21 样本)即越过
     min_samples=20——真值比 agent 亲审更快把噪声规则顶过阈值。"""
-    from app.contexts.agent.nodes.triage import TriageNode
+    from app.contexts.agent.nodes.screen import ScreenNode
 
     verified_fp = [
         {
@@ -538,13 +583,12 @@ async def test_feedback_resolution_truth_weights_rule_prior(factory, tmp_path):
         patch("app.core.config.get_settings", return_value=_cascade_settings(triage_fast_model_enabled=False)),
         patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", new_callable=AsyncMock) as agent,
     ):
-        out = await TriageNode().execute(ctx, None)
+        out = await ScreenNode().execute(ctx, None)
 
     # agent 当时全判 tp，但验证真值全部翻案 → 真值优先，规则判 fp
     assert out["rule_count"] == 1
     groups = await _groups_of(session, ctx.task_id)
-    assert groups[0].ai_verdict == "fp"
-    assert groups[0].verdict_source == "rule"
+    assert groups == []  # 规则误报已丢弃
     agent.assert_not_called()
     await gen.aclose()
 
@@ -632,6 +676,59 @@ async def test_feedback_low_sample_keeps_default_discount(factory, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_concurrent_triage_progress_uses_done_not_started(factory, tmp_path):
+    """并发代表审议：进度文案用完成后的 done/total，开始只发「开始审议」流水。"""
+    from app.contexts.agent.nodes.triage import TriageNode
+
+    gen = _seed_env(
+        factory,
+        tmp_path,
+        current=[
+            {"rule": "r.a", "file_path": "module/a.py", "cwe": "CWE-89"},
+            {"rule": "r.b", "file_path": "module/b.py", "cwe": "CWE-79"},
+            {"rule": "r.c", "file_path": "module/c.py", "cwe": "CWE-22"},
+        ],
+    )
+    ctx, session = await gen.__anext__()
+    ctx.session_factory = factory
+    events: list[dict] = []
+    ctx.on_event = events.append
+
+    async def agent_side_effect(**kw):
+        return _agent_output("tp", 0.9)
+
+    with (
+        patch(
+            "app.core.config.get_settings",
+            return_value=_cascade_settings(triage_fast_model_enabled=False),
+        ),
+        patch(
+            "app.contexts.agent.ai_runner.run_ai_node_with_shape_retry",
+            new=agent_side_effect,
+        ),
+    ):
+        await TriageNode().execute(ctx, None)
+
+    phases = [
+        e.get("message", "")
+        for e in events
+        if e.get("type") == "phase.updated"
+    ]
+    starts = [m for m in phases if str(m).startswith("开始审议：")]
+    dones = [m for m in phases if str(m).startswith("二审 ")]
+    assert starts, "并发开始应留下事件流痕迹"
+    assert dones, "完成后应更新二审 N/M 进度"
+    assert not any("二审 " in str(m) and "开始" in str(m) for m in starts)
+    progress = [e for e in events if e.get("type") == "triage.progress"]
+    assert progress
+    assert all(e.get("node_key") == "triage" for e in progress)
+    assert all("message" in e and e["message"].startswith("二审 ") for e in progress)
+    last = progress[-1]
+    assert last["done"] == last["total"]
+    await gen.aclose()
+
+
+@pytest.mark.asyncio
 async def test_streaming_dispatch_during_triage(factory, tmp_path):
     """流式派单：族代表判完即建 LeadRun 入队并启动后台排空，
     不等 triage 全部跑完；传播成员置信度打折后不达门槛不入队。"""
@@ -665,7 +762,9 @@ async def test_streaming_dispatch_during_triage(factory, tmp_path):
         return SimpleNamespace(lead_verify_per_task=2)
 
     with (
-        patch("app.core.config.get_settings", return_value=_cascade_settings(triage_fast_model_enabled=False)),
+        patch("app.core.config.get_settings", return_value=_cascade_settings(
+            triage_fast_model_enabled=False, triage_stream_dispatch_enabled=True,
+        )),
         patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", new=agent_side_effect),
         patch("app.contexts.agent.lead_worker.drain_lead_queue", new=fake_drain),
         patch("app.contexts.agent.lead_queue.enqueue_leads", new=fake_enqueue),
@@ -692,6 +791,7 @@ async def test_streaming_dispatch_during_triage(factory, tmp_path):
 async def test_t0_rejects_non_agent_provenance(factory, tmp_path):
     """防自举回归：rule/fast/propagated 来源的历史判决不得被携带——
     否则前置层输出入库即成"永久真值"，跨任务复利。"""
+    from app.contexts.agent.nodes.screen import ScreenNode
     from app.contexts.agent.nodes.triage import TriageNode
 
     gen = _seed_env(
@@ -719,9 +819,11 @@ async def test_t0_rejects_non_agent_provenance(factory, tmp_path):
             return_value=_agent_output("tp", 0.9),
         ) as agent,
     ):
+        screen_out = await ScreenNode().execute(ctx, None)
+        ctx.previous_outputs = {"screen": screen_out}
         out = await TriageNode().execute(ctx, None)
 
-    assert out["carried_count"] == 0
+    assert screen_out["carried_count"] == 0
     assert agent.await_count >= 1  # 落回 agent 亲审
     await gen.aclose()
 
@@ -779,6 +881,7 @@ def test_runtime_update_accepts_token_budget():
 @pytest.mark.asyncio
 async def test_t2_empty_slices_escalate_without_fast_call(factory, tmp_path):
     """切片为空（文件读不到）不送快审：零上下文的单次补全等于盲猜，直接升级 agent。"""
+    from app.contexts.agent.nodes.screen import ScreenNode
     from app.contexts.agent.nodes.triage import TriageNode
 
     gen = _seed_env(
@@ -820,12 +923,14 @@ async def test_t2_empty_slices_escalate_without_fast_call(factory, tmp_path):
         patch("app.core.llm_gateway.llm_complete", new=fast_side_effect),
         patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", new=agent_side_effect),
     ):
+        screen_out = await ScreenNode().execute(ctx, None)
+        ctx.previous_outputs = {"screen": screen_out}
         out = await TriageNode().execute(ctx, None)
 
     assert len(fast_users) == 1  # 只有能切出代码的组进了快审
     groups = {g.file_path: g for g in await _groups_of(session, ctx.task_id)}
-    assert groups["module/db.py"].verdict_source == "fast_model"
-    assert groups["module/missing.py"].verdict_source == "agent"
-    assert out["fast_model_count"] == 1
+    assert "module/db.py" not in groups  # 快审误报已丢弃
+    assert "module/missing.py" not in groups  # agent 误报已丢弃
+    assert screen_out["fast_model_count"] == 1
     assert out["adjudicated_count"] == 1
     await gen.aclose()

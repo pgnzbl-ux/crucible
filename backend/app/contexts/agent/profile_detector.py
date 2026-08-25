@@ -38,7 +38,8 @@ _TRIGGER_FILENAMES = {
 
 KNOWN_LANGUAGE_IDS = {"nodejs", "python", "java", "go", "php", "rust", "static"}
 
-# semgrep --config 派生表(discovery-spec §6.0)：本地规则树目录名，禁止 p/ registry
+# semgrep --config 派生表(discovery-spec §6.0)：值必须是规则库文件夹名
+# （= app.core.semgrep_rules.ALLOWED_SEMGREP_LANG_DIRS），禁止 p/ registry、禁止 nodejs/golang 等别名
 SEMGREP_CONFIG_BY_LANGUAGE: dict[str, list[str]] = {
     "python": ["python"],
     "java": ["java"],
@@ -46,6 +47,23 @@ SEMGREP_CONFIG_BY_LANGUAGE: dict[str, list[str]] = {
     "go": ["go"],
     "php": ["php"],
 }
+
+
+def _assert_semgrep_config_dirs_match_rules_tree() -> None:
+    """启动期自检：派生表目标目录 ⊆ 规则库白名单。"""
+    from app.core.semgrep_rules import ALLOWED_SEMGREP_LANG_DIRS, SemgrepLangDirError
+
+    for lang_id, dirs in SEMGREP_CONFIG_BY_LANGUAGE.items():
+        bad = [d for d in dirs if d not in ALLOWED_SEMGREP_LANG_DIRS]
+        if bad:
+            raise SemgrepLangDirError(
+                f"SEMGREP_CONFIG_BY_LANGUAGE[{lang_id!r}]={dirs} 含非法目录 {bad}；"
+                f"须与 backend/semgrep_rules/<dir> 文件夹名一致: "
+                f"{sorted(ALLOWED_SEMGREP_LANG_DIRS)}"
+            )
+
+
+_assert_semgrep_config_dirs_match_rules_tree()
 
 # osv-scanner 加速用：锁文件/依赖清单(相对路径)
 OSV_MANIFEST_NAMES = (
@@ -254,7 +272,12 @@ def derive_primary_language(languages: list[dict]) -> str | None:
 
 
 def derive_semgrep_configs(languages: list[dict]) -> list[str]:
-    """纯函数派生 semgrep --config 列表；只认 source!=ai 的事实(防 AI 谎报选错规则包)。"""
+    """纯函数派生 semgrep --config 列表；只认 source!=ai 的事实(防 AI 谎报选错规则包)。
+
+    产出的每一项都是规则库语言目录名（php/python/…），不是画像语言 id（nodejs）。
+    """
+    from app.core.semgrep_rules import require_allowed_lang_dirs
+
     ids = {f.get("id") for f in languages if f.get("source") != "ai"}
     configs: list[str] = []
     for lang in ("python", "java", "nodejs", "go", "php"):
@@ -262,7 +285,7 @@ def derive_semgrep_configs(languages: list[dict]) -> list[str]:
             for cfg in SEMGREP_CONFIG_BY_LANGUAGE[lang]:
                 if cfg not in configs:
                     configs.append(cfg)
-    return configs
+    return require_allowed_lang_dirs(configs)
 
 
 def derive_osv_manifests(root: Path) -> list[str]:

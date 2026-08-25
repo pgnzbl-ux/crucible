@@ -4,7 +4,7 @@
 - crucible:lead_verify:{task_id} — LIST，元素 JSON {lead_run_id, group_id, run_id}
 - crucible:lead_inflight:{task_id} — SET，进行中的 lead_run_id
 
-连接 settings.redis_url（db0），禁止写 Celery broker db1。
+连接 settings.redis_clue_url（db3），禁止写 db0 事件/槽位与 Celery db1/2。
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ async def _redis() -> AsyncIterator[Any]:
     # socket 超时必须有：_enqueue 持有未提交行锁跨网络调 Redis，
     # 分区时主会话事务会无限悬挂（对齐 runner_slots 的 2s/5s）
     client = aioredis.from_url(
-        get_settings().redis_url,
+        get_settings().redis_clue_url,
         decode_responses=True,
         socket_connect_timeout=2,
         socket_timeout=5,

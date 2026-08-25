@@ -168,11 +168,8 @@ class FindingService:
         await self.session.flush()
 
     async def mark_unaudited_for_review(self, task_id: str) -> int:
-        """兜底：仍为 clustered 的组 → needs_review，ai_verdict 保持空（禁止记 fp）。"""
+        """未审组保持 clustered，只计数；禁止记 fp、禁止转人工主队列。"""
         groups = await self.list_groups(task_id, status="clustered")
-        for g in groups:
-            g.status = "needs_review"
-        await self.session.flush()
         return len(groups)
 
     # ── dispatch / 复核侧 ──
@@ -188,15 +185,39 @@ class FindingService:
         await self.session.flush()
 
     async def mark_resolved(self, group: AlertGroup, resolution: str) -> None:
-        """终态仅由判决回流(§4.4)写入：confirmed | false_positive | ignored。"""
-        if resolution not in ("confirmed", "false_positive", "ignored"):
+        """终态：confirmed | partial | code_reachable | false_positive | ignored。"""
+        if resolution not in (
+            "confirmed", "partial", "code_reachable", "false_positive", "ignored",
+        ):
             raise ValueError(f"非法 resolution: {resolution}")
         group.status = "resolved"
-        group.resolution = resolution
+        group.resolution = "confirmed" if resolution == "partial" else resolution
         await self.session.flush()
 
+    async def discard_false_positive(self, group: AlertGroup) -> None:
+        """明确误报：级联删组与判决，保留 RawFinding。线索台无对象。"""
+        gid = group.id
+        await self.session.execute(
+            delete(Adjudication).where(Adjudication.alert_group_id == gid)
+        )
+        await self.session.execute(
+            delete(ReviewAction).where(ReviewAction.alert_group_id == gid)
+        )
+        await self.session.execute(delete(LeadRun).where(LeadRun.alert_group_id == gid))
+        await self.session.execute(delete(AlertGroup).where(AlertGroup.id == gid))
+        await self.session.flush()
+
+    async def discard_task_false_positives(self, task_id: str) -> int:
+        """漏斗计数之后丢掉误报组，线索台无对象。"""
+        n = 0
+        for g in await self.list_groups(task_id):
+            if g.ai_verdict == "fp" and g.status not in ("dispatched", "resolved"):
+                await self.discard_false_positive(g)
+                n += 1
+        return n
+
     async def revive(self, group: AlertGroup) -> None:
-        """FP 误杀护栏：终态可复活回复核队列。"""
+        """遗留：历史误报组若仍在库，可退回 needs_review。新误报无对象。"""
         group.status = "needs_review"
         await self.session.flush()
 
@@ -208,8 +229,9 @@ class FindingService:
         """按 Task 终态回写其溯源组。同任务终认与复核台派生走同一函数。
 
         - confirmed/partial → resolved(confirmed)
-        - false_positive → resolved(false_positive)
-        - code_reachable/code_smell/not_reproduced → 退回 needs_review(由人定)
+        - code_reachable → resolved(code_reachable)
+        - false_positive → 丢弃组（漏斗计数，不展示）
+        - code_smell/not_reproduced → 退回 needs_review（线索台默认不展示）
         - 任务 needs_review(status) → 组退回 needs_review
         幂等：组已 resolved 且映射未变则 no-op。丢事件兜底走 reconcile_stale_groups。
         """
@@ -229,9 +251,12 @@ class FindingService:
             if not (group.status == "resolved" and group.resolution == "confirmed"):
                 await self.mark_resolved(group, "confirmed")
         elif verdict == "false_positive":
-            if not (group.status == "resolved" and group.resolution == "false_positive"):
-                await self.mark_resolved(group, "false_positive")
-        elif verdict in ("code_reachable", "code_smell", "not_reproduced"):
+            await self.discard_false_positive(group)
+            return None
+        elif verdict == "code_reachable":
+            if not (group.status == "resolved" and group.resolution == "code_reachable"):
+                await self.mark_resolved(group, "code_reachable")
+        elif verdict in ("code_smell", "not_reproduced"):
             if group.status == "dispatched":
                 group.status = "needs_review"
                 await self.session.flush()

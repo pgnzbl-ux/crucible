@@ -109,7 +109,7 @@ class TaskDetail(TaskSummary):
     vulnerability_reasoning: str | None = None
     credential_refs: list[str] = []
     runs: list[RunSummary] = []
-    # token 消耗台账汇总（prompt/completion/total/sessions）；无记录时为 None
+    # token 消耗台账汇总（含 cache_* / total_tokens / sessions）；无记录时为 None
     usage: dict[str, int] | None = None
 
 

@@ -119,6 +119,18 @@ export function summarizeNodeOutput(
       return VERDICT_LABEL[v] ? `报告已生成 · ${VERDICT_LABEL[v]}` : '报告已生成'
     }
     default:
+      if (nodeKey === 'triage') {
+        const adjudicated = typeof o.adjudicated_count === 'number' ? o.adjudicated_count : null
+        const families = typeof o.family_count === 'number' ? o.family_count : null
+        if (status === 'completed') {
+          const parts = [
+            adjudicated != null ? `已审 ${adjudicated}` : '',
+            families != null ? `${families} 族` : '',
+          ].filter(Boolean)
+          return parts.join(' · ') || '二审完成'
+        }
+        return str(o.progress)
+      }
       return status === 'completed' ? '完成' : ''
   }
 }
@@ -226,6 +238,13 @@ export function applyNodeOverlay(
 export type NodeOverlayPatch = {
   status?: string
   output?: Record<string, unknown>
+  usage?: {
+    prompt_tokens: number
+    completion_tokens: number
+    cache_read_input_tokens: number
+    cache_creation_input_tokens: number
+    total_tokens: number
+  }
 }
 
 function ssePayload(event: unknown): Record<string, unknown> {
@@ -235,7 +254,23 @@ function ssePayload(event: unknown): Record<string, unknown> {
   return {}
 }
 
-/** 把 SSE 叠到步骤条：node.updated 改状态，env_ready 的 phase.updated 改进度句。 */
+function asUsage(raw: unknown): NodeOverlayPatch['usage'] | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const o = raw as Record<string, unknown>
+  const num = (k: string) => {
+    const v = o[k]
+    return typeof v === 'number' && Number.isFinite(v) ? v : 0
+  }
+  return {
+    prompt_tokens: num('prompt_tokens'),
+    completion_tokens: num('completion_tokens'),
+    cache_read_input_tokens: num('cache_read_input_tokens'),
+    cache_creation_input_tokens: num('cache_creation_input_tokens'),
+    total_tokens: num('total_tokens'),
+  }
+}
+
+/** 把 SSE 叠到步骤条：node.updated 改状态，env_ready 的 phase.updated 改进度句，usage.updated 叠用量。 */
 export function overlayFromSseEvents(
   events: Array<{ type: string; event?: unknown }>,
 ): Map<string, NodeOverlayPatch> {
@@ -257,6 +292,15 @@ export function overlayFromSseEvents(
       })
       continue
     }
+    if (ev.type === 'usage.updated') {
+      const key = typeof p.node_key === 'string' ? p.node_key : ''
+      if (!key) continue
+      const cumulative = asUsage(p.cumulative) ?? asUsage(p.usage)
+      if (!cumulative) continue
+      const prev = map.get(key) ?? {}
+      map.set(key, { ...prev, usage: cumulative })
+      continue
+    }
     if (ev.type === 'phase.updated') {
       const phase = typeof p.phase === 'string' ? p.phase : ''
       const msg = str(p.message)
@@ -268,15 +312,51 @@ export function overlayFromSseEvents(
         'scan_gitleaks',
         'scan_osv',
         'cluster',
+        'screen',
         'triage',
       ])
       if (!progressPhases.has(phase) || !msg) continue
+      // 并发二审的「开始审议」只进事件流；左侧进度以 triage.progress / 完成句为准
+      if (phase === 'triage' && msg.startsWith('开始审议')) continue
       const prev = map.get(phase) ?? {}
       map.set(phase, {
+        ...prev,
+        output: { ...(prev.output ?? {}), progress: msg },
+      })
+      continue
+    }
+    if (ev.type === 'triage.progress') {
+      // 快审也会发 triage.progress（node_key=screen）；勿盖到 AI 二审上
+      const key = typeof p.node_key === 'string' ? p.node_key : 'triage'
+      if (key !== 'triage' && key !== '') continue
+      const msg =
+        str(p.message) ||
+        triageProgressCaption(p)
+      if (!msg) continue
+      const prev = map.get('triage') ?? {}
+      map.set('triage', {
         ...prev,
         output: { ...(prev.output ?? {}), progress: msg },
       })
     }
   }
   return map
+}
+
+function triageProgressCaption(p: Record<string, unknown>): string {
+  const done = typeof p.done === 'number' ? p.done : null
+  const total = typeof p.total === 'number' ? p.total : null
+  const label = str(p.label)
+  const familySize = typeof p.family_size === 'number' ? p.family_size : null
+  if (done != null && total != null) {
+    const note = familySize != null ? `（族内 ${familySize} 组）` : ''
+    return label
+      ? `二审 ${done}/${total}：${label}${note}`
+      : `二审 ${done}/${total}`
+  }
+  const adjudicated = p.adjudicated
+  const pending = p.pending
+  if (adjudicated == null && pending == null) return ''
+  const reason = str(p.reason) === 'budget' ? '（预算中断）' : ''
+  return `已审 ${String(adjudicated ?? 0)}${pending != null ? `，待审 ${String(pending)}` : ''}${reason}`
 }

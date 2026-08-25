@@ -565,6 +565,12 @@ describe('NodeSteps compact topology', () => {
     )
     expect(verify).toContain('crucible-dag-overview')
     expect(verify).toContain('定向验证')
+    // 收起态阶段卡：含 AI 节点的阶段带角标（verify: profile/env/audit/reproduce/report）
+    expect((verify.match(/data-ai="true"/g) ?? []).length).toBeGreaterThanOrEqual(4)
+    expect(discovery).toContain('crucible-dag-overview')
+    // discovery 收起：并行初筛/深度/复核/终认/报告 等含 AI
+    expect((discovery.match(/data-ai="true"/g) ?? []).length).toBeGreaterThanOrEqual(4)
+    expect(discovery).toContain('crucible-dag-stage-card__ai')
     expect(verify).toContain('data-stage-key="audit"')
     expect(verify).not.toContain('data-stage-key="initial"')
     expect(discovery).toContain('crucible-dag-overview')

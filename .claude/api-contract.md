@@ -93,7 +93,7 @@
 }
 ```
 
-`task_type`（默认 `verify`）：`verify`=漏洞验证（人工给描述，扫描/聚类/二审/调度节点 `VERIFY_MODE` skip，走 6 个终认节点）；`discovery`=仓库审计（禁止填描述，跑全 12 节点，dispatch 选 0/1 条主线索进同一套 audit）。
+`task_type`（默认 `verify`）：`verify`=漏洞验证（人工给描述，扫描/聚类/二审/调度节点 `VERIFY_MODE` skip，走 6 个终认节点）；`discovery`=仓库审计（禁止填描述，跑全 13 节点，dispatch 把**全部合格可疑真洞**入 Redis db3 终认队，LeadWorker 复用同一套 audit/reproduce）。
 
 `clone_depth`：浅克隆层数，默认 `1`；`0` 表示全量 clone（流量更大）。`project_ref_type` 显式指定可避免 tag 名被误判为 branch 导致缓存 SHA 对不上。`source_type` 默认 `git`；`local_upload` 时 `project_address` 必须是已登记的 `upload://local/{project_id}`，节点 0 从 MinIO 解开原始包，不再 clone。
 
@@ -132,6 +132,8 @@
 
 任务只允许 owner 访问；非 owner 与不存在统一返回 404。该规则同样适用于事件、SSE、取消、重试、删除和节点记录。
 
+`TaskDetail.usage`（有台账时）：`prompt_tokens` / `completion_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens` / `total_tokens` / `sessions`。`total_tokens` 为前四项之和（SDK/API 回传聚合，见 `docs/token-usage-accounting.md`）。
+
 ### POST `/api/v1/tasks/{id}/cancel`
 
 取消任务(已实现):先把任务/run/未完成节点标 `cancelled` 并 **提交后立刻返回**。`revoke(terminate=True)` 停 worker；后台 `schedule_teardown_task_runtime` 只按 `crucible.task_id` 强拆该任务的 agent-runner（停 AI），不 `compose down` 可复用靶场。编排器每节点刷新库状态，已取消则停后续节点，且 execute 失败不得把 cancelled 改成 failed。靶场在静默满 TTL 1 小时且无 live 任务后由巡检销毁。
@@ -141,7 +143,7 @@
 重试任务(202 返 `{task_id, run_id, status:retrying, from_node}`)。任务不存在或非 owner → **404** `TASK_NOT_FOUND`（不是 400）。非法状态 / 非法 `from_node` / 前置节点未完成 → **400**。未配置默认 LLM Provider、默认项无 API Key、或 agent-runner 镜像不存在/Docker 不可用 → **400**，不改任务状态、不新建 run。
 
 - 默认：新建 TaskRun，**从节点 0（源码获取）整条重跑**，不复用上一 run 的 NodeRun。
-- 可选 query `from_node=env_ready|audit|reproduce|report`：拷贝上一 run 里该节点**之前**已 `completed`/`skipped` 的 NodeRun 进新 run，编排器断点续跑，只重跑该节点及之后。前置未完成 → 400。`source`/`profile` 不是合法起点（请整条重试）。
+- 可选 query `from_node=`（除 `source`/`profile` 外的管线节点：`scan_*`/`env_ready`/`cluster`/`screen`/`triage`/`dispatch`/`audit`/`reproduce`/`report`）：拷贝上一 run 里该节点**之前**已 `completed`/`skipped` 的 NodeRun 进新 run，编排器断点续跑，只重跑该节点及之后。前置未完成 → 400。`source`/`profile` 不是合法起点（请整条重试）。
 - 上一 run 的节点/事件保留作历史。工作区按 `task_id` 固定路径；新 run 已有 completed 节点则保留工作区（失败任务本就会留目录），否则清空重拉。不拆可复用靶场。
 - 同一次 run 内 worker 崩溃仍可靠 NodeRun 断点续跑，与用户点「重试」不是同一条路径。
 
@@ -165,15 +167,26 @@
   "error_message": null,
   "started_at": "...",
   "finished_at": "...",
-  "output": { "origin": "minio", "repo_dirname": "claudecodeui" }
+  "output": { "origin": "minio", "repo_dirname": "claudecodeui" },
+  "usage": {
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "cache_creation_input_tokens": 0,
+    "total_tokens": 0
+  }
 }]
 ```
+
+`usage` 可选：本 run 该 `node_key` 在 `agent_usage` 台账的聚合（无消耗则省略）。数值全部来自 Claude Agent SDK / 兼容网关回传（优先 `ResultMessage.model_usage`，否则 `usage`）；`cache_*` 禁止自算。`total_tokens = prompt + completion + cache_read + cache_creation`。规则见 `docs/token-usage-accounting.md`。
 
 `output` 为解析后的节点产出（坏 JSON 为空对象）。源码节点含 origin/repo_dirname/commit_sha；画像含 language/framework/is_web/port/detected_services（不含 AI 长文）；靶场含 target_url（`http://{宿主机IP}:{compose 映射的 Web 端口}`，不是 localhost / 容器端口）与 initial_creds。AI 先根据 README、路由和鉴权配置判断是否存在登录功能：实际存在并可提供账密时为 `{username,password,login_url?}`（可由 `.vuln-env` 通过项目已有初始化机制创建靶场专用账号），确认无登录功能时为 `{auth_required:false,note?}`，存在登录但无法安全初始化时为 `{note}`，说明需自行注册、API Key 或其他前置条件。不要交空对象，也不要把“未找到凭据”冒充“无需登录”。
 
 ### GET `/api/v1/tasks/{id}/events`
 
-历史事件（默认当前/最新一次 run，最近 1000 条，`limit` 1–1000）。重试会新建 run，历史 run 的 `phase.updated` 不混进本接口。含 `agent.thinking` / `agent.message` / `tool.call.*` / `agent.failed`（`title`+`hint`）/ `node.updated`。
+历史事件（默认当前/最新一次 run，最近 1000 条，`limit` 1–1000）。重试会新建 run，历史 run 的 `phase.updated` 不混进本接口。含 `agent.thinking` / `agent.message` / `tool.call.*` / `agent.failed`（`title`+`hint`）/ `node.updated` / `usage.updated`。
+
+`usage.updated`：某次会话入台账后推送。payload 含 `node_key`、`usage`（本会话四字段+`total_tokens`）、`cumulative`（本节点本 run 累计，同形状）。不转发 SDK `thinking_tokens` 心跳。
 
 事件时间：`created_at` 一律带 UTC 偏移（开发 SQLite 读回 naive datetime 也按 UTC 输出）；节点 `started_at` / `finished_at` 同样带 UTC 偏移。每条事件的 `payload.timestamp` 必有 epoch 秒 —— SDK 事件用 SDK 自带值，平台事件（`phase.updated` 等）落库时补齐，SSE 回放才不会显示成浏览器收到的时刻。AI 事件 payload 带 `node_key` / `node_run_id`，`AgentEvent.node_run_id` 列同步写入；思考/工具事件可按节点过滤而不靠时间边界猜测。
 
@@ -233,17 +246,21 @@ owner 校验：所有环境均要求 `report.owner_id` 匹配当前用户。报�
 
 ---
 
-## Finding Context（告警复核台，discovery-spec §9.1）
+## Finding Context（漏洞线索台，discovery-spec §9.1）
 
-仓库审计（`task_type=discovery`）产出的告警组，供人工复核。仅 owner 可访问，非 owner 与不存在统一 404。
+仓库审计（`task_type=discovery`）产出的合格线索与终认结果。仅 owner 可访问，非 owner 与不存在统一 404。
+
+对用户文案必须用「可疑真洞 / 误报 / 二审未决」，禁止把内部码 `tp`/`fp` 当标签原文。`ai_verdict` 字段仍返回内部码，由 UI 翻译。
 
 ### GET `/api/v1/findings/groups`
 
-分页查询告警组。Query：`task_id` / `status` / `resolution`（`confirmed|false_positive|ignored`，按结案结果筛）/ `cwe` / `ai_verdict` / `engine` / `clue_grade` / `scope` / `q` / `limit`（默认 50，最大 200）/ `offset`。未传 `task_id` 时只返回当前用户任务集合内的组。
+分页查询告警组。Query：`task_id` / `status` / `resolution`（`confirmed|partial|code_reachable|false_positive|ignored`）/ `cwe` / `ai_verdict` / `engine` / `clue_grade` / `scope` / `q` / `limit`（默认 50，最大 200）/ `offset`。未传 `task_id` 时只返回当前用户任务集合内的组。
+
+`scope`：`workbench`（默认，验证中 + 已确认 + 代码可达）/ `verifying`（`dispatched`）/ `confirmed`（`confirmed|partial`）/ `reachable`（`code_reachable`）/ `all`。未传 `scope` 且未带 `status`/`resolution` 时按 `workbench`。
 
 响应 `{ total, items }`。每条 `AlertGroupSummary`：`id / task_id / cwe / file_path / function_symbol / line_span / member_count / engine_set / status / clue_grade / ai_verdict / ai_confidence / priority / resolution / created_at / updated_at`。
 
-`status` 状态机：`clustered → triaged → dispatched → resolved(*) | needs_review`。`ai_verdict` 为 `tp / fp / need_more_context / bypass`（osv 依赖情报 bypass 不进终认）。
+`status` 状态机：`clustered → adjudicated → dispatched → resolved(*)`。长期可见终态为 `confirmed | partial | code_reachable`。明确误报不占组。`ai_verdict` 内部码为 `tp / fp / need_more_context / bypass`（osv 依赖情报默认不进终认，除非 `called` 且 T3 可达）。
 
 ### GET `/api/v1/findings/groups/ids`
 
@@ -280,11 +297,11 @@ owner 校验：所有环境均要求 `report.owner_id` 匹配当前用户。报�
 
 ### POST `/api/v1/findings/groups/{group_id}/revive`
 
-FP 误杀护栏：AI 判 `fp` 的组一键复活回复核队列（不物理删除）。响应 `{ id, status }`。
+遗留接口：新产生的误报不入库，故无复活对象。若组仍存在（历史行），行为保持「退回 `needs_review`」。新 UI 不提供入口。
 
 ### POST `/api/v1/findings/groups/{group_id}/dispatch`
 
-人工放行送验证：另开 `task_type=verify`（同 project/ref，Lab 复用）。请求体 `{ "include_engine_conclusion": false }`——勾选才在描述追加【引擎线索】原文（默认不锚定）。响应 `{ group_id, verification_task_id }`。组随后 `dispatched`，验证任务终态经事件回流写回该组（`resolved` / 退回 `needs_review`）。
+人工次级入口：另开 `task_type=verify`（同 project/ref，Lab 复用；同一套终认节点，不是第二套产品）。请求体 `{ "include_engine_conclusion": false }`——勾选才在描述追加【引擎线索】原文（默认不锚定）。响应 `{ group_id, verification_task_id }`。组随后 `dispatched`，验证任务终态经事件回流写回该组（`confirmed` / `code_reachable` 可见；终认证伪不展示）。
 
 ---
 
@@ -469,7 +486,7 @@ Provider **没有独立启用/停用字段**。Agent 运行时只读取唯一的
 
 ## 待补（P0/P1/P2 路线）
 
-- ~~P0-0: Agent 编排~~ ✅ 平台 12 节点编排(见 docs/discovery-spec.md)
+- ~~P0-0: Agent 编排~~ ✅ 平台 13 节点编排(见 docs/discovery-spec.md)
 - ~~P0-1: `GET /tasks/{id}/events/stream` SSE 端点~~ ✅
 - ~~P0-2: `POST /tasks/{id}/cancel` 真正生效~~ ✅（revoke + 容器销毁）
 - ~~P0-3: JWT 闭环 + SSE `?token=` 鉴权~~ ✅

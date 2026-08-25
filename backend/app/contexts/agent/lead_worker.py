@@ -45,13 +45,12 @@ async def _reconcile_group(session: AsyncSession, group_id: str, verdict: str | 
     svc = FindingService(session)
     if verdict in ("confirmed", "partial"):
         await svc.mark_resolved(group, "confirmed")
+    elif verdict == "code_reachable":
+        await svc.mark_resolved(group, "code_reachable")
     elif verdict == "false_positive":
-        await svc.mark_resolved(group, "false_positive")
+        await svc.discard_false_positive(group)
     else:
-        # code_reachable/code_smell/not_reproduced/needs_review，以及 None
-        # （gate=uncertain 等无权威结论）一律退回人工。此前 None 保持
-        # dispatched 等"任务级收尾"，但收尾只认 source_alert_group_id 指针组，
-        # 多线索任务里其余组会永久悬挂在 dispatched。
+        # code_smell/not_reproduced/needs_review，以及 None
         await svc.mark_needs_review(group)
 
 
@@ -314,6 +313,7 @@ def build_discovery_report_from_leads(
     from app.contexts.agent.ai_runner import REPORT_SECTION_KEYS
 
     confirmed = [lr for lr in leads if lr.verdict in ("confirmed", "partial")]
+    reachable = [lr for lr in leads if lr.verdict == "code_reachable"]
     verdict_counts = Counter((lr.verdict or "needs_review") for lr in leads)
 
     findings_md = []
@@ -326,10 +326,19 @@ def build_discovery_report_from_leads(
             f"**Kill chain**: {audit.get('kill_chain') or '—'}\n\n"
             f"**复现**: {repro.get('verdict') or lr.verdict}\n"
         )
+    for i, lr in enumerate(reachable, 1):
+        audit = lr.audit_output or {}
+        findings_md.append(
+            f"### 代码可达 {i}\n\n"
+            f"{lr.lead_description}\n\n"
+            f"**Kill chain**: {audit.get('kill_chain') or '—'}\n\n"
+            "靶场未就绪，仅白盒结论：代码路径可达。\n"
+        )
     body = "\n".join(findings_md) or "本轮终认未确认可进入漏洞清单的发现。"
     n = len(confirmed)
+    reachable_n = len(reachable)
     total = len(leads)
-    needs_review = verdict_counts["needs_review"] + verdict_counts["code_reachable"] + verdict_counts["code_smell"] + verdict_counts["not_reproduced"]
+    needs_review = verdict_counts["needs_review"] + verdict_counts["code_smell"] + verdict_counts["not_reproduced"]
     denoise = denoise or {}
     dropped_c = int(denoise.get("dropped_c_count") or 0)
     finding_count = denoise.get("finding_count")
@@ -342,10 +351,12 @@ def build_discovery_report_from_leads(
     if group_count is not None:
         funnel_bits.append(f"复核组 {group_count}")
     funnel_line = ("；".join(funnel_bits) + "。") if funnel_bits else ""
+    extra_intro = f" 代码可达 {reachable_n} 条。" if reachable_n else ""
     report_data = {
         "document_kind": "code_audit_report",
         "product_intro": (
             f"仓库代码审计报告：终认 {total} 条线索，确认 {n} 条漏洞。"
+            + extra_intro
             + (f" 降噪漏斗：{funnel_line}" if funnel_line else "")
         ),
         "vulnerability": body,
@@ -355,12 +366,13 @@ def build_discovery_report_from_leads(
         "poc_commands": "见已确认 LeadRun 的 reproduce.poc（若有）。",
         "fix_suggestions": "按严重度优先修复已确认发现。" if n else "保持依赖与规则库更新，并复核未充分终认的高价值线索。",
         "reporting_decision": (
-            f"本轮确认 {n} / 终认执行 {total} 条；{needs_review} 条需人工关注。"
-            if n else f"本轮终认执行 {total} 条，未确认漏洞；{needs_review} 条需人工关注。"
+            f"本轮确认 {n} / 终认执行 {total} 条；代码可达 {reachable_n}；{needs_review} 条未形成确认结论。"
+            if n or reachable_n else f"本轮终认执行 {total} 条，未确认漏洞；{needs_review} 条未形成确认结论。"
         ),
         "audit_summary": {
             "lead_count": total,
             "confirmed_count": n,
+            "code_reachable_count": reachable_n,
             "needs_review_count": needs_review,
             "verdict_counts": dict(verdict_counts),
             "denoise_funnel": {

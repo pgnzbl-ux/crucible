@@ -1144,6 +1144,24 @@ body,
   text-align: left;
   box-shadow: 0 1px 2px color-mix(in srgb, var(--crucible-text) 5%, transparent);
 }
+.crucible-dag-stage-card__ai {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  z-index: 2;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--crucible-accent, #2563eb) 18%, transparent);
+  color: var(--crucible-accent, #2563eb);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+.crucible-dag-stage-card.is-ai {
+  padding-right: 28px;
+}
 .crucible-dag-stage-card:disabled {
   cursor: default;
   opacity: 1;
@@ -1206,6 +1224,13 @@ body,
   line-height: 1.2;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+.crucible-dag-stage-card__tokens {
+  color: var(--crucible-text-secondary);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+  white-space: nowrap;
 }
 .crucible-dag-stage-card__state {
   display: flex;
@@ -1511,6 +1536,28 @@ body,
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+.crucible-dag-node__ai {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  z-index: 2;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--crucible-accent, #2563eb) 18%, transparent);
+  color: var(--crucible-accent, #2563eb);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+.crucible-dag-node__tokens {
+  color: var(--crucible-text-secondary);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+  white-space: nowrap;
+}
 @media (max-width: 900px) {
   .crucible-detail-nodes-pin {
     height: 144px;
@@ -1721,6 +1768,23 @@ body,
   line-height: 1.35;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+.crucible-node-list__ai {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--crucible-accent, #2563eb) 14%, transparent);
+  color: var(--crucible-accent, #2563eb);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+}
+.crucible-node-list__tokens {
+  font-family: var(--crucible-font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--crucible-text-secondary);
 }
 .crucible-node-list__stage {
   display: flex;

@@ -14,6 +14,7 @@ from .outputs import (
     EnvReadyHandoff,
     ProfileHandoff,
     ReproduceHandoff,
+    ScreenHandoff,
     SourceHandoff,
     TriageHandoff,
 )
@@ -65,8 +66,13 @@ class ClusterInput(_RepoInput):
     profile: ProfileHandoff | None = None  # 决定函数索引语言；缺失则扫全部已支持语言
 
 
-class TriageInput(_RepoInput):
+class ScreenInput(_RepoInput):
     cluster: ClusterHandoff
+
+
+class TriageInput(_RepoInput):
+    screen: ScreenHandoff
+    cluster: ClusterHandoff | None = None  # 可选摘要；组队列仍从 DB clustered 读取
 
 
 class DispatchInput(_RepoInput):

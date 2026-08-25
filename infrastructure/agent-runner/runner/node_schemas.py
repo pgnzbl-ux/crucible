@@ -200,6 +200,19 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
                 "items": {"type": "string"},
                 "description": "仍看不到而必须确认的符号（尽量用工具自补后仍缺再列）",
             },
+            "attacker_controlled": {
+                "type": "boolean",
+                "description": "可疑真洞必须为 true：存在攻击者可控来源",
+            },
+            "reaches_sink": {
+                "type": "boolean",
+                "description": "可疑真洞必须为 true：能指到危险点",
+            },
+            "sanitizer": {
+                "type": "string",
+                "enum": ["none", "bypassable", "effective"],
+                "description": "可疑真洞只允许 none 或 bypassable",
+            },
         },
         "required": ["verdict", "confidence", "why"],
     },

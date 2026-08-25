@@ -104,11 +104,28 @@ $RECYCLE.BIN/
 .zcode/
 .ipynb_checkpoints/
 
+# Semgrep 本地用户数据（测试 / 沙箱重定向，勿提交）
+.semgrep-xdg/
+.semgrep-user/
+
+# 社区 semgrep 语言树体积大：可 symlink/拷贝到 backend/semgrep_rules/，勿提交；只跟踪 crucible/
+backend/semgrep_rules/php
+backend/semgrep_rules/python
+backend/semgrep_rules/go
+backend/semgrep_rules/java
+backend/semgrep_rules/javascript
+backend/semgrep_rules/typescript
+backend/semgrep_rules/csharp
+backend/semgrep_rules/ruby
+backend/semgrep_rules/generic
+
 # docs：只纳入截图等静态资源，其余本地文档不进仓库
 docs/*
 !docs/assets/
 !docs/discovery-spec.md
 !docs/discovery-plan.md
+!docs/semgrep-coverage-matrix.md
+!docs/token-usage-accounting.md
 
 # 黄金集评估报告（跑出来的 Markdown，不入库）
 scripts/eval/out/

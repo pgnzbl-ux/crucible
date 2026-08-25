@@ -81,7 +81,7 @@ async def _seed_review_env(factory):
             task_id=task.id, group_key="gk1", cwe="CWE-89", file_path="app/db.py",
             function_symbol="handler", line_span="40-50", member_count=1,
             representative_finding_id=f.id, engine_set=["semgrep"],
-            status="adjudicated", clue_grade="A", ai_verdict="tp",
+            status="dispatched", clue_grade="A", ai_verdict="tp",
             ai_confidence=0.9, priority="high",
         )
         s.add(g)
@@ -128,7 +128,7 @@ def test_list_groups_filters(client_env):
     assert data["items"][0]["representative_rule_id"] == "python.sqli"
     assert data["items"][0]["primary_engine"] == "semgrep"
     assert data["items"][0]["screening_status"] == "retained"
-    assert data["items"][0]["screening_summary"] == "AI 初筛保留"
+    assert data["items"][0]["screening_summary"] == "验证中"
     assert data["items"][0]["screening_reasons"] == ["拼接"]
 
     resp2 = client.get(
@@ -250,13 +250,13 @@ def test_list_group_ids_matches_filtered_set(client_env):
 
     fp_only = client.get(
         "/api/v1/findings/groups/ids", headers=headers,
-        params={"resolution": "false_positive"},
+        params={"resolution": "false_positive", "scope": "all"},
     )
     assert fp_only.json()["total"] == 1
     assert group_id not in fp_only.json()["ids"]
 
 
-def test_list_groups_queue_scopes_separate_focus_review_processing_and_noise(client_env):
+def test_list_groups_queue_scopes_workbench_and_slices(client_env):
     client, factory = client_env
     import asyncio
     import hashlib
@@ -272,11 +272,11 @@ def test_list_groups_queue_scopes_separate_focus_review_processing_and_noise(cli
                 select(ScanRun).where(ScanRun.task_id == task_id)
             )).scalars().first()
             specs = [
-                ("noise", "adjudicated", "B", "fp", "medium"),
-                ("review", "needs_review", "B", None, "high"),
-                ("processing", "clustered", "B", None, "medium"),
+                ("confirmed", "resolved", "A", "tp", "high", "confirmed"),
+                ("reachable", "resolved", "A", "tp", "high", "code_reachable"),
+                ("noise", "adjudicated", "B", "fp", "medium", None),
             ]
-            for index, (name, status, grade, verdict, priority) in enumerate(specs, start=1):
+            for index, (name, status, grade, verdict, priority, resolution) in enumerate(specs, start=1):
                 finding = RawFinding(
                     task_id=task_id, scan_run_id=scan_run.id, engine="semgrep",
                     rule_id=f"custom.{name}", cwe="CWE-20", severity="warning",
@@ -291,23 +291,32 @@ def test_list_groups_queue_scopes_separate_focus_review_processing_and_noise(cli
                     file_path=finding.file_path, line_span=f"{index}-{index}",
                     member_count=1, representative_finding_id=finding.id,
                     engine_set=["semgrep"], status=status, clue_grade=grade,
-                    ai_verdict=verdict, priority=priority,
+                    ai_verdict=verdict, priority=priority, resolution=resolution,
                 ))
             await s.commit()
 
     asyncio.run(_arrange())
 
-    expected = {"focus": 1, "review": 1, "processing": 1, "noise": 1, "all": 4}
+    expected = {
+        "verifying": 1,
+        "confirmed": 1,
+        "reachable": 1,
+        "workbench": 3,
+        "all": 4,
+    }
     for scope, count in expected.items():
         response = client.get(
             "/api/v1/findings/groups", headers=_auth(client), params={"scope": scope},
         )
         assert response.status_code == 200
-        assert response.json()["total"] == count
+        assert response.json()["total"] == count, scope
+
+    default = client.get("/api/v1/findings/groups", headers=_auth(client))
+    assert default.json()["total"] == 3
 
     stats = client.get("/api/v1/findings/stats", headers=_auth(client)).json()
     assert stats["by_queue"] == {
-        "focus": 1, "review": 1, "processing": 1, "noise": 1,
+        "workbench": 3, "verifying": 1, "confirmed": 1, "reachable": 1,
     }
 
 
@@ -350,7 +359,8 @@ def test_list_groups_engine_filter_matches_exact_json_element(client_env):
     expected = {"osv": 1, "osv-scanner": 1, "semgrep": 2}
     for engine, count in expected.items():
         response = client.get(
-            "/api/v1/findings/groups", headers=_auth(client), params={"engine": engine},
+            "/api/v1/findings/groups", headers=_auth(client),
+            params={"engine": engine, "scope": "all"},
         )
         assert response.status_code == 200, engine
         assert response.json()["total"] == count, engine
@@ -392,7 +402,7 @@ def test_finding_stats_are_owner_scoped(client_env):
     own = client.get("/api/v1/findings/stats", headers=_auth(client))
     assert own.status_code == 200
     assert own.json()["total"] == 1
-    assert own.json()["by_status"] == {"adjudicated": 1}
+    assert own.json()["by_status"] == {"dispatched": 1}
 
     other = client.get("/api/v1/findings/stats", headers=_auth_as("u2"))
     assert other.status_code == 200
@@ -583,10 +593,19 @@ def test_manual_dispatch_creates_verify_task(client_env):
     """人工放行：另开 verify Task(非自动路径)；溯源指针写到新任务。"""
     import asyncio
 
+    from app.contexts.finding.models import AlertGroup
     from app.contexts.task.models import Task
 
     client, factory = client_env
     group_id, task_id = asyncio.run(_seed_review_env(factory))
+
+    async def _open():
+        async with factory() as s:
+            g = await s.get(AlertGroup, group_id)
+            g.status = "needs_review"
+            await s.commit()
+
+    asyncio.run(_open())
 
     with (
         patch("app.core.agent_runner.agent_runner_manager.image_exists", return_value=True),

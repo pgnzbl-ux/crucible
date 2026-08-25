@@ -36,7 +36,7 @@ sudo -u crucible .venv/bin/pip install -e .
 
 # 2. 配置
 sudo -u crucible cp .env.example .env
-# 编辑 .env：DATABASE_URL/REDIS_URL 指宿主映射端口（5433/6380）；
+# 编辑 .env：DATABASE_URL/REDIS_URL/REDIS_CLUE_URL 指宿主映射端口（5433/6380；线索队用 Redis db3）；
 # ENVIRONMENT=production；AUTH_SECRET 强随机；CORS 填实际域名
 
 # 3. 基础设施 + agent-runner 镜像

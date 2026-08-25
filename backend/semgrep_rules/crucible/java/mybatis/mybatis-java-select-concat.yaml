@@ -1,0 +1,96 @@
+rules:
+  - id: mybatis-java-select-concat
+    languages:
+      - java
+    severity: ERROR
+    mode: taint
+    message: >-
+      User-controlled input reaches a MyBatis SqlSession API
+      (selectList/selectOne/update/insert/delete). Prefer #{} / mapper XML
+      bound parameters instead of concatenating request data into statement IDs
+      or SQL strings.
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp:
+        - A01:2017 - Injection
+        - A03:2021 - Injection
+      category: security
+      technology:
+        - mybatis
+        - spring
+        - java
+      subcategory:
+        - vuln
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      crucible-overlay: true
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  $METHODNAME(..., @$REQ(...) $TYPE $SOURCE, ...) {
+                    ...
+                  }
+              - pattern-inside: |
+                  $METHODNAME(..., @$REQ $TYPE $SOURCE, ...) {
+                    ...
+                  }
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: (RequestBody|RequestParam)
+          - focus-metavariable: $SOURCE
+      - pattern: $REQ.getParameter(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $SS.selectList($SQL, ...)
+              - pattern: $SS.selectOne($SQL, ...)
+              - pattern: $SS.update($SQL, ...)
+              - pattern: $SS.insert($SQL, ...)
+              - pattern: $SS.delete($SQL, ...)
+          - focus-metavariable: $SQL
+
+  - id: mybatis-java-annotation-concat
+    languages:
+      - java
+    severity: ERROR
+    message: >-
+      MyBatis @Select/@Update/@Insert/@Delete SQL string is built by
+      concatenation. Prefer a single literal with #{} placeholders.
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp:
+        - A01:2017 - Injection
+        - A03:2021 - Injection
+      category: security
+      technology:
+        - mybatis
+        - java
+      subcategory:
+        - vuln
+      confidence: HIGH
+      likelihood: MEDIUM
+      impact: HIGH
+      crucible-overlay: true
+    pattern-either:
+      - pattern: |
+          @Select("..." + $X)
+      - pattern: |
+          @Select("..." + $X + "...")
+      - pattern: |
+          @Select($X + "...")
+      - pattern: |
+          @Update("..." + $X)
+      - pattern: |
+          @Update("..." + $X + "...")
+      - pattern: |
+          @Insert("..." + $X)
+      - pattern: |
+          @Insert("..." + $X + "...")
+      - pattern: |
+          @Delete("..." + $X)
+      - pattern: |
+          @Delete("..." + $X + "...")

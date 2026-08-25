@@ -1,12 +1,13 @@
 import { useState } from 'react'
-import { App, Button, Card, Checkbox, Collapse, Descriptions, Input, Modal, Space, Tag, Typography } from 'antd'
-import { ArrowLeftOutlined, DeleteOutlined, SendOutlined, UndoOutlined } from '@ant-design/icons'
+import { App, Button, Card, Checkbox, Collapse, Descriptions, Modal, Space, Tag, Typography } from 'antd'
+import { ArrowLeftOutlined, DeleteOutlined, SendOutlined } from '@ant-design/icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation, useParams } from 'wouter'
 
 import { api } from '../shared/lib/api'
 import { PageContainer } from '../shared/components/PageContainer'
 import { useErrorToast } from '../shared/hooks/useErrorToast'
+import { getVerdictMeta, getAiVerdictMeta } from '../shared/lib/meta'
 import { formatSourceToSink, evidenceMetaFromFinding, ruleClassLabel } from '../shared/lib/findingEvidence'
 
 const { Text, Paragraph } = Typography
@@ -16,13 +17,8 @@ export function FindingDetailPage() {
   const [, navigate] = useLocation()
   const { message, modal } = App.useApp()
   const qc = useQueryClient()
-  const [rejectOpen, setRejectOpen] = useState(false)
-  const [rejectTags, setRejectTags] = useState<string[]>([])
-  const [rejectText, setRejectText] = useState('')
   const [dispatchOpen, setDispatchOpen] = useState(false)
   const [includeEngine, setIncludeEngine] = useState(false)
-  const [confirmOpen, setConfirmOpen] = useState(false)
-  const [confirmText, setConfirmText] = useState('')
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ['alert-group', id],
@@ -31,29 +27,6 @@ export function FindingDetailPage() {
   })
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['alert-group', id] })
-
-  const reviewMutation = useMutation({
-    mutationFn: (payload: Parameters<typeof api.reviewAlertGroup>[1]) =>
-      api.reviewAlertGroup(id!, payload),
-    onSuccess: () => {
-      message.success('复核动作已记录')
-      setConfirmOpen(false)
-      setConfirmText('')
-      invalidate()
-      qc.invalidateQueries({ queryKey: ['alert-groups'] })
-    },
-    onError: (e: Error) => message.error(e.message),
-    onSettled: () => setRejectOpen(false),
-  })
-
-  const reviveMutation = useMutation({
-    mutationFn: () => api.reviveAlertGroup(id!),
-    onSuccess: () => {
-      message.success('已复活到复核队列')
-      invalidate()
-    },
-    onError: (e: Error) => message.error(e.message),
-  })
 
   useErrorToast(isError, error)
 
@@ -112,7 +85,7 @@ export function FindingDetailPage() {
           <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/findings')}>
             返回漏洞线索
           </Button>
-          {data.status === 'needs_review' && (
+          {data.status !== 'resolved' && (
             <>
               <Button
                 type="primary"
@@ -121,18 +94,7 @@ export function FindingDetailPage() {
               >
                 发起定向验证
               </Button>
-              <Button onClick={() => setConfirmOpen(true)}>
-                确认漏洞
-              </Button>
-              <Button danger onClick={() => setRejectOpen(true)}>
-                判误报
-              </Button>
             </>
-          )}
-          {data.status === 'resolved' && data.resolution === 'false_positive' && (
-            <Button icon={<UndoOutlined />} onClick={() => reviveMutation.mutate()}>
-              复活(误杀护栏)
-            </Button>
           )}
           <Button
             danger
@@ -162,12 +124,18 @@ export function FindingDetailPage() {
             </Descriptions.Item>
             <Descriptions.Item label="状态">
               <Tag>{data.status}</Tag>
-              {data.resolution && <Tag color={data.resolution === 'confirmed' ? 'green' : 'default'}>{data.resolution}</Tag>}
+              {data.resolution && (
+                <Tag color={data.resolution === 'confirmed' ? 'red' : 'gold'}>
+                  {data.resolution === 'confirmed' ? '已确认' : data.resolution === 'code_reachable' ? '代码可达' : data.resolution}
+                </Tag>
+              )}
             </Descriptions.Item>
             <Descriptions.Item label="AI 判决">
               {data.ai_verdict ? (
                 <Space>
-                  <Tag color={data.ai_verdict === 'tp' ? 'red' : 'default'}>{data.ai_verdict}</Tag>
+                  <Tag color={getAiVerdictMeta(data.ai_verdict).color}>
+                    {getAiVerdictMeta(data.ai_verdict).label}
+                  </Tag>
                   {data.ai_confidence != null && <Text>{data.ai_confidence.toFixed(2)}</Text>}
                 </Space>
               ) : (
@@ -182,7 +150,7 @@ export function FindingDetailPage() {
                   {data.verification_task_id.slice(0, 8)}
                 </Button>
                 {data.verification_verdict && (
-                  <Tag style={{ marginLeft: 8 }}>{data.verification_verdict}</Tag>
+                  <Tag style={{ marginLeft: 8 }}>{getVerdictMeta(data.verification_verdict).label}</Tag>
                 )}
               </Descriptions.Item>
             )}
@@ -278,7 +246,11 @@ export function FindingDetailPage() {
                 <Descriptions.Item key={lead.id} label={`线索 ${index + 1}`}>
                   <Space wrap>
                     <Tag>{lead.status}</Tag>
-                    {lead.verdict && <Tag color={lead.verdict === 'confirmed' ? 'green' : 'orange'}>{lead.verdict}</Tag>}
+                    {lead.verdict && (
+                      <Tag color={lead.verdict === 'confirmed' ? 'red' : 'gold'}>
+                        {getVerdictMeta(lead.verdict).label}
+                      </Tag>
+                    )}
                     {lead.gate_verdict && <Text type="secondary">白盒结论：{lead.gate_verdict}</Text>}
                     {lead.error && <Text type="danger">{lead.error}</Text>}
                   </Space>
@@ -303,57 +275,6 @@ export function FindingDetailPage() {
             ))}
           </Card>
         )}
-
-        <Modal
-          title="确认漏洞"
-          open={confirmOpen}
-          onOk={() => reviewMutation.mutate({ action: 'confirm', reason_text: confirmText })}
-          okButtonProps={{ disabled: !confirmText.trim(), loading: reviewMutation.isPending }}
-          onCancel={() => setConfirmOpen(false)}
-        >
-          <Paragraph type="secondary">请简要说明确认依据，便于报告审阅。</Paragraph>
-          <Input.TextArea
-            rows={3}
-            placeholder="例如：用户输入可控，数据流可达危险调用，终认已证明影响"
-            value={confirmText}
-            onChange={(e) => setConfirmText(e.target.value)}
-          />
-        </Modal>
-
-        <Modal
-          title="判为误报"
-          open={rejectOpen}
-          onOk={() =>
-            reviewMutation.mutate({
-              action: 'reject',
-              reason_tags: rejectTags,
-              reason_text: rejectText || null,
-            })
-          }
-          okButtonProps={{ disabled: rejectTags.length === 0 }}
-          onCancel={() => setRejectOpen(false)}
-        >
-          <Paragraph type="secondary">请至少选择一个原因。</Paragraph>
-          <Checkbox.Group
-            options={[
-              '输入不可控',
-              '已有净化',
-              '路径不可达',
-              '测试代码',
-              '配置已禁用',
-              '其他',
-            ]}
-            value={rejectTags}
-            onChange={(v) => setRejectTags(v as string[])}
-          />
-          <Input.TextArea
-            rows={2}
-            style={{ marginTop: 8 }}
-            placeholder="补充说明（可选）"
-            value={rejectText}
-            onChange={(e) => setRejectText(e.target.value)}
-          />
-        </Modal>
 
         <Modal
           title="发起定向验证"

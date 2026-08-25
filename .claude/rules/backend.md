@@ -19,7 +19,7 @@ paths: ["backend/app/contexts/**/*.py", "backend/app/shared/**/*.py", "backend/a
 | Context | 核心模型 | 关键职责 |
 |---|---|---|
 | `identity` | users | 注册、登录、JWT、bcrypt（**锁 bcrypt==4.0.1**） |
-| `task` | tasks / task_runs / node_runs / agent_events | 任务 CRUD、状态机(含 retry/delete/archived)、12 节点断点续跑、事件查询 |
+| `task` | tasks / task_runs / node_runs / agent_events | 任务 CRUD、状态机(含 retry/delete/archived)、13 节点断点续跑、事件查询 |
 | `agent` | （无自有表，消费 settings 与 task） | Agent 执行器抽象、Celery 工作流、沙箱编排 |
 | `project` | projects / source_artifacts | 项目元数据 + 按 SHA 的画像缓存；源码 tar.gz 按 owner+host 隔离缓存在 MinIO `crucible-durable`（agent 只调 `acquire_source()` / ProjectService） |
 | `lab` | labs | 靶场生命周期：复用 / TTL / stop / start / rebuild / destroy，按 compose project 名操作容器 |
@@ -54,7 +54,7 @@ paths: ["backend/app/contexts/**/*.py", "backend/app/shared/**/*.py", "backend/a
 
 ## 5. Agent 执行（`orchestrator` + `ai_runner`）
 
-12 节点由 `orchestrator.py` 驱动；AI 节点经 `ai_runner.py` 拉起 agent-runner 容器。LLM 凭据由 `sdk_adapter.build_runner_env()` 注入 `ANTHROPIC_*`（容器销毁即消失）。
+13 节点由 `orchestrator.py` 驱动；AI 节点经 `ai_runner.py` 拉起 agent-runner 容器。LLM 凭据由 `sdk_adapter.build_runner_env()` 注入 `ANTHROPIC_*`（容器销毁即消失）。
 
 事件流：容器内 `runner/run_one.py` 把 SDK Message 翻译为统一事件（`phase.updated` / `agent.thinking` / `agent.message` / `tool.call.*` / `agent.completed` / `agent.failed`），stdout JSONL 推给 worker。`agent.failed` 带 `title`/`hint`；编排失败文案见 `contexts/agent/errors.py`。
 

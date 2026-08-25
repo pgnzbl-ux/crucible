@@ -168,12 +168,24 @@ async def adjudicate_group(ctx, group, settings) -> bool:
     response_text = str(meta.get("assistant_text") or output)
     usage = meta.get("usage") if isinstance(meta.get("usage"), dict) else {}
     group.verdict_source = "agent"
-    from app.contexts.agent.usage_ledger import record_usage
+    from app.contexts.agent.usage_ledger import normalize_usage, record_usage
 
+    # 台账 prefer model_usage；判决审计链仍保留 sidecar usage 原文
     await record_usage(
         ctx.db_session, task_id=ctx.task_id, run_id=ctx.run_id,
-        node_key="triage", usage=usage, source="agent",
+        node_key="triage",
+        usage=usage,
+        model_usage=meta.get("model_usage"),
+        source="agent",
+        on_event=ctx.on_event,
     )
+    # adjudications.usage 写入归一化后的数值（含 cache），便于复核对齐台账
+    adj_usage = normalize_usage(usage, meta.get("model_usage"))
+    qualify = {
+        "attacker_controlled": output.get("attacker_controlled"),
+        "reaches_sink": output.get("reaches_sink"),
+        "sanitizer": output.get("sanitizer"),
+    }
     await svc.record_adjudication(
         group=group,
         adjudication=Adjudication(
@@ -184,10 +196,13 @@ async def adjudicate_group(ctx, group, settings) -> bool:
             why=list(output.get("why") or []),
             evidence=list(output.get("evidence") or []),
             need=list(output.get("need") or []),
-            context_log=[{"round": 1, "slices": len(slices), "via": "agent-runner"}],
+            context_log=[{
+                "round": 1, "slices": len(slices), "via": "agent-runner",
+                "qualify": qualify,
+            }],
             prompt_text=prompt_text[:50000],
             response_text=response_text[:20000],
-            usage=usage,
+            usage=adj_usage,
         ),
     )
     return True

@@ -36,6 +36,7 @@ def _settings(**kw):
         claude_agent_sdk_enabled=True,
         # 本文件验证串行旧路径；级联管线见 test_triage_cascade.py
         triage_cascade_enabled=False,
+        triage_stream_dispatch_enabled=False,
     )
     base.update(kw)
     return MagicMock(**base)
@@ -233,6 +234,9 @@ async def test_triage_emits_progress_events(session_factory, tmp_path):
             await TriageNode().execute(ctx, None)
         progress = [e for e in events if e.get("type") == "triage.progress"]
         assert progress and progress[-1]["adjudicated"] == 2
+        assert progress[-1]["node_key"] == "triage"
+        assert "message" in progress[-1]
+        assert progress[-1]["message"].startswith("二审 ")
         phases = [e for e in events if e.get("type") == "phase.updated"]
         assert any("待审" in str(e.get("message")) for e in phases)
         assert any("二审" in str(e.get("message")) for e in phases)
@@ -240,6 +244,7 @@ async def test_triage_emits_progress_events(session_factory, tmp_path):
 
 @pytest.mark.asyncio
 async def test_triage_downgraded_path_skips_llm_to_review(session_factory, tmp_path):
+    from app.contexts.agent.nodes.screen import ScreenNode
     from app.contexts.agent.nodes.triage import TriageNode
     from app.contexts.finding.models import AlertGroup
 
@@ -251,12 +256,16 @@ async def test_triage_downgraded_path_skips_llm_to_review(session_factory, tmp_p
                 ("CWE-79", "low", "B", None, "app.py"),
             ],
         )
+        # screen 负责 skip_llm；升级组进 triage（本文件默认 cascade 关闭）
         with patch("app.core.config.get_settings", return_value=_settings()), \
              patch(
                  "app.contexts.agent.ai_runner.run_ai_node_with_shape_retry",
                  new_callable=AsyncMock, return_value=_tp_output(),
              ) as ai:
+            screen_out = await ScreenNode().execute(ctx, None)
+            ctx.previous_outputs = {"screen": screen_out}
             out = await TriageNode().execute(ctx, None)
+        assert screen_out["skipped_llm_count"] == 1
         assert out["adjudicated_count"] == 1
         assert out["skipped_llm_count"] == 1
         assert ai.await_count == 1
@@ -401,7 +410,8 @@ async def test_triage_records_real_prompt_and_usage(session_factory, tmp_path):
             select(Adjudication).where(Adjudication.alert_group_id.isnot(None))
         )).scalars().one()
         assert adj.model == "test-model"
-        assert adj.usage == {"input_tokens": 10, "output_tokens": 5}
+        assert adj.usage["prompt_tokens"] == 10
+        assert adj.usage["completion_tokens"] == 5
         assert "[system]" in adj.prompt_text and "代码审计二审员" in adj.prompt_text
         assert "submit_result" in adj.prompt_text  # 真实 user prompt，非 input repr
         assert adj.response_text == "先看切片，再下结论"

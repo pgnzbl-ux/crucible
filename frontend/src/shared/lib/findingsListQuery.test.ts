@@ -8,17 +8,17 @@ import {
 } from './findingsListQuery'
 
 describe('findingsListQuery', () => {
-  it('omits default focus scope and page 1', () => {
-    expect(buildFindingsSearch({ scope: 'focus', page: 1 })).toBe('/findings')
+  it('omits default workbench scope and page 1', () => {
+    expect(buildFindingsSearch({ scope: 'workbench', page: 1 })).toBe('/findings')
   })
 
   it('keeps work-queue and search shareable', () => {
     expect(buildFindingsSearch({
-      scope: 'review',
+      scope: 'verifying',
       q: 'db.py',
       engine: 'semgrep',
       page: 2,
-    })).toBe('/findings?scope=review&q=db.py&engine=semgrep&page=2')
+    })).toBe('/findings?scope=verifying&q=db.py&engine=semgrep&page=2')
   })
 
   it('preserves dashboard deep-link status without forcing scope', () => {
@@ -41,23 +41,23 @@ describe('findingsListQuery', () => {
     expect(buildFindingsSearch({
       scope: 'all',
       status: 'resolved',
-      resolution: 'false_positive',
+      resolution: 'code_reachable',
       page: 1,
-    })).toBe('/findings?scope=all&resolution=false_positive')
+    })).toBe('/findings?scope=all&resolution=code_reachable')
   })
 
   it('parses scope and status / resolution deep links', () => {
-    expect(parseFindingScope(new URLSearchParams('scope=review'))).toBe('review')
+    expect(parseFindingScope(new URLSearchParams('scope=verifying'))).toBe('verifying')
     expect(parseFindingScope(new URLSearchParams('status=dispatched'))).toBe('all')
     expect(parseFindingScope(new URLSearchParams('resolution=confirmed'))).toBe('all')
-    expect(parseFindingScope(new URLSearchParams())).toBe('focus')
+    expect(parseFindingScope(new URLSearchParams())).toBe('workbench')
   })
 
   it('parses progress from status or resolution', () => {
     expect(parseFindingProgress(new URLSearchParams('status=dispatched'))).toBe('status:dispatched')
     expect(parseFindingProgress(new URLSearchParams('resolution=confirmed'))).toBe('resolution:confirmed')
     expect(parseFindingProgress(new URLSearchParams('status=resolved'))).toBeUndefined()
-    expect(progressToParams('resolution:ignored')).toEqual({ resolution: 'ignored' })
-    expect(progressToParams('status:needs_review')).toEqual({ status: 'needs_review' })
+    expect(progressToParams('resolution:code_reachable')).toEqual({ resolution: 'code_reachable' })
+    expect(progressToParams('status:dispatched')).toEqual({ status: 'dispatched' })
   })
 })

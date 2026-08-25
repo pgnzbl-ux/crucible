@@ -1,0 +1,96 @@
+rules:
+  - id: go-framework-ssrf
+    languages:
+      - go
+    severity: ERROR
+    mode: taint
+    message: >-
+      Framework request input (Gin/Echo/Chi/Fiber) flows into an outbound HTTP
+      call (http.Get / NewRequest / Client.Do). Validate and allowlist hosts
+      before making server-side requests to avoid SSRF.
+    metadata:
+      cwe:
+        - "CWE-918: Server-Side Request Forgery (SSRF)"
+      owasp:
+        - A10:2021 - Server-Side Request Forgery (SSRF)
+      category: security
+      technology:
+        - gin
+        - echo
+        - chi
+        - fiber
+        - go
+      subcategory:
+        - vuln
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      crucible-overlay: true
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  func $F(..., $C *gin.Context, ...) {
+                    ...
+                  }
+              - pattern-inside: |
+                  func ($R $T) $F(..., $C *gin.Context, ...) {
+                    ...
+                  }
+          - pattern-either:
+              - pattern: $C.Query(...)
+              - pattern: $C.Param(...)
+              - pattern: $C.PostForm(...)
+              - pattern: $C.DefaultQuery(...)
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  func $F(..., $C echo.Context, ...) {
+                    ...
+                  }
+              - pattern-inside: |
+                  func ($R $T) $F(..., $C echo.Context, ...) {
+                    ...
+                  }
+          - pattern-either:
+              - pattern: $C.QueryParam(...)
+              - pattern: $C.FormValue(...)
+              - pattern: $C.Param(...)
+      - pattern-either:
+          - pattern: chi.URLParam(...)
+          - pattern: chi.URLParamFromCtx(...)
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  func $F(..., $C *fiber.Ctx, ...) {
+                    ...
+                  }
+              - pattern-inside: |
+                  func ($R $T) $F(..., $C *fiber.Ctx, ...) {
+                    ...
+                  }
+          - pattern-either:
+              - pattern: $C.Query(...)
+              - pattern: $C.Params(...)
+              - pattern: $C.FormValue(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - patterns:
+                  - pattern: http.Get($URL, ...)
+                  - focus-metavariable: $URL
+              - patterns:
+                  - pattern: http.Head($URL, ...)
+                  - focus-metavariable: $URL
+              - patterns:
+                  - pattern: http.Post($URL, ...)
+                  - focus-metavariable: $URL
+              - patterns:
+                  - pattern: http.NewRequest($METHOD, $URL, ...)
+                  - focus-metavariable: $URL
+              - patterns:
+                  - pattern: http.NewRequestWithContext($CTX, $METHOD, $URL, ...)
+                  - focus-metavariable: $URL
+              - patterns:
+                  - pattern: $CLIENT.Do($REQ, ...)
+                  - focus-metavariable: $REQ

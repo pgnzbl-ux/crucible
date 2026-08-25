@@ -111,6 +111,120 @@ async def test_retry_creates_new_run_without_reusing_nodes(session_factory):
 
 
 @pytest.mark.asyncio
+async def test_retry_from_triage_copies_screen_without_rerun(session_factory):
+    """P0：screen=completed + triage=failed → from_node=triage 拷贝 screen，不重跑轻量快审。"""
+    from app.contexts.task.models import Task, TaskRun, NodeRun
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+    from unittest.mock import patch
+    from sqlalchemy import select
+
+    async with session_factory() as session:
+        task = Task(
+            project_address="x",
+            task_type="discovery",
+            vulnerability_description=None,
+            owner_id="u1",
+            status="failed",
+        )
+        session.add(task)
+        await session.flush()
+        old_run = TaskRun(task_id=task.id, status="failed")
+        session.add(old_run)
+        await session.flush()
+        # 用 registry 真索引；拷贝时会按 key 重写
+        prior = [
+            ("source", "completed", '{"source_path":"/p"}'),
+            ("profile", "completed", '{"is_web":true}'),
+            ("scan_gitleaks", "completed", "{}"),
+            ("scan_osv", "completed", "{}"),
+            ("scan_semgrep", "completed", "{}"),
+            ("env_ready", "completed", "{}"),
+            ("cluster", "completed", "{}"),
+            ("screen", "completed", '{"escalated_count":2,"fast_model_count":3}'),
+            ("triage", "failed", "{}"),
+        ]
+        for i, (key, st, out) in enumerate(prior):
+            session.add(
+                NodeRun(
+                    run_id=old_run.id,
+                    task_id=task.id,
+                    node_index=i,
+                    node_key=key,
+                    status=st,
+                    output_json=out,
+                )
+            )
+        await session.flush()
+
+        svc = TaskService(TaskRepository(session))
+        with patch("app.core.celery_app.celery_app.send_task"):
+            new_run_id = await svc.retry_task(task.id, "u1", from_node="triage")
+
+        new_nodes = (
+            await session.execute(
+                select(NodeRun).where(NodeRun.run_id == new_run_id).order_by(NodeRun.node_index)
+            )
+        ).scalars().all()
+        by_key = {n.node_key: n for n in new_nodes}
+        assert "triage" not in by_key
+        assert "dispatch" not in by_key
+        assert by_key["screen"].status == "completed"
+        assert by_key["screen"].output_json == '{"escalated_count":2,"fast_model_count":3}'
+        assert by_key["cluster"].status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_retry_from_triage_rejects_missing_screen(session_factory):
+    """旧 run 仅有 triage、无 screen completed → 不得伪造，须拒绝续跑。"""
+    from app.contexts.task.models import Task, TaskRun, NodeRun
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+
+    async with session_factory() as session:
+        task = Task(
+            project_address="x",
+            task_type="discovery",
+            vulnerability_description=None,
+            owner_id="u1",
+            status="failed",
+        )
+        session.add(task)
+        await session.flush()
+        old_run = TaskRun(task_id=task.id, status="failed")
+        session.add(old_run)
+        await session.flush()
+        # 模拟拆分前旧拓扑：有 triage，无 screen
+        for i, (key, st) in enumerate(
+            [
+                ("source", "completed"),
+                ("profile", "completed"),
+                ("scan_gitleaks", "completed"),
+                ("scan_osv", "completed"),
+                ("scan_semgrep", "completed"),
+                ("env_ready", "completed"),
+                ("cluster", "completed"),
+                ("triage", "failed"),
+            ]
+        ):
+            session.add(
+                NodeRun(
+                    run_id=old_run.id,
+                    task_id=task.id,
+                    node_index=i,
+                    node_key=key,
+                    status=st,
+                    output_json="{}",
+                )
+            )
+        await session.flush()
+
+        svc = TaskService(TaskRepository(session))
+        with pytest.raises(ValueError, match="缺 screen"):
+            await svc.retry_task(task.id, "u1", from_node="triage")
+
+
+@pytest.mark.asyncio
 async def test_retry_from_node_copies_prior_completed_nodes(session_factory):
     """从 reproduce 重试:拷贝上一 run 里 index<4 的已完成节点进新 run,不重跑 clone/画像。"""
     from app.contexts.task.models import Task, TaskRun, NodeRun

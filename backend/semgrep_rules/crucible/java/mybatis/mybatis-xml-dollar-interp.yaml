@@ -1,0 +1,30 @@
+rules:
+  - id: mybatis-xml-dollar-interp
+    languages:
+      - regex
+    severity: ERROR
+    message: >-
+      MyBatis XML uses ${...} string substitution. Unlike #{} placeholders,
+      ${} interpolates raw text into SQL and is a common SQL injection vector.
+      Prefer #{} bound parameters (or a strict allowlist) for any user-influenced value.
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp:
+        - A01:2017 - Injection
+        - A03:2021 - Injection
+      category: security
+      technology:
+        - mybatis
+        - java
+      subcategory:
+        - vuln
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      crucible-overlay: true
+    paths:
+      include:
+        - "*Mapper.xml"
+        - "**/mapper/**/*.xml"
+    pattern-regex: \$\{[^}]+\}

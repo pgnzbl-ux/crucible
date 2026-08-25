@@ -1,0 +1,94 @@
+rules:
+  - id: go-template-ssti
+    languages:
+      - go
+    severity: ERROR
+    mode: taint
+    message: >-
+      Framework request input flows into text/template or html/template Parse.
+      User-controlled template source enables server-side template injection
+      (SSTI). Do not Parse untrusted strings; use fixed templates and pass data
+      as Execute arguments. ParseFiles with a user path is out of scope for this
+      rule.
+    metadata:
+      cwe:
+        - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp:
+        - A03:2021 - Injection
+      category: security
+      technology:
+        - gin
+        - echo
+        - chi
+        - fiber
+        - go
+      subcategory:
+        - vuln
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      crucible-overlay: true
+      references:
+        - https://www.onsecurity.io/blog/go-ssti-method-research/
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  func $F(..., $C *gin.Context, ...) {
+                    ...
+                  }
+              - pattern-inside: |
+                  func ($R $T) $F(..., $C *gin.Context, ...) {
+                    ...
+                  }
+          - pattern-either:
+              - pattern: $C.Query(...)
+              - pattern: $C.Param(...)
+              - pattern: $C.PostForm(...)
+              - pattern: $C.DefaultQuery(...)
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  func $F(..., $C echo.Context, ...) {
+                    ...
+                  }
+              - pattern-inside: |
+                  func ($R $T) $F(..., $C echo.Context, ...) {
+                    ...
+                  }
+          - pattern-either:
+              - pattern: $C.QueryParam(...)
+              - pattern: $C.FormValue(...)
+              - pattern: $C.Param(...)
+      - pattern-either:
+          - pattern: chi.URLParam(...)
+          - pattern: chi.URLParamFromCtx(...)
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  func $F(..., $C *fiber.Ctx, ...) {
+                    ...
+                  }
+              - pattern-inside: |
+                  func ($R $T) $F(..., $C *fiber.Ctx, ...) {
+                    ...
+                  }
+          - pattern-either:
+              - pattern: $C.Query(...)
+              - pattern: $C.Params(...)
+              - pattern: $C.FormValue(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - patterns:
+                  - pattern: template.New(...).Parse($T)
+                  - focus-metavariable: $T
+              - patterns:
+                  - pattern: $TMPL.Parse($T)
+                  - focus-metavariable: $T
+              - patterns:
+                  - pattern: template.Must(..., $TMPL.Parse($T))
+                  - focus-metavariable: $T
+              - patterns:
+                  - pattern: template.Must(template.New(...).Parse($T))
+                  - focus-metavariable: $T

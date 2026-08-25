@@ -270,8 +270,10 @@ async def test_env_ready_docker_platform_failure_does_not_consume_ai_retries(tmp
             "Cannot connect to the Docker daemon. Is the docker daemon running?",
         )
 
-        with pytest.raises(RuntimeError, match="failed_stage=docker_unavailable"):
-            await mod.EnvReadyNode().execute(ctx)
+        out = await mod.EnvReadyNode().execute(ctx)
+
+    assert out["ok"] is False
+    assert "docker_unavailable" in (out.get("error") or "")
 
     assert mock_ai.await_count == 1
     mock_logs.assert_not_awaited()
@@ -279,8 +281,8 @@ async def test_env_ready_docker_platform_failure_does_not_consume_ai_retries(tmp
 
 
 @pytest.mark.asyncio
-async def test_env_ready_5_fails_then_node_fails(tmp_path):
-    """5 轮全失败 → 节点 failed(分支出口 C)。"""
+async def test_env_ready_5_fails_then_degrades_completed(tmp_path):
+    """5 轮全失败 → 节点 completed 降级（ok=false），不得杀整任务。"""
     from app.contexts.agent.nodes import env_ready as mod
     from app.contexts.agent.nodes.env_ready import (
         ai_recipe,
@@ -301,9 +303,10 @@ async def test_env_ready_5_fails_then_node_fails(tmp_path):
         mock_logs.return_value = ""
 
         node = mod.EnvReadyNode()
-        with pytest.raises(RuntimeError, match="5"):
-            await node.execute(ctx)
+        out = await node.execute(ctx)
 
+    assert out["ok"] is False
+    assert out["target_url"] is None
     assert mock_ai.call_count == 5
 
 
@@ -916,8 +919,8 @@ async def test_env_ready_rejects_db_only_port_mapping(tmp_path):
             "http://localhost:5432",
         )
         mock_up.return_value = (True, "")
-        with pytest.raises(RuntimeError, match="5"):
-            await mod.EnvReadyNode().execute(ctx)
+        out = await mod.EnvReadyNode().execute(ctx)
+    assert out["ok"] is False
     assert mock_up.await_count == 0
     assert mock_down.await_count == 0
     assert "Web 端口" in mock_ai.call_args_list[-1].args[2]
@@ -1033,9 +1036,9 @@ async def test_env_ready_rejects_empty_initial_creds_before_compose_up(tmp_path)
             "initial_creds": {},
         }
 
-        with pytest.raises(RuntimeError, match="5"):
-            await mod.EnvReadyNode().execute(ctx)
+        out = await mod.EnvReadyNode().execute(ctx)
 
+    assert out["ok"] is False
     assert mock_up.await_count == 0
     assert mock_hc.await_count == 0
     assert mock_ai.call_count == 5
@@ -1065,8 +1068,8 @@ async def test_env_ready_occupied_host_port_skips_compose_up(tmp_path):
             "http://localhost:3001",
         )
         mock_up.return_value = (True, "")
-        with pytest.raises(RuntimeError, match="5"):
-            await mod.EnvReadyNode().execute(ctx)
+        out = await mod.EnvReadyNode().execute(ctx)
+    assert out["ok"] is False
     assert mock_up.await_count == 0
     assert mock_hc.await_count == 0
     assert mock_ai.call_count == 5

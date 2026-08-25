@@ -9,7 +9,7 @@ import {
   WarningOutlined,
 } from '@ant-design/icons'
 
-import { NODE_LABELS } from '../lib/meta'
+import { NODE_LABELS, formatTokenCount, isAiNode, mergeTokenUsage } from '../lib/meta'
 import {
   DAG_STATUS_TEXT,
   dagVisualStatus,
@@ -25,6 +25,13 @@ export interface DagNodeModel {
   status: string
   error_message?: string | null
   output?: Record<string, unknown> | null
+  usage?: {
+    prompt_tokens: number
+    completion_tokens: number
+    cache_read_input_tokens: number
+    cache_creation_input_tokens: number
+    total_tokens: number
+  } | null
   selectable?: boolean
   selected?: boolean
 }
@@ -57,7 +64,8 @@ const NODE_CAPTIONS: Record<string, string> = {
   scan_semgrep: '静态代码检测',
   env_ready: '仅 Web 构建靶场',
   cluster: '发现归并与去重',
-  triage: '轻量模型二审',
+  screen: '规则/快审过滤',
+  triage: 'Agent 亲审',
   dispatch: '筛选高置信线索',
   audit: '白盒路径终认',
   reproduce: '动态验证利用链',
@@ -135,6 +143,8 @@ function DagOverview({
             ?? models.find((model) => ['running', 'failed', 'degraded'].includes(dagVisualStatus(model)))
             ?? selectableModels[selectableModels.length - 1]
           const selectable = Boolean(onSelect && target?.selectable)
+          const stageIsAi = stage.nodeKeys.some((key) => isAiNode(key))
+          const stageUsage = mergeTokenUsage(...models.map((model) => model.usage))
           return (
             <div className="crucible-dag-overview__segment" key={stage.key}>
               <button
@@ -144,15 +154,33 @@ function DagOverview({
                   `is-${visual}`,
                   models.some((model) => model.selected) ? 'is-selected' : '',
                   selectable ? 'is-selectable' : '',
+                  stageIsAi ? 'is-ai' : '',
                 ].filter(Boolean).join(' ')}
                 data-stage-key={stage.key}
+                data-ai={stageIsAi ? 'true' : undefined}
                 disabled={!selectable}
                 onClick={selectable ? () => onSelect?.(target!.key) : undefined}
               >
+                {stageIsAi ? (
+                  <span className="crucible-dag-stage-card__ai" title="含 AI 节点">AI</span>
+                ) : null}
                 <span className="crucible-dag-stage-card__index">{index + 1}</span>
                 <span className="crucible-dag-stage-card__copy">
                   <strong>{stage.label}</strong>
                   <small>{stage.caption}</small>
+                  {stageUsage && stageUsage.total_tokens > 0 ? (
+                    <span
+                      className="crucible-dag-stage-card__tokens"
+                      title={[
+                        `prompt ${stageUsage.prompt_tokens}`,
+                        `completion ${stageUsage.completion_tokens}`,
+                        `cache_read ${stageUsage.cache_read_input_tokens}`,
+                        `cache_creation ${stageUsage.cache_creation_input_tokens}`,
+                      ].join(' · ')}
+                    >
+                      {formatTokenCount(stageUsage.total_tokens)} tok
+                    </span>
+                  ) : null}
                 </span>
                 <span className="crucible-dag-stage-card__state" title={DAG_STATUS_TEXT[visual]}>
                   {statusIcon(visual)}
@@ -313,11 +341,27 @@ export function NodeDag({ nodes, mode = 'discovery', contain = true, overview = 
             >
               {box.shape === 'box' ? (
                 <>
+                  {isAiNode(box.key) ? (
+                    <span className="crucible-dag-node__ai" title="AI 节点">AI</span>
+                  ) : null}
                   <span className="crucible-dag-node__port is-in" />
                   <span className="crucible-dag-node__status" title={DAG_STATUS_TEXT[visual]}>{statusIcon(visual)}</span>
                   <span className="crucible-dag-node__copy">
                     <span className="crucible-dag-node__label">{label}</span>
                     <span className="crucible-dag-node__caption">{nodeCaption(box.key, model.output)}</span>
+                    {model.usage && model.usage.total_tokens > 0 ? (
+                      <span
+                        className="crucible-dag-node__tokens"
+                        title={[
+                          `prompt ${model.usage.prompt_tokens}`,
+                          `completion ${model.usage.completion_tokens}`,
+                          `cache_read ${model.usage.cache_read_input_tokens}`,
+                          `cache_creation ${model.usage.cache_creation_input_tokens}`,
+                        ].join(' · ')}
+                      >
+                        {formatTokenCount(model.usage.total_tokens)} tok
+                      </span>
+                    ) : null}
                   </span>
                   <span className="crucible-dag-node__port is-out" />
                 </>

@@ -157,13 +157,23 @@ async def llm_complete(
             blocks = data.get("content") or []
             text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
             usage_raw = data.get("usage") or {}
+            # Anthropic 兼容体：cache_* 有则透传，无则 0；禁止自算
+            def _u(*keys: str) -> int:
+                for k in keys:
+                    v = usage_raw.get(k)
+                    if isinstance(v, (int, float)) and not isinstance(v, bool):
+                        return int(v)
+                return 0
+
             return LlmResult(
                 text=text,
                 model=data.get("model") or runtime.model,
                 provider_id=runtime.id,
                 usage={
-                    "prompt_tokens": int(usage_raw.get("input_tokens") or 0),
-                    "completion_tokens": int(usage_raw.get("output_tokens") or 0),
+                    "prompt_tokens": _u("input_tokens", "prompt_tokens"),
+                    "completion_tokens": _u("output_tokens", "completion_tokens"),
+                    "cache_read_input_tokens": _u("cache_read_input_tokens"),
+                    "cache_creation_input_tokens": _u("cache_creation_input_tokens"),
                 },
             )
         except LlmGatewayConfigError:

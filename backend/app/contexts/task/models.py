@@ -188,6 +188,9 @@ class AgentUsage(BaseModel):
     )
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    # SDK/API 回传分项（Anthropic usage / ResultMessage.model_usage）；禁止自算
+    cache_read_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cache_creation_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
 
     __table_args__ = (
         Index("idx_agent_usage_task_node", "task_id", "node_key"),

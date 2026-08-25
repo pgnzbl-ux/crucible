@@ -1,0 +1,85 @@
+rules:
+  - id: sql-fragment-concat
+    languages:
+      - php
+    severity: ERROR
+    message: >-
+      SQL fragment is built by string concatenation / implode without a leading
+      SELECT|INSERT|… keyword. Patterns like IN-list implode, quoted value
+      concat, "`field` {$op} {$value}", " where " / " ORDER BY " / " LIMIT " /
+      " AND " / " OR " / LIKE '%…%' often feed a later PDO/mysqli exec and are a
+      common SQLi shape in custom PHP MVC (e.g. Zentao).
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp:
+        - A01:2017 - Injection
+        - A03:2021 - Injection
+      category: security
+      technology:
+        - php
+      subcategory:
+        - vuln
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      crucible-overlay: true
+    patterns:
+      - pattern-either:
+          # IN ('a','b') via implode — no SELECT keyword in the literal
+          - pattern: |
+              "('" . implode(..., $X) . "')"
+          - pattern: |
+              '("' . implode(..., $X) . '")'
+          # quoted scalar concat into SQL fragment
+          - pattern: |
+              "'" . $X . "'"
+          - pattern: |
+              '"' . $X . '"'
+          # LIKE '%…%'
+          - pattern: |
+              "'%" . $X . "%'"
+          - pattern: |
+              '"%' . $X . '%"'
+          # " where " / " AND " / " OR " / ORDER BY / LIMIT / OFFSET (concat form)
+          - pattern: |
+              " where " . $X
+          - pattern: |
+              " WHERE " . $X
+          - pattern: |
+              $SQL .= " where " . $X
+          - pattern: |
+              " and " . $X
+          - pattern: |
+              " AND " . $X
+          - pattern: |
+              " or " . $X
+          - pattern: |
+              " OR " . $X
+          - pattern: |
+              " order by " . $X
+          - pattern: |
+              " ORDER BY " . $X
+          - pattern: |
+              " limit " . $X
+          - pattern: |
+              " LIMIT " . $X
+          - pattern: |
+              " offset " . $X
+          - pattern: |
+              " OFFSET " . $X
+          # double-quoted interpolation: " where $whereStr" / " ORDER BY $col"
+          - patterns:
+              - pattern: |
+                  $SQL .= "...$EXPR..."
+              - metavariable-regex:
+                  metavariable: $EXPR
+                  regex: (?is)^\s*(where|and|or|order\s+by|limit|offset)\b
+          - patterns:
+              - pattern: |
+                  "...$EXPR..."
+              - metavariable-regex:
+                  metavariable: $EXPR
+                  regex: (?is)^\s*(where|and|or|order\s+by|limit|offset)\b
+          # "`$field` {$filter['operator']} {$filter['value']}" (AST metavars miss braces)
+          - pattern-regex: '`\$\w+`\s*\{\$[^}]*operator'

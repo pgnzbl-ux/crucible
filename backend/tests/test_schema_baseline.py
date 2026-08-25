@@ -69,7 +69,10 @@ def test_alembic_chain_from_baseline():
     auth_mode = (versions / "o8b2d5c64a03_llm_provider_auth_mode.py").read_text(encoding="utf-8")
     assert 'revision: str = "o8b2d5c64a03"' in auth_mode
     assert 'down_revision: Union[str, None] = "n7a1c4e53f92"' in auth_mode
-    assert _alembic_head() == "o8b2d5c64a03"
+    cache_tokens = (versions / "p9c3e6d75b14_agent_usage_cache_tokens.py").read_text(encoding="utf-8")
+    assert 'revision: str = "p9c3e6d75b14"' in cache_tokens
+    assert 'down_revision: Union[str, None] = "o8b2d5c64a03"' in cache_tokens
+    assert _alembic_head() == "p9c3e6d75b14"
 
 
 @pytest.mark.asyncio
@@ -119,6 +122,14 @@ async def test_create_all_schema_matches_models():
                 "lead_verify_per_task",
                 "reproduce_per_lab",
             } <= runtime_cols
+            assert "agent_usage" in insp.get_table_names()
+            usage_cols = {c["name"] for c in insp.get_columns("agent_usage")}
+            assert {
+                "prompt_tokens",
+                "completion_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
+            } <= usage_cols
 
         await conn.run_sync(_check)
     await engine.dispose()

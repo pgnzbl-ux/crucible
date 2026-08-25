@@ -1,0 +1,87 @@
+rules:
+  - id: gorm-where-receiver
+    languages:
+      - go
+    severity: ERROR
+    mode: taint
+    message: >-
+      User-controlled input flows into GORM Where/Raw via a struct field
+      receiver (e.g. r.db.Where). Use parameterized placeholders instead of
+      concatenating request data into SQL fragments. Find/First alone are not
+      flagged by this rule.
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp:
+        - A01:2017 - Injection
+        - A03:2021 - Injection
+      category: security
+      technology:
+        - gorm
+        - gin
+        - echo
+        - go
+      subcategory:
+        - vuln
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      crucible-overlay: true
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  func $F(..., $C *gin.Context, ...) {
+                    ...
+                  }
+              - pattern-inside: |
+                  func ($R $T) $F(..., $C *gin.Context, ...) {
+                    ...
+                  }
+          - pattern-either:
+              - pattern: $C.Query(...)
+              - pattern: $C.Param(...)
+              - pattern: $C.PostForm(...)
+              - pattern: $C.DefaultQuery(...)
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  func $F(..., $C echo.Context, ...) {
+                    ...
+                  }
+              - pattern-inside: |
+                  func ($R $T) $F(..., $C echo.Context, ...) {
+                    ...
+                  }
+          - pattern-either:
+              - pattern: $C.QueryParam(...)
+              - pattern: $C.FormValue(...)
+              - pattern: $C.Param(...)
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  func $F(..., $REQ *http.Request, ...) {
+                    ...
+                  }
+              - pattern-inside: |
+                  func ($R $T) $F(..., $REQ *http.Request, ...) {
+                    ...
+                  }
+          - pattern-either:
+              - pattern: $REQ.FormValue(...)
+              - pattern: $REQ.URL.Query().Get(...)
+              - pattern: $REQ.PostFormValue(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - patterns:
+                  - pattern: $R.$DB.Where($SQL, ...)
+                  - focus-metavariable: $SQL
+              - patterns:
+                  - pattern: $R.$DB.Raw($SQL, ...)
+                  - focus-metavariable: $SQL
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: strconv.Atoi(...)
+          - pattern: strconv.ParseInt(...)
+          - pattern: strconv.Itoa(...)

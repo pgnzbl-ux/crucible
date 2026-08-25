@@ -57,30 +57,59 @@ async def _seed(session, tmp_path, groups_spec, *, is_web=True):
     session.add(sr)
     await session.flush()
 
-    for i, (cwe, grade, verdict, conf, priority) in enumerate(groups_spec):
+    for i, spec in enumerate(groups_spec):
+        if isinstance(spec, dict):
+            cwe = spec.get("cwe", "CWE-89")
+            grade = spec.get("grade", "B")
+            verdict = spec.get("verdict", "tp")
+            conf = spec.get("conf", 0.9)
+            priority = spec.get("priority", "high")
+            source = spec.get("source", "agent" if verdict == "tp" else None)
+            file_path = spec.get("file_path", f"app/mod{i}.py")
+            engines = spec.get("engine_set", ["semgrep"])
+            raw = spec.get("raw") or {}
+            qualify = spec.get("qualify")
+            if qualify is None and verdict == "tp" and source == "agent":
+                qualify = {
+                    "attacker_controlled": True,
+                    "reaches_sink": True,
+                    "sanitizer": "none",
+                }
+        else:
+            cwe, grade, verdict, conf, priority = spec
+            source = "agent" if verdict == "tp" else None
+            file_path = f"app/mod{i}.py"
+            engines = ["semgrep"]
+            raw = {}
+            qualify = {
+                "attacker_controlled": True,
+                "reaches_sink": True,
+                "sanitizer": "none",
+            } if verdict == "tp" else None
         fp = hashlib.sha256(f"wp5-{i}".encode()).hexdigest()
         f = RawFinding(
-            task_id=task.id, scan_run_id=sr.id, engine="semgrep", rule_id="python.sqli",
-            cwe=cwe, severity="error", file_path=f"app/mod{i}.py", line_start=2,
+            task_id=task.id, scan_run_id=sr.id, engine=engines[0], rule_id="python.sqli",
+            cwe=cwe, severity="error", file_path=file_path, line_start=2,
             line_end=2, message="secret-rule-msg", source_to_sink=["a.py:1 (x)"],
-            code_snippet="2\tq = 'SELECT ' + user", fingerprint=fp, raw={},
+            code_snippet="2\tq = 'SELECT ' + user", fingerprint=fp, raw=raw,
         )
         session.add(f)
         await session.flush()
         g = AlertGroup(
-            task_id=task.id, group_key=f"gk-{i:03d}", cwe=cwe, file_path=f"app/mod{i}.py",
+            task_id=task.id, group_key=f"gk-{i:03d}", cwe=cwe, file_path=file_path,
             function_symbol="handler", line_span="1-3", member_count=1,
-            representative_finding_id=f.id, engine_set=["semgrep"],
+            representative_finding_id=f.id, engine_set=engines,
             status="adjudicated", clue_grade=grade, ai_verdict=verdict,
-            ai_confidence=conf, priority=priority,
+            ai_confidence=conf, priority=priority, verdict_source=source,
         )
         session.add(g)
         await session.flush()
         if verdict in ("tp", "need_more_context"):
+            log = [{"qualify": qualify}] if qualify else []
             session.add(Adjudication(
                 alert_group_id=g.id, attempt=1, verdict=verdict, confidence=conf,
-                why=["拼接注入"], evidence=[{"file": f"app/mod{i}.py", "lines": "2-2"}],
-                need=[], context_log=[], prompt_text="p", response_text="r", usage={},
+                why=["拼接注入"], evidence=[{"file": file_path, "lines": "2-2"}],
+                need=[], context_log=log, prompt_text="p", response_text="r", usage={},
             ))
     await session.flush()
 
@@ -243,43 +272,155 @@ async def test_dispatch_emits_phase_events(session_factory, tmp_path):
             with patch("app.core.config.get_settings", return_value=_settings()):
                 out = await DispatchNode().execute(ctx, inp)
             assert out["has_lead"] is False
-            assert any("无合格主线索" in str(e.get("message")) for e in events)
+            assert any("无合格线索" in str(e.get("message")) for e in events)
     finally:
         set_redis_client(None)
 
 
 @pytest.mark.asyncio
-async def test_dispatch_b_grade_never_auto_dispatched(session_factory, tmp_path):
+async def test_dispatch_b_grade_t3_can_enqueue(session_factory, tmp_path):
+    """B 级只要 T3 合格即可入队，不再要求 A 级。"""
+    from app.contexts.agent.lead_queue import queue_depth, set_redis_client
     from app.contexts.agent.nodes.dispatch import DispatchNode
-    from app.contexts.finding.models import AlertGroup
 
-    async with session_factory() as session:
-        ctx, task, inp = await _seed(session, tmp_path, [
-            ("CWE-89", "B", "tp", 0.95, "high"),   # 高置信但无数据流
-            ("CWE-79", "A", "tp", 0.6, "high"),    # 中置信
-        ])
-        with patch("app.core.config.get_settings", return_value=_settings()):
-            out = await DispatchNode().execute(ctx, inp)
-        assert out["has_lead"] is False  # B 级禁止自动终认；中置信也不当线索
-        groups = (await session.execute(
-            select(AlertGroup).where(AlertGroup.task_id == task.id)
-        )).scalars().all()
-        assert all(g.status == "needs_review" for g in groups)
+    class _MemRedis:
+        def __init__(self):
+            self.lists: dict[str, list] = {}
+            self.sets: dict[str, set] = {}
+
+        async def lpush(self, key, *values):
+            self.lists.setdefault(key, [])
+            for v in reversed(values):
+                self.lists[key].insert(0, v)
+
+        async def rpop(self, key):
+            lst = self.lists.get(key) or []
+            return lst.pop() if lst else None
+
+        async def sadd(self, key, *members):
+            self.sets.setdefault(key, set()).update(members)
+
+        async def srem(self, key, *members):
+            pass
+
+        async def llen(self, key):
+            return len(self.lists.get(key) or [])
+
+        async def lrange(self, key, start, end):
+            lst = self.lists.get(key) or []
+            return lst[start:] if end == -1 else lst[start:end + 1]
+
+        async def smembers(self, key):
+            return set(self.sets.get(key) or set())
+
+        async def scard(self, key):
+            return len(self.sets.get(key) or set())
+
+        async def delete(self, *keys):
+            for k in keys:
+                self.lists.pop(k, None)
+                self.sets.pop(k, None)
+
+    set_redis_client(_MemRedis())
+    try:
+        async with session_factory() as session:
+            ctx, task, inp = await _seed(session, tmp_path, [
+                ("CWE-89", "B", "tp", 0.95, "high"),
+            ])
+            with patch("app.core.config.get_settings", return_value=_settings()):
+                out = await DispatchNode().execute(ctx, inp)
+            assert out["has_lead"] is True
+            assert out["queued_count"] == 1
+            assert await queue_depth(task.id) == 1
+    finally:
+        set_redis_client(None)
 
 
 @pytest.mark.asyncio
-async def test_dispatch_non_web_never_picks_lead(session_factory, tmp_path):
+async def test_dispatch_rejects_fast_model_and_propagated_tp(session_factory, tmp_path):
     from app.contexts.agent.nodes.dispatch import DispatchNode
 
     async with session_factory() as session:
         ctx, task, inp = await _seed(session, tmp_path, [
-            ("CWE-89", "A", "tp", 0.95, "high"),
-        ], is_web=False)
+            {"cwe": "CWE-79", "grade": "B", "verdict": "tp", "conf": 0.99,
+             "priority": "high", "source": "fast_model"},
+            {"cwe": "CWE-79", "grade": "B", "verdict": "tp", "conf": 0.9,
+             "priority": "high", "source": "propagated"},
+        ])
         with patch("app.core.config.get_settings", return_value=_settings()):
             out = await DispatchNode().execute(ctx, inp)
         assert out["has_lead"] is False
-        await session.refresh(task)
-        assert task.source_alert_group_id is None
+        assert out["queued_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_dispatch_zentaopms_fast_model_tp_not_all_enqueued(session_factory, tmp_path):
+    """禅道口径：不得把快审 tp 整包送终认。"""
+    from app.contexts.agent.nodes.dispatch import DispatchNode
+
+    specs = [
+        {"cwe": "CWE-79", "grade": "B", "verdict": "tp", "conf": 0.95,
+         "priority": "medium", "source": "fast_model", "file_path": f"www/js/jquery-{i}.js"}
+        for i in range(20)
+    ]
+    async with session_factory() as session:
+        ctx, task, inp = await _seed(session, tmp_path, specs)
+        with patch("app.core.config.get_settings", return_value=_settings()):
+            out = await DispatchNode().execute(ctx, inp)
+        assert out["has_lead"] is False
+        assert out["queued_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_dispatch_non_web_still_enqueues_qualified(session_factory, tmp_path):
+    from app.contexts.agent.lead_queue import set_redis_client
+    from app.contexts.agent.nodes.dispatch import DispatchNode
+
+    class _MemRedis:
+        def __init__(self):
+            self.lists: dict[str, list] = {}
+            self.sets: dict[str, set] = {}
+
+        async def lpush(self, key, *values):
+            self.lists.setdefault(key, [])
+            for v in reversed(values):
+                self.lists[key].insert(0, v)
+
+        async def sadd(self, key, *members):
+            self.sets.setdefault(key, set()).update(members)
+
+        async def llen(self, key):
+            return len(self.lists.get(key) or [])
+
+        async def lrange(self, key, start, end):
+            return list(self.lists.get(key) or [])
+
+        async def smembers(self, key):
+            return set(self.sets.get(key) or set())
+
+        async def scard(self, key):
+            return len(self.sets.get(key) or set())
+
+        async def delete(self, *keys):
+            pass
+
+        async def rpop(self, key):
+            return None
+
+        async def srem(self, key, *members):
+            pass
+
+    set_redis_client(_MemRedis())
+    try:
+        async with session_factory() as session:
+            ctx, task, inp = await _seed(session, tmp_path, [
+                ("CWE-89", "A", "tp", 0.95, "high"),
+            ], is_web=False)
+            with patch("app.core.config.get_settings", return_value=_settings()):
+                out = await DispatchNode().execute(ctx, inp)
+            assert out["has_lead"] is True
+    finally:
+        set_redis_client(None)
 
 
 @pytest.mark.asyncio
@@ -303,8 +444,7 @@ async def test_dispatch_no_candidates_still_completes(session_factory, tmp_path)
 
 @pytest.mark.asyncio
 async def test_reconcile_six_verdict_mapping(session_factory, tmp_path):
-    """六档映射：confirmed/partial→resolved(confirmed)；fp→resolved(fp)；
-    code_reachable/code_smell/not_reproduced→退回 needs_review。"""
+    """confirmed/partial→resolved(confirmed)；code_reachable 可见；fp 丢组。"""
     from app.contexts.finding.models import AlertGroup
     from app.contexts.finding.service import FindingService
 
@@ -322,30 +462,43 @@ async def test_reconcile_six_verdict_mapping(session_factory, tmp_path):
         for verdict, expect in [
             ("confirmed", ("resolved", "confirmed")),
             ("partial", ("resolved", "confirmed")),
-            ("false_positive", ("resolved", "false_positive")),
         ]:
             group.status = "dispatched"; group.resolution = None
             task.status, task.verdict = "completed", verdict
             await svc.reconcile_from_task(task)
             assert (group.status, group.resolution) == expect, verdict
 
-        for verdict in ("code_reachable", "code_smell", "not_reproduced"):
+        group.status = "dispatched"
+        group.resolution = None
+        task.status, task.verdict = "completed", "code_reachable"
+        await svc.reconcile_from_task(task)
+        assert (group.status, group.resolution) == ("resolved", "code_reachable")
+
+        for verdict in ("code_smell", "not_reproduced"):
             group.status = "dispatched"
+            group.resolution = None
             task.status, task.verdict = "completed", verdict
             await svc.reconcile_from_task(task)
             assert group.status == "needs_review", verdict
 
-        # 任务 needs_review 状态 → 组退回复核
         group.status = "dispatched"
         task.status, task.verdict = "needs_review", None
         await svc.reconcile_from_task(task)
         assert group.status == "needs_review"
 
-        # 幂等：重复回写 no-op
         task.status, task.verdict = "completed", "confirmed"
         group.status, group.resolution = "resolved", "confirmed"
         await svc.reconcile_from_task(task)
         assert (group.status, group.resolution) == ("resolved", "confirmed")
+
+        group.status = "dispatched"
+        group.resolution = None
+        task.status, task.verdict = "completed", "false_positive"
+        await svc.reconcile_from_task(task)
+        gone = (await session.execute(
+            select(AlertGroup).where(AlertGroup.id == group.id)
+        )).scalar_one_or_none()
+        assert gone is None
 
 
 @pytest.mark.asyncio

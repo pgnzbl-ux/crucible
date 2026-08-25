@@ -228,7 +228,7 @@ async def retry_task(
 ) -> dict:
     """重试任务。
 
-    默认从节点 0 整条重跑；带 from_node=env_ready|audit|reproduce|report 时，
+    默认从节点 0 整条重跑；带 from_node=triage|cluster|dispatch|scan_*|env_ready|audit|reproduce|report 时，
     复用上一 run 该节点之前的产出，只重跑该节点及之后（不重跑 clone/画像）。
     """
     try:

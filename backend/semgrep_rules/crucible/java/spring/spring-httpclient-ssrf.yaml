@@ -1,0 +1,63 @@
+rules:
+  - id: spring-httpclient-ssrf
+    languages:
+      - java
+    severity: ERROR
+    mode: taint
+    message: >-
+      Spring request input (@RequestParam / @PathVariable / @RequestBody) flows
+      into an HTTP client URL (RestTemplate, WebClient, OkHttp, java.net.http.HttpClient).
+      Validate against an allowlist of hosts/schemes before making server-side requests (SSRF).
+    metadata:
+      cwe:
+        - "CWE-918: Server-Side Request Forgery (SSRF)"
+      owasp:
+        - A10:2021 - Server-Side Request Forgery (SSRF)
+      category: security
+      technology:
+        - spring
+        - java
+      subcategory:
+        - vuln
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      crucible-overlay: true
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  $METHODNAME(..., @$REQ(...) $TYPE $SOURCE, ...) {
+                    ...
+                  }
+              - pattern-inside: |
+                  $METHODNAME(..., @$REQ $TYPE $SOURCE, ...) {
+                    ...
+                  }
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: (RequestBody|PathVariable|RequestParam)
+          - focus-metavariable: $SOURCE
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $RT.getForObject($URL, ...)
+              - pattern: $RT.exchange($URL, ...)
+              - pattern: $RT.getForEntity($URL, ...)
+              - pattern: $RT.postForObject($URL, ...)
+          - focus-metavariable: $URL
+      - patterns:
+          - pattern: $WC.uri($URL, ...)
+          - focus-metavariable: $URL
+      - patterns:
+          - pattern: $CLIENT.newCall($REQ)
+          - focus-metavariable: $REQ
+      - patterns:
+          - pattern: $B.url($URL)
+          - focus-metavariable: $URL
+      - patterns:
+          - pattern: $HC.send($REQ, ...)
+          - focus-metavariable: $REQ
+      - patterns:
+          - pattern: URI.create($URL)
+          - focus-metavariable: $URL

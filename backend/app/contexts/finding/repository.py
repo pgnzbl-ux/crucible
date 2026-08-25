@@ -1,7 +1,7 @@
 """finding context repository — 过滤查询。"""
 from __future__ import annotations
 
-from sqlalchemy import String, and_, func, not_, or_, select
+from sqlalchemy import String, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Select
 
@@ -127,33 +127,27 @@ class FindingRepository:
 
     @staticmethod
     def queue_scope_clause(scope: str):
-        """工作队列四分法：重点、需复核、初筛中、已降噪，互斥且覆盖全部。"""
-        resolution = func.coalesce(AlertGroup.resolution, "")
-        verdict = func.coalesce(AlertGroup.ai_verdict, "")
-        grade = func.coalesce(AlertGroup.clue_grade, "")
-        priority = func.coalesce(AlertGroup.priority, "")
-        noise = or_(
-            resolution.in_(("false_positive", "ignored")),
-            verdict == "fp",
-            and_(AlertGroup.status == "needs_review", grade == "F"),
-            and_(AlertGroup.status == "needs_review", priority == "low", verdict == ""),
+        """工作队列：验证中、已确认、代码可达；workbench 为其并集。"""
+        verifying = AlertGroup.status == "dispatched"
+        confirmed = and_(
+            AlertGroup.status == "resolved",
+            AlertGroup.resolution.in_(("confirmed", "partial")),
         )
-        processing = and_(not_(noise), AlertGroup.status.in_(("new", "clustered")))
-        review = and_(
-            not_(noise), not_(processing),
-            or_(verdict == "need_more_context", AlertGroup.status == "needs_review"),
+        reachable = and_(
+            AlertGroup.status == "resolved",
+            AlertGroup.resolution == "code_reachable",
         )
         clauses = {
-            "noise": noise,
-            "processing": processing,
-            "review": review,
-            "focus": not_(or_(noise, processing, review)),
+            "verifying": verifying,
+            "confirmed": confirmed,
+            "reachable": reachable,
+            "workbench": or_(verifying, confirmed, reachable),
         }
         return clauses[scope]
 
     async def group_queue_stats(self, owner_task_ids: list[str]) -> dict[str, int]:
         result: dict[str, int] = {}
-        for scope in ("focus", "review", "processing", "noise"):
+        for scope in ("workbench", "verifying", "confirmed", "reachable"):
             count = await self.session.scalar(
                 select(func.count(AlertGroup.id)).where(
                     AlertGroup.task_id.in_(owner_task_ids),

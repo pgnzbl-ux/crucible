@@ -1,0 +1,72 @@
+rules:
+  - id: php-process-cmdi
+    languages:
+      - php
+    severity: ERROR
+    mode: taint
+    message: >-
+      User-controlled data reaches a Symfony/Illuminate Process API
+      (new Process, fromShellCommandline, setCommandLine, Process::run).
+      This can lead to OS command injection (CWE-78). Prefer argument arrays
+      and escapeshellarg / explicit argv without a shell.
+    metadata:
+      cwe:
+        - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+      owasp:
+        - A01:2017 - Injection
+        - A03:2021 - Injection
+      category: security
+      technology:
+        - php
+        - symfony
+        - laravel
+      subcategory:
+        - vuln
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      crucible-overlay: true
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $REQ->query->get(...)
+          - pattern: $REQ->request->get(...)
+          - pattern: $REQ->get(...)
+    pattern-propagators:
+      - pattern: $TO = $FROM . $X
+        from: $FROM
+        to: $TO
+      - pattern: $TO = $X . $FROM
+        from: $FROM
+        to: $TO
+      - pattern: $TO .= $FROM
+        from: $FROM
+        to: $TO
+      - pattern: $TO = sprintf(..., $FROM, ...)
+        from: $FROM
+        to: $TO
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: escapeshellarg(...)
+          - pattern: escapeshellcmd(...)
+    pattern-sinks:
+      - pattern-either:
+          # String command form only — argv arrays are the safe API
+          - patterns:
+              - pattern: new Process($SINK, ...)
+              - pattern-not: new Process([...], ...)
+              - focus-metavariable: $SINK
+          - patterns:
+              - pattern: Process::fromShellCommandline($SINK, ...)
+              - focus-metavariable: $SINK
+          - patterns:
+              - pattern: $P->setCommandLine($SINK, ...)
+              - focus-metavariable: $SINK
+          - patterns:
+              - pattern: $FACADE::run($SINK, ...)
+              - metavariable-regex:
+                  metavariable: $FACADE
+                  regex: (?i).*Process$
+              - focus-metavariable: $SINK

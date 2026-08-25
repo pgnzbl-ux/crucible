@@ -597,6 +597,34 @@ def test_mock_report_needs_review_for_uncertain_audit():
     assert ok, err
 
 
+def test_validate_triage_rejects_fake_tp():
+    ok, err = validate_output("triage", {
+        "verdict": "tp", "confidence": 0.9, "why": ["x"],
+        "evidence": [{"file": "a.py", "lines": "1-1"}],
+        "attacker_controlled": True, "reaches_sink": True, "sanitizer": "effective",
+    })
+    assert not ok
+    assert "sanitizer" in (err or "")
+
+    ok2, _ = validate_output("triage", {
+        "verdict": "tp", "confidence": 0.9, "why": ["x"],
+        "evidence": [{"file": "a.py", "lines": "1-1"}],
+        "attacker_controlled": True, "reaches_sink": True, "sanitizer": "none",
+    })
+    assert ok2
+
+    ok3, err3 = validate_output("triage", {
+        "verdict": "tp", "confidence": 0.9, "why": ["x"], "evidence": [],
+        "attacker_controlled": True, "reaches_sink": True, "sanitizer": "none",
+    })
+    assert not ok3
+
+    ok4, _ = validate_output("triage", {
+        "verdict": "fp", "confidence": 0.9, "why": ["不是漏洞"],
+    })
+    assert ok4
+
+
 def test_validate_profile_requires_is_web():
     ok, err = validate_output("profile", {"language": "python"})
     assert not ok

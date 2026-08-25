@@ -42,14 +42,15 @@ export function auditResultLabel(status: string, verdict: string | null | undefi
 
 export function findingStatusLabel(status: string, resolution: string | null | undefined): string {
   if (resolution === 'confirmed') return '已确认漏洞'
-  if (resolution === 'false_positive') return '已排除误报'
+  if (resolution === 'code_reachable') return '代码可达'
+  if (resolution === 'false_positive') return '误报'
   if (resolution === 'ignored') return '已忽略'
   const labels: Record<string, string> = {
     new: '等待聚类',
     clustered: '等待 AI 研判',
     adjudicated: 'AI 研判完成',
     needs_review: '等待人工复核',
-    dispatched: '漏洞终认中',
+    dispatched: '验证中',
     resolved: '已处置',
   }
   return labels[status] ?? status
@@ -57,11 +58,11 @@ export function findingStatusLabel(status: string, resolution: string | null | u
 
 export function screeningStatusMeta(status: string): { label: string; color: string } {
   const meta: Record<string, { label: string; color: string }> = {
-    retained: { label: '重点', color: 'red' },
+    retained: { label: '线索', color: 'red' },
     confirmed: { label: '已确认', color: 'success' },
-    review: { label: '需复核', color: 'warning' },
-    processing: { label: '初筛中', color: 'processing' },
-    suppressed: { label: '已降噪', color: 'default' },
+    review: { label: '二审未决', color: 'warning' },
+    processing: { label: '研判中', color: 'processing' },
+    suppressed: { label: '误报', color: 'default' },
   }
   return meta[status] ?? { label: '待判断', color: 'default' }
 }

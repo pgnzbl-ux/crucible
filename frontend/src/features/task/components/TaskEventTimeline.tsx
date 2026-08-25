@@ -489,6 +489,10 @@ function renderBody(ev: AgentEvent, p: Record<string, unknown>) {
   }
 
   if (ev.event_type === 'triage.progress') {
+    const message = asText(p.message)
+    if (message) {
+      return <Text>{message}{asText(p.reason) === 'budget' && !message.includes('预算') ? '（预算中断）' : ''}</Text>
+    }
     const done = asText(p.adjudicated)
     const pending = asText(p.pending)
     const reason = asText(p.reason)

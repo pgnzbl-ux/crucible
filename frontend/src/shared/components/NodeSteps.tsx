@@ -15,7 +15,7 @@ import {
 import { useQuery } from '@tanstack/react-query'
 import { api, type NodeRun } from '../lib/api'
 import type { SSEEvent, SSEStatus } from '../hooks/useTaskEvents'
-import { NODE_LABELS, PIPELINE_NODE_ORDER, VERIFY_MODE_SKIPPED_KEYS } from '../lib/meta'
+import { NODE_LABELS, PIPELINE_NODE_ORDER, VERIFY_MODE_SKIPPED_KEYS, formatTokenCount, isAiNode, mergeTokenUsage } from '../lib/meta'
 import {
   applyNodeOverlay,
   displayNodeStatus,
@@ -196,6 +196,8 @@ export function NodeSteps({
   const mode: PipelineMode = taskType === 'discovery' ? 'discovery' : 'verify'
   const dispatchNode = ordered.find((n) => n.node_key === 'dispatch')
   const reportNode = ordered.find((n) => n.node_key === 'report')
+  const auditNode = ordered.find((n) => n.node_key === 'audit')
+  const reproduceNode = ordered.find((n) => n.node_key === 'reproduce')
   const progressOrdered: NodeRun[] = mode === 'discovery'
     ? ordered
         .filter((n) => !DISCOVERY_REPLACED_NODE_KEYS.has(n.node_key))
@@ -210,6 +212,8 @@ export function NodeSteps({
               started_at: null,
               finished_at: null,
               output: { queued_count: dispatchNode?.output?.queued_count },
+              // discovery 隐藏 audit/reproduce：用量合到合成终认节点
+              usage: mergeTokenUsage(auditNode?.usage, reproduceNode?.usage),
             }, n]
           : [n])
     : ordered
@@ -233,6 +237,7 @@ export function NodeSteps({
         status: presentationStatus(n, taskStatus),
         error_message: n.error_message,
         output: n.output,
+        usage: n.usage ?? null,
         selectable: !!onSelectNode && isNodeSelectable(n.status),
         selected: selectedNode === n.node_key,
       }))
@@ -247,6 +252,7 @@ export function NodeSteps({
       status: overStatus,
       error_message: null,
       output: {},
+      usage: null,
       selectable: false,
       selected: false,
     })
@@ -362,9 +368,27 @@ export function NodeSteps({
                       {stage ? `阶段 ${String(stageIndex + 1).padStart(2, '0')} · ${stage.label}` : '内部跳过链'}
                       {parallel ? <em>并行</em> : null}
                     </span>
-                    <strong>{NODE_LABELS[n.node_key] ?? n.node_key}</strong>
+                    <strong>
+                      {NODE_LABELS[n.node_key] ?? n.node_key}
+                      {isAiNode(n.node_key) ? (
+                        <span className="crucible-node-list__ai" title="AI 节点">AI</span>
+                      ) : null}
+                    </strong>
                   </div>
                   <div className="crucible-node-list__meta">
+                    {n.usage && n.usage.total_tokens > 0 ? (
+                      <span
+                        className="crucible-node-list__tokens"
+                        title={[
+                          `prompt ${n.usage.prompt_tokens}`,
+                          `completion ${n.usage.completion_tokens}`,
+                          `cache_read ${n.usage.cache_read_input_tokens}`,
+                          `cache_creation ${n.usage.cache_creation_input_tokens}`,
+                        ].join(' · ')}
+                      >
+                        {formatTokenCount(n.usage.total_tokens)} tok
+                      </span>
+                    ) : null}
                     {n.attempt > 1 ? <span>第 {n.attempt} 次</span> : null}
                     <span className={`crucible-node-list__status is-${visual}`}>{DAG_STATUS_TEXT[visual]}</span>
                   </div>

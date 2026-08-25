@@ -18,7 +18,7 @@ class TaskDispatchError(RuntimeError):
     """任务已落库，但无法投递给 Agent worker。"""
 
 
-# 节点顺序 → 索引(从 registry 派生，discovery-spec §4.2.4 后 DEFAULT_PIPELINE 是 12 节点)。
+# 节点顺序 → 索引(从 registry 派生，discovery-spec §4.2.4 后 DEFAULT_PIPELINE 是 13 节点)。
 # 单节点重试不允许从 source/profile 起步——它们便宜且确定性，想重跑直接整轮 retry(from_node=None)。
 from app.contexts.agent.contracts import DEFAULT_PIPELINE as _PIPELINE
 from app.contexts.agent.contracts import SkipWhen as _SkipWhen
@@ -59,8 +59,8 @@ def _parse_node_output(raw: str | None) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _serialize_node_run(nr: Any) -> dict[str, Any]:
-    return {
+def _serialize_node_run(nr: Any, usage: dict[str, int] | None = None) -> dict[str, Any]:
+    out = {
         "id": nr.id,
         "node_index": nr.node_index,
         "node_key": nr.node_key,
@@ -71,6 +71,9 @@ def _serialize_node_run(nr: Any) -> dict[str, Any]:
         "finished_at": iso_utc(nr.finished_at),
         "output": _parse_node_output(nr.output_json),
     }
+    if usage:
+        out["usage"] = usage
+    return out
 
 
 class TaskService:
@@ -411,8 +414,9 @@ class TaskService:
         """重试任务:新建 TaskRun，返回新 run_id。
 
         from_node 为空:从节点 0（源码获取）整条重跑，不拷贝上一 run 的 NodeRun。
-        from_node 指定(env_ready/audit/reproduce/report):把上一 run 里该节点**之前**的
-        completed/skipped NodeRun 原样拷进新 run，编排器据此断点续跑，只重跑该节点及之后。
+        from_node 指定(除 source/profile 外的管线节点，含 triage/cluster/dispatch/scan_*):
+        把上一 run 里该节点**之前**的 completed/skipped NodeRun 原样拷进新 run，
+        编排器据此断点续跑，只重跑该节点及之后。
         上一 run 的节点/事件保留作历史；工作区是否重置由 worker 按新 run 是否已有 completed 节点决定。
         """
         task = await self.repo.get_by_id_with_runs(task_id, owner_id)
@@ -595,7 +599,8 @@ class TaskService:
     async def get_run_nodes(
         self, task_id: str, run_id: str, owner_id: str
     ) -> list[dict] | None:
-        """获取某 run 的 6 节点状态(前端步骤条数据源)。"""
+        """获取某 run 的节点状态(前端步骤条数据源)；附带按节点聚合的 usage。"""
+        from app.contexts.agent.usage_ledger import run_nodes_usage_map
         from app.contexts.task.models import NodeRun
         from sqlalchemy import select as sa_select
 
@@ -606,7 +611,13 @@ class TaskService:
             .where(NodeRun.run_id == run_id, NodeRun.task_id == task_id)
             .order_by(NodeRun.node_index)
         )
-        return [_serialize_node_run(nr) for nr in result.scalars().all()]
+        usage_map = await run_nodes_usage_map(
+            self.repo.session, task_id=task_id, run_id=run_id,
+        )
+        return [
+            _serialize_node_run(nr, usage_map.get(nr.node_key))
+            for nr in result.scalars().all()
+        ]
 
     async def record_node_run_failure(
         self,

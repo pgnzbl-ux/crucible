@@ -45,7 +45,7 @@ async def _seed_task_run(session, is_web=True, status="running"):
 def _legacy_order(orch):
     """旧六节点顺序的执行器引用(source/profile/env_ready/audit/reproduce/report)。
 
-    DEFAULT_PIPELINE 扩为 12 节点后(discovery-spec §4.2.4)，测试统一按键取执行器，
+    DEFAULT_PIPELINE 扩为 13 节点后(discovery-spec §4.2.4)，测试统一按键取执行器，
     位置索引不再稳定。
     """
     keys = ("source", "profile", "env_ready", "audit", "reproduce", "report")
@@ -106,7 +106,7 @@ async def test_non_web_keeps_whitebox_audit_and_report(session_factory):
         assert by_key["report"] == "completed"
         for key in (
             "scan_gitleaks", "scan_osv", "scan_semgrep", "env_ready",
-            "cluster", "triage", "dispatch", "reproduce",
+            "cluster", "screen", "triage", "dispatch", "reproduce",
         ):
             assert by_key[key] == "skipped"
 
@@ -643,7 +643,7 @@ async def test_resume_reuses_audit_gate_fail_skips_reproduce(session_factory):
             status="completed", output_json='{"target_url": "http://localhost:5000", "compose_path": "x.yml"}',
         ))
         session.add(NodeRun(
-            run_id=run.id, task_id=task.id, node_index=9, node_key="audit",
+            run_id=run.id, task_id=task.id, node_index=10, node_key="audit",
             status="completed", output_json='{"gate_verdict": "fail", "gate_reason": "链路不通"}',
         ))
         await session.flush()
@@ -656,7 +656,9 @@ async def test_resume_reuses_audit_gate_fail_skips_reproduce(session_factory):
              patch.object(real_nodes[5], "execute", fake_report):
             result = await orch.run_orchestration(
                 task_id=task.id, run_id=run.id, session=session,
-                host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
+                host_workdir="/tmp/crucible-orch-resume-absent",
+                source_path="/tmp/crucible-orch-resume-absent",
+                runner_env={},
             )
 
         assert result["status"] == "completed"
@@ -874,7 +876,7 @@ async def test_resume_reuses_audit_uncertain_skips_reproduce_but_runs_report(ses
             output_json='{"target_url": "http://localhost:5000", "compose_path": "x.yml"}',
         ))
         session.add(NodeRun(
-            run_id=run.id, task_id=task.id, node_index=9, node_key="audit",
+            run_id=run.id, task_id=task.id, node_index=10, node_key="audit",
             status="completed",
             output_json='{"gate_verdict": "uncertain", "gate_reason": "对不上"}',
         ))
@@ -892,7 +894,9 @@ async def test_resume_reuses_audit_uncertain_skips_reproduce_but_runs_report(ses
              patch.object(real_nodes[5], "execute", fake_report):
             result = await orch.run_orchestration(
                 task_id=task.id, run_id=run.id, session=session,
-                host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
+                host_workdir="/tmp/crucible-orch-resume-absent",
+                source_path="/tmp/crucible-orch-resume-absent",
+                runner_env={},
             )
 
         assert result["status"] == "needs_review"

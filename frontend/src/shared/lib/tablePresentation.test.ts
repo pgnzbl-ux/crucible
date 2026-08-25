@@ -29,8 +29,9 @@ describe('table presentation', () => {
 
   it('merges workflow status and resolution', () => {
     expect(findingStatusLabel('resolved', 'confirmed')).toBe('已确认漏洞')
-    expect(findingStatusLabel('resolved', 'false_positive')).toBe('已排除误报')
-    expect(findingStatusLabel('dispatched', null)).toBe('漏洞终认中')
+    expect(findingStatusLabel('resolved', 'false_positive')).toBe('误报')
+    expect(findingStatusLabel('resolved', 'code_reachable')).toBe('代码可达')
+    expect(findingStatusLabel('dispatched', null)).toBe('验证中')
   })
 
   it('labels report kinds and file sizes', () => {
@@ -40,8 +41,8 @@ describe('table presentation', () => {
   })
 
   it('turns screening states into an actionable visual hierarchy', () => {
-    expect(screeningStatusMeta('retained')).toEqual({ label: '重点', color: 'red' })
-    expect(screeningStatusMeta('suppressed')).toEqual({ label: '已降噪', color: 'default' })
-    expect(screeningStatusMeta('processing')).toEqual({ label: '初筛中', color: 'processing' })
+    expect(screeningStatusMeta('retained')).toEqual({ label: '线索', color: 'red' })
+    expect(screeningStatusMeta('suppressed')).toEqual({ label: '误报', color: 'default' })
+    expect(screeningStatusMeta('processing')).toEqual({ label: '研判中', color: 'processing' })
   })
 })

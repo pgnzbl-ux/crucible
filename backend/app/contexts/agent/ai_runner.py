@@ -93,7 +93,9 @@ NODE_OUTPUT_SCHEMAS: dict[str, dict] = {
     },
     "triage": {
         "required": ["verdict", "confidence", "why"],
-        "optional": ["evidence", "need"],
+        "optional": [
+            "evidence", "need", "attacker_controlled", "reaches_sink", "sanitizer",
+        ],
     },
 }
 
@@ -198,6 +200,9 @@ def _mock_output(node_key: str, input_json: dict[str, Any]) -> dict[str, Any]:
             "why": ["[Mock] llm_gateway 已退役；SDK 未启用时的固定二审"],
             "evidence": [{"file": "app.py", "lines": "1-1"}],
             "need": [],
+            "attacker_controlled": True,
+            "reaches_sink": True,
+            "sanitizer": "none",
         }
     return {}
 
@@ -566,6 +571,28 @@ def validate_initial_creds(value: Any) -> tuple[bool, str | None]:
     return False, "initial_creds 必须明确提供账密、auth_required=false 或非空 note"
 
 
+def _validate_triage_output(output: dict) -> tuple[bool, str | None]:
+    """T3 二审形状：why 必填；可疑真洞还要证据与合格门字段（Agent 输出不可信）。"""
+    verdict = output.get("verdict")
+    if verdict not in ("tp", "fp", "need_more_context"):
+        return False, "verdict 必须是 tp|fp|need_more_context"
+    why = output.get("why")
+    if not isinstance(why, list) or not any(isinstance(x, str) and x.strip() for x in why):
+        return False, "why 必须为非空字符串数组"
+    if verdict != "tp":
+        return True, None
+    evidence = output.get("evidence")
+    if not isinstance(evidence, list) or len(evidence) < 1:
+        return False, "可疑真洞必须提供非空 evidence"
+    if output.get("attacker_controlled") is not True:
+        return False, "可疑真洞必须 attacker_controlled=true"
+    if output.get("reaches_sink") is not True:
+        return False, "可疑真洞必须 reaches_sink=true"
+    if output.get("sanitizer") not in ("none", "bypassable"):
+        return False, "可疑真洞的 sanitizer 必须是 none 或 bypassable"
+    return True, None
+
+
 def validate_output(
     node_key: str,
     output: dict,
@@ -587,6 +614,8 @@ def validate_output(
         return _validate_reproduce_output(output, host_workdir=host_workdir)
     if node_key == "report":
         return _validate_report_output(output)
+    if node_key == "triage":
+        return _validate_triage_output(output)
     return True, None
 
 
@@ -710,6 +739,7 @@ async def _run_one_container_unthrottled(
             if meta_out is not None:
                 fresh_meta = json.loads(node_meta_path.read_text(encoding="utf-8"))
                 prev_usage = meta_out.get("usage")
+                prev_mu = meta_out.get("model_usage")
                 meta_out.clear()
                 meta_out.update(fresh_meta)
                 if (
@@ -717,11 +747,12 @@ async def _run_one_container_unthrottled(
                     and isinstance(fresh_meta.get("usage"), dict)
                 ):
                     # 形状回喂重试时 meta 每轮整体覆盖：usage 必须跨轮累加，
-                    # 否则台账只记最后一轮、预算会系统性晚停
+                    # 否则台账只记最后一轮、预算会系统性晚停。
+                    # cache_* 同为 SDK/API 回传字段，禁止自算，只做各轮相加。
                     def _u(d: dict, *keys: str) -> int:
                         for k in keys:
                             v = d.get(k)
-                            if v:
+                            if isinstance(v, (int, float)) and not isinstance(v, bool):
                                 return int(v)
                         return 0
 
@@ -730,7 +761,28 @@ async def _run_one_container_unthrottled(
                         + _u(fresh_meta["usage"], "prompt_tokens", "input_tokens"),
                         "completion_tokens": _u(prev_usage, "completion_tokens", "output_tokens")
                         + _u(fresh_meta["usage"], "completion_tokens", "output_tokens"),
+                        "cache_read_input_tokens": _u(
+                            prev_usage, "cache_read_input_tokens",
+                        )
+                        + _u(fresh_meta["usage"], "cache_read_input_tokens"),
+                        "cache_creation_input_tokens": _u(
+                            prev_usage, "cache_creation_input_tokens",
+                        )
+                        + _u(fresh_meta["usage"], "cache_creation_input_tokens"),
                     }
+                fresh_mu = fresh_meta.get("model_usage")
+                if prev_mu is not None and fresh_mu is not None:
+                    # 多轮各保留一份；台账侧 normalize 时对整份求和。
+                    merged: list = []
+                    if isinstance(prev_mu, list):
+                        merged.extend(prev_mu)
+                    else:
+                        merged.append(prev_mu)
+                    if isinstance(fresh_mu, list):
+                        merged.extend(fresh_mu)
+                    else:
+                        merged.append(fresh_mu)
+                    meta_out["model_usage"] = merged
         except (json.JSONDecodeError, OSError):
             pass
         try:

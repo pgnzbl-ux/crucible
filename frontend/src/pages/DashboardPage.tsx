@@ -55,10 +55,10 @@ export function DashboardPage() {
   const tasks = data?.items ?? []
   const cards = [
     { key: 'running', title: '进行中的审计', value: sumTaskStats(stats?.by_status ?? {}, 'pending,queued,running'), icon: <ThunderboltOutlined />, tone: 'primary' as const, href: '/tasks?status=pending%2Cqueued%2Crunning' },
-    { key: 'review', title: '待人工复核', value: findingStats?.by_queue.review ?? 0, icon: <ClockCircleOutlined />, tone: 'warning' as const, href: '/findings?scope=review' },
-    { key: 'confirming', title: '终认中', value: findingStats?.by_status.dispatched ?? 0, icon: <BugOutlined />, tone: 'warning' as const, href: '/findings?status=dispatched' },
-    { key: 'confirmed', title: '已确认漏洞', value: findingStats?.by_resolution.confirmed ?? 0, icon: <CheckCircleOutlined />, tone: 'success' as const, href: '/findings?resolution=confirmed' },
-    { key: 'findings', title: '漏洞线索', value: findingStats?.total ?? 0, icon: <BugOutlined />, tone: 'default' as const, href: '/findings?scope=all' },
+    { key: 'review', title: '验证中', value: findingStats?.by_queue.verifying ?? 0, icon: <ClockCircleOutlined />, tone: 'warning' as const, href: '/findings?scope=verifying' },
+    { key: 'confirming', title: '已确认', value: findingStats?.by_queue.confirmed ?? 0, icon: <CheckCircleOutlined />, tone: 'success' as const, href: '/findings?scope=confirmed' },
+    { key: 'confirmed', title: '代码可达', value: findingStats?.by_queue.reachable ?? 0, icon: <BugOutlined />, tone: 'warning' as const, href: '/findings?scope=reachable' },
+    { key: 'findings', title: '漏洞线索', value: findingStats?.by_queue.workbench ?? 0, icon: <BugOutlined />, tone: 'default' as const, href: '/findings' },
     { key: 'total', title: '审计运行', value: stats?.total ?? 0, icon: <FileProtectOutlined />, tone: 'default' as const, href: '/tasks' },
   ]
 

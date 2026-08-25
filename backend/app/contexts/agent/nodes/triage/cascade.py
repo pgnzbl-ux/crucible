@@ -93,6 +93,8 @@ async def _apply(
     adjudication: Adjudication,
     *,
     source: str,
+    run_id: str | None = None,
+    on_event=None,
 ) -> None:
     adjudication.alert_group_id = group.id
     group.verdict_source = source
@@ -103,10 +105,11 @@ async def _apply(
         await record_usage(
             svc.session,
             task_id=group.task_id,
-            run_id=None,
-            node_key="triage",
+            run_id=run_id,
+            node_key="screen",
             usage=adjudication.usage or {},
             source="fast_model",
+            on_event=on_event,
         )
     await svc.record_adjudication(group=group, adjudication=adjudication)
 
@@ -447,7 +450,7 @@ async def fast_screen(
     emit_phase(
         ctx,
         f"快审启动：{total} 组送 screening 模型（并发 {FAST_CONCURRENCY}）",
-        phase="triage",
+        phase="screen",
     )
 
     def _note_progress(outcome: tuple | None) -> None:
@@ -461,8 +464,8 @@ async def fast_screen(
         if state["done"] % FAST_PROGRESS_EVERY == 0 or state["done"] == total:
             emit_phase(
                 ctx,
-                f"快审 {state['done']}/{total}（tp {state['tp']} · fp {state['fp']} · 升级 {state['escalated']}）",
-                phase="triage",
+                f"快审 {state['done']}/{total}（可疑真洞 {state['tp']} · 误报 {state['fp']} · 升级 {state['escalated']}）",
+                phase="screen",
             )
             if ctx.on_event:
                 ctx.on_event(
@@ -478,6 +481,7 @@ async def fast_screen(
                             "propagated": 0,
                         },
                         "stage": "fast_screen",
+                        "node_key": "screen",
                     }
                 )
 
@@ -498,7 +502,7 @@ async def fast_screen(
                 from app.core.agent_runner import AgentRunnerError
 
                 if is_llm_api_failure(str(e)):
-                    raise AgentRunnerError(f"AI 节点 triage LLM 调用失败: {e}") from e
+                    raise AgentRunnerError(f"AI 节点 screen LLM 调用失败: {e}") from e
                 logger.info("快审失败升级 agent: %s %s", group.group_key, e)
                 _note_progress(None)
                 return group, None
@@ -510,7 +514,7 @@ async def fast_screen(
             except (TypeError, ValueError):
                 confidence = 0.0
             outcome = (verdict, confidence, parsed, result)
-            _note_progress(outcome if verdict in ("tp", "fp") else None)
+            _note_progress(outcome if verdict == "fp" else None)
             return group, outcome
 
     # 快审也烧 token（本层 ~1.2k/条 × 数百条）：预算耗尽整层跳过、
@@ -522,7 +526,7 @@ async def fast_screen(
         emit_phase(
             ctx,
             f"token 预算耗尽（{spent}/{budget}），快审跳过，全部升级 agent 审议",
-            phase="triage",
+            phase="screen",
         )
         return groups, 0
 
@@ -535,7 +539,7 @@ async def fast_screen(
             emit_phase(
                 ctx,
                 f"token 预算耗尽（{spent}/{budget}），快审中止于 {len(results)}/{len(prepared)}，其余升级 agent 审议",
-                phase="triage",
+                phase="screen",
             )
             break
     by_id = {g.id: outcome for g, outcome in results}
@@ -547,7 +551,7 @@ async def fast_screen(
             escalated.append(group)
             continue
         verdict, confidence, parsed, result = outcome
-        if verdict in ("tp", "fp") and confidence >= threshold:
+        if verdict == "fp" and confidence >= threshold:
             await _apply(
                 svc,
                 group,
@@ -560,6 +564,8 @@ async def fast_screen(
                     usage=result.usage,
                 ),
                 source="fast_model",
+                run_id=getattr(ctx, "run_id", None),
+                on_event=getattr(ctx, "on_event", None),
             )
             decided += 1
         else:

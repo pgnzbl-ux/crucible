@@ -17,7 +17,8 @@ export const PIPELINE_REQUIRES: Record<string, readonly string[]> = {
   scan_semgrep: ['source', 'profile'],
   env_ready: ['source', 'profile'],
   cluster: ['scan_semgrep', 'scan_gitleaks', 'scan_osv'],
-  triage: ['cluster'],
+  screen: ['cluster'],
+  triage: ['screen'],
   dispatch: ['triage'],
   audit: ['source', 'profile', 'dispatch'],
   reproduce: ['source', 'env_ready', 'audit'],
@@ -98,7 +99,7 @@ export function pipelineOverviewStages(mode: PipelineMode): PipelineOverviewStag
         nodeKeys: ['scan_semgrep', 'env_ready'],
         parallel: true,
       },
-      { key: 'review', label: '发现复核', caption: '归并与 AI 二审', nodeKeys: ['cluster', 'triage'] },
+      { key: 'review', label: '发现复核', caption: '归并 · 轻量快审 · AI 二审', nodeKeys: ['cluster', 'screen', 'triage'] },
       { key: 'dispatch', label: '线索调度', caption: '进入终认队列', nodeKeys: ['dispatch'] },
       { key: 'verify', label: '多线索终认', caption: '白盒 + 可选复现', nodeKeys: ['lead_verify'] },
       { key: 'report', label: '审计报告', caption: '聚合最终结果', nodeKeys: ['report'] },
@@ -175,7 +176,7 @@ export function flowColumn(key: string, _mode: PipelineMode): number {
   if (key === 'profile' || key === 'scan_gitleaks' || key === 'scan_osv') return 1
   if (key === 'scan_semgrep' || key === 'env_ready') return 2
   if (key === 'cluster') return 3
-  if (key === 'triage') return 4
+  if (key === 'screen' || key === 'triage') return 4
   if (key === 'dispatch') return 5
   if (key === 'audit' || key === 'lead_verify') return 6
   if (key === 'reproduce') return 7
@@ -244,11 +245,11 @@ export function flowEdges(
   add(edges, 'scan_gitleaks', 'cluster')
 
   if (mode === 'discovery') {
-    addChain(edges, vis, ['cluster', 'triage', 'dispatch', 'lead_verify', 'report'])
+    addChain(edges, vis, ['cluster', 'screen', 'triage', 'dispatch', 'lead_verify', 'report'])
     add(edges, 'env_ready', 'lead_verify', 'support', 'Web 靶场')
   } else {
     if (vis.has('dispatch')) {
-      addChain(edges, vis, ['cluster', 'triage', 'dispatch', 'audit'])
+      addChain(edges, vis, ['cluster', 'screen', 'triage', 'dispatch', 'audit'])
       // 当前波次调度会等 env_ready 所在波收敛后才处理 skip 链并进入 audit。
       add(edges, 'env_ready', 'audit', 'support', '环境分支收敛')
     } else if (vis.has('env_ready')) {

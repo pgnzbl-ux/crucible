@@ -41,7 +41,7 @@ alembic upgrade head
 | 变量 | 含义 |
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL：`postgresql+asyncpg://crucible:crucible_secret@localhost:5433/crucible` |
-| `REDIS_URL` / `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` | Redis `6380`，db0 事件 / db1 broker / db2 result |
+| `REDIS_URL` / `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` / `REDIS_CLUE_URL` | Redis `6380`，db0 事件/槽位 / db1 broker / db2 result / db3 合格线索+终认队 |
 | `S3_ENDPOINT` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` | MinIO；桶名写在 `app/shared/object_store.py` |
 | `CLAUDE_AGENT_SDK_ENABLED` | `true` 走真实 Agent，`false` 走 Mock |
 | `AUTH_SECRET` | JWT；生产环境必填 |

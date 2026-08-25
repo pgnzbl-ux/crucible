@@ -28,6 +28,19 @@ export const CONCLUSION_META: Record<string, { label: string; color: TagProps['c
   failed: { label: '分析失败', color: 'default' },
 }
 
+// 二审内部码 → 对用户文案（禁止把 tp/fp 当标签原文）
+export const AI_VERDICT_META: Record<string, { label: string; color: TagProps['color'] }> = {
+  tp: { label: '可疑真洞', color: 'red' },
+  fp: { label: '误报', color: 'default' },
+  need_more_context: { label: '二审未决', color: 'orange' },
+  bypass: { label: '依赖情报', color: 'blue' },
+}
+
+export function getAiVerdictMeta(verdict: string | null | undefined): { label: string; color: TagProps['color'] } {
+  if (!verdict) return { label: '尚未研判', color: 'default' }
+  return AI_VERDICT_META[verdict] ?? { label: '未知结论', color: 'default' }
+}
+
 // 判定(verdict,对齐 docs/discovery-spec.md §12)。needs_review 是 audit uncertain 的验证记录判定。
 export const VERDICT_META: Record<string, { label: string; color: TagProps['color'] }> = {
   confirmed: { label: '已确认', color: 'red' },
@@ -62,6 +75,7 @@ export const NODE_LABELS: Record<string, string> = {
   scan_semgrep: '扫描·SAST',
   env_ready: '靶场就绪',
   cluster: '聚类分组',
+  screen: '轻量快审',
   triage: 'AI 二审',
   dispatch: '线索调度',
   audit: '白盒审计',
@@ -71,7 +85,7 @@ export const NODE_LABELS: Record<string, string> = {
   over: '结束',
 }
 
-// 12 节点拓扑顺序(discovery-spec §4.2.4)；后端按 node_index 返回
+// 13 节点拓扑顺序(discovery-spec §4.2.4)；后端按 node_index 返回
 export const PIPELINE_NODE_ORDER: string[] = [
   'source',
   'profile',
@@ -80,6 +94,7 @@ export const PIPELINE_NODE_ORDER: string[] = [
   'scan_semgrep',
   'env_ready',
   'cluster',
+  'screen',
   'triage',
   'dispatch',
   'audit',
@@ -87,12 +102,74 @@ export const PIPELINE_NODE_ORDER: string[] = [
   'report',
 ]
 
+/** 调用过模型的节点（Agent 容器或快模型网关）；DAG 右上角 AI 角标。
+ * lead_verify：discovery UI 合成节点，承接被隐藏的 audit + reproduce。 */
+export const AI_NODE_KEYS = new Set([
+  'profile',
+  'env_ready',
+  'screen',
+  'triage',
+  'audit',
+  'reproduce',
+  'report',
+  'lead_verify',
+])
+
+export function isAiNode(nodeKey: string): boolean {
+  return AI_NODE_KEYS.has(nodeKey)
+}
+
+export type TokenUsageParts = {
+  prompt_tokens: number
+  completion_tokens: number
+  cache_read_input_tokens: number
+  cache_creation_input_tokens: number
+  total_tokens: number
+}
+
+/** 合并多段台账用量（如 discovery 下 audit+reproduce → lead_verify）。 */
+export function mergeTokenUsage(
+  ...parts: Array<TokenUsageParts | null | undefined>
+): TokenUsageParts | undefined {
+  const list = parts.filter((p): p is TokenUsageParts => Boolean(p))
+  if (list.length === 0) return undefined
+  const sum = {
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+  }
+  for (const u of list) {
+    sum.prompt_tokens += u.prompt_tokens || 0
+    sum.completion_tokens += u.completion_tokens || 0
+    sum.cache_read_input_tokens += u.cache_read_input_tokens || 0
+    sum.cache_creation_input_tokens += u.cache_creation_input_tokens || 0
+  }
+  return {
+    ...sum,
+    total_tokens:
+      sum.prompt_tokens
+      + sum.completion_tokens
+      + sum.cache_read_input_tokens
+      + sum.cache_creation_input_tokens,
+  }
+}
+
+/** 紧凑展示 token 数（DAG 角标旁） */
+export function formatTokenCount(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0'
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return String(Math.round(n))
+}
+
 // 验证任务会被 VERIFY_MODE 跳过的发现侧节点：步骤条默认隐藏(discovery-spec §9.2)
 export const VERIFY_MODE_SKIPPED_KEYS = new Set([
   'scan_gitleaks',
   'scan_osv',
   'scan_semgrep',
   'cluster',
+  'screen',
   'triage',
   'dispatch',
 ])
@@ -117,6 +194,7 @@ export const EVENT_PHASE_LABELS: Record<string, string> = {
   scan_semgrep: '扫描·SAST',
   env_ready: '靶场构建',
   cluster: '聚类分组',
+  screen: '轻量快审',
   triage: 'AI 二审',
   dispatch: '线索调度',
   audit: '白盒审计',

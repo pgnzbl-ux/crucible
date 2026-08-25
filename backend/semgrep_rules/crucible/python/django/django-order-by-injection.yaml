@@ -1,0 +1,51 @@
+rules:
+  - id: django-order-by-injection
+    languages:
+      - python
+    severity: ERROR
+    mode: taint
+    message: >-
+      Django request.GET/POST flows into QuerySet.order_by or extra(order_by=...).
+      User-controlled order fields enable SQL injection via column names.
+      Use a fixed literal or an allowlist of field names.
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp:
+        - A01:2017 - Injection
+        - A03:2021 - Injection
+      category: security
+      technology:
+        - django
+        - python
+      subcategory:
+        - vuln
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      crucible-overlay: true
+    pattern-sources:
+      - pattern-either:
+          - pattern: request.GET
+          - pattern: request.POST
+    pattern-sinks:
+      - pattern-either:
+          - patterns:
+              - pattern: $QS.order_by($COL, ...)
+              - focus-metavariable: $COL
+          - patterns:
+              - pattern: $QS.extra(..., order_by=$COL, ...)
+              - focus-metavariable: $COL
+          - patterns:
+              - pattern: $QS.extra(..., order_by=[$COL, ...], ...)
+              - focus-metavariable: $COL
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: int(...)
+          - patterns:
+              - pattern-inside: |
+                  $W = {...}
+                  ...
+              - pattern-either:
+                  - pattern: $W[$KEY]
+                  - pattern: $W.get($KEY, ...)

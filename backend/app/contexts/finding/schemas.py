@@ -61,14 +61,16 @@ class AlertGroupListRequest(BaseModel):
     task_id: str | None = None
     status: str | None = None
     resolution: str | None = Field(
-        None, pattern=r"^(confirmed|false_positive|ignored)$",
+        None, pattern=r"^(confirmed|partial|code_reachable|false_positive|ignored)$",
         description="结案结果细分；与 status=resolved 配合或单独使用",
     )
     cwe: str | None = None
     ai_verdict: str | None = None
     engine: str | None = None
     clue_grade: str | None = None
-    scope: str | None = Field(None, pattern=r"^(focus|review|processing|noise|all)$")
+    scope: str | None = Field(
+        None, pattern=r"^(workbench|verifying|confirmed|reachable|all)$",
+    )
     q: str | None = Field(None, max_length=200, description="模糊搜索：CWE/路径/函数/项目/任务ID")
     limit: int = Field(50, ge=1, le=200)
     offset: int = Field(0, ge=0)
@@ -78,12 +80,16 @@ class AlertGroupIdsRequest(BaseModel):
     """跨页全选：与列表相同的筛选，不分页。"""
     task_id: str | None = None
     status: str | None = None
-    resolution: str | None = Field(None, pattern=r"^(confirmed|false_positive|ignored)$")
+    resolution: str | None = Field(
+        None, pattern=r"^(confirmed|partial|code_reachable|false_positive|ignored)$",
+    )
     cwe: str | None = None
     ai_verdict: str | None = None
     engine: str | None = None
     clue_grade: str | None = None
-    scope: str | None = Field(None, pattern=r"^(focus|review|processing|noise|all)$")
+    scope: str | None = Field(
+        None, pattern=r"^(workbench|verifying|confirmed|reachable|all)$",
+    )
     q: str | None = Field(None, max_length=200)
 
 

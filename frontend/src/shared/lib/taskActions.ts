@@ -2,7 +2,19 @@ export const ACTIVE_STATUSES = ['pending', 'queued', 'running'] as const
 export const RETRY_STATUSES = ['failed', 'cancelled', 'completed', 'needs_review'] as const
 export const BLOCK_DELETE_STATUSES = ['running', 'pending', 'queued', 'archived'] as const
 /** 单节点重试允许的起点（与后端 _RETRYABLE_FROM_NODES 对齐）。source/profile 走整条重试。 */
-export const RETRYABLE_FROM_NODES = ['env_ready', 'audit', 'reproduce', 'report'] as const
+export const RETRYABLE_FROM_NODES = [
+  'scan_gitleaks',
+  'scan_osv',
+  'scan_semgrep',
+  'env_ready',
+  'cluster',
+  'screen',
+  'triage',
+  'dispatch',
+  'audit',
+  'reproduce',
+  'report',
+] as const
 
 export type TaskDetailTab = 'overview' | 'progress' | 'report'
 

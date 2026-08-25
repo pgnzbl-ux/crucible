@@ -153,7 +153,7 @@ async def list_groups(
     total, groups = await repo.list_groups(
         task_id=req.task_id, status=req.status, resolution=req.resolution, cwe=req.cwe,
         ai_verdict=req.ai_verdict, engine=req.engine, clue_grade=req.clue_grade,
-        scope=req.scope, q=req.q,
+        scope=req.scope or "workbench", q=req.q,
         limit=req.limit, offset=req.offset,
         owner_task_ids=await _owner_task_ids(repo.session, user_id, req.task_id),
     )
@@ -204,7 +204,7 @@ async def list_group_ids(
         total, ids = await repo.list_group_ids(
             task_id=req.task_id, status=req.status, resolution=req.resolution,
             cwe=req.cwe, ai_verdict=req.ai_verdict, engine=req.engine,
-            clue_grade=req.clue_grade, scope=req.scope, q=req.q,
+            clue_grade=req.clue_grade, scope=req.scope or "workbench", q=req.q,
             owner_task_ids=await _owner_task_ids(repo.session, user_id, req.task_id),
         )
     except ValueError as e:

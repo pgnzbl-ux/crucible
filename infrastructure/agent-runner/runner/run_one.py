@@ -613,6 +613,7 @@ async def _stream_messages(
                     )
                     # 一个 SDK 会话只能有一个终态。失败结果不能继续伪装成 completed。
                     continue
+                # usage = 主环；model_usage = 整树（官方 prefer）。透传有则记，禁止自算。
                 yield {
                     "type": "agent.completed",
                     **(
@@ -626,6 +627,7 @@ async def _stream_messages(
                     "total_cost_usd": getattr(message, "total_cost_usd", None),
                     "num_turns": getattr(message, "num_turns", None),
                     "usage": getattr(message, "usage", None),
+                    "model_usage": getattr(message, "model_usage", None),
                     "is_error": False,
                     "sequence": seq,
                     "timestamp": ts,
@@ -997,6 +999,7 @@ async def _main() -> int:
                 saw_failure = True
             for k in (
                 "usage",
+                "model_usage",
                 "num_turns",
                 "duration_ms",
                 "total_cost_usd",

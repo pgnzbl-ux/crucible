@@ -56,6 +56,8 @@ class EnvReadyHandoff(_HandoffBase):
     transport_shape: dict[str, Any] = Field(default_factory=dict)
     initial_creds: dict[str, Any] = Field(default_factory=dict)
     started_containers: list[Any] = Field(default_factory=list)
+    ok: bool | None = None
+    error: str | None = None
 
 
 class AuditHandoff(_HandoffBase):
@@ -126,6 +128,20 @@ class ClusterHandoff(_HandoffBase):
     dropped_c_by_engine: dict[str, int] = Field(default_factory=dict)
 
 
+class ScreenHandoff(_HandoffBase):
+    """轻量二审：T0 携带 + T1 规则 + T2 快审；无 Docker。"""
+
+    skipped_llm_count: int = 0
+    carried_count: int = 0
+    rule_count: int = 0
+    fast_model_count: int = 0
+    escalated_count: int = 0
+    tp_count: int = 0
+    fp_count: int = 0
+    need_more_count: int = 0
+    budget_exhausted: bool = False
+
+
 class TriageHandoff(_HandoffBase):
     adjudicated_count: int = 0
     skipped_llm_count: int = 0
@@ -133,7 +149,7 @@ class TriageHandoff(_HandoffBase):
     tp_count: int = 0
     fp_count: int = 0
     need_more_count: int = 0
-    # 级联收敛分级计数（展示/排障用，下游节点不依赖）
+    # 级联收敛分级计数（展示/排障用；screen 段计数由 ScreenHandoff 持有）
     carried_count: int = 0
     rule_count: int = 0
     fast_model_count: int = 0
@@ -169,6 +185,7 @@ HANDOFF_BY_KEY: dict[str, type[_HandoffBase]] = {
     "scan_osv": EngineScanHandoff,
     "scan_semgrep": EngineScanHandoff,
     "cluster": ClusterHandoff,
+    "screen": ScreenHandoff,
     "triage": TriageHandoff,
     "dispatch": DispatchHandoff,
 }

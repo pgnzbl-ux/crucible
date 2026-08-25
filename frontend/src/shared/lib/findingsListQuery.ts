@@ -1,20 +1,16 @@
-export const FINDING_SCOPE_VALUES = ['focus', 'review', 'processing', 'noise', 'all'] as const
+export const FINDING_SCOPE_VALUES = ['workbench', 'verifying', 'confirmed', 'reachable', 'all'] as const
 export type FindingScope = (typeof FINDING_SCOPE_VALUES)[number]
 
 /** 对人可见的处理进度：流水线状态或结案结果（互斥） */
 export type FindingProgressValue =
-  | 'status:needs_review'
   | 'status:dispatched'
   | 'resolution:confirmed'
-  | 'resolution:false_positive'
-  | 'resolution:ignored'
+  | 'resolution:code_reachable'
 
 export const FINDING_PROGRESS_OPTIONS: { value: FindingProgressValue; label: string }[] = [
-  { value: 'status:needs_review', label: '等待人工复核' },
-  { value: 'status:dispatched', label: '漏洞终认中' },
+  { value: 'status:dispatched', label: '验证中' },
   { value: 'resolution:confirmed', label: '已确认漏洞' },
-  { value: 'resolution:false_positive', label: '已排除误报' },
-  { value: 'resolution:ignored', label: '已忽略' },
+  { value: 'resolution:code_reachable', label: '代码可达' },
 ]
 
 const PROGRESS_SET = new Set(FINDING_PROGRESS_OPTIONS.map((o) => o.value))
@@ -50,7 +46,7 @@ export function parseFindingScope(query: URLSearchParams): FindingScope {
   }
   // 工作台深链带 status / resolution 时进入「全部 + 该条件」，避免和队列语义打架
   if (query.get('status') || query.get('resolution')) return 'all'
-  return 'focus'
+  return 'workbench'
 }
 
 export function buildFindingsSearch(next: {
@@ -64,7 +60,7 @@ export function buildFindingsSearch(next: {
   page: number
 }): string {
   const qs = new URLSearchParams()
-  if (next.scope !== 'focus') qs.set('scope', next.scope)
+  if (next.scope !== 'workbench') qs.set('scope', next.scope)
   if (next.resolution) qs.set('resolution', next.resolution)
   else if (next.status) qs.set('status', next.status)
   if (next.q) qs.set('q', next.q)

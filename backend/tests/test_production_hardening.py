@@ -14,6 +14,7 @@ def _base_kwargs(**overrides):
         "redis_url": "redis://localhost:6380/0",
         "celery_broker_url": "redis://localhost:6380/1",
         "celery_result_backend": "redis://localhost:6380/2",
+        "redis_clue_url": "redis://localhost:6380/3",
         "s3_endpoint": "http://localhost:9000",
         "s3_access_key": "k",
         "s3_secret_key": "s",

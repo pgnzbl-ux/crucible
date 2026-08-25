@@ -12,6 +12,25 @@ from app.contexts.agent.lead_worker import build_discovery_report_from_leads
 from app.contexts.finding.models import LeadRun
 
 
+def test_aggregate_report_includes_code_reachable_in_body():
+    class _L:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    out = build_discovery_report_from_leads([
+        _L(lead_description="可达线索", verdict="code_reachable",
+           audit_output={"kill_chain": "a→b"}, reproduce_output=None),
+        _L(lead_description="确认线索", verdict="confirmed",
+           audit_output={"kill_chain": "x"}, reproduce_output={"verdict": "confirmed"}),
+    ])
+    rd = out["report_data"]
+    assert "可达线索" in rd["vulnerability"]
+    assert "代码可达" in rd["vulnerability"]
+    assert rd["audit_summary"]["code_reachable_count"] == 1
+    assert rd["audit_summary"]["confirmed_count"] == 1
+    assert "需人工关注" not in rd["reporting_decision"]
+
+
 def test_aggregate_report_only_confirmed_partial():
     leads = [
         LeadRun(

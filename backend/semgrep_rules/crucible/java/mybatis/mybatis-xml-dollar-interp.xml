@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+  "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.UserMapper">
+
+  <select id="findByNameBad" resultType="map">
+    SELECT * FROM users WHERE name =
+    <!-- ruleid: mybatis-xml-dollar-interp -->
+    '${name}'
+    ORDER BY id
+  </select>
+
+  <select id="orderByBad" resultType="map">
+    SELECT * FROM users
+    <!-- ruleid: mybatis-xml-dollar-interp -->
+    ORDER BY ${sortColumn}
+  </select>
+
+  <select id="findByIdSafe" resultType="map">
+    <!-- ok: mybatis-xml-dollar-interp -->
+    SELECT * FROM users WHERE id = #{id}
+  </select>
+
+  <select id="findByNameSafe" resultType="map">
+    <!-- ok: mybatis-xml-dollar-interp -->
+    SELECT * FROM users WHERE name = #{name}
+  </select>
+
+</mapper>

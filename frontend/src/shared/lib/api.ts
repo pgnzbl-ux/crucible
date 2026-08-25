@@ -145,16 +145,26 @@ export interface TaskDetail extends TaskSummary {
 }
 
 // 节点状态(6 节点步骤条数据源)
+export interface NodeUsage {
+  prompt_tokens: number
+  completion_tokens: number
+  cache_read_input_tokens: number
+  cache_creation_input_tokens: number
+  total_tokens: number
+}
+
 export interface NodeRun {
   id: string
   node_index: number
-  node_key: string  // 12 节点拓扑(discovery-spec §4.2.4)
+  node_key: string  // 13 节点拓扑(discovery-spec §4.2.4)
   status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'cancelled'
   attempt: number
   error_message: string | null
   started_at: string | null
   finished_at: string | null
   output?: Record<string, unknown>
+  /** 本 run 该节点台账聚合；无消耗时省略 */
+  usage?: NodeUsage
 }
 
 // 6 档判定(对齐后端 verdict)

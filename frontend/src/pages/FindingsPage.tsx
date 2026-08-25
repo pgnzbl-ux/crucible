@@ -9,7 +9,7 @@ import { api, type AlertGroupSummary } from '../shared/lib/api'
 import { PageHeader } from '../shared/components/PageHeader'
 import { PageContainer } from '../shared/components/PageContainer'
 import { useErrorToast } from '../shared/hooks/useErrorToast'
-import { getPriorityMeta } from '../shared/lib/meta'
+import { getPriorityMeta, AI_VERDICT_META } from '../shared/lib/meta'
 import { findingStatusLabel, projectLabel, screeningStatusMeta, sourceVersionLabel } from '../shared/lib/tablePresentation'
 import {
   buildFindingsSearch,
@@ -31,13 +31,6 @@ const STATUS_TAG_COLOR: Record<string, string> = {
   needs_review: 'warning',
   dispatched: 'processing',
   resolved: 'success',
-}
-
-const VERDICT_META: Record<string, { label: string; color: string }> = {
-  tp: { label: '疑似真实', color: 'red' },
-  fp: { label: 'AI 判误报', color: 'default' },
-  need_more_context: { label: '上下文不足', color: 'orange' },
-  bypass: { label: '依赖情报', color: 'blue' },
 }
 
 const GRADE_META: Record<string, { label: string; color: string }> = {
@@ -244,7 +237,7 @@ export function FindingsPage() {
 
   const hasExtraFilters = Boolean(progress || debouncedQ || aiVerdict || clueGrade || engine)
   const clearFilters = () => {
-    setScope('focus')
+    setScope('workbench')
     setProgress(undefined)
     setKeyword('')
     setDebouncedQ('')
@@ -256,10 +249,10 @@ export function FindingsPage() {
   }
 
   const scopeOptions = [
-    { value: 'focus', label: `重点 ${stats?.by_queue.focus ?? 0}` },
-    { value: 'review', label: `待复核 ${stats?.by_queue.review ?? 0}` },
-    { value: 'processing', label: `初筛中 ${stats?.by_queue.processing ?? 0}` },
-    { value: 'noise', label: `已降噪 ${stats?.by_queue.noise ?? 0}` },
+    { value: 'workbench', label: `工作台 ${stats?.by_queue.workbench ?? 0}` },
+    { value: 'verifying', label: `验证中 ${stats?.by_queue.verifying ?? 0}` },
+    { value: 'confirmed', label: `已确认 ${stats?.by_queue.confirmed ?? 0}` },
+    { value: 'reachable', label: `代码可达 ${stats?.by_queue.reachable ?? 0}` },
     { value: 'all', label: `全部 ${stats?.total ?? 0}` },
   ]
 
@@ -399,11 +392,11 @@ export function FindingsPage() {
         <Space size={4} onClick={(event) => event.stopPropagation()}>
           <Button
             size="small"
-            type={row.status === 'needs_review' ? 'primary' : 'default'}
+            type={row.status === 'dispatched' ? 'primary' : 'default'}
             icon={<EyeOutlined />}
             onClick={() => navigate(`/findings/${row.id}`)}
           >
-            {row.status === 'needs_review' ? '复核' : row.status === 'dispatched' ? '终认' : '详情'}
+            {row.status === 'dispatched' ? '终认' : '详情'}
           </Button>
           <Popconfirm
             title="删除这条线索？"
@@ -427,15 +420,15 @@ export function FindingsPage() {
 
   const emptyDescription = hasExtraFilters
     ? '当前筛选下没有线索，试试清空条件或换个工作队列'
-    : scope === 'focus'
-      ? '暂无重点线索。新扫描完成后会出现在这里；也可查看「待复核」或「全部」'
+    : scope === 'workbench'
+      ? '暂无合格线索。终认中的可疑真洞、已确认漏洞和代码可达会出现在这里'
       : '这个队列暂时是空的'
 
   return (
     <>
       <PageHeader
         title="漏洞线索"
-        subtitle="按队列处理待办，再用搜索定位文件、CWE 或项目"
+        subtitle="验证中、已确认与代码可达；误报不展示"
         extra={
           <Space>
             {selectedRowKeys.length > 0 ? (
@@ -473,7 +466,7 @@ export function FindingsPage() {
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
           />
-          {hasExtraFilters || scope !== 'focus' ? (
+          {hasExtraFilters || scope !== 'workbench' ? (
             <Button icon={<ClearOutlined />} onClick={clearFilters}>
               清空条件
             </Button>
@@ -502,7 +495,7 @@ export function FindingsPage() {
             style={{ width: 140 }}
             value={aiVerdict}
             onChange={(v) => { setAiVerdict(v); setPage(1) }}
-            options={Object.entries(VERDICT_META).map(([value, m]) => ({ value, label: m.label }))}
+            options={Object.entries(AI_VERDICT_META).map(([value, m]) => ({ value, label: m.label }))}
           />
           <Select
             allowClear
@@ -592,8 +585,8 @@ export function FindingsPage() {
           locale={{
             emptyText: (
               <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={emptyDescription}>
-                {hasExtraFilters || scope !== 'focus' ? (
-                  <Button type="link" onClick={clearFilters}>清空条件并回到重点队列</Button>
+                {hasExtraFilters || scope !== 'workbench' ? (
+                  <Button type="link" onClick={clearFilters}>清空条件并回到工作台</Button>
                 ) : null}
               </Empty>
             ),

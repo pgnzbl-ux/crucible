@@ -287,8 +287,9 @@ async def test_env_ready_upload_failure_cleans_started_compose(tmp_path):
         up.return_value = (True, "")
         hc.return_value = (True, 3001, "http")
 
-        with pytest.raises(RuntimeError, match="minio down"):
-            await EnvReadyNode().execute(ctx)
+        out = await EnvReadyNode().execute(ctx)
+        assert out["ok"] is False
+        assert "minio down" in (out.get("error") or "")
 
     down.assert_awaited_once_with(
         str(tmp_path),
@@ -660,8 +661,9 @@ async def test_create_recipe_hit_docker_unavailable_marks_failed_with_daemon_err
         LS.return_value.mark_ready = AsyncMock(return_value=True)
         LS.return_value.mark_failed = AsyncMock(return_value=True)
         up.return_value = (False, daemon_err)
-        with pytest.raises(RuntimeError):
-            await EnvReadyNode().execute(ctx)
+        out = await EnvReadyNode().execute(ctx)
+        assert out["ok"] is False
+        assert "docker_unavailable" in (out.get("error") or "")
     ai.assert_not_awaited()
     LS.return_value.mark_failed.assert_awaited()
     reason = LS.return_value.mark_failed.await_args.args[1]
@@ -741,8 +743,9 @@ async def test_reuse_dead_shared_lab_refuses_concurrent_rebuild(tmp_path):
         lab_service.return_value.acquire = AsyncMock(return_value=lab)
         lab_service.return_value.live_task_ids = AsyncMock(return_value=["t1", "t2"])
 
-        with pytest.raises(RuntimeError, match="仍被其他任务使用"):
-            await EnvReadyNode().execute(ctx)
+        out = await EnvReadyNode().execute(ctx)
+        assert out["ok"] is False
+        assert "仍被其他任务使用" in (out.get("error") or "")
 
     lab_service.return_value.mark_failed.assert_not_awaited()
     ai.assert_not_awaited()
@@ -778,8 +781,9 @@ async def test_reuse_dead_lab_rechecks_users_after_failed_cas(tmp_path):
         )
         lab_service.return_value.reclaim_gone_runtime = AsyncMock()
 
-        with pytest.raises(RuntimeError, match="出现新的使用任务"):
-            await EnvReadyNode().execute(ctx)
+        out = await EnvReadyNode().execute(ctx)
+        assert out["ok"] is False
+        assert "出现新的使用任务" in (out.get("error") or "")
 
     lab_service.return_value.mark_failed.assert_awaited_once()
     lab_service.return_value.mark_ready.assert_awaited_once()
@@ -788,10 +792,6 @@ async def test_reuse_dead_lab_rechecks_users_after_failed_cas(tmp_path):
 
 @pytest.mark.asyncio
 async def test_old_creator_losing_lease_after_up_does_not_down_shared_lab(tmp_path):
-    from app.contexts.agent.nodes.env_ready.cache_recipe import (
-        CreationOwnershipLostError,
-    )
-
     lab = SimpleNamespace(
         lab_id="lab1",
         role="create",
@@ -836,8 +836,9 @@ async def test_old_creator_losing_lease_after_up_does_not_down_shared_lab(tmp_pa
         )
         ai.return_value = _ai_recipe()
 
-        with pytest.raises(CreationOwnershipLostError):
-            await EnvReadyNode().execute(ctx)
+        out = await EnvReadyNode().execute(ctx)
+        assert out["ok"] is False
+        assert "创建权已转移" in (out.get("error") or "")
 
     down.assert_not_awaited()
     health_check.assert_not_awaited()
@@ -883,8 +884,9 @@ async def test_cached_recipe_cred_lookup_failure_tears_down_compose(tmp_path):
         up.return_value = (True, "")
         hc.return_value = (True, 3001, "http")
         ai.side_effect = RuntimeError("AI 补查凭据失败")
-        with pytest.raises(RuntimeError, match="AI 补查凭据失败"):
-            await EnvReadyNode().execute(ctx)
+        out = await EnvReadyNode().execute(ctx)
+        assert out["ok"] is False
+        assert "AI 补查凭据失败" in (out.get("error") or "")
     down.assert_awaited_once()
 
 

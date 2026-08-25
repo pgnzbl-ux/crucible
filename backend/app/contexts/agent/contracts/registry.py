@@ -3,7 +3,7 @@
 权威契约：docs/discovery-spec.md。DEFAULT_PIPELINE 为一张图：
 - 仓库审计(task_type=discovery)：全图；dispatch 入队；无队 NO_DISPATCH_LEAD skip 终认；
   有队 LEAD_DRIVEN skip DAG audit/reproduce；两种出口都生成聚合审计 report。
-- 漏洞验证(task_type=verify)：scan_*/cluster/triage/dispatch 被 VERIFY_MODE skip，
+- 漏洞验证(task_type=verify)：scan_*/cluster/screen/triage/dispatch 被 VERIFY_MODE skip，
   走终认工位；skip 视为 completed，满足下游 requires。
 """
 from __future__ import annotations
@@ -88,15 +88,22 @@ DEFAULT_PIPELINE: tuple[NodeSpec, ...] = (
         skip_when=frozenset({SkipWhen.VERIFY_MODE}),
     ),
     NodeSpec(
-        key="triage",
+        key="screen",
         index=7,
         requires=("cluster",),
+        produces="screen",
+        skip_when=frozenset({SkipWhen.VERIFY_MODE}),
+    ),
+    NodeSpec(
+        key="triage",
+        index=8,
+        requires=("screen",),
         produces="triage",
         skip_when=frozenset({SkipWhen.VERIFY_MODE}),
     ),
     NodeSpec(
         key="dispatch",
-        index=8,
+        index=9,
         requires=("triage",),
         produces="dispatch",
         skip_when=frozenset({SkipWhen.VERIFY_MODE}),
@@ -105,7 +112,7 @@ DEFAULT_PIPELINE: tuple[NodeSpec, ...] = (
     # 验证模式 dispatch 被 skip 后照常就绪，不命中 LEAD_DRIVEN
     NodeSpec(
         key="audit",
-        index=9,
+        index=10,
         requires=("source", "profile", "dispatch"),
         produces="audit",
         skip_when=frozenset({
@@ -114,7 +121,7 @@ DEFAULT_PIPELINE: tuple[NodeSpec, ...] = (
     ),
     NodeSpec(
         key="reproduce",
-        index=10,
+        index=11,
         requires=("source", "env_ready", "audit"),
         produces="reproduce",
         skip_when=frozenset({
@@ -126,7 +133,7 @@ DEFAULT_PIPELINE: tuple[NodeSpec, ...] = (
     ),
     NodeSpec(
         key="report",
-        index=11,
+        index=12,
         requires=("profile", "env_ready", "audit", "reproduce"),
         produces="report",
         # discovery 始终由聚合报告代替执行器（包括零线索）；报告失败不推翻审计结论

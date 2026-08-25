@@ -35,13 +35,26 @@ class SemgrepNode(EngineScanNode):
         )
 
     def _config_paths(self, inp, settings) -> list[str]:
-        from app.core.semgrep_rules import ensure_rules, local_config_names
+        from app.core.semgrep_rules import (
+            SemgrepLangDirError,
+            ensure_rules,
+            local_config_names,
+            overlay_config_paths,
+            require_allowed_lang_dirs,
+        )
 
         names = local_config_names(getattr(inp.profile, "semgrep_configs", None) or [])
         if not names:
             return []
+        try:
+            require_allowed_lang_dirs(names)
+        except SemgrepLangDirError as exc:
+            raise EngineScanError(str(exc)) from exc
+        rules_explicit = getattr(settings, "scanner_semgrep_rules_dir", "") or ""
+        if not isinstance(rules_explicit, str):
+            rules_explicit = ""
         root = ensure_rules(
-            explicit=getattr(settings, "scanner_semgrep_rules_dir", "") or "",
+            explicit=rules_explicit,
             auto_install=bool(getattr(settings, "scanner_auto_install", False)),
         )
         paths: list[str] = []
@@ -54,8 +67,20 @@ class SemgrepNode(EngineScanNode):
                 missing.append(name)
         if missing:
             raise EngineScanError(
-                f"本地 semgrep 规则缺失: {missing} (root={root})"
+                f"本地 semgrep 规则缺失: {missing} (root={root})；"
+                f"目录名须与 semgrep_configs 完全一致"
             )
+        overlay_explicit = getattr(settings, "scanner_semgrep_overlay_dir", "") or ""
+        if not isinstance(overlay_explicit, str):
+            overlay_explicit = ""
+        # 社区语言目录 + {RULES_DIR}/crucible/<lang>（同语言常开）
+        for overlay in overlay_config_paths(
+            names,
+            explicit=overlay_explicit,
+            rules_dir=str(root),
+        ):
+            if overlay not in paths:
+                paths.append(overlay)
         return paths
 
     def build_command(self, ctx, inp, settings) -> list[str]:
@@ -79,12 +104,25 @@ class SemgrepNode(EngineScanNode):
         return normalize("semgrep", json.loads(stdout or "{}"))
 
     def config_summary(self, ctx, inp, settings) -> dict[str, Any]:
-        from app.core.semgrep_rules import local_config_names
+        from app.core.semgrep_rules import local_config_names, overlay_config_paths
 
+        names = local_config_names(
+            getattr(inp.profile, "semgrep_configs", None) or []
+        )
+        rules_explicit = getattr(settings, "scanner_semgrep_rules_dir", "") or ""
+        if not isinstance(rules_explicit, str):
+            rules_explicit = ""
+        overlay_explicit = getattr(settings, "scanner_semgrep_overlay_dir", "") or ""
+        if not isinstance(overlay_explicit, str):
+            overlay_explicit = ""
         return {
             "engine": "semgrep",
-            "configs": local_config_names(
-                getattr(inp.profile, "semgrep_configs", None) or []
+            "configs": names,
+            "rules_dir": rules_explicit or None,
+            "overlay_configs": overlay_config_paths(
+                names,
+                explicit=overlay_explicit,
+                rules_dir=rules_explicit,
             ),
             "dataflow_traces": True,
             "oss_only": True,

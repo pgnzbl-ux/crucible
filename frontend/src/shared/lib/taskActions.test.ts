@@ -37,7 +37,13 @@ describe('taskActions', () => {
   it.each([
     ['failed', 'reproduce', 'failed', true],
     ['failed', 'env_ready', 'failed', true],
+    ['failed', 'screen', 'failed', true],
+    ['failed', 'triage', 'failed', true],
+    ['failed', 'cluster', 'failed', true],
+    ['failed', 'dispatch', 'failed', true],
+    ['failed', 'scan_semgrep', 'failed', true],
     ['failed', 'source', 'failed', false],
+    ['failed', 'profile', 'failed', false],
     ['failed', 'reproduce', 'completed', false],
     ['running', 'reproduce', 'failed', false],
   ])('canRetryFromNode(%s, %s, %s) → %s', (taskStatus, nodeKey, nodeStatus, expected) => {

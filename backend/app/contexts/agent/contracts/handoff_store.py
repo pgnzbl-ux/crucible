@@ -15,6 +15,7 @@ from .inputs import (
     ScanGitleaksInput,
     ScanOsvInput,
     ScanSemgrepInput,
+    ScreenInput,
     SourceInput,
     TriageInput,
 )
@@ -148,12 +149,23 @@ class InputAssembler:
                 scans=scans,
                 profile=ProfileHandoff.model_validate(profile_raw) if profile_raw else None,
             )
-        if node_key == "triage":
-            return TriageInput(
+        if node_key == "screen":
+            return ScreenInput(
                 source=SourceHandoff.model_validate(store.get_raw("source")),
                 host_workdir=task.host_workdir,
                 source_path=task.source_path,
                 cluster=project_handoff("cluster", store.get_raw("cluster")),
+            )
+        if node_key == "triage":
+            cluster_raw = store.get_raw("cluster")
+            return TriageInput(
+                source=SourceHandoff.model_validate(store.get_raw("source")),
+                host_workdir=task.host_workdir,
+                source_path=task.source_path,
+                screen=project_handoff("screen", store.get_raw("screen")),
+                cluster=(
+                    project_handoff("cluster", cluster_raw) if cluster_raw else None
+                ),
             )
         if node_key == "dispatch":
             return DispatchInput(

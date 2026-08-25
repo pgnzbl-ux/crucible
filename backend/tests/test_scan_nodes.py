@@ -493,11 +493,20 @@ async def test_semgrep_node_uses_profile_configs(session_factory, tmp_path):
         assert "--dataflow-traces" in argv
         assert not any(str(a).startswith("p/") for a in argv)
         python_root = str(tmp_path / "rules" / "python")
-        assert argv.count("--config") == 1
         assert python_root in argv
+        # 社区 python + 仓库 overlay/python（若存在）
+        assert argv.count("--config") >= 1
         summary = node.config_summary(ctx, inp, settings)
         assert summary["configs"] == ["python"]
         assert summary["oss_only"] is True
+        assert "overlay_configs" in summary
+        assert any(
+            ("/crucible/" in p.replace("\\", "/") or p.replace("\\", "/").endswith("/crucible/python"))
+            and p.endswith("python")
+            for p in summary["overlay_configs"]
+        )
+        for overlay in summary["overlay_configs"]:
+            assert overlay in argv
 
 
 def _osv_input(tmp_path):
