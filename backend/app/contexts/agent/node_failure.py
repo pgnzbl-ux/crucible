@@ -61,6 +61,8 @@ def classify_node_error(*, failed_stage: str | None, error_text: str) -> str:
 
     if stage == "recipe_validation":
         return "recipe_validation"
+    if stage == "ai_submit":
+        return "runner.no_submit"
     if stage == "port_conflict":
         return "port_conflict"
     if stage == "health_check":

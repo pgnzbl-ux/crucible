@@ -105,13 +105,27 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 await _bump_node_attempt(ctx, attempt)
             occupied = ports.list_docker_occupied_host_ports(exclude_project=exclude_project)
             events._emit(ctx, f"第 {attempt}/{MAX_ATTEMPTS} 轮：AI 分析并写 Dockerfile/compose")
-            recipe = await ai_recipe.run_ai_turn(
-                ctx,
-                attempt,
-                last_error,
-                failed_stage=failed_stage,
-                occupied_host_ports=sorted(occupied),
-            )
+            try:
+                recipe = await ai_recipe.run_ai_turn(
+                    ctx,
+                    attempt,
+                    last_error,
+                    failed_stage=failed_stage,
+                    occupied_host_ports=sorted(occupied),
+                )
+            except Exception as ai_exc:  # noqa: BLE001 — AI 未提交/网关抖动：回喂下一轮
+                from app.core.agent_runner import AgentRunnerError
+
+                if not isinstance(ai_exc, AgentRunnerError):
+                    raise
+                last_error = f"attempt {attempt} AI 配方失败: {ai_exc}"
+                failed_stage = "ai_submit"
+                _snapshot_failed_attempt(ctx, attempt, last_error, failed_stage)
+                events._emit(
+                    ctx,
+                    f"AI 未产出配方，回喂重试（{attempt}/{MAX_ATTEMPTS}）",
+                )
+                continue
             await cache_recipe._require_creation_owner(ctx, svc, result.lab_id)
 
             from app.contexts.agent.ai_runner import validate_initial_creds

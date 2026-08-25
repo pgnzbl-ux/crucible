@@ -214,6 +214,39 @@ async def test_env_ready_retry_until_success(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_env_ready_retries_when_ai_turn_missing_submit_result(tmp_path):
+    """AI 首轮未调 submit_result（如 DSML 泄漏）必须回喂下一轮，不能直接降级。"""
+    from app.contexts.agent.nodes import env_ready as mod
+    from app.contexts.agent.nodes.env_ready import ai_recipe, compose_host, health
+    from app.core.agent_runner import AgentRunnerError
+
+    ctx = _exec_ctx(tmp_path, {"is_web": True, "port": 8000})
+    _write_compose(tmp_path)
+
+    with patch.object(ai_recipe, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
+         patch.object(compose_host, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
+         patch.object(health, "health_check", new_callable=AsyncMock) as mock_hc, \
+         patch("app.contexts.agent.target_url.host_advertise_ip", return_value="192.168.1.8"):
+        mock_ai.side_effect = [
+            AgentRunnerError(
+                "AI 节点 env_ready 未产出 .node_output.json (exit=1): "
+                "模型输出含 DSML 工具标记（未形成有效 tool_use）"
+            ),
+            _recipe(".vuln-env/docker-compose.yml", "http://localhost:8000"),
+        ]
+        mock_up.return_value = (True, "")
+        mock_hc.return_value = (True, 8000, "http")
+
+        out = await mod.EnvReadyNode().execute(ctx)
+
+    assert out.get("ok") is not False
+    assert out["target_url"] == "http://192.168.1.8:8000"
+    assert mock_ai.call_count == 2
+    assert mock_ai.call_args_list[1].kwargs["failed_stage"] == "ai_submit"
+    assert "未产出 .node_output.json" in mock_ai.call_args_list[1].args[2]
+
+
+@pytest.mark.asyncio
 async def test_env_ready_container_healthcheck_failure_is_labeled_for_next_round(tmp_path):
     """compose --wait 的 unhealthy 必须区别于构建/启动失败并携带诊断。"""
     from app.contexts.agent.nodes import env_ready as mod

@@ -39,6 +39,11 @@ from app.contexts.agent.errors import humanize_agent_error
         ("AI 节点 reproduce 超时(1800s)", "超时"),
         ("节点 audit 未调用 submit_result(无 .node_output.json)", "没有提交节点结果"),
         (
+            "AI 节点 env_ready 未产出 .node_output.json (exit=1): "
+            "模型输出含 DSML 工具标记（未形成有效 tool_use）",
+            "工具调用格式异常",
+        ),
+        (
             "AI 节点 canary 未产出 .node_output.json (exit=1): "
             "bubblewrap is required for subprocess env scrubbing and isolation",
             "缺少进程隔离依赖",
