@@ -131,6 +131,23 @@ export function summarizeNodeOutput(
         }
         return str(o.progress)
       }
+      if (nodeKey === 'api_inventory') {
+        if (o.skipped === true) return '已跳过'
+        const count = typeof o.endpoint_count === 'number' ? o.endpoint_count : null
+        const parsers = Array.isArray(o.parsers)
+          ? o.parsers.map((p) => str(p)).filter(Boolean)
+          : []
+        const unsupported = Array.isArray(o.unsupported_languages)
+          ? o.unsupported_languages.map((p) => str(p)).filter(Boolean)
+          : []
+        const parserLabel = parsers.join('/') || (str(o.parser) !== 'none' ? str(o.parser) : '')
+        const parts = [
+          count != null ? `${count} 端点` : '',
+          parserLabel,
+          unsupported.length ? `${unsupported.join('、')} 无 parser` : '',
+        ].filter(Boolean)
+        return parts.join(' · ') || '清单完成'
+      }
       return status === 'completed' ? '完成' : ''
   }
 }
@@ -311,6 +328,7 @@ export function overlayFromSseEvents(
         'scan_semgrep',
         'scan_gitleaks',
         'scan_osv',
+        'api_inventory',
         'cluster',
         'screen',
         'triage',

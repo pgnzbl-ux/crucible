@@ -63,6 +63,8 @@ const NODE_CAPTIONS: Record<string, string> = {
   scan_osv: '依赖漏洞检测',
   scan_semgrep: '静态代码检测',
   env_ready: '仅 Web 构建靶场',
+  api_inventory: '确定性入口清单',
+  api_hunt: '鉴权/逻辑猎洞直出',
   cluster: '发现归并与去重',
   screen: '规则/快审过滤',
   triage: 'Agent 亲审',
@@ -107,6 +109,14 @@ function nodeCaption(key: string, output?: Record<string, unknown> | null): stri
   }
   if ((key === 'dispatch' || key === 'lead_verify') && typeof output?.queued_count === 'number') {
     return `${output.queued_count} 条线索`
+  }
+  if (key === 'api_inventory' && typeof output?.endpoint_count === 'number') {
+    const parsers = Array.isArray(output.parsers)
+      ? output.parsers.filter((p): p is string => typeof p === 'string' && p.length > 0 && p !== 'openapi')
+      : []
+    const label = parsers.slice(0, 2).join('/')
+      || (typeof output.parser === 'string' && output.parser !== 'none' ? output.parser : '')
+    return label ? `${output.endpoint_count} 端点 · ${label}` : `${output.endpoint_count} 端点`
   }
   return NODE_CAPTIONS[key] ?? ''
 }

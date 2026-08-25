@@ -373,6 +373,47 @@ describe('overlayFromSseEvents', () => {
     ).toBe('已审 40 · 12 族')
   })
 
+  it('api_inventory 按画像 parser 摘要，不说 FastAPI', () => {
+    expect(
+      summarizeNodeOutput(
+        'api_inventory',
+        {
+          endpoint_count: 3,
+          parsers: ['openapi', 'express', 'nextjs'],
+          parser: 'openapi,express,nextjs',
+          unsupported_languages: [],
+        },
+        'completed',
+      ),
+    ).toBe('3 端点 · openapi/express/nextjs')
+    expect(
+      summarizeNodeOutput(
+        'api_inventory',
+        { endpoint_count: 0, parsers: ['openapi'], unsupported_languages: ['rust'] },
+        'completed',
+      ),
+    ).toBe('0 端点 · openapi · rust 无 parser')
+    expect(
+      summarizeNodeOutput(
+        'api_inventory',
+        { endpoint_count: 0, parsers: ['openapi'], parser: 'openapi', unsupported_languages: ['nodejs'] },
+        'completed',
+      ),
+    ).not.toContain('FastAPI')
+  })
+
+  it('api_inventory phase.updated 写入进度句', () => {
+    const map = overlayFromSseEvents([
+      {
+        type: 'phase.updated',
+        event: { phase: 'api_inventory', message: '按画像 nodejs 解析 openapi/express/nextjs/nestjs' },
+      },
+    ])
+    expect(map.get('api_inventory')?.output?.progress).toBe(
+      '按画像 nodejs 解析 openapi/express/nextjs/nestjs',
+    )
+  })
+
   it('stacks usage.updated cumulative onto the node', () => {
     const map = overlayFromSseEvents([
       {
