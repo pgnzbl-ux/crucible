@@ -6,6 +6,7 @@ import {
   CheckCircleFilled,
   CloudUploadOutlined,
   DeleteOutlined,
+  EditOutlined,
   FileZipOutlined,
   GithubOutlined,
   MoreOutlined,
@@ -21,6 +22,7 @@ import { useErrorToast } from '../shared/hooks/useErrorToast'
 import { PageHeader } from '../shared/components/PageHeader'
 import { PageContainer } from '../shared/components/PageContainer'
 import { tableRowNavigateProps } from '../shared/lib/tableRowNavigate'
+import { EditProjectDrawer } from '../features/project/EditProjectDrawer'
 import { RegisterSourceDrawer } from '../features/project/RegisterSourceDrawer'
 
 const { Text } = Typography
@@ -43,6 +45,7 @@ export function ProjectsPage() {
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
   const [registerMode, setRegisterMode] = useState<'git' | 'upload' | null>(null)
+  const [editing, setEditing] = useState<Project | null>(null)
 
   const { data, error, isError, isLoading, isFetching, refetch } = useQuery({
     queryKey: ['projects', { page, pageSize }],
@@ -179,6 +182,12 @@ export function ProjectsPage() {
             menu={{
               items: [
                 {
+                  key: 'edit',
+                  icon: <EditOutlined />,
+                  label: '编辑项目',
+                  onClick: () => setEditing(row),
+                },
+                {
                   key: 'delete',
                   icon: <DeleteOutlined />,
                   label: '删除项目',
@@ -280,6 +289,7 @@ export function ProjectsPage() {
         mode={registerMode ?? 'git'}
         onClose={() => setRegisterMode(null)}
       />
+      <EditProjectDrawer open={editing !== null} project={editing} onClose={() => setEditing(null)} />
     </>
   )
 }

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { App, Button, Card, Descriptions, Popconfirm, Result, Skeleton, Space, Table, Tag, Typography } from 'antd'
-import { ArrowLeftOutlined, BugOutlined, DeleteOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, BugOutlined, DeleteOutlined, EditOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
@@ -9,6 +9,7 @@ import { useLocation, useRoute } from 'wouter'
 import { api, type SourceArtifact } from '../shared/lib/api'
 import { PageHeader } from '../shared/components/PageHeader'
 import { PageContainer } from '../shared/components/PageContainer'
+import { EditProjectDrawer } from '../features/project/EditProjectDrawer'
 import { TaskCreateDrawer } from '../features/task/components/TaskCreateDrawer'
 import { formatFileSize } from '../shared/lib/tablePresentation'
 import { classifyProjectRef, projectDefaultRefLabel } from '../features/task/lib/projectSelectOptions'
@@ -23,6 +24,7 @@ export function ProjectDetailPage() {
   const [, navigate] = useLocation()
   const projectId = params?.id ?? ''
   const [createOpen, setCreateOpen] = useState(false)
+  const [editOpen, setEditOpen] = useState(false)
 
   const { data: project, isLoading, isError } = useQuery({
     queryKey: ['project', projectId],
@@ -124,6 +126,11 @@ export function ProjectDetailPage() {
               返回列表
             </Button>
             {project && (
+              <Button icon={<EditOutlined />} onClick={() => setEditOpen(true)} aria-label="编辑项目资产">
+                编辑项目
+              </Button>
+            )}
+            {project && (
               <Popconfirm
                 title="删除该项目？"
                 description="将删除登记信息与本仓库缓存包。进行中的任务工作目录不受影响。"
@@ -164,6 +171,12 @@ export function ProjectDetailPage() {
                   label: project.source_type === 'local_upload' ? '源码标识' : 'Git 地址',
                   span: 2,
                   children: <Text code>{project.git_url}</Text>,
+                },
+                {
+                  key: 'description',
+                  label: '备注',
+                  span: 2,
+                  children: project.description?.trim() ? project.description : <Text type="secondary">未填写</Text>,
                 },
                 {
                   key: 'source',
@@ -242,6 +255,7 @@ export function ProjectDetailPage() {
           />
         )}
       </PageContainer>
+      <EditProjectDrawer open={editOpen} project={project ?? null} onClose={() => setEditOpen(false)} />
       <TaskCreateDrawer
         open={createOpen}
         onClose={() => setCreateOpen(false)}

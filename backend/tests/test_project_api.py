@@ -456,6 +456,63 @@ async def test_update_project_returns_artifact_source_refs(session):
 
 
 @pytest.mark.asyncio
+async def test_update_project_fields(session):
+    from app.contexts.project.repository import ProjectRepository
+    from app.contexts.project.schemas import ProjectCreateRequest, ProjectUpdateRequest
+    from app.contexts.project.service import ProjectService
+
+    svc = ProjectService(ProjectRepository(session))
+    created = await svc.create_project(
+        ProjectCreateRequest(
+            name="old-name",
+            git_url="https://github.com/acme/app.git",
+            default_ref="main",
+            default_ref_type="branch",
+            description="old",
+        ),
+        owner_id="u1",
+    )
+    updated = await svc.update_project(
+        created.id,
+        ProjectUpdateRequest(
+            name="new-name",
+            default_ref="v2.0.0",
+            default_ref_type="tag",
+            description="备注",
+        ),
+        owner_id="u1",
+    )
+    assert updated is not None
+    assert updated.name == "new-name"
+    assert updated.default_ref == "v2.0.0"
+    assert updated.default_ref_type == "tag"
+    assert updated.description == "备注"
+    assert updated.git_url == created.git_url
+
+
+@pytest.mark.asyncio
+async def test_update_project_rejects_duplicate_name(session):
+    from app.contexts.project.repository import ProjectRepository
+    from app.contexts.project.schemas import ProjectCreateRequest, ProjectUpdateRequest
+    from app.contexts.project.service import ProjectService
+    from app.shared.exceptions import ConflictError
+
+    svc = ProjectService(ProjectRepository(session))
+    await svc.create_project(
+        ProjectCreateRequest(name="taken", git_url="https://github.com/a/one.git"),
+        owner_id="u1",
+    )
+    other = await svc.create_project(
+        ProjectCreateRequest(name="free", git_url="https://github.com/a/two.git"),
+        owner_id="u1",
+    )
+    with pytest.raises(ConflictError, match="项目名称已存在"):
+        await svc.update_project(
+            other.id, ProjectUpdateRequest(name="taken"), owner_id="u1"
+        )
+
+
+@pytest.mark.asyncio
 async def test_delete_upload_artifact_removes_original_package(session):
     from app.contexts.project.repository import ProjectRepository
     from app.contexts.project.service import ProjectService
