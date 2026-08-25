@@ -287,6 +287,7 @@ export function NodeDag({ nodes, mode = 'discovery', contain = true, overview = 
             </marker>
           </defs>
           {layout.edges.map((e) => {
+            const showArrow = e.kind !== 'link'
             return (
               <g key={`${e.kind}:${e.from}->${e.to}`}>
                 <path
@@ -298,7 +299,7 @@ export function NodeDag({ nodes, mode = 'discovery', contain = true, overview = 
                     .join(' ')}
                   d={e.d}
                   fill="none"
-                  markerEnd={`url(#${markerId})`}
+                  markerEnd={showArrow ? `url(#${markerId})` : undefined}
                   data-edge-from={e.from}
                   data-edge-to={e.to}
                 />

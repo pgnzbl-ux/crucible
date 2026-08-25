@@ -44,7 +44,7 @@ describe('pipelineDag 运行流程', () => {
     expect(x('source')).toBeLessThan(x('profile'))
     expect(x('profile')).toBeLessThan(x('scan_semgrep'))
     expect(x('scan_semgrep')).toBeLessThan(x('cluster'))
-    expect(x('cluster')).toBeLessThan(x('triage'))
+    expect(x('cluster')).toBeCloseTo(x('triage'), 0)
     expect(x('dispatch')).toBeLessThan(x('lead_verify'))
     expect(x('lead_verify')).toBeLessThan(x('report'))
 
@@ -77,6 +77,56 @@ describe('pipelineDag 运行流程', () => {
     expect(layout.groups.map(({ key, label, caption }) => ({ key, label, caption }))).toEqual(
       pipelineOverviewStages('discovery').map(({ key, label, caption }) => ({ key, label, caption })),
     )
+  })
+
+  it('stacks 发现复核 nodes in one column with vertical arrows', () => {
+    const layout = layoutPipelineDag(PIPELINE_NODE_ORDER, { mode: 'discovery' })
+    const node = (k: string) => layout.nodes.find((n) => n.key === k)!
+
+    expect(node('cluster').x).toBeCloseTo(node('screen').x, 0)
+    expect(node('screen').x).toBeCloseTo(node('triage').x, 0)
+    expect(node('cluster').y).toBeLessThan(node('screen').y)
+    expect(node('screen').y).toBeLessThan(node('triage').y)
+    expect(flowColumn('cluster', 'discovery')).toBe(flowColumn('screen', 'discovery'))
+    expect(flowColumn('screen', 'discovery')).toBe(flowColumn('triage', 'discovery'))
+    expect(flowColumn('triage', 'discovery')).toBeLessThan(flowColumn('dispatch', 'discovery'))
+
+    const screenToTriage = layout.edges.find((e) => e.from === 'screen' && e.to === 'triage')!
+    expect(screenToTriage.kind).toBe('flow')
+    expect(screenToTriage.d).toMatch(/^M [\d.]+ [\d.]+ V [\d.]+$/)
+
+    const stepped = layout.edges.find((e) => e.from === 'cluster' && e.to === 'screen')!
+    expect(stepped.kind).toBe('flow')
+    expect(stepped.d).toMatch(/^M [\d.]+ [\d.]+ V [\d.]+$/)
+
+    const review = layout.groups.find((g) => g.key === 'review')!
+    const source = layout.groups.find((g) => g.key === 'source')!
+    expect(review.width).toBeCloseTo(source.width, 0)
+  })
+
+  it('merges three scan edges into cluster at a shared junction', () => {
+    const layout = layoutPipelineDag(PIPELINE_NODE_ORDER, { mode: 'discovery' })
+    const cluster = layout.nodes.find((n) => n.key === 'cluster')!
+    const cy = cluster.y + cluster.height / 2
+    const intoCluster = (from: string) =>
+      layout.edges.find((e) => e.from === from && e.to === 'cluster')!
+
+    const gitleaks = intoCluster('scan_gitleaks')
+    const osv = intoCluster('scan_osv')
+    const semgrep = intoCluster('scan_semgrep')
+    const finalSeg = new RegExp(`V ${cy} H ${cluster.x}$`)
+    expect(gitleaks.d).toMatch(finalSeg)
+    expect(osv.d).toMatch(finalSeg)
+    expect(semgrep.d).toMatch(finalSeg)
+
+    const mergeXs = [gitleaks, osv, semgrep].map((edge) => {
+      const m = edge.d.match(new RegExp(`H ([\\d.]+) V ${cy} H ${cluster.x}$`))
+      expect(m).toBeTruthy()
+      return Number(m![1])
+    })
+    expect(mergeXs[0]).toBeCloseTo(mergeXs[1], 5)
+    expect(mergeXs[1]).toBeCloseTo(mergeXs[2], 5)
+    expect(mergeXs[0]).toBeLessThan(cluster.x)
   })
 
   it('discovery edges match runtime waves and LeadWorker handoff', () => {

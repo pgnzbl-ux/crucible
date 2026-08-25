@@ -116,7 +116,7 @@ export function pipelineOverviewStages(mode: PipelineMode): PipelineOverviewStag
 }
 
 export type DagShape = 'box' | 'diamond' | 'terminal'
-export type DagEdgeKind = 'flow' | 'conditional' | 'support'
+export type DagEdgeKind = 'flow' | 'conditional' | 'support' | 'link'
 
 export interface DagLayoutNode {
   key: string
@@ -175,13 +175,13 @@ export function flowColumn(key: string, _mode: PipelineMode): number {
   if (key === 'source') return 0
   if (key === 'profile' || key === 'scan_gitleaks' || key === 'scan_osv') return 1
   if (key === 'scan_semgrep' || key === 'env_ready') return 2
-  if (key === 'cluster') return 3
-  if (key === 'screen' || key === 'triage') return 4
-  if (key === 'dispatch') return 5
-  if (key === 'audit' || key === 'lead_verify') return 6
-  if (key === 'reproduce') return 7
-  if (key === 'report') return 8
-  if (key === 'over') return 9
+  // 发现复核三节点同列纵向，压缩横向跨度
+  if (key === 'cluster' || key === 'screen' || key === 'triage') return 3
+  if (key === 'dispatch') return 4
+  if (key === 'audit' || key === 'lead_verify') return 5
+  if (key === 'reproduce') return 6
+  if (key === 'report') return 7
+  if (key === 'over') return 8
   return 1
 }
 
@@ -245,11 +245,15 @@ export function flowEdges(
   add(edges, 'scan_gitleaks', 'cluster')
 
   if (mode === 'discovery') {
-    addChain(edges, vis, ['cluster', 'screen', 'triage', 'dispatch', 'lead_verify', 'report'])
+    add(edges, 'cluster', 'screen')
+    add(edges, 'screen', 'triage')
+    addChain(edges, vis, ['triage', 'dispatch', 'lead_verify', 'report'])
     add(edges, 'env_ready', 'lead_verify', 'support', 'Web 靶场')
   } else {
     if (vis.has('dispatch')) {
-      addChain(edges, vis, ['cluster', 'screen', 'triage', 'dispatch', 'audit'])
+      add(edges, 'cluster', 'screen')
+      add(edges, 'screen', 'triage')
+      addChain(edges, vis, ['triage', 'dispatch', 'audit'])
       // 当前波次调度会等 env_ready 所在波收敛后才处理 skip 链并进入 audit。
       add(edges, 'env_ready', 'audit', 'support', '环境分支收敛')
     } else if (vis.has('env_ready')) {
@@ -270,6 +274,8 @@ function stackKeys(keys: string[]): string[] {
 
 function spineKeyInColumn(keys: string[], column: number): string | null {
   if (column === 2 && keys.includes('scan_semgrep')) return 'scan_semgrep'
+  // 发现复核列以中间节点对齐主轴，上下再叠 cluster / triage
+  if (column === 3 && keys.includes('screen')) return 'screen'
   return keys[Math.floor(keys.length / 2)] ?? null
 }
 
@@ -278,7 +284,6 @@ function routeBox(
   b: DagLayoutNode,
   kind: DagEdgeKind,
   bottomRail: number,
-  topFlowRail: number,
   bottomFlowRail: number,
 ): { d: string; labelX: number; labelY: number } {
   if (kind === 'support') {
@@ -292,30 +297,26 @@ function routeBox(
       labelY: bottomRail - 7,
     }
   }
+  // 同列纵向：顶底中点直连
+  const sameColumn = Math.abs(a.x + a.width / 2 - (b.x + b.width / 2)) < 1
+  if (sameColumn && a.y + a.height <= b.y + 1) {
+    const x = a.x + a.width / 2
+    const y1 = a.y + a.height
+    const y2 = b.y
+    return {
+      d: `M ${x} ${y1} V ${y2}`,
+      labelX: x + 8,
+      labelY: (y1 + y2) / 2,
+    }
+  }
+  // 三扫描汇入 cluster：先汇到同一合并点，再一根进入节点
+  if (b.key === 'cluster' && a.key.startsWith('scan_')) {
+    return routeScanIntoCluster(a, b, bottomFlowRail)
+  }
   const x1 = a.x + a.width
   const y1 = a.y + a.height / 2
   const x2 = b.x
   const y2 = b.y + b.height / 2
-  // gitleaks / osv 可早于深度分析完成，汇入 cluster 时跨过一个可见列。
-  if (x2 - x1 > SIZE.gapX + SIZE.nodeW / 2) {
-    const entryX = x1 + SIZE.gapX / 3
-    const exitX = x2 - SIZE.gapX / 3
-    // Gitleaks 已放在最上方：直接穿过上方空白，只在 Cluster 前下折一次。
-    if (a.key === 'scan_gitleaks') {
-      return {
-        d: `M ${x1} ${y1} H ${exitX} V ${y2} H ${x2}`,
-        labelX: (x1 + exitX) / 2,
-        labelY: y1 - 7,
-      }
-    }
-    // OSV 仍从节点区下方绕行，避免穿过 Semgrep 或靶场卡片。
-    const railY = a.key === 'scan_osv' ? bottomFlowRail : topFlowRail
-    return {
-      d: `M ${x1} ${y1} H ${entryX} V ${railY} H ${exitX} V ${y2} H ${x2}`,
-      labelX: (entryX + exitX) / 2,
-      labelY: railY - 7,
-    }
-  }
   if (Math.abs(y1 - y2) < 1) {
     return {
       d: `M ${x1} ${y1} H ${x2}`,
@@ -329,6 +330,33 @@ function routeBox(
     d: `M ${x1} ${y1} H ${busX} V ${y2} H ${x2}`,
     labelX: busX + 7,
     labelY: (y1 + y2) / 2 - 5,
+  }
+}
+
+/** 扫描列 → 聚类：共享 mergeX / clusterCy，末段重合为单入口。 */
+function routeScanIntoCluster(
+  a: DagLayoutNode,
+  cluster: DagLayoutNode,
+  bottomFlowRail: number,
+): { d: string; labelX: number; labelY: number } {
+  const x1 = a.x + a.width
+  const y1 = a.y + a.height / 2
+  const x2 = cluster.x
+  const cy = cluster.y + cluster.height / 2
+  const mergeX = x2 - SIZE.gapX / 3
+  if (a.key === 'scan_osv') {
+    const entryX = x1 + SIZE.gapX / 3
+    return {
+      d: `M ${x1} ${y1} H ${entryX} V ${bottomFlowRail} H ${mergeX} V ${cy} H ${x2}`,
+      labelX: (entryX + mergeX) / 2,
+      labelY: bottomFlowRail - 7,
+    }
+  }
+  // gitleaks / semgrep：水平到合并点后竖落到聚类入口高度
+  return {
+    d: `M ${x1} ${y1} H ${mergeX} V ${cy} H ${x2}`,
+    labelX: (x1 + mergeX) / 2,
+    labelY: Math.min(y1, cy) - 7,
   }
 }
 
@@ -457,8 +485,6 @@ export function layoutPipelineDag(
     for (const n of nodes) n.y += shift
   }
   const maxBottom = Math.max(...nodes.map((n) => n.y + n.height), SIZE.padY)
-  const minTop = Math.min(...nodes.map((n) => n.y))
-  const topFlowRail = Math.max(42, minTop - 12)
   const bottomFlowRail = maxBottom + 10
   const supportRail = maxBottom + 28
   const height = supportRail + 34
@@ -467,7 +493,7 @@ export function layoutPipelineDag(
     const a = byKey.get(e.from)
     const b = byKey.get(e.to)
     if (!a || !b) return []
-    const route = routeBox(a, b, e.kind, supportRail, topFlowRail, bottomFlowRail)
+    const route = routeBox(a, b, e.kind, supportRail, bottomFlowRail)
     return [{
       from: e.from,
       to: e.to,

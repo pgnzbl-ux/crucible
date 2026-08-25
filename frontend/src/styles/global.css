@@ -1366,6 +1366,10 @@ body,
   stroke: color-mix(in srgb, var(--crucible-primary) 62%, var(--crucible-border-strong));
   stroke-dasharray: 3 4;
 }
+.crucible-dag__edge.is-link {
+  stroke: color-mix(in srgb, var(--crucible-text-secondary) 42%, var(--crucible-border-strong));
+  stroke-width: 1.2;
+}
 .crucible-dag__arrow {
   fill: color-mix(in srgb, var(--crucible-text-secondary) 55%, var(--crucible-border-strong));
 }
