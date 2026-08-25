@@ -156,7 +156,7 @@ export interface NodeUsage {
 export interface NodeRun {
   id: string
   node_index: number
-  node_key: string  // 13 节点拓扑(discovery-spec §4.2.4)
+  node_key: string  // 拓扑节点(discovery-spec §4.2.4)
   status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'cancelled'
   attempt: number
   error_message: string | null

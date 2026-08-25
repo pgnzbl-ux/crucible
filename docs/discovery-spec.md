@@ -43,7 +43,7 @@ Crucible 的主流程是“项目资产 → 代码审计 → 漏洞线索 → �
 
 ### 2.1 发现来源
 
-首发发现源为 Semgrep、Gitleaks、OSV。每个引擎独立执行、独立记账；单引擎失败不得抹去其它引擎结果。
+四条并行线索：Semgrep、Gitleaks、OSV、API 猎洞（`engine=api_hunt`）。前三条经扫描节点独立执行、独立记账，汇入 `cluster`（**不含** `api_hunt` RawFinding）；猎洞经 `api_inventory → api_hunt` 自建 AlertGroup。单引擎/猎洞失败不得抹去其它线索。扫描复核链（`cluster → screen → triage`）与猎洞并列，互不阻塞；`dispatch` 等两端都 terminal 后统一按 §2.7 入队。
 
 ### 2.2 反锚定
 
@@ -89,13 +89,13 @@ OSV 不是 SAST。不得把全部 GHSA 当白盒真洞；仅当本仓库**调用
 必须**同时**满足：
 
 1. `verdict == tp`（可疑真洞，不是误报）。
-2. `verdict_source == agent`：只有 T3 亲审。T2 `fast_model` 的 tp **禁止入队**，只能标 fp 或升级 T3。
-3. 族内传播的 tp **不入队**；一家族只让代表走 T3。
+2. `verdict_source == agent`：T3 亲审，或 `api_hunt` 猎洞节点在 **§2.7 全部门**（含字段齐备与 `confidence >= triage_high_confidence`）通过后写入的判决（`context_log.via=api_hunt`）。T2 `fast_model` / 传播的 tp **禁止入队**。MEDIUM 猎洞嫌疑可入库为组，但不得直出判决、不得进终认队。
+3. 族内传播的 tp **不入队**；一家族只让代表走 T3（猎洞直出组不走族传播）。
 4. `confidence >= triage_high_confidence`（现 0.8）。
 5. schema 强制：`why` 非空、`evidence` 非空；平台拒收不合格 `submit_result`：
-   - `attacker_controlled`：存在攻击者可控来源（gitleaks known 密钥暴露可视为满足）
-   - `reaches_sink`：能指到危险点
-   - `sanitizer` ∈ `none | bypassable`（`effective` 不得报 tp）
+   - `attacker_controlled`：存在攻击者可控来源（对象 id / 角色可选；gitleaks known 密钥暴露可视为满足）
+   - `reaches_sink`：能指到危险点（未授权资源读写 / 特权操作）
+   - `sanitizer` ∈ `none | bypassable`（`effective` 不得报 tp / 不得进猎洞 suspects）
 6. 确定性封禁：测试/文档路径上的注入/XSS 类不得入队（密钥 CWE-798 / gitleaks known 例外，与 `should_downgrade` 一致）。
 7. OSV：仅 `called=true` 且 T3 认为可达才入队。
 
@@ -136,7 +136,7 @@ OSV 不是 SAST。不得把全部 GHSA 当白盒真洞；仅当本仓库**调用
 
 ### 4.2 调度与分支
 
-编排器按依赖就绪波次执行，skip 是可观察终态并满足下游依赖。分支信号包括 `verify_mode`、`non_web`、`no_dispatch_lead`、`lead_driven`、`gate_fail`、`gate_uncertain`。
+编排器按依赖就绪渐进调度：节点 `requires` 全部 terminal（completed/skipped）即准入开跑；任一完成立即写入 terminal 并解锁下游，**同批就绪的兄弟节点不构成整波屏障**。因此 `scan_*` 齐后 `cluster` / 发现复核可与仍在执行的 `env_ready` 并行，靶场就绪不得阻断发现侧复核链。skip 是可观察终态并满足下游依赖。分支信号包括 `verify_mode`、`non_web`、`no_dispatch_lead`、`lead_driven`、`gate_fail`、`gate_uncertain`。
 
 #### 4.2.2 数据前提
 
@@ -148,7 +148,13 @@ OSV 不是 SAST。不得把全部 GHSA 当白盒真洞；仅当本仓库**调用
 
 #### 4.2.4 当前拓扑
 
-当前拓扑为 `source → profile → scans/env_ready → cluster → screen → triage → dispatch → lead verification → report`。实现可把三个扫描引擎拆为独立节点；产品 UI 不依赖固定节点数量。`env_ready` 与扫描并行；零线索仍可能起靶场（本期不搬拓扑）。
+当前拓扑为 `source → profile → (scans ∥ api_inventory ∥ env_ready)`，随后两条线索流并行：`(scans → cluster → screen → triage) ∥ (api_inventory → api_hunt) → dispatch → lead verification → report`。实现可把扫描引擎与 API 清单拆为独立节点；产品 UI 不依赖固定节点数量。`env_ready` / `api_inventory` 与扫描并行；猎洞与扫描复核链并列，**绕过** screen/triage，在节点内做 schema + **§2.7 全部门**（含 conf 阈值）后直出判决；零线索仍可能起靶场。
+
+- `api_inventory`：按画像 `languages` / `frameworks` 表驱动选择确定性 parser，产出 BOM + `resource_key` 索引；获取方式分 `router`（框架路由表）、`script_file`（PHP/Next pages 式文件入口）、`export_handler`（Next `route.ts` 导出方法）、`openapi`（OpenAPI/Swagger）。**禁止**用 AI 列端点；AI 不得把自拟 path 写入 BOM。详见 [`research-api-hunting.md`](research-api-hunting.md)。
+- `api_hunt`：`requires=(api_inventory,)`；只审清单中的优先 PVE；`submit_result` 嫌疑项必须带 §2.7 合格门字段；写 `engine=api_hunt` 线索、upsert AlertGroup，并对**通过 conf 阈值在内的全部门**的项落 `verdict_source=agent` 判决（`qualified_count` = 直出数）。失败不得抹杀 cluster / screen 结果。
+- `cluster`：只读 `semgrep` / `gitleaks` / `osv` 的 RawFinding；不得把 `api_hunt` 并入扫描组。
+- `screen`：`requires=(cluster,)`，只审扫描聚类工作集（`status=clustered` 且 `engine_set` 不含 `api_hunt`）；猎洞组无论是否已判决均不进快审。
+- `dispatch`：`requires=(triage, api_hunt)`，等扫描复核链与猎洞都 terminal 后再按统一合格门入队。
 
 ### 4.3 AI 交接
 
@@ -176,7 +182,7 @@ AI 节点只接收结构化、已裁剪、已脱敏的输入并返回结构化�
 
 ### 5.4 模型角色
 
-模型配置区分 screening、final、hunting 角色；未配置特定角色时按平台已声明的回退规则处理，不得随机选择。
+模型配置区分 screening、final、hunting 角色；`api_hunt` 优先使用 hunting，未配置时回退 default Provider，不得随机选择。轻量网关（screen）仍仅 screening/final。
 
 ### 5.5 Redis 分库
 
@@ -205,16 +211,21 @@ AI 节点只接收结构化、已裁剪、已脱敏的输入并返回结构化�
 
 ### 6.2 Cluster
 
-聚类输出原始发现数、分组数、各 CWE/引擎/等级统计及函数索引覆盖情况。必须包含降噪漏斗：`dropped_c_count`、按引擎的降噪计数（C 档未建组条目），以及 OSV bypass 组数。
+聚类输出原始发现数、分组数、各 CWE/引擎/等级统计及函数索引覆盖情况。必须包含降噪漏斗：`dropped_c_count`、按引擎的降噪计数（C 档未建组条目），以及 OSV bypass 组数。输入范围仅限三扫描引擎 RawFinding，排除 `api_hunt`。
+
+### 6.2.1 API Inventory / Hunt
+
+- `api_inventory`：输出 `endpoint_count`、`pve_count`、`parser`（汇合主键）、`parsers`、`acquisition_kinds`、`bom_path`、`unsupported_languages`、`ok`。BOM 落工作区 JSON；Handoff 只带摘要。无适配 parser 的画像语言列入 `unsupported_languages`；已跑 parser 但 0 端点**不算**语言不支持，禁止把 0 端点说成「无 API=安全」。
+- `api_hunt`：输入 inventory（不依赖 cluster）；按 `resource_key` 批审 Top-K PVE；产出 `reviewed_count`、`suspect_count`、`finding_count`、`qualified_count`、`ok`。嫌疑项 schema 对齐 §2.7（`why`/`evidence`/`attacker_controlled`/`reaches_sink`/`sanitizer`/`confidence`）；归一为 RawFinding（`engine=api_hunt`）并 upsert AlertGroup；**仅**当 `confidence >= triage_high_confidence` 且字段齐备时写 Adjudication（`verdict_source=agent`，`context_log.via=api_hunt`），`qualified_count` 计此类直出数；**不进** screen/triage。验证任务 `VERIFY_MODE` skip。动态 BOLA 确认仍在 lead/reproduce，不在本节点发 HTTP。
 
 ### 6.3 Screen / Triage
 
-二审拆为两个节点，按是否启动 Docker / Claude SDK 切分（验证任务二者均 `VERIFY_MODE` skip）：
+二审拆为两个节点，按是否启动 Docker / Claude SDK 切分（验证任务二者均 `VERIFY_MODE` skip）；**仅覆盖扫描聚类线索**（显式排除 `engine_set` 含 `api_hunt` 的组）：
 
-- `screen`（轻量快审）：T0 指纹携带 + T1 规则 FP 率 + T2 `llm_complete` 快审。T2 **不得**对 tp 走 LeadStreamer；高置信 tp 只能升级 T3。无 Docker。
-- `triage`（AI 二审）：T3 族代表 + `adjudicate_group` + 族内传播；只消费仍为 `clustered` 的升级组。有 Docker。T3 `submit_result` 按 §2.7 拒收假 tp。
+- `screen`（轻量快审）：T0 指纹携带 + T1 规则 FP 率 + T2 `llm_complete` 快审。T2 **不得**对 tp 走 LeadStreamer；高置信 tp 只能升级 T3。无 Docker。`requires=(cluster,)`。
+- `triage`（AI 二审）：T3 族代表 + `adjudicate_group` + 族内传播；只消费仍为 `clustered` 的扫描升级组。有 Docker。T3 `submit_result` 按 §2.7 拒收假 tp。
 
-事件文案用「可疑真洞 N / 误报 N」，禁止只打未翻译的 `tp_count` 给用户看。`dispatch.requires = triage`。Agent 段失败时可 `retry?from_node=triage` 复用已 completed 的 `screen`，不重跑 T0–T2。旧 run 无 `screen` completed 行时不得伪造成功，须从 `screen` 或整条重试。
+事件文案用「可疑真洞 N / 误报 N」，禁止只打未翻译的 `tp_count` 给用户看。`dispatch.requires = (triage, api_hunt)`。Agent 段失败时可 `retry?from_node=triage` 复用已 completed 的 `screen`，不重跑 T0–T2。旧 run 无 `screen` completed 行时不得伪造成功，须从 `screen` 或整条重试。
 
 ### 6.4 Dispatch
 

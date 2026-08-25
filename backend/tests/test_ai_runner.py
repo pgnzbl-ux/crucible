@@ -625,6 +625,43 @@ def test_validate_triage_rejects_fake_tp():
     assert ok4
 
 
+def test_validate_api_hunt_requires_qualify_fields():
+    base = {
+        "file_path": "app/api.py",
+        "endpoint_id": "GET:/items/{id}",
+        "why": ["无 ownership 校验"],
+        "evidence": [{"file": "app/api.py", "lines": "10-20"}],
+        "attacker_controlled": True,
+        "reaches_sink": True,
+        "sanitizer": "none",
+        "confidence": 0.9,
+    }
+    ok, _ = validate_output("api_hunt", {"suspects": [base], "reviewed_count": 1})
+    assert ok
+
+    ok_high, _ = validate_output(
+        "api_hunt",
+        {"suspects": [{**base, "confidence": "HIGH"}], "reviewed_count": 1},
+    )
+    assert ok_high
+
+    bad = {**base}
+    del bad["evidence"]
+    ok2, err2 = validate_output("api_hunt", {"suspects": [bad], "reviewed_count": 1})
+    assert not ok2
+    assert "evidence" in (err2 or "")
+
+    ok3, err3 = validate_output(
+        "api_hunt",
+        {"suspects": [{**base, "sanitizer": "effective"}], "reviewed_count": 1},
+    )
+    assert not ok3
+    assert "sanitizer" in (err3 or "")
+
+    ok4, _ = validate_output("api_hunt", {"suspects": [], "reviewed_count": 0})
+    assert ok4
+
+
 def test_validate_profile_requires_is_web():
     ok, err = validate_output("profile", {"language": "python"})
     assert not ok
@@ -685,6 +722,43 @@ async def test_missing_output_includes_failed_event(tmp_path, monkeypatch):
     msg = str(ei.value)
     assert "未产出 .node_output.json" in msg
     assert "未调用 submit_result" in msg
+
+
+@pytest.mark.asyncio
+async def test_missing_output_annotates_dsml_tool_leak(tmp_path, monkeypatch):
+    """DeepSeek 把 DSML tool 泄成纯文本时，错误须点名 DSML，便于 humanize / 回喂。"""
+    from unittest.mock import MagicMock, patch
+
+    from app.contexts.agent import ai_runner
+    from app.core.agent_runner import AgentRunnerError
+
+    settings = MagicMock()
+    settings.claude_agent_sdk_enabled = True
+
+    def _fake_run(spec, on_event):
+        on_event({
+            "type": "agent.message",
+            "text": "]\n</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
+        })
+        on_event({
+            "type": "agent.failed",
+            "error": "节点 env_ready 未调用 submit_result(无 .node_output.json)",
+        })
+        return 1, {"stderr_tail": "", "timed_out": False}
+
+    monkeypatch.setattr("app.core.config.get_settings", lambda: settings)
+    with patch("app.contexts.agent.ai_runner.agent_runner_manager") as mgr:
+        mgr.run_with_streaming.side_effect = _fake_run
+        with pytest.raises(AgentRunnerError) as ei:
+            await ai_runner.run_ai_node(
+                node_key="env_ready",
+                input_json={"attempt": 1},
+                host_workdir=str(tmp_path),
+                runner_env={},
+            )
+    msg = str(ei.value)
+    assert "DSML" in msg
+    assert "未产出 .node_output.json" in msg
 
 
 @pytest.mark.asyncio

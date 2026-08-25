@@ -49,6 +49,10 @@ def test_pipeline_shape_per_spec():
     assert node_by_key("scan_osv").requires == ("source",)
     assert node_by_key("scan_semgrep").requires == ("source", "profile")
     assert node_by_key("scan_semgrep").require_data == ("profile.semgrep_configs",)
+    assert node_by_key("api_inventory").requires == ("source", "profile")
+    assert node_by_key("api_hunt").requires == ("api_inventory",)
+    assert node_by_key("screen").requires == ("cluster",)
+    assert node_by_key("dispatch").requires == ("triage", "api_hunt")
     # cluster 等齐三个扫描；audit 等dispatch(验证模式 dispatch 被 skip 视为满足)
     assert set(node_by_key("cluster").requires) == {"scan_semgrep", "scan_gitleaks", "scan_osv"}
     assert "dispatch" in node_by_key("audit").requires
@@ -62,7 +66,7 @@ def test_pipeline_shape_per_spec():
 
 
 def test_discovery_ready_waves_parallel_scans():
-    """审计任务就绪波次：profile ∥ gitleaks ∥ osv，随后 semgrep ∥ env_ready。"""
+    """审计任务就绪波次：profile ∥ gitleaks ∥ osv，随后 semgrep ∥ api_inventory ∥ env_ready。"""
     from app.contexts.agent.contracts import DEFAULT_PIPELINE
     from app.contexts.agent.orchestrator import compute_ready
 
@@ -75,17 +79,39 @@ def test_discovery_ready_waves_parallel_scans():
 
     after_scans = after_source | wave2
     wave3 = {s.key for s in compute_ready(DEFAULT_PIPELINE, after_scans)}
-    assert wave3 == {"scan_semgrep", "env_ready"}
+    assert wave3 == {"scan_semgrep", "api_inventory", "env_ready"}
 
-    after_env_semgrep = after_scans | wave3
-    wave4 = {s.key for s in compute_ready(DEFAULT_PIPELINE, after_env_semgrep)}
-    assert wave4 == {"cluster"}
+    # 扫描齐即可开 cluster，无需等 env_ready / api_inventory（靶场不阻断发现复核）
+    after_semgrep = after_scans | {"scan_semgrep"}
+    assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_semgrep)} == {
+        "api_inventory", "env_ready", "cluster",
+    }
 
-    # cluster → screen → triage → dispatch → audit(线性收窄段)
-    after_cluster = after_env_semgrep | {"cluster"}
-    assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_cluster)} == {"screen"}
-    after_screen = after_cluster | {"screen"}
+    after_deep = after_scans | wave3
+    assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_deep)} == {
+        "cluster", "api_hunt",
+    }
+
+    # 清单齐即可猎洞，无需等 cluster；扫描齐即可 cluster，无需等猎洞
+    after_inventory = after_scans | {"api_inventory"}
+    assert "api_hunt" in {s.key for s in compute_ready(DEFAULT_PIPELINE, after_inventory)}
+    assert "screen" not in {s.key for s in compute_ready(DEFAULT_PIPELINE, after_inventory)}
+
+    # cluster 齐即可开 screen，无需等 api_hunt
+    after_cluster_only = after_deep | {"cluster"}
+    assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_cluster_only)} == {
+        "api_hunt", "screen",
+    }
+    after_hunt_only = after_deep | {"api_hunt"}
+    assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_hunt_only)} == {"cluster"}
+
+    # 扫描复核链与猎洞并列汇入 dispatch
+    after_screen = after_deep | {"cluster", "api_hunt", "screen"}
     assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_screen)} == {"triage"}
+    after_triage_no_hunt = after_deep | {"cluster", "screen", "triage"}
+    assert "dispatch" not in {
+        s.key for s in compute_ready(DEFAULT_PIPELINE, after_triage_no_hunt)
+    }
     after_triage = after_screen | {"triage"}
     assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_triage)} == {"dispatch"}
     after_dispatch = after_triage | {"dispatch"}
@@ -93,12 +119,15 @@ def test_discovery_ready_waves_parallel_scans():
 
 
 def test_verify_mode_skip_signals():
-    """验证任务：扫描/聚类/二审/调度被 VERIFY_MODE skip；NON_WEB 不受影响。"""
+    """验证任务：扫描/清单/猎洞/聚类/二审/调度被 VERIFY_MODE skip；NON_WEB 不受影响。"""
     from app.contexts.agent.contracts import HandoffStore, SkipWhen, node_by_key
     from app.contexts.agent.orchestrator import _evaluate_skip
 
     store = HandoffStore()  # 无任何输出
-    for key in ("scan_gitleaks", "scan_osv", "scan_semgrep", "cluster", "screen", "triage", "dispatch"):
+    for key in (
+        "scan_gitleaks", "scan_osv", "scan_semgrep", "api_inventory", "api_hunt",
+        "cluster", "screen", "triage", "dispatch",
+    ):
         assert _evaluate_skip(node_by_key(key), store, verify_mode=True) == SkipWhen.VERIFY_MODE
         assert _evaluate_skip(node_by_key(key), store, verify_mode=False) is None
     # is_web 未定/False 时 env_ready 等仍按 NON_WEB 出口
@@ -183,6 +212,10 @@ async def test_discovery_no_lead_completes_with_terminal_skipped(session_factory
             patch.object(orch._NODE_EXECUTORS["scan_gitleaks"], "execute", await fake_scan_ok("gitleaks")),
             patch.object(orch._NODE_EXECUTORS["scan_osv"], "execute", await fake_scan_ok("osv")),
             patch.object(orch._NODE_EXECUTORS["scan_semgrep"], "execute", await fake_scan_ok("semgrep")),
+            patch.object(orch._NODE_EXECUTORS["api_inventory"], "execute",
+                         AsyncMock(return_value={"ok": True, "parser": "none", "endpoint_count": 0, "pve_count": 0})),
+            patch.object(orch._NODE_EXECUTORS["api_hunt"], "execute",
+                         AsyncMock(return_value={"ok": True, "reviewed_count": 0, "suspect_count": 0, "finding_count": 0})),
         ):
             result = await orch.run_orchestration(
                 task_id=task.id, run_id=run.id, session=session,
@@ -198,6 +231,8 @@ async def test_discovery_no_lead_completes_with_terminal_skipped(session_factory
         assert by_key["scan_gitleaks"] == "completed"  # WP1 骨架：零 finding 完成
         assert by_key["scan_osv"] == "completed"
         assert by_key["scan_semgrep"] == "completed"
+        assert by_key["api_inventory"] == "completed"
+        assert by_key["api_hunt"] == "completed"
         assert by_key["cluster"] == "completed"
         assert by_key["triage"] == "completed"
         assert by_key["dispatch"] == "completed"
@@ -297,6 +332,10 @@ async def test_discovery_with_lead_runs_terminal_nodes(session_factory):
                 patch.object(execs["scan_gitleaks"], "execute", await fake_scan_ok("gitleaks")),
                 patch.object(execs["scan_osv"], "execute", await fake_scan_ok("osv")),
                 patch.object(execs["scan_semgrep"], "execute", await fake_scan_ok("semgrep")),
+                patch.object(execs["api_inventory"], "execute",
+                             AsyncMock(return_value={"ok": True, "parser": "none", "endpoint_count": 0, "pve_count": 0})),
+                patch.object(execs["api_hunt"], "execute",
+                             AsyncMock(return_value={"ok": True, "reviewed_count": 0, "suspect_count": 0, "finding_count": 0})),
             ):
                 result = await orch.run_orchestration(
                     task_id=task.id, run_id=run.id, session=session,
@@ -360,7 +399,8 @@ async def test_verify_task_skips_discovery_nodes(session_factory):
         by_key = {n.node_key: n.status for n in nodes}
         assert by_key["source"] == "completed"
         assert by_key["profile"] == "completed"
-        for key in ("scan_gitleaks", "scan_osv", "scan_semgrep", "cluster", "screen", "triage",
+        for key in ("scan_gitleaks", "scan_osv", "scan_semgrep", "api_inventory", "api_hunt",
+                    "cluster", "screen", "triage",
                     "dispatch", "env_ready", "reproduce"):
             assert by_key[key] == "skipped", f"{key} 应 skip"
         assert by_key["audit"] == "completed"
@@ -407,7 +447,7 @@ async def test_parallel_wave_runs_concurrently(session_factory, tmp_path):
             async def gated_profile(ctx, node_input=None):
                 overlapped["n"] += 1
                 await barrier.wait()
-                return {"is_web": True, "language": "python"}
+                return {"is_web": True, "language": "python", "semgrep_configs": ["p/python"]}
 
             async def gated_scan(node_key):
                 async def inner(ctx, node_input=None):
@@ -418,7 +458,10 @@ async def test_parallel_wave_runs_concurrently(session_factory, tmp_path):
                 return inner
 
             async def fake_env(ctx, node_input=None):
-                return {"target_url": "http://x:8080", "compose_path": "y.yml"}
+                return {"target_url": "http://x:8080", "compose_path": "y.yml", "ok": True}
+
+            async def fake_pass(ctx, node_input=None):
+                return {"ok": True}
 
             execs = orch._NODE_EXECUTORS
             with (
@@ -426,7 +469,15 @@ async def test_parallel_wave_runs_concurrently(session_factory, tmp_path):
                 patch.object(execs["profile"], "execute", gated_profile),
                 patch.object(execs["scan_gitleaks"], "execute", await gated_scan("scan_gitleaks")),
                 patch.object(execs["scan_osv"], "execute", await gated_scan("scan_osv")),
+                patch.object(execs["scan_semgrep"], "execute", fake_pass),
+                patch.object(execs["api_inventory"], "execute", fake_pass),
                 patch.object(execs["env_ready"], "execute", fake_env),
+                patch.object(execs["cluster"], "execute", fake_pass),
+                patch.object(execs["api_hunt"], "execute", fake_pass),
+                patch.object(execs["screen"], "execute", fake_pass),
+                patch.object(execs["triage"], "execute", fake_pass),
+                patch.object(execs["dispatch"], "execute",
+                             AsyncMock(return_value={"has_lead": False})),
             ):
                 result = await asyncio.wait_for(
                     orch.run_orchestration(
@@ -438,6 +489,104 @@ async def test_parallel_wave_runs_concurrently(session_factory, tmp_path):
                 )
             assert result["status"] == "completed"
             assert overlapped["n"] == 3  # profile + gitleaks + osv 同波并发
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cluster_starts_while_env_ready_still_running(tmp_path):
+    """渐进调度：三扫描完成后 cluster 立即开工，不整波等待 env_ready。"""
+    import asyncio
+
+    from app.contexts.agent import orchestrator as orch
+    from app.contexts.task.models import Task, TaskRun
+
+    db_file = tmp_path / "progressive.sqlite"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}", connect_args={"timeout": 30})
+    async with engine.begin() as conn:
+        from app.shared.models import register_models
+
+        register_models()
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with factory() as session:
+            task = Task(
+                project_address="https://github.com/a/b.git", task_type="discovery",
+                vulnerability_description=None, owner_id="u1", status="running",
+            )
+            session.add(task)
+            await session.flush()
+            run = TaskRun(task_id=task.id, status="running")
+            session.add(run)
+            await session.flush()
+
+            release_env = asyncio.Event()
+            cluster_started = asyncio.Event()
+            env_still_running_when_cluster_started = {"ok": False}
+
+            from app.shared.object_store import MemoryObjectStore, set_object_store_for_tests
+            set_object_store_for_tests(MemoryObjectStore())
+
+            async def fake_source(ctx, node_input=None):
+                return {"source_path": ctx.source_path, "repo_dirname": "demo", "commit_sha": "abc"}
+
+            async def fake_profile(ctx, node_input=None):
+                return {"is_web": True, "language": "python", "semgrep_configs": ["p/python"]}
+
+            async def fake_scan(ctx, node_input=None):
+                return {"engine": "x", "scan_run_id": None, "status": "completed", "finding_count": 0}
+
+            async def slow_env(ctx, node_input=None):
+                await release_env.wait()
+                return {"target_url": "http://x:8080", "compose_path": "y.yml", "ok": True}
+
+            async def watch_cluster(ctx, node_input=None):
+                env_still_running_when_cluster_started["ok"] = not release_env.is_set()
+                cluster_started.set()
+                return {"ok": True, "group_count": 0, "finding_count": 0}
+
+            async def fake_pass(ctx, node_input=None):
+                return {
+                    "ok": True,
+                    "parser": "none",
+                    "endpoint_count": 0,
+                    "pve_count": 0,
+                    "reviewed_count": 0,
+                    "suspect_count": 0,
+                    "finding_count": 0,
+                    "group_count": 0,
+                }
+
+            execs = orch._NODE_EXECUTORS
+            try:
+                with (
+                    patch.object(execs["source"], "execute", fake_source),
+                    patch.object(execs["profile"], "execute", fake_profile),
+                    patch.object(execs["scan_gitleaks"], "execute", fake_scan),
+                    patch.object(execs["scan_osv"], "execute", fake_scan),
+                    patch.object(execs["scan_semgrep"], "execute", fake_scan),
+                    patch.object(execs["api_inventory"], "execute", fake_pass),
+                    patch.object(execs["env_ready"], "execute", slow_env),
+                    patch.object(execs["cluster"], "execute", watch_cluster),
+                    patch.object(execs["api_hunt"], "execute", fake_pass),
+                    patch.object(execs["screen"], "execute", fake_pass),
+                    patch.object(execs["triage"], "execute", fake_pass),
+                    patch.object(execs["dispatch"], "execute",
+                                 AsyncMock(return_value={"has_lead": False})),
+                ):
+                    orch_task = asyncio.create_task(orch.run_orchestration(
+                        task_id=task.id, run_id=run.id, session=session,
+                        host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
+                        node_session_factory=factory,
+                    ))
+                    await asyncio.wait_for(cluster_started.wait(), timeout=5)
+                    assert env_still_running_when_cluster_started["ok"] is True
+                    release_env.set()
+                    result = await asyncio.wait_for(orch_task, timeout=10)
+                assert result["status"] == "completed"
+            finally:
+                set_object_store_for_tests(None)
     finally:
         await engine.dispose()
 

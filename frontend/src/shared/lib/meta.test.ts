@@ -5,6 +5,7 @@ import { AI_NODE_KEYS, formatTokenCount, getAiVerdictMeta, isAiNode, mergeTokenU
 describe('AI_NODE_KEYS', () => {
   it('marks model-using pipeline nodes', () => {
     expect([...AI_NODE_KEYS].sort()).toEqual([
+      'api_hunt',
       'audit',
       'env_ready',
       'lead_verify',
@@ -14,7 +15,7 @@ describe('AI_NODE_KEYS', () => {
       'screen',
       'triage',
     ])
-    expect(isAiNode('triage')).toBe(true)
+    expect(isAiNode('api_hunt')).toBe(true)
     expect(isAiNode('lead_verify')).toBe(true)
     expect(isAiNode('cluster')).toBe(false)
   })

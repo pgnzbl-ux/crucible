@@ -10,7 +10,7 @@ from sqlalchemy import select
 
 from ..base import NodeContext, emit_phase, task_run_cancelled
 from ..triage import cascade
-from ..triage.queue import order_groups, should_skip_llm
+from ..triage.queue import order_groups, scan_review_groups, should_skip_llm
 from ..triage.streamer import LeadStreamer
 
 
@@ -43,7 +43,9 @@ class ScreenNode:
         settings = get_settings()
         svc = FindingService(ctx.db_session)
 
-        groups = await svc.list_groups(ctx.task_id, status="clustered")
+        groups = scan_review_groups(
+            await svc.list_groups(ctx.task_id, status="clustered")
+        )
         rep_ids = [
             g.representative_finding_id
             for g in groups

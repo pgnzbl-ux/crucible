@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from .handoff_store import HandoffStore, InputAssembler, TaskScalars
 from .inputs import (
+    ApiHuntInput,
+    ApiInventoryInput,
     AuditInput,
     ClusterInput,
     DispatchInput,
@@ -22,6 +24,8 @@ from .inputs import (
     TriageInput,
 )
 from .outputs import (
+    ApiHuntHandoff,
+    ApiInventoryHandoff,
     AuditForReproduce,
     AuditHandoff,
     ClusterHandoff,
@@ -48,6 +52,10 @@ from .registry import (
 from .signals import ControlSignals
 
 __all__ = [
+    "ApiHuntHandoff",
+    "ApiHuntInput",
+    "ApiInventoryHandoff",
+    "ApiInventoryInput",
     "AuditForReproduce",
     "AuditHandoff",
     "AuditInput",

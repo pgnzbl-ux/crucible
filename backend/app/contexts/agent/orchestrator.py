@@ -1,10 +1,11 @@
-"""节点编排器 — 就绪波次调度 + 分支出口 + 断点续跑(discovery-spec §4.2)。
+"""节点编排器 — 依赖就绪渐进调度 + 分支出口 + 断点续跑(discovery-spec §4.2)。
 
 有限就绪并行，不是通用 DAG 引擎：
-- 某节点 requires 全部 terminal(completed/skipped 均满足) → 就绪；
-- 同一波内轻节点(扫描子进程等)并发执行，重 runner(agent-runner 容器)节点至多 1 个；
-- 验证任务是线性链，每波恰一个节点，行为与旧顺序循环一致；
-- 并发执行时每个节点持独立 session(node_session_factory)，主 session 只在波间使用。
+- 某节点 requires 全部 terminal(completed/skipped 均满足) → 就绪并立即开跑；
+- 同批就绪节点可并发；任一完成即写入 terminal 并解锁下游，不整波等待兄弟节点
+  （故 scan_* 齐后 cluster/发现复核可与仍在跑的 env_ready 并行）；
+- 验证任务是线性链，行为与旧顺序循环一致；
+- 并发执行时每个节点持独立 session(node_session_factory)，主 session 只在准入/收尾使用。
 
 skip 信号：NON_WEB / GATE_*(audit 后) / VERIFY_MODE / NO_DISPATCH_LEAD / LEAD_DRIVEN。
 skip 视为 completed，满足下游 requires(验证任务 skip dispatch 后 audit 照常就绪)。
@@ -19,6 +20,7 @@ import contextlib
 import json
 import logging
 import traceback
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -42,6 +44,8 @@ from app.contexts.agent.errors import (
 )
 from app.contexts.task.models import NodeRun, Task, TaskRun
 
+from .nodes.api_hunt import ApiHuntNode
+from .nodes.api_inventory import ApiInventoryNode
 from .nodes.audit import AuditNode
 from .nodes.base import NodeContext, repo_dirname_from_outputs, source_tree_present
 from .nodes.cluster import ClusterNode
@@ -64,8 +68,10 @@ _NODE_EXECUTORS = {
     "scan_gitleaks": GitleaksNode(),
     "scan_osv": OsvScanNode(),
     "scan_semgrep": SemgrepNode(),
+    "api_inventory": ApiInventoryNode(),
     "env_ready": EnvReadyNode(),
     "cluster": ClusterNode(),
+    "api_hunt": ApiHuntNode(),
     "screen": ScreenNode(),
     "triage": TriageNode(),
     "dispatch": DispatchNode(),
@@ -115,6 +121,37 @@ async def _is_cancelled_by_id(session: AsyncSession, task_id: str, run_id: str) 
 
 def _cancelled_result() -> dict[str, Any]:
     return {"status": "cancelled", "verdict": None}
+
+
+@dataclass(frozen=True)
+class _TaskExecSnap:
+    """并发节点执行用的 Task 标量快照，避免跨 session 碰 ORM。"""
+
+    id: str
+    vulnerability_description: str | None
+    project_address: str
+    project_ref: str | None
+    project_ref_type: str | None
+    clone_depth: int | None
+    source_type: str
+    project_id: str | None
+    owner_id: str | None
+    lab_id: str | None
+
+
+def _task_exec_snap(task: Task) -> _TaskExecSnap:
+    return _TaskExecSnap(
+        id=task.id,
+        vulnerability_description=task.vulnerability_description,
+        project_address=task.project_address,
+        project_ref=task.project_ref,
+        project_ref_type=getattr(task, "project_ref_type", None),
+        clone_depth=getattr(task, "clone_depth", None),
+        source_type=getattr(task, "source_type", None) or "git",
+        project_id=getattr(task, "project_id", None),
+        owner_id=getattr(task, "owner_id", None),
+        lab_id=getattr(task, "lab_id", None),
+    )
 
 
 def _task_scalars(task: Task, host_workdir: str, source_path: str) -> TaskScalars:
@@ -414,7 +451,7 @@ async def _execute_one(
     node,
     nr_id: str,
     node_input,
-    task: Task,
+    task_snap: _TaskExecSnap,
     run_id: str,
     host_workdir: str,
     source_path: str,
@@ -432,24 +469,25 @@ async def _execute_one(
     try:
         nr = await ns.get(NodeRun, nr_id)
         ctx = NodeContext(
-            task_id=task.id, run_id=run_id, host_workdir=host_workdir,
+            task_id=task_snap.id, run_id=run_id, host_workdir=host_workdir,
             source_path=source_path,
-            vulnerability_description=task.vulnerability_description,
-            project_address=task.project_address, project_ref=task.project_ref,
-            project_ref_type=getattr(task, "project_ref_type", None),
-            clone_depth=getattr(task, "clone_depth", None),
-            source_type=getattr(task, "source_type", None) or "git",
+            vulnerability_description=task_snap.vulnerability_description,
+            project_address=task_snap.project_address,
+            project_ref=task_snap.project_ref,
+            project_ref_type=task_snap.project_ref_type,
+            clone_depth=task_snap.clone_depth,
+            source_type=task_snap.source_type,
             previous_outputs=previous_outputs or {}, runner_env=runner_env,
             node_run_id=nr_id,
             on_event=_stamp_ai_event(on_ai_event, spec.key, nr_id),
             db_session=ns,
             session_factory=session_factory,
-            project_id=getattr(task, "project_id", None),
-            owner_id=getattr(task, "owner_id", None),
-            lab_id=getattr(task, "lab_id", None),
+            project_id=task_snap.project_id,
+            owner_id=task_snap.owner_id,
+            lab_id=task_snap.lab_id,
         )
         output = await node.execute(ctx, node_input)
-        if await _is_cancelled_by_id(ns, task.id, run_id):
+        if await _is_cancelled_by_id(ns, task_snap.id, run_id):
             nr.status = "cancelled"
             nr.finished_at = datetime.now(timezone.utc)
             await ns.commit()
@@ -600,11 +638,12 @@ async def run_orchestration(
     on_ai_event=None,
     node_session_factory=None,
 ) -> dict[str, Any]:
-    """按就绪波次跑节点编排。返回 {status, verdict, summary}。
+    """按依赖就绪渐进调度跑节点编排。返回 {status, verdict, summary}。
 
     on_node_event: 可选回调 (node_key, status, output) → None,用于发 SSE。
-    node_session_factory: 并发波内每节点独立 session 的工厂；
-    缺省(单测)时退化为顺序执行、共享主 session——与旧行为一致。
+    node_session_factory: 并发时每节点独立 session 的工厂；
+    缺省(单测)时退化为顺序执行、共享主 session。
+    有工厂时任一节点完成即解锁下游，不整波等待兄弟节点。
     """
     task = await session.get(Task, task_id)
     run = await session.get(TaskRun, run_id)
@@ -612,23 +651,71 @@ async def run_orchestration(
         return {"status": "failed", "error": "task/run 不存在"}
 
     verify_mode = (getattr(task, "task_type", None) or "verify") == "verify"
+    task_snap = _task_exec_snap(task)
     store = HandoffStore()
     final_verdict: str | None = None
     skipped_due_to_non_web = False
     terminal: set[str] = set()
+    # 并发在飞：Task → (spec, node, nr_id, node_input, previous_outputs)
+    inflight: dict[asyncio.Task, tuple] = {}
+
+    def _inflight_keys() -> set[str]:
+        return {info[0].key for info in inflight.values()}
+
+    async def _cancel_inflight() -> set[str]:
+        """取消所有在飞任务，返回被连带取消的 node_key。"""
+        if not inflight:
+            return set()
+        pending = list(inflight.keys())
+        for t in pending:
+            t.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        keys = {inflight[t][0].key for t in pending}
+        inflight.clear()
+        return keys
+
+    async def _spawn_prepared(prepared: list[tuple]) -> None:
+        for spec, node, nr_id, node_input, prev in prepared:
+            if spec.lead_driven_aggregate and not verify_mode:
+                async def _agg(nr_id=nr_id):
+                    async with node_session_factory() as ns:
+                        try:
+                            out = await _complete_discovery_aggregate_report(
+                                ns, run_id, nr_id,
+                            )
+                            await ns.commit()
+                            return out
+                        except Exception as e:  # noqa: BLE001
+                            raise _NodeFailure("report", e) from e
+                t = asyncio.create_task(_agg())
+            else:
+                t = asyncio.create_task(_execute_one(
+                    spec=spec, node=node, nr_id=nr_id, node_input=node_input,
+                    task_snap=task_snap, run_id=run_id, host_workdir=host_workdir,
+                    source_path=source_path, runner_env=runner_env,
+                    on_ai_event=on_ai_event, node_session=None,
+                    session_factory=node_session_factory,
+                    previous_outputs=prev,
+                ))
+            inflight[t] = (spec, node, nr_id, node_input, prev)
 
     while True:
         if await _is_cancelled(session, task, run):
+            await _cancel_inflight()
             await _mark_inflight_cancelled(session, run_id)
             return _cancelled_result()
 
-        ready = compute_ready(DEFAULT_PIPELINE, terminal)
-        if not ready:
+        ready = [
+            spec for spec in compute_ready(DEFAULT_PIPELINE, terminal)
+            if spec.key not in _inflight_keys()
+        ]
+        if not ready and not inflight:
             break
 
-        # 先清掉本波内命中分支出口/数据前提缺失的节点(skip 视为 completed)
+        # 先清掉命中分支出口/数据前提缺失的节点(skip 视为 completed)
         scalars_probe = _task_scalars(task, host_workdir, source_path)
         wave: list = []
+        early_fail: dict[str, Any] | None = None
         for spec in ready:
             hit = _evaluate_skip(spec, store, verify_mode)
             if hit is not None:
@@ -642,8 +729,6 @@ async def run_orchestration(
                 terminal.add(spec.key)
                 if hit == SkipWhen.NON_WEB:
                     skipped_due_to_non_web = True
-                # 声明式出口（registry.skip_verdict）：如 reproduce 被 GATE_FAIL
-                # skip → final_verdict=false_positive，不再手写节点名 helper
                 if spec.skip_verdict.get(hit.value):
                     final_verdict = spec.skip_verdict[hit.value]
                 if on_node_event:
@@ -651,11 +736,13 @@ async def run_orchestration(
                 continue
             if _require_data_missing(spec, store, scalars_probe):
                 if spec.on_missing_data == "fail":
-                    return await _finalize_node_failure(
+                    await _cancel_inflight()
+                    early_fail = await _finalize_node_failure(
                         session, task, run, spec, None, host_workdir, store,
                         final_verdict, RuntimeError(f"{spec.key} 数据前提缺失: {spec.require_data}"),
                         on_node_event, verify_mode,
                     )
+                    break
                 nr = await _get_or_create_node_run(
                     session, run_id, task_id, spec.index, spec.key
                 )
@@ -668,11 +755,10 @@ async def run_orchestration(
                     await on_node_event(spec.key, "skipped", None)
                 continue
             wave.append(spec)
+        if early_fail is not None:
+            return early_fail
 
-        if not wave:
-            continue  # 本轮全是 skip，重算就绪集
-
-        # 断点续跑：波内已完成/已 skip 的节点直接复用
+        # 断点续跑：已完成/已 skip 的节点直接复用
         executable: list = []
         for spec in wave:
             nr = await _get_or_create_node_run(
@@ -682,6 +768,7 @@ async def run_orchestration(
                 try:
                     raw = json.loads(nr.output_json or "{}")
                 except json.JSONDecodeError:
+                    await _cancel_inflight()
                     return await _fail_corrupt_output(session, task, run, nr, spec.key)
                 if spec.requires_workspace and not source_tree_present(
                     host_workdir, store.get_raw(spec.key) or raw
@@ -699,7 +786,6 @@ async def run_orchestration(
                     await on_node_event(spec.key, "reused", store.get_raw(spec.key))
                 continue
             if nr.status == "skipped":
-                # 已被分支出口(如 gate_fail 后的 reproduce)标记 → 不执行
                 store.set(spec.key, {})
                 terminal.add(spec.key)
                 if on_node_event:
@@ -707,66 +793,72 @@ async def run_orchestration(
                 continue
             executable.append((spec, nr))
 
+        # 无新执行体：若有在飞则等完成；否则因 skip/reuse 重算就绪
         if not executable:
-            continue
-
-        # discovery 有入队线索：先排空 Lead 队列，再跑聚合 report(§4.4)
-        if (
-            any(spec.key == "report" for spec, _ in executable)
-            and store.signals(verify_mode=verify_mode).lead_driven
-        ):
-            await _drain_leads_before_report(
-                session=session,
-                session_factory=node_session_factory,
-                task_id=task_id,
-                run_id=run_id,
-                host_workdir=host_workdir,
-                source_path=source_path,
-                runner_env=runner_env,
-                store=store,
-                on_ai_event=on_ai_event,
-                lab_id=getattr(task, "lab_id", None),
+            if not inflight:
+                continue
+            done, _ = await asyncio.wait(
+                inflight.keys(), return_when=asyncio.FIRST_COMPLETED,
             )
+        else:
+            # discovery 有入队线索：先排空 Lead 队列，再跑聚合 report(§4.4)
+            if (
+                any(spec.key == "report" for spec, _ in executable)
+                and store.signals(verify_mode=verify_mode).lead_driven
+            ):
+                await _drain_leads_before_report(
+                    session=session,
+                    session_factory=node_session_factory,
+                    task_id=task_id,
+                    run_id=run_id,
+                    host_workdir=host_workdir,
+                    source_path=source_path,
+                    runner_env=runner_env,
+                    store=store,
+                    on_ai_event=on_ai_event,
+                    lab_id=task_snap.lab_id,
+                )
 
-        # 串行准备(主 session)：写 input_json / running，并组装 Input
-        prepared: list[tuple] = []
-        for spec, nr in executable:
-            scalars = _task_scalars(task, host_workdir, source_path)
-            try:
-                node_input = InputAssembler.assemble(spec.key, store, scalars)
-            except Exception as e:  # noqa: BLE001 — Input 组装失败按节点失败处理
-                raise _NodeFailure(spec.key, e) from e
-            nr.input_json = json.dumps(
-                InputAssembler.dump_for_persistence(node_input),
-                ensure_ascii=False,
-                default=str,
-            )
-            nr.status = "running"
-            nr.started_at = datetime.now(timezone.utc)
-            await session.commit()
-            if on_node_event:
-                await on_node_event(spec.key, "running", None)
-            previous_outputs = store.as_previous_outputs()
-            prepared.append((spec, _NODE_EXECUTORS[spec.key], nr.id, node_input, previous_outputs))
-
-        # 执行：无工厂(单测/降级)一律顺序共享主 session；有工厂才并发(独立 session)
-        outcomes: dict[str, dict[str, Any] | _NodeFailure | _NodeCancelled] = {}
-        # collateral：因兄弟节点失败/取消而被连带 cancel 的节点（并发波才有）
-        collateral: set[str] = set()
-        if node_session_factory is None:
-            for spec, node, nr_id, node_input, prev in prepared:
+            # 串行准备(主 session)：写 input_json / running，并组装 Input
+            to_prepare = executable[:1] if node_session_factory is None else executable
+            prepared: list[tuple] = []
+            for spec, nr in to_prepare:
+                scalars = _task_scalars(task, host_workdir, source_path)
                 try:
-                    if (
-                        spec.lead_driven_aggregate
-                        and not verify_mode
-                    ):
-                        outcomes[spec.key] = await _complete_discovery_aggregate_report(
+                    node_input = InputAssembler.assemble(spec.key, store, scalars)
+                except Exception as e:  # noqa: BLE001
+                    await _cancel_inflight()
+                    await _mark_inflight_cancelled(session, run_id)
+                    return await _finalize_node_failure(
+                        session, task, run, spec, nr.id, host_workdir, store,
+                        final_verdict, e, on_node_event,
+                    )
+                nr.input_json = json.dumps(
+                    InputAssembler.dump_for_persistence(node_input),
+                    ensure_ascii=False,
+                    default=str,
+                )
+                nr.status = "running"
+                nr.started_at = datetime.now(timezone.utc)
+                await session.commit()
+                if on_node_event:
+                    await on_node_event(spec.key, "running", None)
+                previous_outputs = store.as_previous_outputs()
+                prepared.append(
+                    (spec, _NODE_EXECUTORS[spec.key], nr.id, node_input, previous_outputs)
+                )
+
+            if node_session_factory is None:
+                spec, node, nr_id, node_input, prev = prepared[0]
+                try:
+                    if spec.lead_driven_aggregate and not verify_mode:
+                        output = await _complete_discovery_aggregate_report(
                             session, run_id, nr_id,
                         )
                     else:
-                        outcomes[spec.key] = await _execute_one(
+                        output = await _execute_one(
                             spec=spec, node=node, nr_id=nr_id, node_input=node_input,
-                            task=task, run_id=run_id, host_workdir=host_workdir,
+                            task_snap=task_snap, run_id=run_id, host_workdir=host_workdir,
                             source_path=source_path, runner_env=runner_env,
                             on_ai_event=on_ai_event, node_session=session,
                             previous_outputs=prev,
@@ -775,83 +867,67 @@ async def run_orchestration(
                     await _mark_inflight_cancelled(session, run_id)
                     return _cancelled_result()
                 except _NodeFailure as f:
-                    outcomes[spec.key] = f
-        else:
-            tasks_map: dict[asyncio.Task, str] = {}
-            for spec, node, nr_id, node_input, prev in prepared:
-                if (
-                    spec.lead_driven_aggregate
-                    and not verify_mode
-                ):
-                    async def _agg(nr_id=nr_id):
-                        async with node_session_factory() as ns:
-                            try:
-                                out = await _complete_discovery_aggregate_report(
-                                    ns, run_id, nr_id,
-                                )
-                                await ns.commit()
-                                return out
-                            except Exception as e:  # noqa: BLE001
-                                raise _NodeFailure("report", e) from e
-                    t = asyncio.create_task(_agg())
-                else:
-                    t = asyncio.create_task(_execute_one(
-                        spec=spec, node=node, nr_id=nr_id, node_input=node_input,
-                        task=task, run_id=run_id, host_workdir=host_workdir,
-                        source_path=source_path, runner_env=runner_env,
-                        on_ai_event=on_ai_event, node_session=None,
-                        session_factory=node_session_factory,
-                        previous_outputs=prev,
-                    ))
-                tasks_map[t] = spec.key
-            done, pending = await asyncio.wait(
-                tasks_map.keys(), return_when=asyncio.FIRST_EXCEPTION
-            )
-            # 连带取消的节点不是 completed——不进 store/terminal、不发 completed
-            # 事件；其 NodeRun 由失败收尾的 _mark_inflight_cancelled 统一收敛。
-            if pending:
-                # 有失败/取消：终止波内其余节点(引擎子进程在 WP2 保障可取消)
-                for t in pending:
-                    t.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
-                for t in pending:
-                    key = tasks_map[t]
-                    collateral.add(key)
-                    outcomes[key] = _NodeCancelled()
-            for t in done:
-                key = tasks_map[t]
-                try:
-                    outcomes[key] = t.result()
-                except _NodeCancelled:
-                    outcomes[key] = _NodeCancelled()
-                except _NodeFailure as f:
-                    outcomes[key] = f
-                except asyncio.CancelledError:
-                    outcomes[key] = _NodeCancelled()
-                    collateral.add(key)
+                    await _mark_inflight_cancelled(session, run_id)
+                    return await _finalize_node_failure(
+                        session, task, run, spec, nr_id, host_workdir, store,
+                        final_verdict, f.error, on_node_event,
+                    )
+                store.set(spec.key, output)
+                terminal.add(spec.key)
+                if spec.updates_source_path:
+                    source_path = output.get("project_path") or source_path
+                if on_node_event:
+                    await on_node_event(spec.key, "completed", output)
+                continue
 
-        # 收尾(主 session 串行)
-        for spec, node, nr_id, node_input, _prev in prepared:
-            outcome = outcomes.get(spec.key)
-            if isinstance(outcome, _NodeCancelled):
-                if spec.key in collateral:
-                    continue  # 连带取消：等失败节点统一收尾，不误标 completed
-                await _mark_inflight_cancelled(session, run_id)
-                return _cancelled_result()
-            if isinstance(outcome, _NodeFailure):
-                # 先收敛波内连带取消节点的 NodeRun(含本节点，随后被覆写为 failed)
-                await _mark_inflight_cancelled(session, run_id)
-                return await _finalize_node_failure(
-                    session, task, run, spec, nr_id, host_workdir, store,
-                    final_verdict, outcome.error, on_node_event,
-                )
-            output = outcome
-            store.set(spec.key, output)
+            await _spawn_prepared(prepared)
+            done, _ = await asyncio.wait(
+                inflight.keys(), return_when=asyncio.FIRST_COMPLETED,
+            )
+
+        # 收尾已完成的在飞节点：先落成功，再处理取消/失败（与旧波次语义一致）
+        batch: list[tuple] = []
+        for t in done:
+            info = inflight.pop(t)
+            try:
+                outcome: dict[str, Any] | _NodeFailure | _NodeCancelled = t.result()
+            except _NodeCancelled:
+                outcome = _NodeCancelled()
+            except _NodeFailure as f:
+                outcome = f
+            except asyncio.CancelledError:
+                outcome = _NodeCancelled()
+            batch.append((info, outcome))
+
+        for (spec, _node, _nr_id, _ni, _prev), outcome in batch:
+            if isinstance(outcome, (_NodeFailure, _NodeCancelled)):
+                continue
+            store.set(spec.key, outcome)
             terminal.add(spec.key)
             if spec.updates_source_path:
-                source_path = output.get("project_path") or source_path
+                source_path = outcome.get("project_path") or source_path
             if on_node_event:
-                await on_node_event(spec.key, "completed", output)
+                await on_node_event(spec.key, "completed", outcome)
+
+        cancel_hit = next(
+            (item for item in batch if isinstance(item[1], _NodeCancelled)), None
+        )
+        if cancel_hit is not None:
+            await _cancel_inflight()
+            await _mark_inflight_cancelled(session, run_id)
+            return _cancelled_result()
+
+        fail_hit = next(
+            (item for item in batch if isinstance(item[1], _NodeFailure)), None
+        )
+        if fail_hit is not None:
+            (spec, _node, nr_id, _ni, _prev), outcome = fail_hit
+            await _cancel_inflight()
+            await _mark_inflight_cancelled(session, run_id)
+            return await _finalize_node_failure(
+                session, task, run, spec, nr_id, host_workdir, store,
+                final_verdict, outcome.error, on_node_event,
+            )
 
     previous_outputs = store.as_previous_outputs()
     report_out = store.get_raw("report")

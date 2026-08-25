@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from .inputs import (
+    ApiHuntInput,
+    ApiInventoryInput,
     AuditInput,
     ClusterInput,
     DispatchInput,
@@ -20,6 +22,8 @@ from .inputs import (
     TriageInput,
 )
 from .outputs import (
+    ApiHuntHandoff,
+    ApiInventoryHandoff,
     AuditHandoff,
     DispatchHandoff,
     EngineScanHandoff,
@@ -136,6 +140,13 @@ class InputAssembler:
                 host_workdir=task.host_workdir,
                 source_path=task.source_path,
             )
+        if node_key == "api_inventory":
+            return ApiInventoryInput(
+                source=SourceHandoff.model_validate(store.get_raw("source")),
+                profile=ProfileHandoff.model_validate(store.get_raw("profile")),
+                host_workdir=task.host_workdir,
+                source_path=task.source_path,
+            )
         if node_key == "cluster":
             scans = [
                 EngineScanHandoff.model_validate(store.get_raw(key))
@@ -149,12 +160,24 @@ class InputAssembler:
                 scans=scans,
                 profile=ProfileHandoff.model_validate(profile_raw) if profile_raw else None,
             )
+        if node_key == "api_hunt":
+            profile_raw = store.get_raw("profile")
+            return ApiHuntInput(
+                source=SourceHandoff.model_validate(store.get_raw("source")),
+                host_workdir=task.host_workdir,
+                source_path=task.source_path,
+                inventory=ApiInventoryHandoff.model_validate(store.get_raw("api_inventory")),
+                profile=ProfileHandoff.model_validate(profile_raw) if profile_raw else None,
+            )
         if node_key == "screen":
+            cluster_raw = store.get_raw("cluster")
             return ScreenInput(
                 source=SourceHandoff.model_validate(store.get_raw("source")),
                 host_workdir=task.host_workdir,
                 source_path=task.source_path,
-                cluster=project_handoff("cluster", store.get_raw("cluster")),
+                cluster=(
+                    project_handoff("cluster", cluster_raw) if cluster_raw else None
+                ),
             )
         if node_key == "triage":
             cluster_raw = store.get_raw("cluster")
@@ -168,12 +191,16 @@ class InputAssembler:
                 ),
             )
         if node_key == "dispatch":
+            hunt_raw = store.get_raw("api_hunt")
             return DispatchInput(
                 source=SourceHandoff.model_validate(store.get_raw("source")),
                 host_workdir=task.host_workdir,
                 source_path=task.source_path,
                 triage=project_handoff("triage", store.get_raw("triage")),
                 profile=ProfileHandoff.model_validate(store.get_raw("profile")),
+                api_hunt=(
+                    ApiHuntHandoff.model_validate(hunt_raw) if hunt_raw else None
+                ),
             )
         if node_key == "audit":
             # 验证：人给的描述；审计：description 为空串 + dispatch 主线索(discovery-spec §4.2.4)

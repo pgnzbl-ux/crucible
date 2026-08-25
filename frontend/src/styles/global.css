@@ -1303,19 +1303,20 @@ body,
 .crucible-dag-group.is-prepare { background: color-mix(in srgb, var(--crucible-primary) 4%, var(--crucible-bg-elevated, var(--crucible-bg))); }
 .crucible-dag-group.is-parallel { background: color-mix(in srgb, #1677ff 4%, var(--crucible-bg-elevated, var(--crucible-bg))); }
 .crucible-dag-group.is-deep { background: color-mix(in srgb, #08979c 5%, var(--crucible-bg-elevated, var(--crucible-bg))); }
+.crucible-dag-group.is-clues { background: color-mix(in srgb, #531dab 4%, var(--crucible-bg-elevated, var(--crucible-bg))); }
 .crucible-dag-group.is-review { background: color-mix(in srgb, #722ed1 4%, var(--crucible-bg-elevated, var(--crucible-bg))); }
 .crucible-dag-group.is-dispatch { background: color-mix(in srgb, #c41d7f 4%, var(--crucible-bg-elevated, var(--crucible-bg))); }
 .crucible-dag-group.is-verify { background: color-mix(in srgb, #d46b08 5%, var(--crucible-bg-elevated, var(--crucible-bg))); }
 .crucible-dag-group.is-result { background: color-mix(in srgb, var(--crucible-success) 4%, var(--crucible-bg-elevated, var(--crucible-bg))); }
 .crucible-dag-group__index {
   position: absolute;
-  top: 10px;
-  left: 12px;
+  top: 6px;
+  left: 10px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   border-radius: 5px;
   color: var(--crucible-text-secondary);
   background: color-mix(in srgb, var(--crucible-border-strong) 22%, transparent);
@@ -1325,8 +1326,8 @@ body,
 }
 .crucible-dag-group__copy {
   position: absolute;
-  top: 9px;
-  left: 36px;
+  top: 5px;
+  left: 32px;
   right: 10px;
   display: flex;
   align-items: baseline;

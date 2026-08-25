@@ -174,6 +174,32 @@ class DispatchHandoff(_HandoffBase):
     skipped_unaudited_count: int = 0
 
 
+class ApiInventoryHandoff(_HandoffBase):
+    """确定性 API 清单摘要(discovery-spec §6.2.1)。"""
+
+    ok: bool = True
+    parser: str = ""  # 汇合主键，如 fastapi,flask,openapi
+    parsers: list[str] = Field(default_factory=list)
+    acquisition_kinds: list[str] = Field(default_factory=list)
+    endpoint_count: int = 0
+    pve_count: int = 0
+    bom_path: str | None = None  # 相对 host_workdir
+    unsupported_languages: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
+class ApiHuntHandoff(_HandoffBase):
+    """API 逻辑/鉴权猎洞摘要(discovery-spec §6.2.1)。"""
+
+    ok: bool = True
+    reviewed_count: int = 0
+    suspect_count: int = 0
+    finding_count: int = 0
+    qualified_count: int = 0  # §2.7 全部门直出判决数（含 conf≥阈值）
+    budget_exhausted: bool = False
+    error: str | None = None
+
+
 HANDOFF_BY_KEY: dict[str, type[_HandoffBase]] = {
     "source": SourceHandoff,
     "profile": ProfileHandoff,
@@ -184,7 +210,9 @@ HANDOFF_BY_KEY: dict[str, type[_HandoffBase]] = {
     "scan_gitleaks": EngineScanHandoff,
     "scan_osv": EngineScanHandoff,
     "scan_semgrep": EngineScanHandoff,
+    "api_inventory": ApiInventoryHandoff,
     "cluster": ClusterHandoff,
+    "api_hunt": ApiHuntHandoff,
     "screen": ScreenHandoff,
     "triage": TriageHandoff,
     "dispatch": DispatchHandoff,

@@ -14,7 +14,7 @@ from sqlalchemy import select
 from ..base import NodeContext, emit_phase, task_run_cancelled
 from . import cascade
 from .adjudicate import adjudicate_group
-from .queue import order_groups
+from .queue import order_groups, scan_review_groups
 from .streamer import LeadStreamer
 
 
@@ -47,8 +47,11 @@ class TriageNode:
         settings = get_settings()
         svc = FindingService(ctx.db_session)
 
-        # screen 已定案/转人工的组不再是 clustered；此处只拿升级队列
-        groups = await svc.list_groups(ctx.task_id, status="clustered")
+        # screen 已定案/转人工的组不再是 clustered；此处只拿扫描升级队列
+        # （猎洞组绕过本节点，由 api_hunt 直出或保持 clustered 不进 T3）
+        groups = scan_review_groups(
+            await svc.list_groups(ctx.task_id, status="clustered")
+        )
         rep_ids = [
             g.representative_finding_id
             for g in groups

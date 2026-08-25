@@ -1,6 +1,7 @@
 """cluster 节点 — 确定性降噪 + 函数索引 + 指纹分组 + grade/降权。
 
 入口检查：三个 ScanRun 全 failed → raise「全引擎失败」。
+只汇入 semgrep/gitleaks/osv RawFinding（不含 api_hunt）。
 按 profile.languages 建索引（python/java/js/ts）；产出 ClusterHandoff 计数与进度事件。
 """
 from __future__ import annotations
@@ -82,10 +83,22 @@ class ClusterNode:
             save_index(ctx.host_workdir, index)
         emit_phase(ctx, f"索引完成：{len(index)} 个符号", phase=self.node_key)
 
-        findings = (await ctx.db_session.execute(
+        from app.contexts.finding.clustering import is_scan_engine
+
+        all_rows = (await ctx.db_session.execute(
             select(RawFinding).where(RawFinding.task_id == ctx.task_id)
         )).scalars().all()
-        emit_phase(ctx, f"读取 findings {len(findings)} 条", phase=self.node_key)
+        # 只汇入三扫描引擎；api_hunt 由猎洞节点自建组，避免同 locus 合并短路 T3
+        findings = [f for f in all_rows if is_scan_engine(f.engine)]
+        skipped_hunt = len(all_rows) - len(findings)
+        emit_phase(
+            ctx,
+            (
+                f"读取扫描 findings {len(findings)} 条"
+                + (f"（忽略猎洞 {skipped_hunt}）" if skipped_hunt else "")
+            ),
+            phase=self.node_key,
+        )
         dicts = [
             {
                 "id": f.id, "engine": f.engine, "rule_id": f.rule_id, "cwe": f.cwe,

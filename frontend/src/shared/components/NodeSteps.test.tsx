@@ -162,7 +162,7 @@ describe('NodeSteps audit detail wiring', () => {
 
     expect(html).toContain('crucible-node-progress__summary')
     expect(html).toContain('role="progressbar"')
-    expect(html).toContain('aria-valuenow="17"')
+    expect(html).toContain('aria-valuenow="13"')
     expect(html).toContain('正在执行：项目画像')
     expect(html).toContain('阶段 01 · 准备源码')
     expect(html).toContain('crucible-node-list__connector')
@@ -578,7 +578,7 @@ describe('NodeSteps compact topology', () => {
     expect(discovery).toContain('data-stage-key="initial"')
     expect(discovery).toContain('data-stage-key="deep"')
     expect(discovery).toContain('画像 + Gitleaks + OSV')
-    expect(discovery).toContain('Semgrep + Web 靶场')
+    expect(discovery).toContain('Semgrep · API 清单 · Web 靶场')
     expect(discovery).toContain('data-stage-key="verify"')
     expect(discoveryDetailed).toContain('crucible-dag-node--scan_gitleaks')
     expect(discoveryDetailed).toContain('crucible-dag-node--dispatch')
@@ -586,7 +586,7 @@ describe('NodeSteps compact topology', () => {
     expect(discoveryDetailed).not.toContain('crucible-dag-node--audit')
     expect(discoveryDetailed).toContain('data-group-key="initial"')
     expect(discoveryDetailed).toContain('data-group-key="deep"')
-    for (const label of ['准备源码', '并行初筛', '深度分析', '发现复核', '线索调度', '多线索终认', '审计报告']) {
+    for (const label of ['准备源码', '并行初筛', '深度分析', '线索归并', '扫描复核', '线索调度', '多线索终认', '审计报告']) {
       expect(discovery).toContain(label)
       expect(discoveryDetailed).toContain(label)
     }

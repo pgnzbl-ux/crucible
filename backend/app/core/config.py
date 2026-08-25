@@ -113,6 +113,12 @@ class Settings(BaseSettings):
     # 不再等整个 triage 跑完（首批确认漏洞的到达时间大幅提前）──
     triage_stream_dispatch_enabled: bool = True
 
+    # API 清单 + 猎洞（discovery-spec §6.2.1）
+    api_inventory_enabled: bool = True
+    api_hunt_enabled: bool = True
+    api_hunt_top_k: int = 20
+    api_hunt_max_batches: int = 8
+
     # ── 任务级 wall-clock（Celery soft/hard；子步骤另有局部超时）──
     # soft 触发 SoftTimeLimitExceeded 走失败收尾；hard 为 SIGKILL 兜底
     celery_task_soft_time_limit_seconds: int = Field(3 * 60 * 60 + 30 * 60, ge=60)  # 3.5h

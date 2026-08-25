@@ -15,11 +15,13 @@ export const PIPELINE_REQUIRES: Record<string, readonly string[]> = {
   scan_gitleaks: ['source'],
   scan_osv: ['source'],
   scan_semgrep: ['source', 'profile'],
+  api_inventory: ['source', 'profile'],
   env_ready: ['source', 'profile'],
   cluster: ['scan_semgrep', 'scan_gitleaks', 'scan_osv'],
+  api_hunt: ['api_inventory'],
   screen: ['cluster'],
   triage: ['screen'],
-  dispatch: ['triage'],
+  dispatch: ['triage', 'api_hunt'],
   audit: ['source', 'profile', 'dispatch'],
   reproduce: ['source', 'env_ready', 'audit'],
   report: ['profile', 'env_ready', 'audit', 'reproduce'],
@@ -31,22 +33,27 @@ export type SyntheticKey = (typeof SYNTHETIC_KEYS)[number]
 /** discovery 中由 LeadWorker 取代执行、因而在 NodeRun 上必然 skipped 的节点。 */
 export const DISCOVERY_REPLACED_NODE_KEYS: ReadonlySet<string> = new Set(['audit', 'reproduce'])
 
-/** 仅控制展开拓扑的纵向排布；画像居中对齐 Semgrep，泄露扫描走上方跨列导轨。 */
+/** 仅控制展开拓扑的纵向排布；画像居中对齐 Semgrep；清单在 Semgrep 上方填满深度列。
+ * 线索列把猎洞放在聚类之上，与「清单 → 猎洞」「SAST → 聚类」两条泳道对齐，避免对向斜穿。 */
 const PARALLEL_STACK: readonly string[] = [
   'scan_gitleaks',
-  'profile',
   'scan_osv',
+  'profile',
+  'api_inventory',
   'scan_semgrep',
+  'api_hunt',
+  'cluster',
   'env_ready',
 ]
 
 const SIZE = {
   nodeW: 156,
-  nodeH: 56,
-  gapX: 72,
-  gapY: 16,
-  padX: 34,
-  padY: 56,
+  nodeH: 52,
+  gapX: 64,
+  gapY: 10,
+  padX: 24,
+  // 留给阶段卡标题条，节点紧贴标题下方，避免深度列上方大块空白
+  padY: 30,
   diamond: 76,
   terminal: 44,
 }
@@ -95,12 +102,24 @@ export function pipelineOverviewStages(mode: PipelineMode): PipelineOverviewStag
       {
         key: 'deep',
         label: '深度分析',
-        caption: 'Semgrep + Web 靶场',
-        nodeKeys: ['scan_semgrep', 'env_ready'],
+        caption: 'Semgrep · API 清单 · Web 靶场',
+        nodeKeys: ['scan_semgrep', 'api_inventory', 'env_ready'],
         parallel: true,
       },
-      { key: 'review', label: '发现复核', caption: '归并 · 轻量快审 · AI 二审', nodeKeys: ['cluster', 'screen', 'triage'] },
-      { key: 'dispatch', label: '线索调度', caption: '进入终认队列', nodeKeys: ['dispatch'] },
+      {
+        key: 'clues',
+        label: '线索归并',
+        caption: '扫描聚类 ∥ API 猎洞直出',
+        nodeKeys: ['cluster', 'api_hunt'],
+        parallel: true,
+      },
+      {
+        key: 'review',
+        label: '扫描复核',
+        caption: '轻量快审 · AI 二审',
+        nodeKeys: ['screen', 'triage'],
+      },
+      { key: 'dispatch', label: '线索调度', caption: '扫描复核 ∪ 猎洞合格', nodeKeys: ['dispatch'] },
       { key: 'verify', label: '多线索终认', caption: '白盒 + 可选复现', nodeKeys: ['lead_verify'] },
       { key: 'report', label: '审计报告', caption: '聚合最终结果', nodeKeys: ['report'] },
     ]
@@ -143,7 +162,7 @@ export interface DagLayoutGroup {
   key: string
   label: string
   caption: string
-  tone: 'prepare' | 'parallel' | 'deep' | 'review' | 'dispatch' | 'verify' | 'result'
+  tone: 'prepare' | 'parallel' | 'deep' | 'clues' | 'review' | 'dispatch' | 'verify' | 'result'
   x: number
   y: number
   width: number
@@ -174,14 +193,15 @@ function orderIndex(key: string): number {
 export function flowColumn(key: string, _mode: PipelineMode): number {
   if (key === 'source') return 0
   if (key === 'profile' || key === 'scan_gitleaks' || key === 'scan_osv') return 1
-  if (key === 'scan_semgrep' || key === 'env_ready') return 2
-  // 发现复核三节点同列纵向，压缩横向跨度
-  if (key === 'cluster' || key === 'screen' || key === 'triage') return 3
-  if (key === 'dispatch') return 4
-  if (key === 'audit' || key === 'lead_verify') return 5
-  if (key === 'reproduce') return 6
-  if (key === 'report') return 7
-  if (key === 'over') return 8
+  if (key === 'scan_semgrep' || key === 'api_inventory' || key === 'env_ready') return 2
+  // 两条线索流并列：scans→cluster ∥ inventory→hunt；复核仅扫描支路
+  if (key === 'cluster' || key === 'api_hunt') return 3
+  if (key === 'screen' || key === 'triage') return 4
+  if (key === 'dispatch') return 5
+  if (key === 'audit' || key === 'lead_verify') return 6
+  if (key === 'reproduce') return 7
+  if (key === 'report') return 8
+  if (key === 'over') return 9
   return 1
 }
 
@@ -238,24 +258,34 @@ export function flowEdges(
   add(edges, 'source', 'scan_gitleaks')
   add(edges, 'source', 'scan_osv')
   add(edges, 'profile', 'scan_semgrep')
+  add(edges, 'profile', 'api_inventory')
   add(edges, 'profile', 'env_ready', 'conditional', '仅 Web')
 
   add(edges, 'scan_osv', 'cluster')
   add(edges, 'scan_semgrep', 'cluster')
   add(edges, 'scan_gitleaks', 'cluster')
+  add(edges, 'api_inventory', 'api_hunt')
+  add(edges, 'cluster', 'screen')
+  add(edges, 'screen', 'triage')
+  if (vis.has('dispatch')) {
+    add(edges, 'triage', 'dispatch')
+    add(edges, 'api_hunt', 'dispatch')
+  }
 
   if (mode === 'discovery') {
-    add(edges, 'cluster', 'screen')
-    add(edges, 'screen', 'triage')
-    addChain(edges, vis, ['triage', 'dispatch', 'lead_verify', 'report'])
+    if (vis.has('dispatch')) {
+      addChain(edges, vis, ['dispatch', 'lead_verify', 'report'])
+    } else {
+      addChain(edges, vis, ['triage', 'lead_verify', 'report'])
+      if (vis.has('lead_verify')) add(edges, 'api_hunt', 'lead_verify')
+      else add(edges, 'api_hunt', 'report')
+    }
     add(edges, 'env_ready', 'lead_verify', 'support', 'Web 靶场')
   } else {
     if (vis.has('dispatch')) {
-      add(edges, 'cluster', 'screen')
-      add(edges, 'screen', 'triage')
-      addChain(edges, vis, ['triage', 'dispatch', 'audit'])
-      // 当前波次调度会等 env_ready 所在波收敛后才处理 skip 链并进入 audit。
-      add(edges, 'env_ready', 'audit', 'support', '环境分支收敛')
+      add(edges, 'dispatch', 'audit')
+      // audit 不依赖 env_ready；靶场仅支撑后续 reproduce / lead 动态复现
+      add(edges, 'env_ready', 'audit', 'support', '并行旁路')
     } else if (vis.has('env_ready')) {
       add(edges, 'env_ready', 'audit', 'support', '就绪 / 跳过')
     } else {
@@ -272,11 +302,72 @@ function stackKeys(keys: string[]): string[] {
   return [...keys].sort((a, b) => orderIndex(a) - orderIndex(b))
 }
 
+const SLOT_Y = SIZE.nodeH + SIZE.gapY
+
+function columnMembers(
+  stacked: Map<number, string[]>,
+  byKey: Map<string, DagLayoutNode>,
+  col: number,
+): DagLayoutNode[] {
+  return (stacked.get(col) ?? [])
+    .map((key) => byKey.get(key))
+    .filter((node): node is DagLayoutNode => Boolean(node))
+}
+
+function shiftNodes(nodes: readonly DagLayoutNode[], delta: number) {
+  if (Math.abs(delta) < 0.5) return
+  for (const node of nodes) node.y += delta
+}
+
+/** 矮列按节点数落位：两节点上空一格，单节点垂直居中；三节点列维持脊柱。 */
+function placeSparseColumns(
+  colIds: readonly number[],
+  stacked: Map<number, string[]>,
+  byKey: Map<string, DagLayoutNode>,
+) {
+  const tall: DagLayoutNode[] = []
+  const sparse: Array<{ count: number; nodes: DagLayoutNode[] }> = []
+  for (const col of colIds) {
+    const nodes = columnMembers(stacked, byKey, col)
+    if (nodes.length >= 3) tall.push(...nodes)
+    else if (nodes.length > 0) sparse.push({ count: nodes.length, nodes })
+  }
+  if (!tall.length || !sparse.length) return
+  const bandTop = Math.min(...tall.map((n) => n.y))
+  const bandBottom = Math.max(...tall.map((n) => n.y + n.height))
+  const mid = (bandTop + bandBottom) / 2
+  for (const { count, nodes } of sparse) {
+    if (count === 2) {
+      shiftNodes(nodes, bandTop + SLOT_Y - Math.min(...nodes.map((n) => n.y)))
+    } else {
+      const [node] = nodes
+      shiftNodes(nodes, mid - node.height / 2 - node.y)
+    }
+  }
+}
+
 function spineKeyInColumn(keys: string[], column: number): string | null {
+  // 初筛列：画像与 Semgrep 同高；OSV 在画像上方
+  if (column === 1 && keys.includes('profile')) return 'profile'
   if (column === 2 && keys.includes('scan_semgrep')) return 'scan_semgrep'
-  // 发现复核列以中间节点对齐主轴，上下再叠 cluster / triage
-  if (column === 3 && keys.includes('screen')) return 'screen'
+  if (column === 3 && keys.includes('cluster')) return 'cluster'
+  if (column === 4 && keys.includes('screen')) return 'screen'
   return keys[Math.floor(keys.length / 2)] ?? null
+}
+
+const WIRE_HOP_R = 7
+
+/** 竖线跨过另一条导线时画电路跳线圆弧，表示两线不相接。 */
+function verticalHop(x: number, yFrom: number, yTo: number, hopY: number | null): string {
+  if (hopY == null || Math.abs(yTo - yFrom) < WIRE_HOP_R * 2 + 2) return `V ${yTo}`
+  const lo = Math.min(yFrom, yTo)
+  const hi = Math.max(yFrom, yTo)
+  if (hopY <= lo + WIRE_HOP_R || hopY >= hi - WIRE_HOP_R) return `V ${yTo}`
+  // 凸向列间隙（左侧），避免圆弧贴到目标节点
+  if (yTo > yFrom) {
+    return `V ${hopY - WIRE_HOP_R} A ${WIRE_HOP_R} ${WIRE_HOP_R} 0 0 1 ${x} ${hopY + WIRE_HOP_R} V ${yTo}`
+  }
+  return `V ${hopY + WIRE_HOP_R} A ${WIRE_HOP_R} ${WIRE_HOP_R} 0 0 1 ${x} ${hopY - WIRE_HOP_R} V ${yTo}`
 }
 
 function routeBox(
@@ -284,7 +375,8 @@ function routeBox(
   b: DagLayoutNode,
   kind: DagEdgeKind,
   bottomRail: number,
-  bottomFlowRail: number,
+  gitleaksCy: number | null,
+  hopY: number | null,
 ): { d: string; labelX: number; labelY: number } {
   if (kind === 'support') {
     const x1 = a.x + a.width / 2
@@ -311,7 +403,11 @@ function routeBox(
   }
   // 三扫描汇入 cluster：先汇到同一合并点，再一根进入节点
   if (b.key === 'cluster' && a.key.startsWith('scan_')) {
-    return routeScanIntoCluster(a, b, bottomFlowRail)
+    return routeScanIntoCluster(a, b, gitleaksCy, hopY)
+  }
+  // 扫描复核与猎洞汇入 dispatch（猎洞从复核列顶上飞过，避免横穿快审/二审）
+  if (b.key === 'dispatch' && (a.key === 'triage' || a.key === 'api_hunt')) {
+    return routeIntoDispatch(a, b, gitleaksCy)
   }
   const x1 = a.x + a.width
   const y1 = a.y + a.height / 2
@@ -333,26 +429,70 @@ function routeBox(
   }
 }
 
-/** 扫描列 → 聚类：共享 mergeX / clusterCy，末段重合为单入口。 */
+/** 扫描列 → 聚类：共享 mergeX / clusterCy；OSV 上抬并入泄露扫描同高线段。
+ * SAST 与聚类同泳道时走直线，避免和清单→猎洞对向斜穿。 */
 function routeScanIntoCluster(
   a: DagLayoutNode,
   cluster: DagLayoutNode,
-  bottomFlowRail: number,
+  gitleaksCy: number | null,
+  hopY: number | null,
 ): { d: string; labelX: number; labelY: number } {
   const x1 = a.x + a.width
   const y1 = a.y + a.height / 2
   const x2 = cluster.x
   const cy = cluster.y + cluster.height / 2
   const mergeX = x2 - SIZE.gapX / 3
-  if (a.key === 'scan_osv') {
-    const entryX = x1 + SIZE.gapX / 3
+  if (Math.abs(y1 - cy) < 1) {
     return {
-      d: `M ${x1} ${y1} H ${entryX} V ${bottomFlowRail} H ${mergeX} V ${cy} H ${x2}`,
-      labelX: (entryX + mergeX) / 2,
-      labelY: bottomFlowRail - 7,
+      d: `M ${x1} ${y1} H ${x2}`,
+      labelX: (x1 + x2) / 2,
+      labelY: y1 - 9,
     }
   }
-  // gitleaks / semgrep：水平到合并点后竖落到聚类入口高度
+  if (a.key === 'scan_osv' && gitleaksCy != null && Math.abs(y1 - gitleaksCy) > 1) {
+    const entryX = x1 + SIZE.gapX / 3
+    return {
+      d: `M ${x1} ${y1} H ${entryX} V ${gitleaksCy} H ${mergeX} ${verticalHop(mergeX, gitleaksCy, cy, hopY)} H ${x2}`,
+      labelX: (entryX + mergeX) / 2,
+      labelY: gitleaksCy - 7,
+    }
+  }
+  // gitleaks / 已与泄露同高的 OSV：沿顶轨飞过深度列，在聚类前竖落到入口；
+  // 跨过清单→猎洞时用跳线圆弧，表示不相接。
+  return {
+    d: `M ${x1} ${y1} H ${mergeX} ${verticalHop(mergeX, y1, cy, hopY)} H ${x2}`,
+    labelX: (x1 + mergeX) / 2,
+    labelY: Math.min(y1, cy) - 7,
+  }
+}
+
+/** 复核 / 猎洞 → 调度。猎洞走深度列空出来的顶轨飞过复核列，避免横穿快审。 */
+function routeIntoDispatch(
+  a: DagLayoutNode,
+  dispatch: DagLayoutNode,
+  gitleaksCy: number | null,
+): { d: string; labelX: number; labelY: number } {
+  const x1 = a.x + a.width
+  const y1 = a.y + a.height / 2
+  const x2 = dispatch.x
+  const cy = dispatch.y + dispatch.height / 2
+  const mergeX = x2 - SIZE.gapX / 3
+  if (a.key === 'api_hunt') {
+    const dropX = x1 + SIZE.gapX / 3
+    const railY = gitleaksCy ?? SIZE.padY + SIZE.nodeH / 2
+    return {
+      d: `M ${x1} ${y1} H ${dropX} V ${railY} H ${mergeX} V ${cy} H ${x2}`,
+      labelX: (dropX + mergeX) / 2,
+      labelY: railY - 7,
+    }
+  }
+  if (Math.abs(y1 - cy) < 1) {
+    return {
+      d: `M ${x1} ${y1} H ${x2}`,
+      labelX: (x1 + x2) / 2,
+      labelY: y1 - 9,
+    }
+  }
   return {
     d: `M ${x1} ${y1} H ${mergeX} V ${cy} H ${x2}`,
     labelX: (x1 + mergeX) / 2,
@@ -360,14 +500,11 @@ function routeScanIntoCluster(
   }
 }
 
-type GroupDefinition = Pick<DagLayoutGroup, 'key' | 'label' | 'caption' | 'tone'> & {
-  nodeKeys: readonly string[]
-}
-
 function toneForStage(key: string): DagLayoutGroup['tone'] {
   if (key === 'source') return 'prepare'
   if (key === 'initial' || key === 'profile') return 'parallel'
   if (key === 'deep' || key === 'env') return 'deep'
+  if (key === 'clues') return 'clues'
   if (key === 'review') return 'review'
   if (key === 'dispatch') return 'dispatch'
   if (key === 'report') return 'result'
@@ -393,7 +530,9 @@ function groupDefinitions(mode: PipelineMode, visible: ReadonlySet<string>): Gro
 
   // 用户显式打开 verify 中被跳过的发现节点时，按 discovery 的真实阶段补充展示；
   // audit/reproduce/report 仍沿用 verify 的阶段定义。
-  const discoveryPrefix = pipelineOverviewStages('discovery').slice(0, 5)
+  const discoveryPrefix = pipelineOverviewStages('discovery').filter(
+    (stage) => !['verify', 'report'].includes(stage.key),
+  )
   const verifyTail = pipelineOverviewStages('verify').filter((stage) =>
     ['audit', 'reproduce', 'report'].includes(stage.key),
   )
@@ -421,9 +560,9 @@ function layoutGroups(
       caption: definition.caption,
       tone: definition.tone,
       x: Math.max(10, left),
-      y: 12,
+      y: 4,
       width: right - Math.max(10, left),
-      height: maxBottom + 14,
+      height: maxBottom + 4,
     }]
   })
 }
@@ -484,16 +623,20 @@ export function layoutPipelineDag(
   if (shift > 0) {
     for (const n of nodes) n.y += shift
   }
+  placeSparseColumns(colIds, stacked, byKey)
   const maxBottom = Math.max(...nodes.map((n) => n.y + n.height), SIZE.padY)
-  const bottomFlowRail = maxBottom + 10
-  const supportRail = maxBottom + 28
-  const height = supportRail + 34
+  const supportRail = maxBottom + 18
+  const height = supportRail + 22
+  const gitleaks = byKey.get('scan_gitleaks')
+  const gitleaksCy = gitleaks ? gitleaks.y + gitleaks.height / 2 : null
+  const hopLane = byKey.get('api_hunt') ?? byKey.get('api_inventory')
+  const hopY = hopLane ? hopLane.y + hopLane.height / 2 : null
 
   const edges: DagLayoutEdge[] = flowEdges(keys, mode).flatMap((e) => {
     const a = byKey.get(e.from)
     const b = byKey.get(e.to)
     if (!a || !b) return []
-    const route = routeBox(a, b, e.kind, supportRail, bottomFlowRail)
+    const route = routeBox(a, b, e.kind, supportRail, gitleaksCy, hopY)
     return [{
       from: e.from,
       to: e.to,

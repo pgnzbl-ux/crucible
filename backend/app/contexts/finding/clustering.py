@@ -3,11 +3,17 @@
 分组键：sha256(cwe+file+function)（索引反查函数名，缺失降级 rule_id）；
 osv 特例按依赖组件。写 clue_grade(A/B/F，osv 为 null) 与 priority（含攻击面降权）。
 C 档由 denoise.partition_for_cluster 在调用前剔除，不进本组。
+
+扫描复核链的 cluster 节点只汇入 SCAN_ENGINES；api_hunt 自建组，不进本节点。
 """
 from __future__ import annotations
 
 import hashlib
 from typing import Any
+
+# 扫描 → cluster → screen/triage 工作集引擎（不含猎洞）
+SCAN_ENGINES = frozenset({"semgrep", "gitleaks", "osv"})
+HUNT_ENGINE = "api_hunt"
 
 # §2.4 攻击面降权：这些路径前缀/后缀的组 priority 不得高于 low
 _DOWNGRADE_PATH_PREFIXES = ("test/", "tests/", "docs/", "vendor/", "node_modules/")
@@ -16,6 +22,19 @@ _DOWNGRADE_SUFFIXES = (".md",)
 _DOWNGRADE_CWES = frozenset({"CWE-89", "CWE-78", "CWE-79", "CWE-22", "CWE-611", "CWE-601"})
 
 _SEVERITY_RANK = {"error": "high", "warning": "medium", "note": "low", "info": "low"}
+
+
+def is_scan_engine(engine: str | None) -> bool:
+    return (engine or "").lower() in SCAN_ENGINES
+
+
+def is_hunt_group(group: Any) -> bool:
+    """猎洞自建组（含仅 api_hunt，或历史误并入的混合组）。"""
+    if isinstance(group, dict):
+        engines = group.get("engine_set") or []
+    else:
+        engines = getattr(group, "engine_set", None) or []
+    return HUNT_ENGINE in engines
 
 
 def _group_key(cwe: str | None, file_path: str, function_symbol: str | None,
@@ -82,6 +101,14 @@ def grade_for(finding: dict[str, Any]) -> str | None:
         if not has_locus and not has_cwe:
             return "F"
         return "B"
+
+    if engine == "api_hunt":
+        confidence = str(raw.get("confidence") or "MEDIUM").upper()
+        if has_locus and has_cwe and confidence == "HIGH":
+            return "A"
+        if has_locus and has_cwe:
+            return "B"
+        return "F"
 
     # 其他/缺引擎：兼容旧逻辑
     if finding.get("source_to_sink"):

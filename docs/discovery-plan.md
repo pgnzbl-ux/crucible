@@ -32,7 +32,7 @@
 4. **合格门**：T3 schema 强制 why/evidence/`attacker_controlled`/`reaches_sink`/`sanitizer`；dispatch 删除 A 级+Web 硬门槛。
 5. **评估与报告**：漏斗与线索台同一套数；OSV `called=false` 排除在终认外。
 
-非目标：密钥出网核验、Semgrep Pro、新 DAG 节点、把 2530 条 raw 或 cluster 工作集整体迁 Redis、回填禅道旧瘦字段。
+非目标：密钥出网核验、Semgrep Pro、把 2530 条 raw 或 cluster 工作集整体迁 Redis、回填禅道旧瘦字段。
 
 ## 2.2 Redis db3 配置配套
 
@@ -44,6 +44,15 @@
 - 线索客户端超时对齐 `lead_queue`（2s/5s）
 - compose 不用新容器：同一 Redis 实例开 db（默认 `databases 16`）
 - 崩溃恢复靠 db3 TTL + 已有 Lead 队列补偿；Redis 需 AOF/RDB（compose 已有 `redisdata`）
+
+## 2.3 API 清单 + 猎洞（补 Semgrep 鉴权/逻辑短板）
+
+对应规格 §4.2.4 / §6.2.1；调研见 [`research-api-hunting.md`](research-api-hunting.md)。
+
+1. **`api_inventory`**：`requires=(source, profile)`，与 `scan_*` / `env_ready` 同波；按画像语言表驱动 parser（OpenAPI 恒跑；Python/Node/PHP/Java/Go 各有路由或文件入口解析）。产出 BOM + resource_key。
+2. **`api_hunt`**：`requires=(api_inventory,)`，与 `cluster→screen→triage` 并列；嫌疑经 §2.7 **全部门**（含 conf≥阈值）直出 Adjudication，绕过 screen/triage；`cluster` 只吃三扫描引擎；`screen`/`triage` 排除猎洞组；`dispatch.requires=(triage, api_hunt)`。
+3. **VERIFY_MODE** skip inventory/hunt；失败隔离：hunt `ok=false` 不阻断扫描复核链。
+4. **扩展栈**：只加确定性 parser；禁止 AI 列端点。动态前缀等解不出的只记 incomplete，不让模型编 path。
 
 ## 3. API 与页面迁移
 

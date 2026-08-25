@@ -45,7 +45,7 @@ async def _seed_task_run(session, is_web=True, status="running"):
 def _legacy_order(orch):
     """旧六节点顺序的执行器引用(source/profile/env_ready/audit/reproduce/report)。
 
-    DEFAULT_PIPELINE 扩为 13 节点后(discovery-spec §4.2.4)，测试统一按键取执行器，
+    DEFAULT_PIPELINE 扩节点后(discovery-spec §4.2.4)，测试统一按键取执行器，
     位置索引不再稳定。
     """
     keys = ("source", "profile", "env_ready", "audit", "reproduce", "report")
@@ -639,11 +639,11 @@ async def test_resume_reuses_audit_gate_fail_skips_reproduce(session_factory):
             status="completed", output_json='{"is_web": true, "language": "python"}',
         ))
         session.add(NodeRun(
-            run_id=run.id, task_id=task.id, node_index=5, node_key="env_ready",
+            run_id=run.id, task_id=task.id, node_index=6, node_key="env_ready",
             status="completed", output_json='{"target_url": "http://localhost:5000", "compose_path": "x.yml"}',
         ))
         session.add(NodeRun(
-            run_id=run.id, task_id=task.id, node_index=10, node_key="audit",
+            run_id=run.id, task_id=task.id, node_index=12, node_key="audit",
             status="completed", output_json='{"gate_verdict": "fail", "gate_reason": "链路不通"}',
         ))
         await session.flush()
@@ -871,12 +871,12 @@ async def test_resume_reuses_audit_uncertain_skips_reproduce_but_runs_report(ses
             status="completed", output_json='{"is_web": true}',
         ))
         session.add(NodeRun(
-            run_id=run.id, task_id=task.id, node_index=5, node_key="env_ready",
+            run_id=run.id, task_id=task.id, node_index=6, node_key="env_ready",
             status="completed",
             output_json='{"target_url": "http://localhost:5000", "compose_path": "x.yml"}',
         ))
         session.add(NodeRun(
-            run_id=run.id, task_id=task.id, node_index=10, node_key="audit",
+            run_id=run.id, task_id=task.id, node_index=12, node_key="audit",
             status="completed",
             output_json='{"gate_verdict": "uncertain", "gate_reason": "对不上"}',
         ))

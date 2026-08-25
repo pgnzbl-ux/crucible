@@ -97,6 +97,10 @@ NODE_OUTPUT_SCHEMAS: dict[str, dict] = {
             "evidence", "need", "attacker_controlled", "reaches_sink", "sanitizer",
         ],
     },
+    "api_hunt": {
+        "required": ["suspects", "reviewed_count"],
+        "optional": ["budget_exhausted"],
+    },
 }
 
 def rewrite_url_for_agent_container(url: str | None) -> str | None:
@@ -203,6 +207,12 @@ def _mock_output(node_key: str, input_json: dict[str, Any]) -> dict[str, Any]:
             "attacker_controlled": True,
             "reaches_sink": True,
             "sanitizer": "none",
+        }
+    if node_key == "api_hunt":
+        return {
+            "suspects": [],
+            "reviewed_count": len(input_json.get("endpoints") or []),
+            "budget_exhausted": False,
         }
     return {}
 
@@ -593,6 +603,63 @@ def _validate_triage_output(output: dict) -> tuple[bool, str | None]:
     return True, None
 
 
+def _normalize_hunt_confidence(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        conf = float(value)
+        return conf if 0.0 <= conf <= 1.0 else None
+    if isinstance(value, str):
+        raw = value.strip().upper()
+        if raw == "HIGH":
+            return 0.9
+        if raw == "MEDIUM":
+            return 0.75
+        if raw == "LOW":
+            return 0.4
+        try:
+            conf = float(raw)
+        except ValueError:
+            return None
+        return conf if 0.0 <= conf <= 1.0 else None
+    return None
+
+
+def _validate_api_hunt_output(output: dict) -> tuple[bool, str | None]:
+    """猎洞嫌疑对齐 §2.7：每项必须 why/evidence/三布尔，才能绕过 screen/triage。"""
+    suspects = output.get("suspects")
+    if not isinstance(suspects, list):
+        return False, "suspects 必须为数组"
+    reviewed = output.get("reviewed_count")
+    if not isinstance(reviewed, int) or reviewed < 0:
+        return False, "reviewed_count 必须为非负整数"
+    for i, s in enumerate(suspects):
+        if not isinstance(s, dict):
+            return False, f"suspects[{i}] 必须为对象"
+        if not (isinstance(s.get("file_path"), str) and s["file_path"].strip()):
+            return False, f"suspects[{i}] 必须有非空 file_path（locus）"
+        if not (isinstance(s.get("endpoint_id"), str) and s["endpoint_id"].strip()):
+            return False, f"suspects[{i}] 必须有非空 endpoint_id"
+        why = s.get("why")
+        if (
+            not isinstance(why, list)
+            or not any(isinstance(x, str) and x.strip() for x in why)
+        ):
+            return False, f"suspects[{i}].why 必须为非空字符串数组"
+        evidence = s.get("evidence")
+        if not isinstance(evidence, list) or len(evidence) < 1:
+            return False, f"suspects[{i}] 必须提供非空 evidence"
+        if s.get("attacker_controlled") is not True:
+            return False, f"suspects[{i}] 必须 attacker_controlled=true"
+        if s.get("reaches_sink") is not True:
+            return False, f"suspects[{i}] 必须 reaches_sink=true"
+        if s.get("sanitizer") not in ("none", "bypassable"):
+            return False, f"suspects[{i}].sanitizer 必须是 none 或 bypassable"
+        if _normalize_hunt_confidence(s.get("confidence")) is None:
+            return False, f"suspects[{i}].confidence 必须是 0–1 或 HIGH/MEDIUM/LOW"
+    return True, None
+
+
 def validate_output(
     node_key: str,
     output: dict,
@@ -616,6 +683,8 @@ def validate_output(
         return _validate_report_output(output)
     if node_key == "triage":
         return _validate_triage_output(output)
+    if node_key == "api_hunt":
+        return _validate_api_hunt_output(output)
     return True, None
 
 
@@ -687,10 +756,19 @@ async def _run_one_container_unthrottled(
 
     last_fail = ""
     llm_fail = ""
+    dsml_leak = False
 
     def _on_event(event: dict) -> None:
-        nonlocal last_fail, llm_fail
+        nonlocal last_fail, llm_fail, dsml_leak
         et = event.get("type")
+        if et in ("agent.message", "agent.thinking", "agent.completed"):
+            blob = " ".join(
+                str(event.get(k) or "")
+                for k in ("text", "reasoning", "content", "message")
+            )
+            # DeepSeek 偶发把 tool_use 泄成 DSML 纯文本，CLI 无法执行工具
+            if "DSML" in blob or "｜DSML｜" in blob:
+                dsml_leak = True
         if et in ("agent.failed", "raw"):
             err = (
                 event.get("error")
@@ -716,6 +794,10 @@ async def _run_one_container_unthrottled(
         # LLM 网关错误（如 401 余额不足）常出现在较早的 agent.failed；
         # 末尾可能是 SDK 误报或「未调用 submit_result」次生事件，须优先保留 llm_fail。
         primary = (llm_fail or combined).strip()
+        if dsml_leak and "DSML" not in primary:
+            primary = (
+                "模型输出含 DSML 工具标记（未形成有效 tool_use）；" + primary
+            ).strip("；")
         detail = primary[-600:]
         if exit_code == 137:
             raise AgentRunnerError(
@@ -850,7 +932,7 @@ async def _run_one_container(
 
 
 # 轻工位节点（spec §7.4：不注入任务凭据；工具仅 Read/Grep/Glob）
-_LIGHT_WORKSTATION_NODES = frozenset({"triage", "profile"})
+_LIGHT_WORKSTATION_NODES = frozenset({"triage", "profile", "api_hunt"})
 # SDK 运行必需的 env 前缀/白名单；凭据最小化时 runner_env 只保留这些
 _SDK_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_")
 _SDK_ENV_KEYS = frozenset({

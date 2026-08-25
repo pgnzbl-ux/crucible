@@ -564,3 +564,58 @@ def test_should_skip_llm_only_a_b():
     assert should_skip_llm(B()) is False
     assert should_skip_llm(F()) is True
     assert should_skip_llm(NoneGrade()) is True
+
+
+@pytest.mark.asyncio
+async def test_cluster_ignores_api_hunt_findings(session_factory, tmp_path):
+    """cluster 只汇入三扫描；同 locus 的 api_hunt 不得并入扫描组。"""
+    from app.contexts.agent.nodes.cluster import ClusterNode
+    from app.contexts.finding.models import AlertGroup
+    from app.contexts.finding.sarif import fingerprint
+
+    findings = [
+        {
+            "engine": "semgrep", "rule_id": "python.sqli", "cwe": "CWE-89",
+            "severity": "error", "file_path": "app.py", "line_start": 2, "line_end": 2,
+            "message": "sqli", "source_to_sink": None, "code_snippet": None,
+            "fingerprint": fingerprint("semgrep", "python.sqli", "app.py", 2, "CWE-89"),
+            "raw": {},
+        },
+        {
+            "engine": "api_hunt", "rule_id": "missing_ownership_check", "cwe": "CWE-639",
+            "severity": "warning", "file_path": "app.py", "line_start": 2, "line_end": 2,
+            "message": "hunt", "source_to_sink": None, "code_snippet": None,
+            "fingerprint": fingerprint(
+                "api_hunt", "missing_ownership_check|ep1", "app.py", 2, "CWE-639",
+            ),
+            "raw": {"endpoint_id": "ep1"},
+        },
+    ]
+    async with session_factory() as session:
+        ctx, task, _run, inp = await _seed_discovery_task(
+            session, tmp_path,
+            [("semgrep", "completed"), ("gitleaks", "skipped"), ("osv", "skipped")],
+            findings,
+        )
+        out = await ClusterNode().execute(ctx, inp)
+        assert out["finding_count"] == 1
+        assert out["group_count"] == 1
+        assert out["groups_by_engine"].get("semgrep") == 1
+        assert "api_hunt" not in out["groups_by_engine"]
+        groups = (await session.execute(
+            select(AlertGroup).where(AlertGroup.task_id == task.id)
+        )).scalars().all()
+        assert len(groups) == 1
+        assert groups[0].engine_set == ["semgrep"]
+
+
+def test_scan_review_groups_excludes_hunt():
+    from app.contexts.agent.nodes.triage.queue import scan_review_groups
+
+    class _G:
+        def __init__(self, engines):
+            self.engine_set = engines
+
+    kept = scan_review_groups([_G(["semgrep"]), _G(["api_hunt"]), _G(["semgrep", "api_hunt"])])
+    assert len(kept) == 1
+    assert kept[0].engine_set == ["semgrep"]

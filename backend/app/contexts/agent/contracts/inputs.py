@@ -6,6 +6,8 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from .outputs import (
+    ApiHuntHandoff,
+    ApiInventoryHandoff,
     AuditForReproduce,
     AuditHandoff,
     ClusterHandoff,
@@ -66,8 +68,17 @@ class ClusterInput(_RepoInput):
     profile: ProfileHandoff | None = None  # 决定函数索引语言；缺失则扫全部已支持语言
 
 
+class ApiInventoryInput(_RepoInput):
+    profile: ProfileHandoff
+
+
+class ApiHuntInput(_RepoInput):
+    inventory: ApiInventoryHandoff
+    profile: ProfileHandoff | None = None
+
+
 class ScreenInput(_RepoInput):
-    cluster: ClusterHandoff
+    cluster: ClusterHandoff | None = None  # 可选摘要；组队列从 DB clustered 读取
 
 
 class TriageInput(_RepoInput):
@@ -78,6 +89,7 @@ class TriageInput(_RepoInput):
 class DispatchInput(_RepoInput):
     triage: TriageHandoff
     profile: ProfileHandoff  # NON_WEB 判定：非 web 不选主线索(§6.4)
+    api_hunt: ApiHuntHandoff | None = None  # 并列线索流终态摘要；合格组已在 DB
 
 
 class EnvReadyInput(_InputBase):

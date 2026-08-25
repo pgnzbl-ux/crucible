@@ -216,4 +216,56 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
         },
         "required": ["verdict", "confidence", "why"],
     },
+    "api_hunt": {
+        "type": "object",
+        "properties": {
+            "suspects": {
+                "type": "array",
+                "description": "鉴权/逻辑嫌疑列表；无证据则空数组。每项必须齐备合格门字段",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "cwe": {"type": "string", "description": "CWE-639 / CWE-863 等"},
+                        "endpoint_id": {"type": "string"},
+                        "file_path": {"type": "string", "description": "相对仓库根的 handler 文件"},
+                        "function_symbol": {"type": "string"},
+                        "line_start": {"type": "integer"},
+                        "why": {"type": "array", "items": {"type": "string"}},
+                        "evidence": {
+                            "type": "array",
+                            "description": "证据条目：字符串或 {file, lines}",
+                            "items": {},
+                        },
+                        "attacker_controlled": {"type": "boolean"},
+                        "reaches_sink": {"type": "boolean"},
+                        "sanitizer": {
+                            "type": "string",
+                            "enum": ["none", "bypassable", "effective"],
+                        },
+                        "confidence": {
+                            "description": "0–1 浮点；也接受 HIGH/MEDIUM 字符串",
+                        },
+                        "evidence_kind": {"type": "string"},
+                        "owasp_api": {"type": "string"},
+                        "resource_key": {"type": "string"},
+                        "method": {"type": "string"},
+                        "path_template": {"type": "string"},
+                    },
+                    "required": [
+                        "file_path",
+                        "endpoint_id",
+                        "why",
+                        "evidence",
+                        "attacker_controlled",
+                        "reaches_sink",
+                        "sanitizer",
+                        "confidence",
+                    ],
+                },
+            },
+            "reviewed_count": {"type": "integer", "description": "本批审过的端点数"},
+            "budget_exhausted": {"type": "boolean"},
+        },
+        "required": ["suspects", "reviewed_count"],
+    },
 }

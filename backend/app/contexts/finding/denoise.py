@@ -79,6 +79,14 @@ def is_c_grade(finding: dict[str, Any]) -> bool:
             return True
         return False
 
+    if engine == "api_hunt":
+        # 无 locus 或无 CWE → C；缺字段保守保留
+        if not finding.get("file_path"):
+            return True
+        if not finding.get("cwe"):
+            return True
+        return False
+
     return False
 
 

@@ -66,15 +66,17 @@ export const REPORT_STATUS_META: Record<string, { label: string; color: TagProps
   published: { label: '已发布', color: 'green' },
 }
 
-// 6 节点(node_key,对齐编排器)
+// 节点(node_key,对齐编排器)
 export const NODE_LABELS: Record<string, string> = {
   source: '源码获取',
   profile: '项目画像',
   scan_gitleaks: '扫描·泄露',
   scan_osv: '扫描·依赖',
   scan_semgrep: '扫描·SAST',
+  api_inventory: 'API 清单',
   env_ready: '靶场就绪',
   cluster: '聚类分组',
+  api_hunt: 'API 猎洞',
   screen: '轻量快审',
   triage: 'AI 二审',
   dispatch: '线索调度',
@@ -85,15 +87,17 @@ export const NODE_LABELS: Record<string, string> = {
   over: '结束',
 }
 
-// 13 节点拓扑顺序(discovery-spec §4.2.4)；后端按 node_index 返回
+// 拓扑顺序(discovery-spec §4.2.4)；后端按 node_index 返回
 export const PIPELINE_NODE_ORDER: string[] = [
   'source',
   'profile',
   'scan_gitleaks',
   'scan_osv',
   'scan_semgrep',
+  'api_inventory',
   'env_ready',
   'cluster',
+  'api_hunt',
   'screen',
   'triage',
   'dispatch',
@@ -107,6 +111,7 @@ export const PIPELINE_NODE_ORDER: string[] = [
 export const AI_NODE_KEYS = new Set([
   'profile',
   'env_ready',
+  'api_hunt',
   'screen',
   'triage',
   'audit',
