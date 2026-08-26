@@ -1,7 +1,7 @@
 """finding context repository — 过滤查询。"""
 from __future__ import annotations
 
-from sqlalchemy import String, and_, case, func, or_, select, type_coerce
+from sqlalchemy import String, and_, case, func, or_, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.compiler import compiles
@@ -30,8 +30,9 @@ class _JsonArrayHas(ColumnElement[bool]):
 
 @compiles(_JsonArrayHas, "postgresql")
 def _json_array_has_pg(element, compiler, **kw):
+    # engine_set 列为 JSON（非 JSONB）；`?` 仅 jsonb 有。必须 CAST，type_coerce 不写 SQL。
     return compiler.process(
-        type_coerce(element.column, JSONB).has_key(element.value), **kw,
+        element.column.cast(JSONB).has_key(element.value), **kw,
     )
 
 

@@ -29,15 +29,11 @@ SKIP_DIR_NAMES = frozenset({
     "dist", "build", ".eggs", ".mypy_cache", ".pytest_cache",
     "vendor", "target", "coverage", ".next",
 })
-SUPPORTED_INVENTORY_LANGUAGES = frozenset({"python", "nodejs", "php", "java", "go"})
-LANG_ALIASES = {
-    "py": "python",
-    "js": "nodejs",
-    "javascript": "nodejs",
-    "typescript": "nodejs",
-    "ts": "nodejs",
-    "golang": "go",
-}
+
+from app.contexts.agent.stacks.registry import (  # noqa: E402
+    INVENTORY_LANGUAGES as SUPPORTED_INVENTORY_LANGUAGES,
+    LANG_ALIASES,
+)
 
 
 @dataclass
@@ -56,6 +52,7 @@ class EndpointRecord:
     endpoint_id: str = ""
     parser: str = ""
     acquisition: str = ACQUISITION_ROUTER
+    route_file: str = ""
 
 
 def normalize_path(path: str) -> str:
@@ -109,6 +106,7 @@ def make_endpoint(
     auth_observed: Iterable[str] = (),
     parser: str,
     acquisition: str,
+    route_file: str | None = None,
 ) -> EndpointRecord:
     path = normalize_path(path)
     params = list(path_params(path))
@@ -134,6 +132,7 @@ def make_endpoint(
         endpoint_id=f"{str(method or 'GET').upper()} {path}",
         parser=parser,
         acquisition=acquisition,
+        route_file=route_file or "",
     )
 
 
@@ -239,7 +238,11 @@ def records_to_bom(
 
 
 def prioritize_pve(endpoints: list[dict[str, Any]], *, top_k: int) -> list[dict[str, Any]]:
-    """规则优先：含 object-id / admin / 写操作。"""
+    """规则优先：含 object-id / admin / 写操作。
+
+    若没有任何 is_pve：对 script_file **或** router 端点按写操作/admin 降级 Top-K，
+    避免传统 PHP 与无路径 {id} 的框架路由永久空跑。
+    """
     def score(ep: dict[str, Any]) -> tuple:
         method = str(ep.get("method") or "GET").upper()
         write = 0 if method in ("POST", "PUT", "PATCH", "DELETE") else 1
@@ -249,6 +252,12 @@ def prioritize_pve(endpoints: list[dict[str, Any]], *, top_k: int) -> list[dict[
         return (oid, write, admin, auth_gap, str(ep.get("endpoint_id") or ""))
 
     cands = [e for e in endpoints if e.get("is_pve")]
+    if not cands:
+        acq_ok = {ACQUISITION_SCRIPT, ACQUISITION_ROUTER}
+        cands = [
+            e for e in endpoints
+            if str(e.get("acquisition") or "") in acq_ok
+        ]
     cands.sort(key=score)
     return cands[: max(0, top_k)]
 

@@ -198,7 +198,7 @@ export function compactNodeCaption(
   return ellipsize(summarizeNodeOutput(nodeKey, output, status))
 }
 
-/** 查询未返回才算加载中；`[]` 是新 run 尚未建 NodeRun，应画 6 个 pending。 */
+/** 查询未返回才算加载中；`[]` 是新 run 尚未建 NodeRun。 */
 export function isNodeListLoading(nodes: unknown[] | undefined): nodes is undefined {
   return nodes === undefined
 }
@@ -217,7 +217,9 @@ export function nodeStepsPollMs(opts: {
 }): number | false {
   if (opts.taskStatus === 'cancelled') return false
   const nodes = opts.nodes
-  if (nodes && nodes.length === 6 && nodes.every((n) => isNodeTerminal(n.status))) {
+  const taskTerminal = ['completed', 'failed', 'needs_review', 'cancelled', 'archived']
+    .includes(opts.taskStatus ?? '')
+  if (taskTerminal && nodes && nodes.every((n) => isNodeTerminal(n.status))) {
     return false
   }
   if (opts.sseLive) return false

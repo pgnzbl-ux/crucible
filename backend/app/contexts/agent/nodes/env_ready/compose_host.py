@@ -17,6 +17,8 @@ COMPOSE_PROGRESS_INTERVAL = 2.0
 COMPOSE_PROGRESS_MAX = 220
 COMPOSE_UP_TIMEOUT = 600
 COMPOSE_WAIT_TIMEOUT = 300
+# 同一诊断指纹累计达此次数 → 中止 compose，回喂下一轮（避免空转到硬超时）
+COMPOSE_DIAG_REPEAT_ABORT = 40
 _COMPOSE_URGENT = re.compile(r"error|failed|fatal|exception", re.I)
 _COMPOSE_DIAG = re.compile(
     r"(?i)(\[error\]|error:|failed to solve|could not transfer|"
@@ -31,12 +33,22 @@ _COMPOSE_DIAG_NOISE = re.compile(
     r"for more information about the errors|"
     r"\[help 1\]|enable full debug logging"
 )
+_BUILD_STEP_TS = re.compile(r"^#\d+\s+[\d.]+\s+")
+_ISO_TS = re.compile(r"\d{4}-\d{2}-\d{2}T[\d:.+-]+")
+
 
 def compose_progress_text(line: str, limit: int = COMPOSE_PROGRESS_MAX) -> str | None:
     text = " ".join((line or "").split())
     if not text:
         return None
     return text[:limit]
+
+
+def progress_fingerprint(text: str) -> str:
+    """抹掉 BuildKit 步进秒数 / ISO 时间，得到可去重的稳定指纹。"""
+    normalized = _BUILD_STEP_TS.sub("#N ", text or "")
+    normalized = _ISO_TS.sub("<ts>", normalized)
+    return normalized[:180]
 
 
 def summarize_compose_failure(text: str, *, limit: int = 1600) -> str:
@@ -60,7 +72,11 @@ def summarize_compose_failure(text: str, *, limit: int = 1600) -> str:
 
 
 class ComposeProgressThrottle:
-    """把 docker compose 的刷屏日志收成可落库的进度句。"""
+    """把 docker compose 的刷屏日志收成可落库的进度句。
+
+    urgent（含 error 等）只对**新指纹**立即放行；与上次已 emit 相同的
+    诊断行仍走普通节流，避免同类错误打爆 UI。
+    """
 
     def __init__(
         self,
@@ -70,6 +86,7 @@ class ComposeProgressThrottle:
         self._emit = emit
         self.min_interval = min_interval
         self._last = 0.0
+        self._last_fp: str | None = None
         self._pending: str | None = None
 
     def push(self, line: str) -> None:
@@ -77,10 +94,13 @@ class ComposeProgressThrottle:
         if not text:
             return
         now = time.monotonic()
-        urgent = bool(_COMPOSE_URGENT.search(text))
+        fp = progress_fingerprint(text)
+        same_as_last = self._last_fp is not None and fp == self._last_fp
+        urgent = bool(_COMPOSE_URGENT.search(text)) and not same_as_last
         first = self._last == 0.0
         if first or urgent or (now - self._last) >= self.min_interval:
             self._last = now
+            self._last_fp = fp
             self._pending = None
             self._emit(text)
         else:
@@ -90,6 +110,36 @@ class ComposeProgressThrottle:
         if self._pending:
             self._emit(self._pending)
             self._pending = None
+
+
+class ComposeDiagStallGuard:
+    """同类诊断日志反复出现时要求中止 compose。"""
+
+    def __init__(self, limit: int = COMPOSE_DIAG_REPEAT_ABORT) -> None:
+        self.limit = max(1, int(limit))
+        self._counts: dict[str, int] = {}
+        self._samples: dict[str, str] = {}
+
+    def observe(self, line: str) -> str | None:
+        """若应中止，返回给下一轮 AI 的失败摘要；否则 None。"""
+        text = compose_progress_text(line)
+        if not text:
+            return None
+        if not (_COMPOSE_URGENT.search(text) or _COMPOSE_DIAG.search(text)):
+            return None
+        if _COMPOSE_DIAG_NOISE.search(text):
+            return None
+        fp = progress_fingerprint(text)
+        self._counts[fp] = self._counts.get(fp, 0) + 1
+        self._samples.setdefault(fp, text)
+        if self._counts[fp] < self.limit:
+            return None
+        sample = self._samples[fp]
+        return (
+            "docker compose 同类错误反复刷屏，已中止等待:\n"
+            f"{sample}\n"
+            "failed to build / repeating diagnostic logs"
+        )
 
 
 def resolve_compose_host_path(
@@ -241,7 +291,7 @@ async def docker_compose_up(
         "--wait", "--wait-timeout", str(COMPOSE_WAIT_TIMEOUT),
     ]
 
-    def _run() -> tuple[int, str, bool]:
+    def _run() -> tuple[int, str, bool, str | None]:
         from app.contexts.lab.compose_policy import compose_subprocess_env
 
         proc = subprocess.Popen(
@@ -261,8 +311,10 @@ async def docker_compose_up(
                 on_progress(text)
 
         throttle = ComposeProgressThrottle(_forward)
+        stall = ComposeDiagStallGuard(limit=COMPOSE_DIAG_REPEAT_ABORT)
         chunks: list[str] = []
         timed_out = False
+        stall_err: str | None = None
 
         def _kill() -> None:
             nonlocal timed_out
@@ -277,14 +329,20 @@ async def docker_compose_up(
                 for line in proc.stdout:
                     chunks.append(line)
                     throttle.push(line)
+                    stall_err = stall.observe(line)
+                    if stall_err:
+                        proc.kill()
+                        break
             rc = proc.wait()
         finally:
             timer.cancel()
             throttle.flush()
-        return rc, "".join(chunks), timed_out
+        return rc, "".join(chunks), timed_out, stall_err
 
     try:
-        rc, out, timed_out = await asyncio.to_thread(_run)
+        rc, out, timed_out, stall_err = await asyncio.to_thread(_run)
+        if stall_err:
+            return False, stall_err
         if timed_out:
             return False, f"docker compose up 超时(>{COMPOSE_UP_TIMEOUT}s)"
         if rc == 0:

@@ -1,8 +1,8 @@
-"""dispatch 节点 — 合格线索入 Redis 终认队列(discovery-spec §6.4 / v1.2)。
+"""dispatch 节点 — 合格线索入 Redis 终认队列(discovery-spec §6.4 / v1.4)。
 
 硬规则：禁止自动创建 task_type=verify；禁止回填 vulnerability_description；
 禁止把多条线索拼进同一次 audit prompt；无合格线索 has_lead=False(节点仍 completed)。
-合格门见 finding.qualify（discovery-spec §2.7），不再用 A 级 ∧ is_web。
+合格门见 finding.qualify（discovery-spec §2.7）：漏报优先，置信度只排序。
 """
 from __future__ import annotations
 
@@ -178,7 +178,7 @@ class DispatchNode:
             ):
                 candidates.append(g)
             else:
-                # 不合格可疑真洞（T2/传播/无证据等）进漏斗，不转人工主队列
+                # 字段不齐 / 快审来源等：进漏斗计数，不转人工主队列
                 review_count += 1
 
         ordered: list = []

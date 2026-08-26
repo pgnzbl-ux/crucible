@@ -21,6 +21,7 @@ describe('pipelineDag 前提表契约', () => {
 
   it('keeps the backend audit dependency even when verify hides skipped discovery nodes', () => {
     expect(PIPELINE_REQUIRES.audit).toEqual(['source', 'profile', 'dispatch'])
+    expect(PIPELINE_REQUIRES.env_ready).toEqual(['source', 'profile', 'dispatch'])
   })
 
   it('hunt bypasses screen/triage and joins dispatch with triage', () => {
@@ -35,7 +36,7 @@ describe('pipelineDag 运行流程', () => {
     const stages = pipelineOverviewStages('discovery')
     expect(stages[1].nodeKeys).toEqual(['profile', 'scan_gitleaks', 'scan_osv'])
     expect(stages[1].parallel).toBe(true)
-    expect(stages[2].nodeKeys).toEqual(['scan_semgrep', 'api_inventory', 'env_ready'])
+    expect(stages[2].nodeKeys).toEqual(['scan_semgrep', 'api_inventory'])
     expect(stages[2].parallel).toBe(true)
     expect(stages.find((stage) => stage.key === 'clues')?.nodeKeys).toEqual([
       'cluster', 'api_hunt',
@@ -43,7 +44,7 @@ describe('pipelineDag 运行流程', () => {
     expect(stages.find((stage) => stage.key === 'review')?.nodeKeys).toEqual([
       'screen', 'triage',
     ])
-    expect(stages.at(-2)?.nodeKeys).toEqual(['lead_verify'])
+    expect(stages.at(-2)?.nodeKeys).toEqual(['env_ready', 'lead_verify'])
   })
 
   it('discovery: keeps dependency lanes readable before lead verification', () => {
@@ -65,13 +66,13 @@ describe('pipelineDag 运行流程', () => {
     expect(node('scan_osv').x).toBeCloseTo(node('scan_gitleaks').x, 0)
     expect(node('profile').x).toBeCloseTo(node('scan_osv').x, 0)
     expect(node('profile').x).toBeLessThan(node('scan_semgrep').x)
-    expect(node('scan_semgrep').x).toBeCloseTo(node('env_ready').x, 0)
+    expect(node('scan_semgrep').x).toBeLessThan(node('env_ready').x)
+    expect(node('env_ready').x).toBeLessThan(node('lead_verify').x)
     expect(y('scan_gitleaks')).toBeLessThan(y('scan_osv'))
     expect(y('scan_osv')).toBeLessThan(y('profile'))
     expect(y('profile')).toBeCloseTo(y('scan_semgrep'), 0)
     expect(y('scan_osv')).toBeCloseTo(y('api_inventory'), 0)
     expect(y('api_inventory')).toBeLessThan(y('scan_semgrep'))
-    expect(y('scan_semgrep')).toBeLessThan(y('env_ready'))
 
     expect(layout.nodes.some((n) => n.key === 'is_web')).toBe(false)
     expect(layout.nodes.some((n) => n.key === 'audit')).toBe(false)
@@ -80,7 +81,7 @@ describe('pipelineDag 运行流程', () => {
     expect(Math.min(...layout.nodes.map((n) => n.y))).toBeGreaterThanOrEqual(0)
     expect(flowColumn('profile', 'discovery')).toBe(flowColumn('scan_gitleaks', 'discovery'))
     expect(flowColumn('scan_gitleaks', 'discovery')).toBeLessThan(flowColumn('scan_semgrep', 'discovery'))
-    expect(flowColumn('scan_semgrep', 'discovery')).toBe(flowColumn('env_ready', 'discovery'))
+    expect(flowColumn('scan_semgrep', 'discovery')).toBeLessThan(flowColumn('env_ready', 'discovery'))
     expect(layout.groups.map((group) => group.key)).toEqual([
       'source',
       'initial',
@@ -176,13 +177,12 @@ describe('pipelineDag 运行流程', () => {
     expect(y('screen')).toBeCloseTo(y('api_hunt'), 0)
     expect(y('triage')).toBeCloseTo(y('cluster'), 0)
     expect(y('api_hunt')).toBeGreaterThan(y('scan_gitleaks'))
-    expect(y('cluster')).toBeLessThan(y('env_ready'))
+    expect(node('env_ready').x).toBeLessThan(node('lead_verify').x)
 
     const bandTop = y('scan_gitleaks')
-    const bandBottom = node('env_ready').y + node('env_ready').height
+    const bandBottom = node('scan_semgrep').y + node('scan_semgrep').height
     expect(node('source').y + node('source').height / 2).toBeCloseTo((bandTop + bandBottom) / 2, 0)
     expect(y('dispatch')).toBeCloseTo(y('source'), 0)
-    expect(y('lead_verify')).toBeCloseTo(y('source'), 0)
     expect(y('report')).toBeCloseTo(y('source'), 0)
 
     expect(y('profile')).toBeCloseTo(y('scan_semgrep'), 0)
@@ -241,16 +241,16 @@ describe('pipelineDag 运行流程', () => {
     expect(edges).toContainEqual(expect.objectContaining({ from: 'api_hunt', to: 'dispatch' }))
     expect(edges).toContainEqual(expect.objectContaining({ from: 'triage', to: 'dispatch' }))
     expect(edges).toContainEqual(expect.objectContaining({ from: 'env_ready', to: 'lead_verify' }))
-    expect(edges).toContainEqual(expect.objectContaining({ from: 'dispatch', to: 'lead_verify' }))
+    expect(edges.some((edge) => edge.from === 'dispatch' && edge.to === 'lead_verify')).toBe(false)
     expect(edges).toContainEqual(expect.objectContaining({ from: 'lead_verify', to: 'report' }))
     expect(edges.some((e) => e.from === 'api_hunt' && e.to === 'screen')).toBe(false)
     expect(edges.some((e) => e.from === 'is_web' || e.to === 'is_web')).toBe(false)
     expect(edges.some((e) => e.from === 'audit' || e.to === 'audit')).toBe(false)
     expect(edges).toContainEqual(expect.objectContaining({
-      from: 'profile',
+      from: 'dispatch',
       to: 'env_ready',
       kind: 'conditional',
-      label: '仅 Web',
+      label: '有线索且为 Web',
     }))
     expect(edges).toContainEqual(expect.objectContaining({
       from: 'env_ready',
@@ -278,7 +278,7 @@ describe('pipelineDag 运行流程', () => {
     expect(layout.nodes.some((n) => n.key === 'dispatch')).toBe(false)
     expect(layout.nodes.some((n) => n.key === 'api_inventory')).toBe(false)
     expect(layout.nodes.some((n) => n.key === 'api_hunt')).toBe(false)
-    expect(node('env_ready').x).toBeLessThan(node('audit').x)
+    expect(node('env_ready').x).toBeCloseTo(node('audit').x, 0)
     expect(node('audit').x).toBeLessThan(node('reproduce').x)
     expect(layout.nodes.some((n) => n.key === 'is_web')).toBe(false)
     expect(layout.nodes.some((n) => n.key === 'lead_verify')).toBe(false)
@@ -288,21 +288,23 @@ describe('pipelineDag 运行流程', () => {
       'verify',
     )
     expect(edges).toContainEqual(expect.objectContaining({ from: 'profile', to: 'env_ready' }))
-    expect(edges).toContainEqual(expect.objectContaining({ from: 'env_ready', to: 'audit' }))
+    expect(edges).toContainEqual(expect.objectContaining({ from: 'profile', to: 'audit' }))
+    expect(edges).toContainEqual(expect.objectContaining({ from: 'env_ready', to: 'reproduce' }))
     expect(edges).toContainEqual(expect.objectContaining({ from: 'audit', to: 'reproduce' }))
     expect(edges.some((e) => e.from === 'dispatch')).toBe(false)
   })
 
-  it('verify expanded graph keeps skipped discovery chain and does not switch to LeadWorker', () => {
+  it('verify expanded diagnostics keeps audit independent from the discovery chain', () => {
     const layout = layoutPipelineDag(PIPELINE_NODE_ORDER, { mode: 'verify' })
     expect(layout.nodes.some((n) => n.key === 'dispatch')).toBe(true)
     expect(layout.nodes.some((n) => n.key === 'lead_verify')).toBe(false)
-    expect(layout.edges).toContainEqual(expect.objectContaining({ from: 'dispatch', to: 'audit' }))
+    expect(layout.edges).toContainEqual(expect.objectContaining({ from: 'profile', to: 'audit' }))
     expect(layout.edges).toContainEqual(expect.objectContaining({
       from: 'env_ready',
-      to: 'audit',
+      to: 'reproduce',
       kind: 'support',
     }))
+    expect(layout.edges.some((edge) => edge.from === 'dispatch' && edge.to === 'audit')).toBe(false)
     expect(layout.groups.map((group) => group.key)).toEqual([
       'source',
       'initial',

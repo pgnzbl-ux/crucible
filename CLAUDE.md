@@ -20,7 +20,7 @@ Crucible 是一个 AI 驱动的漏洞自动验证平台。安全研究员提交�
 - **模块化单体** — Bounded Context 组织代码（task / agent / lab / project / report / settings / identity），不盲目微服务
 - **事件驱动** — Context 间通过 Redis Pub/Sub 异步通信
 - **Agent GateWay** — Agent 执行抽象为平台能力而非胶水代码
-- **Agent 平台 13 节点编排** — Celery worker 的 `orchestrator.py` 按 `DEFAULT_PIPELINE` 驱动 13 节点(source/profile/scan_gitleaks/scan_osv/scan_semgrep/env_ready/cluster/screen/triage/dispatch/audit/reproduce/report)。验证任务(`task_type=verify`)跑其中 6 个终认节点、扫描/聚类/轻量快审/AI 二审/调度 `VERIFY_MODE` skip；审计任务(`discovery`)跑全图、dispatch 把合格可疑真洞入 Redis db3 终认队（LeadWorker 复用同一套 audit/reproduce）。AI 节点用独立 agent-runner 容器 + `submit_result` 回传结构化 output
+- **Agent 平台 15 节点编排** — Celery worker 的 `orchestrator.py` 按 `DEFAULT_PIPELINE` 驱动 15 节点(source/profile/scan_gitleaks/scan_osv/scan_semgrep/api_inventory/env_ready/cluster/api_hunt/screen/triage/dispatch/audit/reproduce/report)。验证任务(`task_type=verify`)跑其中 6 个终认节点、扫描/清单/猎洞/聚类/轻量快审/AI 二审/调度 `VERIFY_MODE` skip；审计任务(`discovery`)跑全图、dispatch 把合格可疑真洞入 Redis db3 终认队（LeadWorker 复用同一套 audit/reproduce）。AI 节点用独立 agent-runner 容器 + `submit_result` 回传结构化 output
 - **Security by Default** — 沙箱真隔离、Agent 零信任。LLM 凭据通过 `docker run --env` 注入容器(容器销毁 env 消失,这部分零落盘成立)。LLM API Key / 任务凭据 **Fernet 加密落库**（`seal_secret` / `reveal_secret`，存量明文可读），响应层 `mask_secret` 掩码。
 
 ## 快速启动
@@ -54,10 +54,12 @@ Crucible/
 │   │   ├── core/                # 配置、数据库、安全、Celery、agent-runner 编排
 │   │   ├── contexts/            # Bounded Contexts
 │   │   │   ├── task/            # 任务管理 (models/schemas/service/repo/api) + NodeRun/重试/删除
-│   │   │   ├── agent/           # Agent 执行平台（13 节点编排 + SDK 适配 + 容器编排）
-│   │   │   │   ├── orchestrator.py     # ★ 13 节点编排器（就绪波次 + 分支出口 + 断点续跑）
+│   │   │   ├── agent/           # Agent 执行平台（15 节点编排 + SDK 适配 + 容器编排）
+│   │   │   │   ├── orchestrator.py     # ★ 15 节点编排器（就绪波次 + 分支出口 + 断点续跑）
 │   │   │   │   ├── contracts/          # 公开 Input/Handoff/ControlSignals + DEFAULT_PIPELINE
-│   │   │   │   ├── nodes/              # ★ 13 节点实现（source/profile/scan_*/env_ready/cluster/screen/triage/dispatch/audit/reproduce/report）
+│   │   │   │   ├── nodes/              # ★ 15 节点实现（含 api_inventory / api_hunt + scan_*/env_ready/cluster/screen/triage/dispatch/audit/reproduce/report）
+│   │   │   │   ├── api_inventory/      # 确定性 API 清单 parsers
+│   │   │   │   ├── stacks/             # 语言/框架单一注册表
 │   │   │   │   ├── ai_runner.py        # AI 节点容器编排 + submit_result 工具 + schema 校验
 │   │   │   │   ├── profile_detector.py # profile 规则引擎 hints / SDK 关闭回退
 │   │   │   │   ├── sdk_adapter.py      # Claude Agent SDK 适配器（env + prompt 构造）

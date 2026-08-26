@@ -15,6 +15,55 @@ from .base import NodeContext, emit_phase, task_run_cancelled
 
 logger = logging.getLogger(__name__)
 
+_NODE_SKILLS_ROOT = (
+    Path(__file__).resolve().parents[5]
+    / "infrastructure"
+    / "agent-runner"
+    / "node-skills"
+)
+_API_HUNT_STACKS = _NODE_SKILLS_ROOT / "api_hunt" / "stacks"
+
+
+def _profile_langs_fws(profile) -> tuple[list[str], list[str]]:
+    langs: list[str] = []
+    fws: list[str] = []
+    if profile is None:
+        return langs, fws
+    for fact in getattr(profile, "languages", None) or []:
+        lid = fact.get("id") if isinstance(fact, dict) else getattr(fact, "id", None)
+        if lid:
+            langs.append(str(lid).lower())
+    primary = getattr(profile, "primary_language", None) or getattr(profile, "language", None)
+    if primary:
+        langs.append(str(primary).lower())
+    for item in getattr(profile, "frameworks", None) or []:
+        fws.append(str(item).lower())
+    single = getattr(profile, "framework", None)
+    if single:
+        fws.append(str(single).lower())
+    return list(dict.fromkeys(langs)), list(dict.fromkeys(fws))
+
+
+def _load_stack_notes(langs: list[str], fws: list[str]) -> str:
+    """读取 api_hunt/stacks/<lang>/<fw>.md；存在则拼接。"""
+    from app.contexts.agent.stacks.registry import canonicalize_framework, canonicalize_language
+
+    chunks: list[str] = []
+    for lang in langs:
+        canon_lang = canonicalize_language(lang)
+        for fw in fws:
+            canon_fw = canonicalize_framework(fw)
+            path = _API_HUNT_STACKS / canon_lang / f"{canon_fw}.md"
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if text:
+                chunks.append(f"## stack {canon_lang}/{canon_fw}\n\n{text}")
+    return "\n\n".join(chunks)
+
 
 def _confidence_label(score: float) -> str:
     if score >= 0.85:
@@ -47,12 +96,13 @@ def _normalize_evidence(
 
 
 async def _adjudicate_hunt_groups(
-    svc, *, task_id: str, high_confidence: float = 0.8,
+    svc, *, task_id: str, high_confidence: float | None = None,
 ) -> int:
-    """把仍为 clustered 且代表为 api_hunt 的组写成 §2.7 全部门对齐的 agent 判决。
+    """把仍为 clustered 且代表为 api_hunt 的组写成 §2.7 字段齐备的 agent 判决。
 
-    含 conf >= triage_high_confidence，与 dispatch 合格门一致；MEDIUM 只入库不直出。
+    漏报优先：置信度不挡直出（high_confidence 保留兼容，忽略）；字段不齐则跳过。
     """
+    del high_confidence
     from app.contexts.agent.ai_runner import _normalize_hunt_confidence
     from app.contexts.finding.models import Adjudication
 
@@ -69,7 +119,7 @@ async def _adjudicate_hunt_groups(
         why = list(raw.get("why") or [])
         evidence = list(raw.get("evidence") or [])
         conf = _normalize_hunt_confidence(raw.get("confidence_score", raw.get("confidence")))
-        if conf is None or conf < high_confidence:
+        if conf is None:
             continue
         if (
             not why
@@ -211,11 +261,19 @@ class ApiHuntNode:
             emit_phase(ctx, "无 PVE 候选，猎洞空跑", phase=self.node_key)
             return empty
 
+        profile = getattr(inp, "profile", None)
+        langs, fws = _profile_langs_fws(profile)
+        stack_label = "+".join(langs + ([f"fw:{','.join(fws)}"] if fws else [])) or "unknown"
+        stack_notes = _load_stack_notes(langs, fws)
+
         svc = FindingService(ctx.db_session)
 
         emit_phase(
             ctx,
-            f"猎洞启动：{len(pve)} PVE / {len(batches)} 资源批（上限 {max_batches}）",
+            (
+                f"猎洞启动：{len(pve)} PVE / {len(batches)} 资源批（上限 {max_batches}）"
+                f" · stack={stack_label}"
+            ),
             phase=self.node_key,
         )
 
@@ -227,7 +285,9 @@ class ApiHuntNode:
             for batch in batches:
                 if await task_run_cancelled(ctx.db_session, ctx.task_id, ctx.run_id):
                     break
-                batch_out = await self._hunt_batch(ctx, batch, settings)
+                batch_out = await self._hunt_batch(
+                    ctx, batch, settings, stack_notes=stack_notes,
+                )
                 reviewed += int(batch_out.get("reviewed_count") or len(batch))
                 suspects.extend(batch_out.get("suspects") or [])
                 if batch_out.get("budget_exhausted"):
@@ -369,7 +429,6 @@ class ApiHuntNode:
             qualified_count = await _adjudicate_hunt_groups(
                 svc,
                 task_id=ctx.task_id,
-                high_confidence=float(settings.triage_high_confidence),
             )
             await ctx.db_session.commit()
 
@@ -395,26 +454,33 @@ class ApiHuntNode:
         ctx: NodeContext,
         batch: list[dict[str, Any]],
         settings,
+        *,
+        stack_notes: str = "",
     ) -> dict[str, Any]:
         """单资源批：Docker AI；SDK 关闭时 mock 空嫌疑。"""
         from app.contexts.agent.ai_runner import run_ai_node
 
+        def _ep_payload(e: dict[str, Any]) -> dict[str, Any]:
+            row: dict[str, Any] = {
+                "endpoint_id": e.get("endpoint_id"),
+                "method": e.get("method"),
+                "path_template": e.get("path_template"),
+                "handler_file": e.get("handler_file"),
+                "handler_symbol": e.get("handler_symbol"),
+                "line_start": e.get("line_start"),
+                "id_params": e.get("id_params") or [],
+                "auth_observed": e.get("auth_observed") or [],
+                "resource_key": e.get("resource_key"),
+                "has_object_id": e.get("has_object_id"),
+            }
+            if e.get("parser"):
+                row["parser"] = e.get("parser")
+            if e.get("route_file"):
+                row["route_file"] = e.get("route_file")
+            return row
+
         payload = {
-            "batch": [
-                {
-                    "endpoint_id": e.get("endpoint_id"),
-                    "method": e.get("method"),
-                    "path_template": e.get("path_template"),
-                    "handler_file": e.get("handler_file"),
-                    "handler_symbol": e.get("handler_symbol"),
-                    "line_start": e.get("line_start"),
-                    "id_params": e.get("id_params") or [],
-                    "auth_observed": e.get("auth_observed") or [],
-                    "resource_key": e.get("resource_key"),
-                    "has_object_id": e.get("has_object_id"),
-                }
-                for e in batch
-            ],
+            "batch": [_ep_payload(e) for e in batch],
             "closed_questions": [
                 "对象 id / 路径参数 / 角色是否可由攻击者控制？（attacker_controlled）",
                 "未做 ownership/租户校验前是否已读写资源或执行特权操作？（reaches_sink）",
@@ -425,11 +491,13 @@ class ApiHuntNode:
                 "attacker_controlled/reaches_sink/sanitizer/confidence"
             ),
         }
-        input_json = {
+        input_json: dict[str, Any] = {
             "endpoints": payload["batch"],
             "closed_questions": payload["closed_questions"],
             "rubric_hint": payload["rubric_hint"],
         }
+        if stack_notes:
+            input_json["stack_notes"] = stack_notes
         emit_phase(
             ctx,
             f"审资源批 {batch[0].get('resource_key', '')[:8]}…（{len(batch)} 端点）",

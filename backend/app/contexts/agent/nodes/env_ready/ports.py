@@ -11,7 +11,26 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-_SIDECAR_CONTAINER_PORTS = {3306, 5432, 6379, 27017, 5672, 1433, 9200, 11211}
+_SIDECAR_CONTAINER_PORTS = {
+    # DB
+    3306,
+    5432,
+    1433,
+    27017,
+    # cache
+    6379,
+    11211,
+    # MQ
+    5672,
+    9092,
+    4222,
+    # search
+    9200,
+    9300,
+    # object storage API / console（会答 HTTP，但不是复现 Web 入口）
+    9000,
+    9001,
+}
 _SHORT_PORT = re.compile(
     r"^(?:(?:\d{1,3}\.){3}\d{1,3}:)?(\d+):(\d+)(?:/(tcp|udp))?$", re.I
 )
@@ -217,6 +236,59 @@ def publishable_runtime_bindings(
             continue
         result.append({**item, "probe_host": probe_host, "public_host": public_host})
     return result
+
+
+def recipe_declared_port(target_url: str | None) -> int | None:
+    """从配方 target_url 抽出声明端口（宿主或容器侧，由调用方匹配）。"""
+    raw = (target_url or "").strip()
+    if not raw:
+        return None
+    from urllib.parse import urlparse
+
+    parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+    if parsed.port is not None:
+        return int(parsed.port)
+    scheme = (parsed.scheme or "http").lower()
+    if scheme == "https":
+        return 443
+    if scheme == "http":
+        return 80
+    return None
+
+
+def filter_bindings_for_recipe(
+    bindings: list[dict[str, str | int]],
+    *,
+    target_url: str | None,
+) -> tuple[list[dict[str, str | int]], str | None]:
+    """按配方声明入口收窄探活候选。
+
+    - 未声明端口：返回全部 Web 绑定（已排除 sidecar）
+    - 声明端口且能匹配 host/container port：只返回匹配项
+    - 声明了但发布列表里没有：返回空列表 + 错误说明（禁止降级到旁路 HTTP 口）
+    """
+    preferred = recipe_declared_port(target_url)
+    if preferred is None:
+        return list(bindings), None
+    matched = [
+        item
+        for item in bindings
+        if int(item.get("host_port") or -1) == preferred
+        or int(item.get("container_port") or -1) == preferred
+    ]
+    if matched:
+        return matched, None
+    published = sorted(
+        {
+            f"{int(item['host_port'])}->{int(item['container_port'])}"
+            for item in bindings
+        }
+    )
+    return [], (
+        f"配方声明入口端口 {preferred} 未出现在已发布 Web 绑定中"
+        f"（published={published or '[]'}）。"
+        "禁止用其它碰巧通的 HTTP 口冒充靶场地址。"
+    )
 
 
 def web_host_ports(mappings: list[tuple[int, int]]) -> list[int]:

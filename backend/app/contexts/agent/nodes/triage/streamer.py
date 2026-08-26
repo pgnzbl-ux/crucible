@@ -53,13 +53,15 @@ async def _resolve_env_ready(session_factory, run_id: str, fallback: Any) -> Any
 class LeadStreamer:
     """达合格门的组立即建 LeadRun 入队并后台排空。
 
-    门槛与 dispatch 节点完全一致（discovery-spec §2.7）；poll() 以库内最新状态为准。
+    门槛与 dispatch 节点完全一致（discovery-spec §2.7，漏报优先）；
+    poll() 以库内最新状态为准。
     """
 
     def __init__(self, ctx, settings, *, phase: str = "triage"):
         self.ctx = ctx
         self.settings = settings
         self.phase = phase
+        # 兼容旧参数；qualify 已不再用置信硬门槛
         self.high = float(getattr(settings, "triage_high_confidence", 0.8))
         self.drain_task: asyncio.Task | None = None
         self.enqueued = 0

@@ -1,4 +1,4 @@
-"""api_hunt 直出合格门与 dispatch conf 阈值对齐。"""
+"""api_hunt 直出合格门：字段齐备即可直出（漏报优先，置信度不挡）。"""
 from __future__ import annotations
 
 import os
@@ -105,18 +105,21 @@ async def _seed_hunt_group(session, *, confidence_score: float):
 
 
 @pytest.mark.asyncio
-async def test_adjudicate_hunt_requires_high_confidence(session_factory):
+async def test_adjudicate_hunt_medium_confidence_now_qualifies(session_factory):
+    """漏报优先：猎洞字段齐备即可直出，不再要求 conf >= 0.8。"""
     from app.contexts.agent.nodes.api_hunt import _adjudicate_hunt_groups
     from app.contexts.finding.service import FindingService
 
     async with session_factory() as session:
         task, group = await _seed_hunt_group(session, confidence_score=0.75)
         svc = FindingService(session)
-        n = await _adjudicate_hunt_groups(svc, task_id=task.id, high_confidence=0.8)
-        assert n == 0
+        n = await _adjudicate_hunt_groups(svc, task_id=task.id)
+        assert n == 1
         await session.refresh(group)
-        assert group.status == "clustered"
-        assert group.ai_verdict is None
+        assert group.status == "adjudicated"
+        assert group.ai_verdict == "tp"
+        assert group.verdict_source == "agent"
+        assert float(group.ai_confidence) == pytest.approx(0.75)
 
 
 @pytest.mark.asyncio
@@ -127,7 +130,7 @@ async def test_adjudicate_hunt_qualifies_high_confidence(session_factory):
     async with session_factory() as session:
         task, group = await _seed_hunt_group(session, confidence_score=0.9)
         svc = FindingService(session)
-        n = await _adjudicate_hunt_groups(svc, task_id=task.id, high_confidence=0.8)
+        n = await _adjudicate_hunt_groups(svc, task_id=task.id)
         assert n == 1
         await session.refresh(group)
         assert group.status == "adjudicated"

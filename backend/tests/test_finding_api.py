@@ -366,6 +366,21 @@ def test_list_groups_engine_filter_matches_exact_json_element(client_env):
         assert response.json()["total"] == count, engine
 
 
+def test_engine_member_clause_casts_json_to_jsonb_on_postgres():
+    """PG 的 `?` 只接受 jsonb；engine_set 是 JSON，编译结果必须 CAST。"""
+    from sqlalchemy.dialects import postgresql
+
+    from app.contexts.finding.repository import FindingRepository
+
+    sql = str(
+        FindingRepository.engine_member_clause("semgrep").compile(
+            dialect=postgresql.dialect(),
+        )
+    )
+    assert "CAST" in sql.upper() or "::JSONB" in sql.upper() or "::jsonb" in sql
+    assert "?" in sql
+
+
 def test_list_groups_exposes_inferred_cwe_for_legacy_group_without_overwriting_raw_finding(client_env):
     client, factory = client_env
     import asyncio

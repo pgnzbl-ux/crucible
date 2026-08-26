@@ -92,6 +92,7 @@ class ReproduceHandoff(_HandoffBase):
     cvss: Any = None
     vulnerable_file: str | None = None
     poc: dict[str, Any] | None = None
+    degraded_reason: str | None = None
 
 
 class ReportHandoff(_HandoffBase):
@@ -185,6 +186,7 @@ class ApiInventoryHandoff(_HandoffBase):
     pve_count: int = 0
     bom_path: str | None = None  # 相对 host_workdir
     unsupported_languages: list[str] = Field(default_factory=list)
+    stack_ids: list[str] = Field(default_factory=list)
     error: str | None = None
 
 

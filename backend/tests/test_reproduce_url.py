@@ -1,7 +1,7 @@
-"""Reproduce 节点把 localhost 靶标改写为容器可达地址。"""
+"""Reproduce 节点：一律注入宿主机 IP:port，禁止 host.docker.internal。"""
 import sys
 import os
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -12,7 +12,7 @@ from app.contexts.agent.nodes.reproduce import ReproduceNode
 
 
 @pytest.mark.asyncio
-async def test_reproduce_rewrites_localhost_target():
+async def test_reproduce_rewrites_localhost_to_advertise_ip():
     captured = {}
 
     async def fake_run_ai_node(**kwargs):
@@ -35,11 +35,19 @@ async def test_reproduce_rewrites_localhost_target():
             "audit": {"gate_verdict": "pass", "runtime_dependent": True},
         },
     )
-    with patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", fake_run_ai_node):
+    with patch(
+        "app.contexts.agent.nodes.reproduce._ensure_lab_reachable",
+        new_callable=AsyncMock,
+        side_effect=lambda ctx, env: env,
+    ), patch(
+        "app.contexts.agent.target_url.host_advertise_ip",
+        return_value="10.0.0.8",
+    ), patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", fake_run_ai_node):
         await ReproduceNode().execute(ctx)
 
     inp = captured["input_json"]
-    assert inp["target_url"] == "http://host.docker.internal:8080"
+    assert inp["target_url"] == "http://10.0.0.8:8080"
+    assert "host.docker.internal" not in inp["target_url"]
     assert inp["initial_creds"] == {"username": "admin", "password": "admin123"}
     assert inp["compose_path"] == ".vuln-env/docker-compose.yml"
     assert inp["started_containers"] == ["app"]
@@ -52,12 +60,49 @@ async def test_reproduce_rewrites_localhost_target():
 
 
 @pytest.mark.asyncio
-async def test_reproduce_fails_without_env_ready_target_url():
+async def test_reproduce_keeps_published_lan_target_url():
+    captured = {}
+
+    async def fake_run_ai_node(**kwargs):
+        captured.update(kwargs)
+        return {"verdict": "confirmed", "reproduced": True}
+
+    ctx = NodeContext(
+        task_id="t1", run_id="r1", host_workdir="/tmp/w",
+        source_path="/tmp/w", vulnerability_description="d",
+        project_address="x", project_ref=None,
+        previous_outputs={
+            "source": {"repo_dirname": "demo", "workspace_path": "/workspace/demo"},
+            "env_ready": {
+                "target_url": "http://10.0.0.8:3001",
+                "transport_shape": {"protocol": "http"},
+                "initial_creds": {"username": "u", "password": "p"},
+                "compose_path": ".vuln-env/docker-compose.yml",
+                "started_containers": ["web"],
+            },
+            "audit": {"gate_verdict": "pass"},
+        },
+    )
+    with patch(
+        "app.contexts.agent.nodes.reproduce._ensure_lab_reachable",
+        new_callable=AsyncMock,
+        side_effect=lambda ctx, env: env,
+    ), patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", fake_run_ai_node):
+        await ReproduceNode().execute(ctx)
+
+    assert captured["input_json"]["target_url"] == "http://10.0.0.8:3001"
+    assert captured["input_json"]["initial_creds"] == {"username": "u", "password": "p"}
+
+
+@pytest.mark.asyncio
+async def test_reproduce_degrades_without_env_ready_target_url():
     ctx = NodeContext(
         task_id="t1", run_id="r1", host_workdir="/tmp/w",
         source_path="/tmp/w", vulnerability_description="d",
         project_address="x", project_ref=None,
         previous_outputs={"env_ready": {}, "audit": {"gate_verdict": "pass", "runtime_dependent": False}},
     )
-    with pytest.raises(RuntimeError, match="target_url"):
-        await ReproduceNode().execute(ctx)
+    output = await ReproduceNode().execute(ctx)
+    assert output["verdict"] == "code_reachable"
+    assert output["reproduced"] is False
+    assert output["degraded_reason"] == "env_unavailable"

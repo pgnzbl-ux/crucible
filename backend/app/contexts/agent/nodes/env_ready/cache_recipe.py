@@ -184,6 +184,19 @@ async def _try_cached_recipe(
             ctx.host_workdir, compose_rel, repo_name, lab_id=result.lab_id
         )
         return None, last_error
+    recipe_url = hit.get("target_url") if isinstance(hit, dict) else None
+    usable_bindings, recipe_port_err = ports.filter_bindings_for_recipe(
+        usable_bindings,
+        target_url=str(recipe_url) if recipe_url else None,
+    )
+    if recipe_port_err or not usable_bindings:
+        last_error = recipe_port_err or "缓存配方声明入口无可用绑定"
+        events._emit(ctx, "缓存配方入口未发布，回喂 AI")
+        await _require_creation_owner(ctx, svc, result.lab_id)
+        await compose_host.docker_compose_down(
+            ctx.host_workdir, compose_rel, repo_name, lab_id=result.lab_id
+        )
+        return None, last_error
     runtime_host_ports = [int(item["host_port"]) for item in usable_bindings]
     events._emit(ctx, f"正在探活实际发布端口 {runtime_host_ports}")
     shape = hit.get("transport_shape") if isinstance(hit, dict) else None

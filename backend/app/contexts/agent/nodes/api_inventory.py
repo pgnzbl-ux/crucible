@@ -21,6 +21,7 @@ def _empty(*, ok: bool = True, skipped: bool = False, error: str | None = None) 
         "pve_count": 0,
         "bom_path": None,
         "unsupported_languages": [],
+        "stack_ids": [],
     }
     if skipped:
         out["skipped"] = True
@@ -100,6 +101,7 @@ class ApiInventoryNode:
                 "pve_count": int(bom.get("pve_count") or 0),
                 "bom_path": None,
                 "unsupported_languages": unsupported,
+                "stack_ids": list(bom.get("stack_ids") or []),
                 "error": f"bom write failed: {e}",
             }
 
@@ -107,6 +109,7 @@ class ApiInventoryNode:
         pve = int(bom.get("pve_count") or 0)
         ran = list(bom.get("parsers") or parser_keys)
         kinds = list(bom.get("acquisition_kinds") or [])
+        stack_ids = list(bom.get("stack_ids") or [])
         parser_label = "/".join(ran) if ran else "none"
         extra = ""
         if unsupported:
@@ -126,4 +129,5 @@ class ApiInventoryNode:
             "pve_count": pve,
             "bom_path": rel,
             "unsupported_languages": unsupported,
+            "stack_ids": stack_ids,
         }

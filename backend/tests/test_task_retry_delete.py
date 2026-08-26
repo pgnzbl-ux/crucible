@@ -173,6 +173,7 @@ async def test_retry_from_triage_copies_screen_without_rerun(session_factory):
         by_key = {n.node_key: n for n in new_nodes}
         assert "triage" not in by_key
         assert "dispatch" not in by_key
+        assert "env_ready" not in by_key  # index 更小，但是 dispatch 后代，必须失效
         assert by_key["screen"].status == "completed"
         assert by_key["screen"].output_json == '{"escalated_count":2,"fast_model_count":3}'
         assert by_key["cluster"].status == "completed"

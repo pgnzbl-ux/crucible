@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -35,6 +35,7 @@ async def factory():
 
 
 def _cascade_settings(**kw):
+    # SimpleNamespace：避免 MagicMock 缺省属性污染 crypto.settings / Fernet key
     base = dict(
         triage_hide_sast_conclusion=True,
         claude_agent_sdk_enabled=True,
@@ -56,7 +57,7 @@ def _cascade_settings(**kw):
         triage_stream_dispatch_enabled=False,
     )
     base.update(kw)
-    return MagicMock(**base)
+    return SimpleNamespace(**base)
 
 
 def _agent_output(verdict="tp", confidence=0.9):
@@ -385,6 +386,12 @@ async def test_t2_fast_model_fp_decides_tp_escalates(factory, tmp_path):
 
 def test_fast_provider_snapshot_keeps_request_settings():
     from app.contexts.agent.nodes.triage.cascade import _snapshot_provider
+    from app.core import crypto
+    from app.core.config import get_settings
+
+    # 恢复可能被并列用例 MagicMock 污染的模块级 settings（reveal_secret → Fernet）
+    crypto.settings = get_settings()
+    crypto._fernet = None
 
     provider = SimpleNamespace(
         id="pv",
@@ -731,9 +738,9 @@ async def test_concurrent_triage_progress_uses_done_not_started(factory, tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_streaming_dispatch_during_triage(factory, tmp_path):
-    """流式派单：族代表判完即建 LeadRun 入队并启动后台排空，
-    不等 triage 全部跑完；传播成员置信度打折后不达门槛不入队。"""
+async def test_triage_is_pure_and_dispatch_is_single_queue_writer(factory, tmp_path):
+    """triage 只落判决；只有 dispatch 可建 LeadRun 和入队。"""
+    from app.contexts.agent.nodes.dispatch import DispatchNode
     from app.contexts.agent.nodes.triage import TriageNode
     from app.contexts.finding.models import LeadRun
 
@@ -760,9 +767,6 @@ async def test_streaming_dispatch_during_triage(factory, tmp_path):
     async def fake_enqueue(task_id, items):
         return len(items)
 
-    async def fake_runtime(self):
-        return SimpleNamespace(lead_verify_per_task=2)
-
     with (
         patch("app.core.config.get_settings", return_value=_cascade_settings(
             triage_fast_model_enabled=False, triage_stream_dispatch_enabled=True,
@@ -770,22 +774,28 @@ async def test_streaming_dispatch_during_triage(factory, tmp_path):
         patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", new=agent_side_effect),
         patch("app.contexts.agent.lead_worker.drain_lead_queue", new=fake_drain),
         patch("app.contexts.agent.lead_queue.enqueue_leads", new=fake_enqueue),
-        patch(
-            "app.contexts.settings.service.SettingsService.get_runtime_settings",
-            new=fake_runtime,
-        ),
     ):
         out = await TriageNode().execute(ctx, None)
 
     assert out["adjudicated_count"] == 1
-    # 代表置信 0.9 ≥ 0.8 达门槛入队；传播成员 0.9×0.85=0.765 不达门槛
+    assert not drain_calls
+    assert not (await session.execute(
+        select(LeadRun).where(LeadRun.task_id == ctx.task_id)
+    )).scalars().all()
+
+    with (
+        patch("app.contexts.agent.lead_queue.enqueue_leads", new=fake_enqueue),
+        patch("app.contexts.agent.lead_queue.queued_lead_ids", new=AsyncMock(return_value=set())),
+    ):
+        dispatch_out = await DispatchNode().execute(ctx, None)
+
+    assert dispatch_out["queued_count"] == 2
+    # 代表 + 传播成员（字段齐备）均由 dispatch 入队
     leads = (await session.execute(select(LeadRun).where(LeadRun.task_id == ctx.task_id))).scalars().all()
-    assert len(leads) == 1
-    assert drain_calls, "后台排空应已启动"
-    assert drain_calls[0]["task_id"] == ctx.task_id
+    assert len(leads) == 2
     groups = await _groups_of(session, ctx.task_id)
     dispatched = [g for g in groups if g.status == "dispatched"]
-    assert len(dispatched) == 1
+    assert len(dispatched) == 2
     await gen.aclose()
 
 

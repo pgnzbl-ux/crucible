@@ -118,7 +118,7 @@ NODE_OUTPUT_SCHEMAS: dict[str, dict] = {
 }
 
 def rewrite_url_for_agent_container(url: str | None) -> str | None:
-    """把宿主机靶标改写成 agent-runner 容器可达的 host.docker.internal。"""
+    """回环/遗留 host.docker.internal 改成宿主机 IP:port；已发布地址原样保留。"""
     from app.contexts.agent.target_url import rewrite_url_for_agent_container as _rewrite
     return _rewrite(url)
 
@@ -823,7 +823,9 @@ async def _run_one_container_unthrottled(
     output_path = node_output_path
     if not output_path.exists():
         stderr_tail = summary.get("stderr_tail", "") if summary else ""
-        combined = (stderr_tail or last_fail or "").strip()
+        # 结构化 agent.failed 优先于 stdout JSONL 截尾：长会话的
+        # agent.completed 用量字段会把真正的 no_submit 埋进截断噪声。
+        combined = (last_fail or stderr_tail or "").strip()
         # LLM 网关错误（如 401 余额不足）常出现在较早的 agent.failed；
         # 末尾可能是 SDK 误报或「未调用 submit_result」次生事件，须优先保留 llm_fail。
         primary = (llm_fail or combined).strip()

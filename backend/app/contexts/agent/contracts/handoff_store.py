@@ -128,10 +128,12 @@ class InputAssembler:
                 source_path=task.source_path,
             )
         if node_key == "scan_osv":
+            profile_raw = store.get_raw("profile")
             return ScanOsvInput(
                 source=SourceHandoff.model_validate(store.get_raw("source")),
                 host_workdir=task.host_workdir,
                 source_path=task.source_path,
+                profile=ProfileHandoff.model_validate(profile_raw) if profile_raw else None,
             )
         if node_key == "scan_semgrep":
             return ScanSemgrepInput(

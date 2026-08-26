@@ -704,7 +704,8 @@ async def test_list_grouped_by_project(session):
         {"name": "web", "status": "running", "ports": "", "image": "x"}
     ]
     assert grouped[0]["labs"][0]["live_task_count"] >= 1
-    assert 3580 <= grouped[0]["labs"][0]["ttl_remaining_seconds"] <= 3590
+    # live 占用中 TTL 未起算，对外显示满额
+    assert grouped[0]["labs"][0]["ttl_remaining_seconds"] == 3600
 
 
 @pytest.mark.parametrize(

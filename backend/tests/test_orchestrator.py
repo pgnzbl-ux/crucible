@@ -105,10 +105,12 @@ async def test_non_web_keeps_whitebox_audit_and_report(session_factory):
         assert by_key["audit"] == "completed"
         assert by_key["report"] == "completed"
         for key in (
-            "scan_gitleaks", "scan_osv", "scan_semgrep", "env_ready",
-            "cluster", "screen", "triage", "dispatch", "reproduce",
+            "scan_gitleaks", "scan_osv", "scan_semgrep",
+            "cluster", "screen", "triage", "dispatch",
         ):
-            assert by_key[key] == "skipped"
+            assert key not in by_key
+        assert by_key["env_ready"] == "skipped"
+        assert by_key["reproduce"] == "skipped"
 
 
 @pytest.mark.asyncio
@@ -498,6 +500,46 @@ async def test_report_fail_after_uncertain_keeps_needs_review(session_factory):
         assert result["status"] == "needs_review"
         assert task.status == "needs_review"
         assert task.verdict is None
+
+
+@pytest.mark.asyncio
+async def test_report_fail_keeps_confirmed_analysis_verdict(session_factory):
+    """动态复现已确认后，报告渲染失败不得推翻分析结论。"""
+    from app.contexts.agent import orchestrator as orch
+
+    async with session_factory() as session:
+        task, run = await _seed_task_run(session)
+
+        async def fake_source(ctx, node_input=None):
+            return {"source_path": ctx.source_path, "repo_dirname": "demo"}
+        async def fake_profile(ctx, node_input=None):
+            return {"is_web": True, "language": "python"}
+        async def fake_env(ctx, node_input=None):
+            return {"target_url": "http://localhost:5000", "compose_path": "x.yml"}
+        async def fake_audit(ctx, node_input=None):
+            return {"gate_verdict": "pass", "core_claim": "reachable"}
+        async def fake_reproduce(ctx, node_input=None):
+            return {"verdict": "confirmed", "reproduced": True, "attempts": []}
+
+        real_nodes = _legacy_order(orch)
+        with (
+            patch.object(real_nodes[0], "execute", fake_source),
+            patch.object(real_nodes[1], "execute", fake_profile),
+            patch.object(real_nodes[2], "execute", fake_env),
+            patch.object(real_nodes[3], "execute", fake_audit),
+            patch.object(real_nodes[4], "execute", fake_reproduce),
+            patch.object(real_nodes[5], "execute", AsyncMock(side_effect=RuntimeError("报告模型超时"))),
+        ):
+            result = await orch.run_orchestration(
+                task_id=task.id, run_id=run.id, session=session,
+                host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
+            )
+
+        await session.refresh(task)
+        assert result["status"] == "completed"
+        assert result["verdict"] == "confirmed"
+        assert task.status == "completed"
+        assert task.verdict == "confirmed"
 
 
 @pytest.mark.asyncio

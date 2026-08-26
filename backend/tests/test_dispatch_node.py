@@ -69,7 +69,7 @@ async def _seed(session, tmp_path, groups_spec, *, is_web=True):
             engines = spec.get("engine_set", ["semgrep"])
             raw = spec.get("raw") or {}
             qualify = spec.get("qualify")
-            if qualify is None and verdict == "tp" and source == "agent":
+            if qualify is None and verdict == "tp" and source in ("agent", "propagated"):
                 qualify = {
                     "attacker_controlled": True,
                     "reaches_sink": True,
@@ -337,20 +337,125 @@ async def test_dispatch_b_grade_t3_can_enqueue(session_factory, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_dispatch_rejects_fast_model_and_propagated_tp(session_factory, tmp_path):
+async def test_dispatch_rejects_fast_model_but_allows_propagated_tp(session_factory, tmp_path):
+    """漏报优先：传播 tp 可入队；快审 tp 仍禁入。"""
+    from app.contexts.agent.lead_queue import queue_depth, set_redis_client
     from app.contexts.agent.nodes.dispatch import DispatchNode
 
-    async with session_factory() as session:
-        ctx, task, inp = await _seed(session, tmp_path, [
-            {"cwe": "CWE-79", "grade": "B", "verdict": "tp", "conf": 0.99,
-             "priority": "high", "source": "fast_model"},
-            {"cwe": "CWE-79", "grade": "B", "verdict": "tp", "conf": 0.9,
-             "priority": "high", "source": "propagated"},
-        ])
-        with patch("app.core.config.get_settings", return_value=_settings()):
-            out = await DispatchNode().execute(ctx, inp)
-        assert out["has_lead"] is False
-        assert out["queued_count"] == 0
+    class _MemRedis:
+        def __init__(self):
+            self.lists: dict[str, list] = {}
+            self.sets: dict[str, set] = {}
+
+        async def lpush(self, key, *values):
+            self.lists.setdefault(key, [])
+            for v in reversed(values):
+                self.lists[key].insert(0, v)
+
+        async def rpop(self, key):
+            lst = self.lists.get(key) or []
+            return lst.pop() if lst else None
+
+        async def sadd(self, key, *members):
+            self.sets.setdefault(key, set()).update(members)
+
+        async def srem(self, key, *members):
+            pass
+
+        async def llen(self, key):
+            return len(self.lists.get(key) or [])
+
+        async def lrange(self, key, start, end):
+            lst = self.lists.get(key) or []
+            return lst[start:] if end == -1 else lst[start:end + 1]
+
+        async def smembers(self, key):
+            return set(self.sets.get(key) or set())
+
+        async def scard(self, key):
+            return len(self.sets.get(key) or set())
+
+        async def delete(self, *keys):
+            for k in keys:
+                self.lists.pop(k, None)
+                self.sets.pop(k, None)
+
+    set_redis_client(_MemRedis())
+    try:
+        async with session_factory() as session:
+            ctx, task, inp = await _seed(session, tmp_path, [
+                {"cwe": "CWE-79", "grade": "B", "verdict": "tp", "conf": 0.99,
+                 "priority": "high", "source": "fast_model"},
+                {"cwe": "CWE-79", "grade": "B", "verdict": "tp", "conf": 0.55,
+                 "priority": "high", "source": "propagated"},
+            ])
+            with patch("app.core.config.get_settings", return_value=_settings()):
+                out = await DispatchNode().execute(ctx, inp)
+            assert out["has_lead"] is True
+            assert out["queued_count"] == 1
+            assert await queue_depth(task.id) == 1
+    finally:
+        set_redis_client(None)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_enqueues_low_confidence_agent_tp(session_factory, tmp_path):
+    """漏报优先：agent tp 不因置信 < 0.8 被挡。"""
+    from app.contexts.agent.lead_queue import queue_depth, set_redis_client
+    from app.contexts.agent.nodes.dispatch import DispatchNode
+
+    class _MemRedis:
+        def __init__(self):
+            self.lists: dict[str, list] = {}
+            self.sets: dict[str, set] = {}
+
+        async def lpush(self, key, *values):
+            self.lists.setdefault(key, [])
+            for v in reversed(values):
+                self.lists[key].insert(0, v)
+
+        async def rpop(self, key):
+            lst = self.lists.get(key) or []
+            return lst.pop() if lst else None
+
+        async def sadd(self, key, *members):
+            self.sets.setdefault(key, set()).update(members)
+
+        async def srem(self, key, *members):
+            pass
+
+        async def llen(self, key):
+            return len(self.lists.get(key) or [])
+
+        async def lrange(self, key, start, end):
+            lst = self.lists.get(key) or []
+            return lst[start:] if end == -1 else lst[start:end + 1]
+
+        async def smembers(self, key):
+            return set(self.sets.get(key) or set())
+
+        async def scard(self, key):
+            return len(self.sets.get(key) or set())
+
+        async def delete(self, *keys):
+            for k in keys:
+                self.lists.pop(k, None)
+                self.sets.pop(k, None)
+
+    set_redis_client(_MemRedis())
+    try:
+        async with session_factory() as session:
+            ctx, task, inp = await _seed(session, tmp_path, [
+                {"cwe": "CWE-89", "grade": "B", "verdict": "tp", "conf": 0.55,
+                 "priority": "medium", "source": "agent"},
+            ])
+            with patch("app.core.config.get_settings", return_value=_settings()):
+                out = await DispatchNode().execute(ctx, inp)
+            assert out["has_lead"] is True
+            assert out["queued_count"] == 1
+            assert await queue_depth(task.id) == 1
+    finally:
+        set_redis_client(None)
 
 
 @pytest.mark.asyncio

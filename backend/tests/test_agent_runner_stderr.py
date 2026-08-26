@@ -74,8 +74,9 @@ def test_success_container_empty_stderr_in_summary():
     assert summary.get("stderr_tail", "MISSING") == ""
 
 
-def test_extra_hosts_maps_host_docker_internal():
-    assert AGENT_EXTRA_HOSTS.get("host.docker.internal") == "host-gateway"
+def test_extra_hosts_empty_without_host_docker_internal():
+    assert AGENT_EXTRA_HOSTS == {}
+    assert "host.docker.internal" not in AGENT_EXTRA_HOSTS
 
 
 def test_runner_uses_public_dns_servers():

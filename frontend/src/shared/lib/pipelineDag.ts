@@ -16,7 +16,7 @@ export const PIPELINE_REQUIRES: Record<string, readonly string[]> = {
   scan_osv: ['source'],
   scan_semgrep: ['source', 'profile'],
   api_inventory: ['source', 'profile'],
-  env_ready: ['source', 'profile'],
+  env_ready: ['source', 'profile', 'dispatch'],
   cluster: ['scan_semgrep', 'scan_gitleaks', 'scan_osv'],
   api_hunt: ['api_inventory'],
   screen: ['cluster'],
@@ -102,8 +102,8 @@ export function pipelineOverviewStages(mode: PipelineMode): PipelineOverviewStag
       {
         key: 'deep',
         label: '深度分析',
-        caption: 'Semgrep · API 清单 · Web 靶场',
-        nodeKeys: ['scan_semgrep', 'api_inventory', 'env_ready'],
+        caption: 'Semgrep · API 清单',
+        nodeKeys: ['scan_semgrep', 'api_inventory'],
         parallel: true,
       },
       {
@@ -120,7 +120,7 @@ export function pipelineOverviewStages(mode: PipelineMode): PipelineOverviewStag
         nodeKeys: ['screen', 'triage'],
       },
       { key: 'dispatch', label: '线索调度', caption: '扫描复核 ∪ 猎洞合格', nodeKeys: ['dispatch'] },
-      { key: 'verify', label: '多线索终认', caption: '白盒 + 可选复现', nodeKeys: ['lead_verify'] },
+      { key: 'verify', label: '多线索终认', caption: '按需靶场 → 白盒/复现', nodeKeys: ['env_ready', 'lead_verify'] },
       { key: 'report', label: '审计报告', caption: '聚合最终结果', nodeKeys: ['report'] },
     ]
   }
@@ -193,13 +193,13 @@ function orderIndex(key: string): number {
 export function flowColumn(key: string, _mode: PipelineMode): number {
   if (key === 'source') return 0
   if (key === 'profile' || key === 'scan_gitleaks' || key === 'scan_osv') return 1
-  if (key === 'scan_semgrep' || key === 'api_inventory' || key === 'env_ready') return 2
+  if (key === 'scan_semgrep' || key === 'api_inventory') return 2
   // 两条线索流并列：scans→cluster ∥ inventory→hunt；复核仅扫描支路
   if (key === 'cluster' || key === 'api_hunt') return 3
   if (key === 'screen' || key === 'triage') return 4
   if (key === 'dispatch') return 5
-  if (key === 'audit' || key === 'lead_verify') return 6
-  if (key === 'reproduce') return 7
+  if (key === 'audit' || key === 'env_ready') return 6
+  if (key === 'reproduce' || key === 'lead_verify') return 7
   if (key === 'report') return 8
   if (key === 'over') return 9
   return 1
@@ -259,7 +259,6 @@ export function flowEdges(
   add(edges, 'source', 'scan_osv')
   add(edges, 'profile', 'scan_semgrep')
   add(edges, 'profile', 'api_inventory')
-  add(edges, 'profile', 'env_ready', 'conditional', '仅 Web')
 
   add(edges, 'scan_osv', 'cluster')
   add(edges, 'scan_semgrep', 'cluster')
@@ -274,24 +273,20 @@ export function flowEdges(
 
   if (mode === 'discovery') {
     if (vis.has('dispatch')) {
-      addChain(edges, vis, ['dispatch', 'lead_verify', 'report'])
+      add(edges, 'dispatch', 'env_ready', 'conditional', '有线索且为 Web')
+      add(edges, 'env_ready', 'lead_verify', 'support', '就绪 / 降级')
+      add(edges, 'lead_verify', 'report')
     } else {
       addChain(edges, vis, ['triage', 'lead_verify', 'report'])
       if (vis.has('lead_verify')) add(edges, 'api_hunt', 'lead_verify')
       else add(edges, 'api_hunt', 'report')
     }
-    add(edges, 'env_ready', 'lead_verify', 'support', 'Web 靶场')
+    if (!vis.has('dispatch')) add(edges, 'env_ready', 'lead_verify', 'support', 'Web 靶场')
   } else {
-    if (vis.has('dispatch')) {
-      add(edges, 'dispatch', 'audit')
-      // audit 不依赖 env_ready；靶场仅支撑后续 reproduce / lead 动态复现
-      add(edges, 'env_ready', 'audit', 'support', '并行旁路')
-    } else if (vis.has('env_ready')) {
-      add(edges, 'env_ready', 'audit', 'support', '就绪 / 跳过')
-    } else {
-      add(edges, 'profile', 'audit')
-    }
+    add(edges, 'profile', 'env_ready', 'conditional', '仅 Web')
+    add(edges, 'profile', 'audit')
     add(edges, 'audit', 'reproduce', 'conditional', 'Gate 通过')
+    add(edges, 'env_ready', 'reproduce', 'support', '动态环境')
     add(edges, 'reproduce', 'report')
   }
   add(edges, 'report', 'over')
@@ -509,6 +504,14 @@ function toneForStage(key: string): DagLayoutGroup['tone'] {
   if (key === 'dispatch') return 'dispatch'
   if (key === 'report') return 'result'
   return 'verify'
+}
+
+interface GroupDefinition {
+  key: string
+  label: string
+  caption: string
+  tone: DagLayoutGroup['tone']
+  nodeKeys: readonly string[]
 }
 
 function toGroupDefinition(stage: PipelineOverviewStage): GroupDefinition {

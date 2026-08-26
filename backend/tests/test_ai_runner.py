@@ -260,7 +260,7 @@ def _record_sections(**over):
 def _attempt(**over):
     base = {
         "purpose": "确认核心危害",
-        "request": "curl -sS -i http://host.docker.internal:3002/login --data-raw 'q=1'",
+        "request": "curl -sS -i http://10.0.0.8:3002/login --data-raw 'q=1'",
         "response_status": 200,
         "response_excerpt": "marker in body",
         "observation": "响应回显 marker",
@@ -282,7 +282,7 @@ def _poc_ok(**over):
             "print(args.url)\n"
             "raise SystemExit(0)\n"
         ),
-        "usage": "python poc.py --url http://host.docker.internal:8080",
+        "usage": "python poc.py --url http://10.0.0.8:8080",
     }
     base.update(over)
     return base
@@ -292,7 +292,7 @@ def test_render_poc_markdown_python_fence():
     md = render_poc_markdown(_poc_ok())
     assert md.startswith("```python\n")
     assert "argparse" in md
-    assert "用法：`python poc.py --url http://host.docker.internal:8080`" in md
+    assert "用法：`python poc.py --url http://10.0.0.8:8080`" in md
 
 
 def test_apply_poc_overwrites_model_poc_commands():
@@ -704,9 +704,23 @@ def test_input_schemas_defined_for_all_ai_nodes():
         assert "required" in NODE_INPUT_SCHEMAS[key]
 
 
-def test_rewrite_localhost_to_host_docker_internal():
-    assert rewrite_url_for_agent_container("http://localhost:8080") == "http://host.docker.internal:8080"
-    assert rewrite_url_for_agent_container("http://127.0.0.1:5000/login") == "http://host.docker.internal:5000/login"
+def test_rewrite_loopback_to_advertise_ip():
+    from unittest.mock import patch
+
+    with patch(
+        "app.contexts.agent.target_url.host_advertise_ip",
+        return_value="10.0.0.8",
+    ):
+        assert rewrite_url_for_agent_container("http://localhost:8080") == "http://10.0.0.8:8080"
+        assert (
+            rewrite_url_for_agent_container("http://127.0.0.1:5000/login")
+            == "http://10.0.0.8:5000/login"
+        )
+        assert (
+            rewrite_url_for_agent_container("http://host.docker.internal:3001")
+            == "http://10.0.0.8:3001"
+        )
+    assert rewrite_url_for_agent_container("http://10.0.0.8:3001") == "http://10.0.0.8:3001"
     assert rewrite_url_for_agent_container("http://example.com") == "http://example.com"
     assert rewrite_url_for_agent_container(None) is None
 
@@ -746,6 +760,48 @@ async def test_missing_output_includes_failed_event(tmp_path, monkeypatch):
     msg = str(ei.value)
     assert "未产出 .node_output.json" in msg
     assert "未调用 submit_result" in msg
+
+
+@pytest.mark.asyncio
+async def test_missing_output_prefers_failed_event_over_usage_jsonl(tmp_path, monkeypatch):
+    """长会话 stdout 截尾是 usage JSON 时，错误必须露出 no_submit，不能只剩 token 数字。"""
+    from unittest.mock import MagicMock, patch
+
+    from app.contexts.agent import ai_runner
+    from app.core.agent_runner import AgentRunnerError
+
+    settings = MagicMock()
+    settings.claude_agent_sdk_enabled = True
+    usage_tail = (
+        '": {"inputTokens": 119514, "outputTokens": 150247, '
+        '"cacheReadInputTokens": 13592576, "is_error": false}'
+    )
+
+    def _fake_run(spec, on_event):
+        on_event({
+            "type": "agent.completed",
+            "usage": {"inputTokens": 119514},
+            "is_error": False,
+        })
+        on_event({
+            "type": "agent.failed",
+            "error": "节点 reproduce 未调用 submit_result(无 .node_output.json)",
+        })
+        return 1, {"stderr_tail": usage_tail, "timed_out": False}
+
+    monkeypatch.setattr("app.core.config.get_settings", lambda: settings)
+    with patch("app.contexts.agent.ai_runner.agent_runner_manager") as mgr:
+        mgr.run_with_streaming.side_effect = _fake_run
+        with pytest.raises(AgentRunnerError) as ei:
+            await ai_runner.run_ai_node(
+                node_key="reproduce",
+                input_json={"target_url": "http://x"},
+                host_workdir=str(tmp_path),
+                runner_env={},
+            )
+    msg = str(ei.value)
+    assert "未调用 submit_result" in msg
+    assert "119514" not in msg
 
 
 @pytest.mark.asyncio

@@ -28,7 +28,7 @@ paths: ["backend/app/**/*.py", "backend/tests/**/*.py"]
 
 新增字段前先讨论是否触碰红线。
 
-Runner 的 reproduce 节点通过 `host.docker.internal` 访问宿主映射的 Lab 端口，因此本阶段保留 host-gateway。通用 Agent 工具访问宿主端口属于已接受的剩余风险；彻底隔离需先改为 Runner 动态加入当前 Lab Compose 网络或引入出站代理，禁止只删别名造成生产复现链路失效。
+Runner 的 reproduce 节点一律使用 env_ready 发布的宿主机可达 `IP:port`（`target_url` 原样注入；回环回退亦改写为 advertise IP）。**禁止** `host.docker.internal`。通用 Agent 工具访问宿主端口属于已接受的剩余风险；彻底隔离需先改为 Runner 动态加入当前 Lab Compose 网络或引入出站代理。
 
 ## 2.1 Agent 工具权限（双层：工具白名单 + Bash 黑名单 hook）
 

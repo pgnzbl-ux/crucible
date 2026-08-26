@@ -592,6 +592,39 @@ async def test_osv_command_uses_v2_format_json(session_factory, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_osv_command_uses_manifest_lockfiles(session_factory, tmp_path):
+    """profile.osv_manifests 非空时传 --lockfile，不再 -r 整树。"""
+    from unittest.mock import MagicMock, patch
+
+    from app.contexts.agent.contracts import ProfileHandoff, ScanOsvInput, SourceHandoff
+    from app.contexts.agent.nodes.scan import OsvScanNode
+
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / "requirements.txt").write_text("flask==3.0\n", encoding="utf-8")
+    (repo / "composer.json").write_text("{}", encoding="utf-8")
+
+    async with session_factory() as session:
+        ctx, task, run = await _make_ctx(session, tmp_path)
+        node = OsvScanNode()
+        settings = MagicMock()
+        inp = ScanOsvInput(
+            source=SourceHandoff(project_path=str(repo)),
+            host_workdir=str(tmp_path),
+            source_path=str(repo),
+            profile=ProfileHandoff(
+                osv_manifests=["requirements.txt", "composer.json", "missing.lock"],
+            ),
+        )
+        with patch.object(node, "_binary", return_value="/opt/osv-scanner"):
+            argv = node.build_command(ctx, inp, settings)
+        assert "-r" not in argv
+        assert f"--lockfile={repo / 'requirements.txt'}" in argv
+        assert f"--lockfile={repo / 'composer.json'}" in argv
+        assert not any("missing.lock" in a for a in argv)
+
+
+@pytest.mark.asyncio
 async def test_gitleaks_command_does_not_redact(session_factory, tmp_path):
     """线索台要看命中原文；--redact 会把 SARIF snippet 写成 REDACTED。"""
     from unittest.mock import MagicMock, patch

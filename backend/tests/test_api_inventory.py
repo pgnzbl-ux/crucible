@@ -87,20 +87,27 @@ def create_item():
 
 
 @pytest.mark.parametrize(
-    ("langs", "expect_keys", "unsupported"),
+    ("langs", "frameworks", "expect_keys", "unsupported"),
     [
-        (("python",), ["openapi", "fastapi", "flask", "django"], []),
-        (("nodejs",), ["openapi", "express", "nextjs", "nestjs"], []),
-        (("php",), ["openapi", "php_script", "laravel"], []),
-        (("java",), ["openapi", "spring"], []),
-        (("go",), ["openapi", "gin"], []),
-        (("rust",), ["openapi"], ["rust"]),
-        (("static",), ["openapi"], ["static"]),
-        ((), ["openapi"], ["unknown"]),
+        (("python",), (), ["openapi", "fastapi", "flask", "django"], []),
+        (("python",), ("flask",), ["openapi", "flask"], []),
+        (("nodejs",), (), ["openapi", "express", "nextjs", "nestjs"], []),
+        (("php",), (), ["openapi", "php_script"], []),
+        (("php",), ("laravel",), ["openapi", "laravel"], []),
+        (("java",), (), ["openapi", "spring"], []),
+        (("go",), (), ["openapi", "gin"], []),
+        (("rust",), (), ["openapi"], ["rust"]),
+        (("static",), (), ["openapi"], ["static"]),
+        ((), (), ["openapi"], ["unknown"]),
     ],
 )
-def test_select_parsers_by_language(langs, expect_keys, unsupported):
+def test_select_parsers_by_language(langs, frameworks, expect_keys, unsupported):
     profile = _profile(*langs)
+    if frameworks:
+        profile = profile.model_copy(update={
+            "frameworks": list(frameworks),
+            "framework": frameworks[0],
+        })
     assert parser_keys_for_profile(profile) == expect_keys
     assert unsupported_for_profile(profile) == unsupported
     msg = phase_message_for_profile(profile)
@@ -229,17 +236,57 @@ def test_laravel_routes(tmp_path: Path):
     root = tmp_path / "repo"
     routes = root / "routes"
     routes.mkdir(parents=True)
+    ctrl = root / "app" / "Http" / "Controllers"
+    ctrl.mkdir(parents=True)
+    (ctrl / "OrderController.php").write_text(
+        "<?php\n"
+        "namespace App\\Http\\Controllers;\n"
+        "class OrderController {\n"
+        "  public function show() { $id = $request->input('user_id'); }\n"
+        "  public function store() {}\n"
+        "}\n",
+        encoding="utf-8",
+    )
     (routes / "web.php").write_text(
         "<?php\n"
         "Route::get('/orders/{id}', [OrderController::class, 'show']);\n"
-        "Route::post('/orders', [OrderController::class, 'store']);\n",
+        "Route::post('/orders', [OrderController::class, 'store']);\n"
+        "Route::get('/legacy/{id}', 'LegacyController@index');\n"
+        "Route::get('/closure', function () { return 1; });\n",
         encoding="utf-8",
     )
-    bom = build_inventory_bom(root, _profile("php"))
+    (ctrl / "LegacyController.php").write_text(
+        "<?php\nclass LegacyController { public function index() {}\n}\n",
+        encoding="utf-8",
+    )
+    profile = _profile("php").model_copy(update={
+        "frameworks": ["laravel"],
+        "framework": "laravel",
+    })
+    bom = build_inventory_bom(root, profile)
     ids = {e["endpoint_id"] for e in bom["endpoints"]}
     assert "GET /orders/{id}" in ids
     assert "POST /orders" in ids
+    assert "GET /legacy/{id}" in ids
+    assert "GET /closure" in ids
     assert "router" in bom["acquisition_kinds"]
+
+    show = next(e for e in bom["endpoints"] if e["endpoint_id"] == "GET /orders/{id}")
+    assert show["route_file"] == "routes/web.php"
+    assert show["handler_file"] == "app/Http/Controllers/OrderController.php"
+    assert show["handler_symbol"] == "show"
+    assert "user_id" in show["id_params"]
+    assert show["is_pve"] is True
+
+    legacy = next(e for e in bom["endpoints"] if e["endpoint_id"] == "GET /legacy/{id}")
+    assert legacy["handler_file"] == "app/Http/Controllers/LegacyController.php"
+    assert legacy["handler_symbol"] == "index"
+    assert legacy["route_file"] == "routes/web.php"
+
+    closure = next(e for e in bom["endpoints"] if e["endpoint_id"] == "GET /closure")
+    assert closure["handler_file"] == "routes/web.php"
+    assert closure["route_file"] == "routes/web.php"
+    assert closure["handler_symbol"] is None
 
 
 def test_spring_and_gin(tmp_path: Path):

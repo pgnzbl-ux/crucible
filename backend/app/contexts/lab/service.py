@@ -36,10 +36,18 @@ def ttl_remaining_seconds(
     last_seen_at: datetime | None,
     ttl_seconds: int,
     now: datetime,
+    *,
+    live_task_count: int = 0,
 ) -> int | None:
-    """仅 ready/stopped 倒计时；创建中等非就绪状态返回 None。"""
+    """仅 ready/stopped 倒计时；创建中等非就绪状态返回 None。
+
+    live 任务占用时 TTL 尚未起算，对外显示满额（不因 env_ready 时刻倒计时）。
+    倒计时锚点 last_seen_at 在任务终态且无其它 live 占用时由 start_ttl_when_idle 重置。
+    """
     if status not in TTL_ACTIVE_STATUSES:
         return None
+    if live_task_count > 0:
+        return int(ttl_seconds)
     if last_seen_at is None:
         return 0
     elapsed = (as_utc(now) - as_utc(last_seen_at)).total_seconds()
@@ -366,6 +374,28 @@ class LabService:
         lab.last_seen_at = self._now()
         await self.session.commit()
 
+    async def start_ttl_when_idle(
+        self,
+        lab_id: str | None,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """任务终态后若无其它 live 占用，重置 last_seen 起算 TTL。
+
+        覆盖完成 / 失败 / 取消 / needs_review：长流水线中间 AI 超时不得用
+        env_ready 时刻把靶场立刻清掉，否则后续动态复现无法访问。
+        """
+        if not lab_id:
+            return False
+        if await self.live_task_ids(lab_id):
+            return False
+        lab = await self.repository.get(lab_id)
+        if lab is None or lab.status not in TTL_ACTIVE_STATUSES:
+            return False
+        lab.last_seen_at = self._as_utc(now or self._now())
+        await self.session.commit()
+        return True
+
     async def heartbeat_creation(self, lab_id: str, task_id: str) -> bool:
         """仅当前 creating owner 可续租，防止旧创建者覆盖接管者。"""
         result = await self.session.execute(
@@ -627,7 +657,8 @@ class LabService:
         aligned = self._apply_aligned_status(
             lab, containers, live_task_count=len(live_ids)
         )
-        if lab.status in TTL_ACTIVE_STATUSES:
+        # 仅空闲 ready/stopped 浏览续期；live 占用中 TTL 未起算，不刷新锚点。
+        if lab.status in TTL_ACTIVE_STATUSES and not live_ids:
             lab.last_seen_at = self._now()
             await self.session.commit()
         elif aligned:
@@ -1177,7 +1208,11 @@ class LabService:
     ) -> dict:
         ttl_seconds = lab.ttl_seconds if lab.ttl_seconds is not None else 3600
         ttl_remaining = ttl_remaining_seconds(
-            lab.status, lab.last_seen_at, ttl_seconds, now
+            lab.status,
+            lab.last_seen_at,
+            ttl_seconds,
+            now,
+            live_task_count=live_task_count,
         )
         # list_containers 的 dict 带内部字段 state（供 _container_is_running 用），
         # 响应模型按契约只暴露 4 个字段且 extra=forbid，组装时必须剥掉。

@@ -136,7 +136,7 @@
 
 ### POST `/api/v1/tasks/{id}/cancel`
 
-取消任务(已实现):先把任务/run/未完成节点标 `cancelled` 并 **提交后立刻返回**。`revoke(terminate=True)` 停 worker；后台 `schedule_teardown_task_runtime` 只按 `crucible.task_id` 强拆该任务的 agent-runner（停 AI），不 `compose down` 可复用靶场。编排器每节点刷新库状态，已取消则停后续节点，且 execute 失败不得把 cancelled 改成 failed。靶场在静默满 TTL 1 小时且无 live 任务后由巡检销毁。
+取消任务(已实现):先把任务/run/未完成节点标 `cancelled` 并 **提交后立刻返回**。`revoke(terminate=True)` 停 worker；后台 `schedule_teardown_task_runtime` 只按 `crucible.task_id` 强拆该任务的 agent-runner（停 AI），不 `compose down` 可复用靶场。编排器每节点刷新库状态，已取消则停后续节点，且 execute 失败不得把 cancelled 改成 failed。靶场 TTL 从任务终态起算，静默满 1 小时且无 live 任务后由巡检销毁。
 
 ### POST `/api/v1/tasks/{id}/retry`  *(已实现，含 from_node 断点续跑)*
 
@@ -386,12 +386,12 @@ Git 项目：该仓库已缓存的 MinIO 源码包（按 owner + host + `project
 
 ## Lab Context
 
-所有端点只访问当前用户的 lab。列表与详情中的 lab 对象包含 `live_task_count`；大于 0 时，停止/启动/重建及容器级写操作均拒绝。**例外：`creating` 的销毁先取消占用任务再 `down`，不返回 409。** `ttl_remaining_seconds` 仅 `ready`/`stopped` 为非负整数，其余状态为 `null`（创建中不计 TTL）。
+所有端点只访问当前用户的 lab。列表与详情中的 lab 对象包含 `live_task_count`；大于 0 时，停止/启动/重建及容器级写操作均拒绝。**例外：`creating` 的销毁先取消占用任务再 `down`，不返回 409。** `ttl_remaining_seconds` 仅 `ready`/`stopped` 为非负整数，其余状态为 `null`（创建中不计 TTL）。**TTL 从任务终态（completed / failed / cancelled / needs_review）且无其它 live 占用时起算**；有 live 任务时对外显示满额 TTL（倒计时未开始）。静默满 TTL 且无 live 任务后由巡检销毁。
 
 | 方法 | 路径 | 行为 |
 |---|---|---|
-| GET | `/api/v1/labs` | 按 `project_id` 分组返回项目及其 labs；lab 含 status、commit_sha、target_url、ttl_remaining_seconds、live_task_count、容器摘要。ttl_remaining_seconds 仅 ready/stopped 有值。status 按 compose 实际容器校正并回写（expired/stopped 且容器在跑 → ready；无 live 任务时 ready 全停 → stopped、无容器 → expired） |
-| GET | `/api/v1/labs/{id}` | 返回 lab 详情及所属 compose 项目的容器列表（name、status、ports、image），按容器实际状态校正 status；仅 ready/stopped 刷新 TTL |
+| GET | `/api/v1/labs` | 按 `project_id` 分组返回项目及其 labs；lab 含 status、commit_sha、target_url、ttl_remaining_seconds、live_task_count、容器摘要。ttl_remaining_seconds 仅 ready/stopped 有值；有 live 任务时为满额 ttl（未起算）。status 按 compose 实际容器校正并回写（expired/stopped 且容器在跑 → ready；无 live 任务时 ready 全停 → stopped、无容器 → expired） |
+| GET | `/api/v1/labs/{id}` | 返回 lab 详情及所属 compose 项目的容器列表（name、status、ports、image），按容器实际状态校正 status；仅空闲 ready/stopped 刷新 TTL 锚点 |
 | POST | `/api/v1/labs/{id}/actions/stop` | `compose stop`，状态变为 `stopped` |
 | POST | `/api/v1/labs/{id}/actions/start` | `compose start`，状态变为 `ready` 并刷新 TTL |
 | POST | `/api/v1/labs/{id}/actions/rebuild` | 状态变为 `creating`，执行 `compose up -d --build`，成功为 `ready`、失败为 `failed`。本地缺 compose 时先从 MinIO 拉配方，仍无则 400。 |

@@ -238,8 +238,12 @@ describe('compactNodeCaption', () => {
 describe('nodeStepsPollMs', () => {
   const sixDone = Array.from({ length: 6 }, () => ({ status: 'completed' }))
 
-  it('stops when all six nodes are terminal', () => {
-    expect(nodeStepsPollMs({ nodes: sixDone })).toBe(false)
+  it('stops when task and all instantiated nodes are terminal', () => {
+    expect(nodeStepsPollMs({ taskStatus: 'completed', nodes: sixDone })).toBe(false)
+  })
+
+  it('keeps polling a live task even if its current partial node list is terminal', () => {
+    expect(nodeStepsPollMs({ taskStatus: 'running', nodes: sixDone })).toBe(3000)
   })
 
   it('stops while SSE is live', () => {

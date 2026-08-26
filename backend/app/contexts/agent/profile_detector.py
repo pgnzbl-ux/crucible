@@ -38,14 +38,11 @@ _TRIGGER_FILENAMES = {
 
 KNOWN_LANGUAGE_IDS = {"nodejs", "python", "java", "go", "php", "rust", "static"}
 
-# semgrep --config 派生表(discovery-spec §6.0)：值必须是规则库文件夹名
-# （= app.core.semgrep_rules.ALLOWED_SEMGREP_LANG_DIRS），禁止 p/ registry、禁止 nodejs/golang 等别名
+# semgrep --config 派生表：权威在 stacks.registry.SEMGREP_DIRS_BY_PROFILE
+from app.contexts.agent.stacks.registry import SEMGREP_DIRS_BY_PROFILE
+
 SEMGREP_CONFIG_BY_LANGUAGE: dict[str, list[str]] = {
-    "python": ["python"],
-    "java": ["java"],
-    "nodejs": ["javascript", "typescript"],
-    "go": ["go"],
-    "php": ["php"],
+    k: list(v) for k, v in SEMGREP_DIRS_BY_PROFILE.items()
 }
 
 
@@ -95,7 +92,20 @@ FRAMEWORK_KEYWORDS: dict[str, dict[str, str]] = {
     },
     "java": {"spring-boot-starter": "spring-boot", "springframework": "spring-boot", "quarkus": "quarkus"},
     "go": {"gin": "gin", "echo": "echo"},
-    "php": {"laravel": "laravel", "symfony": "symfony"},
+    "php": {
+        "laravel": "laravel",
+        "symfony": "symfony",
+        "thinkphp": "thinkphp",
+        "topthink": "thinkphp",
+        "codeigniter": "codeigniter",
+        "yiisoft/yii2": "yii",
+        "cakephp": "cakephp",
+        "phalcon": "phalcon",
+        "laminas": "laminas",
+        "zendframework": "laminas",
+        "slim/slim": "slim",
+        "wordpress": "wordpress",
+    },
     "rust": {"actix-web": "actix-web", "axum": "axum", "rocket": "rocket"},
 }
 
@@ -105,7 +115,8 @@ WEB_FRAMEWORKS = {
     "fastapi", "flask", "django", "streamlit", "tornado",
     "spring-boot", "quarkus",
     "gin", "echo",
-    "laravel", "symfony",
+    "laravel", "symfony", "thinkphp", "codeigniter", "yii", "cakephp",
+    "phalcon", "laminas", "slim", "wordpress",
     "actix-web", "axum", "rocket",
 }
 
@@ -129,6 +140,7 @@ DEPENDENCY_FILES = {
 SPA_MARKERS = ('"vite"', "'vite'", '"react"', "'react'", '"vue"', "'vue'", '"svelte"', "'svelte'", '"@angular/core"')
 
 _EVIDENCE_CAP = 20  # 单语言证据文件上限(防大仓库撑爆落库字段)
+_DEP_BLOB_CAP = 500_000  # 框架检测依赖文件合计字符上限
 
 
 def _read_file(p: Path) -> str:
@@ -277,15 +289,10 @@ def derive_semgrep_configs(languages: list[dict]) -> list[str]:
     产出的每一项都是规则库语言目录名（php/python/…），不是画像语言 id（nodejs）。
     """
     from app.core.semgrep_rules import require_allowed_lang_dirs
+    from app.contexts.agent.stacks.registry import semgrep_dirs_for_languages
 
-    ids = {f.get("id") for f in languages if f.get("source") != "ai"}
-    configs: list[str] = []
-    for lang in ("python", "java", "nodejs", "go", "php"):
-        if lang in ids:
-            for cfg in SEMGREP_CONFIG_BY_LANGUAGE[lang]:
-                if cfg not in configs:
-                    configs.append(cfg)
-    return require_allowed_lang_dirs(configs)
+    facts = [f for f in languages if f.get("source") != "ai"]
+    return require_allowed_lang_dirs(semgrep_dirs_for_languages(facts))
 
 
 def derive_osv_manifests(root: Path) -> list[str]:
@@ -315,14 +322,34 @@ def _detect_framework(root: Path, language: str | None) -> str | None:
 
 
 def detect_frameworks(root: Path, language_ids: list[str]) -> list[str]:
-    """按语言顺序扫依赖文件关键字，返回命中的框架列表(主语言优先)。"""
+    """按语言顺序扫依赖文件关键字，返回命中的框架列表(主语言优先)。
+
+    依赖文件与语言检测一样走全仓 walk（剪枝 vendor/node_modules），不只认根目录。
+    """
     found: list[str] = []
     for language in language_ids:
         kws = FRAMEWORK_KEYWORDS.get(language, {})
         if not kws:
             continue
-        dep_files = DEPENDENCY_FILES.get(language, [])
-        blob = "\n".join(_read_file(root / f) for f in dep_files if (root / f).exists())
+        dep_names = DEPENDENCY_FILES.get(language, [])
+        if not dep_names:
+            continue
+        hits = _walk_trigger_files(root, set(dep_names), cap=50)
+        parts: list[str] = []
+        budget = _DEP_BLOB_CAP
+        for name in dep_names:
+            for rel in hits.get(name, []):
+                if budget <= 0:
+                    break
+                chunk = _read_file(root / rel)
+                if not chunk:
+                    continue
+                take = chunk[:budget]
+                parts.append(take)
+                budget -= len(take)
+            if budget <= 0:
+                break
+        blob = "\n".join(parts)
         for kw, fw in kws.items():
             if kw in blob and fw not in found:
                 found.append(fw)

@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .models import SKIP_DIR_NAMES, EndpointRecord, make_endpoint, rel_posix, walk_files
+from .models import SKIP_DIR_NAMES, EndpointRecord, make_endpoint, read_text, rel_posix, walk_files
+from .php_request_surface import extract_php_id_params
 
 _WEBROOTS = ("public", "www", "web", "htdocs")
 _FRAMEWORK_DIRS = frozenset({
@@ -61,11 +62,13 @@ def parse_php_script_repo(repo_root: Path) -> list[EndpointRecord]:
         except ValueError:
             continue
         url = _url_for(webroot, path)
+        extra = extract_php_id_params(read_text(path), enabled_frameworks=set())
         for method in ("GET", "POST"):
             out.append(make_endpoint(
                 method=method,
                 path=url,
                 handler_file=rel_file,
+                extra_params=extra,
                 parser="php_script",
                 acquisition="script_file",
             ))

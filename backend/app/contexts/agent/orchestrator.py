@@ -20,7 +20,7 @@ import contextlib
 import json
 import logging
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -34,6 +34,8 @@ from app.contexts.agent.contracts import (
     InputAssembler,
     SkipWhen,
     TaskScalars,
+    node_by_key,
+    pipeline_for,
 )
 from app.contexts.agent.errors import (
     RUN_ERROR_LOG_MAX,
@@ -121,6 +123,53 @@ async def _is_cancelled_by_id(session: AsyncSession, task_id: str, run_id: str) 
 
 def _cancelled_result() -> dict[str, Any]:
     return {"status": "cancelled", "verdict": None}
+
+
+@dataclass(frozen=True)
+class _NodeSuccess:
+    """节点成功产出；可附带上游 handoff 修正（如 reproduce 复活 env_ready）。"""
+
+    output: dict[str, Any]
+    handoff_updates: dict[str, dict] = field(default_factory=dict)
+
+
+async def _start_lab_ttl_after_task(session: AsyncSession, task: Task) -> None:
+    """任务已非 live 后起算靶场 TTL（无其它占用时）。"""
+    lab_id = getattr(task, "lab_id", None)
+    if not lab_id:
+        return
+    from app.contexts.lab.service import LabService
+
+    await LabService(session).start_ttl_when_idle(lab_id)
+
+
+async def _persist_handoff_updates(
+    session: AsyncSession,
+    *,
+    run_id: str,
+    task_id: str,
+    updates: dict[str, dict],
+) -> None:
+    """把节点回写的上游 handoff 落到对应已完成 NodeRun.output_json（不 commit）。"""
+    if not updates:
+        return
+    for key, payload in updates.items():
+        try:
+            spec = node_by_key(key)
+        except KeyError:
+            continue
+        nr = await _lookup_node_run(session, run_id, spec.index)
+        if nr is None:
+            nr = await _get_or_create_node_run(session, run_id, task_id, spec.index, key)
+        nr.output_json = json.dumps(payload, ensure_ascii=False, default=str)
+        if nr.status not in ("completed", "skipped"):
+            nr.status = "completed"
+            nr.finished_at = datetime.now(timezone.utc)
+
+
+def _apply_handoff_updates(store: HandoffStore, updates: dict[str, dict]) -> None:
+    for key, payload in updates.items():
+        store.set(key, payload)
 
 
 @dataclass(frozen=True)
@@ -242,6 +291,7 @@ async def _fail_corrupt_output(
     run.finished_at = now
     task.status = "failed"
     await session.commit()
+    await _start_lab_ttl_after_task(session, task)
     return {"status": "failed", "error": msg, "node": node_key, "verdict": None}
 
 
@@ -258,11 +308,30 @@ async def _finish_after_report_fail(
     detail: str,
     verify_mode: bool = False,
 ) -> dict[str, Any] | None:
-    """audit 已给出 B/D 出口时，报告失败不得把任务改成 failed。"""
-    audit_gate = store.signals(verify_mode=verify_mode).gate_verdict
-    keep_false_positive = final_verdict == "false_positive" or audit_gate == "fail"
-    keep_review = audit_gate == "uncertain"
-    if not keep_false_positive and not keep_review:
+    """报告是分析结论的消费者；已有权威结论时只失败报告节点。"""
+    from app.contexts.agent.ai_runner import authoritative_verdict
+
+    analysis_verdict = final_verdict or authoritative_verdict(
+        store.get_raw("reproduce"), store.get_raw("audit"),
+    )
+    keep_review = analysis_verdict == "needs_review"
+
+    if not verify_mode:
+        # discovery 的 dispatch terminal 本身已定义“零线索也是完成的
+        # 分析结果”；LeadRun 中的未终认项则提升为 needs_review。
+        from app.contexts.agent.lead_worker import load_lead_runs
+
+        leads = await load_lead_runs(session, run.id)
+        keep_review = keep_review or any(
+            lead.status in ("failed", "skipped") or not lead.verdict
+            for lead in leads
+        )
+        if analysis_verdict is None:
+            for candidate in ("confirmed", "partial", "code_reachable"):
+                if any(lead.verdict == candidate for lead in leads):
+                    analysis_verdict = candidate
+                    break
+    elif analysis_verdict is None:
         return None
     now = datetime.now(timezone.utc)
     nr.status = "failed"
@@ -277,6 +346,7 @@ async def _finish_after_report_fail(
         task.verdict = None
         task.status = "needs_review"
         await session.commit()
+        await _start_lab_ttl_after_task(session, task)
         return {
             "status": "needs_review",
             "verdict": None,
@@ -284,12 +354,13 @@ async def _finish_after_report_fail(
             "hint": hint,
             "node": "report",
         }
-    task.verdict = "false_positive"
+    task.verdict = analysis_verdict
     task.status = "completed"
     await session.commit()
+    await _start_lab_ttl_after_task(session, task)
     return {
         "status": "completed",
-        "verdict": "false_positive",
+        "verdict": analysis_verdict,
         "error": title,
         "hint": hint,
         "node": "report",
@@ -381,7 +452,19 @@ def _evaluate_skip(
 ) -> SkipWhen | None:
     """就绪节点的分支出口评估：返回命中的信号(按声明顺序)。"""
     signals = store.signals(verify_mode=verify_mode)
-    for signal in spec.skip_when:
+    # skip_when 是 set-like 声明；优先级必须由编排器确定，不能依赖
+    # frozenset 的迭代顺序，否则同一输入可能产生不同 skip verdict。
+    ordered = (
+        SkipWhen.VERIFY_MODE,
+        SkipWhen.NO_DISPATCH_LEAD,
+        SkipWhen.LEAD_DRIVEN,
+        SkipWhen.NON_WEB,
+        SkipWhen.GATE_FAIL,
+        SkipWhen.GATE_UNCERTAIN,
+    )
+    for signal in ordered:
+        if signal not in spec.skip_when:
+            continue
         if signal == SkipWhen.NON_WEB and signals.non_web:
             return signal
         if signal == SkipWhen.VERIFY_MODE and verify_mode:
@@ -498,8 +581,16 @@ async def _execute_one(
         if logged:
             nr.error_message = logged
         nr.finished_at = datetime.now(timezone.utc)
+        handoff_updates = dict(ctx.updated_handoffs)
+        if handoff_updates:
+            await _persist_handoff_updates(
+                ns,
+                run_id=run_id,
+                task_id=task_snap.id,
+                updates=handoff_updates,
+            )
         await ns.commit()
-        return output
+        return _NodeSuccess(output=output, handoff_updates=handoff_updates)
     except _NodeCancelled:
         raise
     except Exception as e:  # noqa: BLE001
@@ -567,6 +658,16 @@ async def _drain_leads_before_report(
         allow_reclaim=session_factory is not None,
         concurrency=runtime.lead_verify_per_task,
     )
+    # Lead 路径可能复活靶场并原地更新 env_ready dict；回写 store / NodeRun
+    if env_ready and env_ready.get("target_url"):
+        store.set("env_ready", env_ready)
+        await _persist_handoff_updates(
+            session,
+            run_id=run_id,
+            task_id=task_id,
+            updates={"env_ready": env_ready},
+        )
+        await session.commit()
     # 主 session 可能被旁路更新；刷新 LeadRun 可见性
     await session.commit()
 
@@ -651,6 +752,7 @@ async def run_orchestration(
         return {"status": "failed", "error": "task/run 不存在"}
 
     verify_mode = (getattr(task, "task_type", None) or "verify") == "verify"
+    pipeline = pipeline_for(getattr(task, "task_type", None) or "verify")
     task_snap = _task_exec_snap(task)
     store = HandoffStore()
     final_verdict: str | None = None
@@ -706,7 +808,7 @@ async def run_orchestration(
             return _cancelled_result()
 
         ready = [
-            spec for spec in compute_ready(DEFAULT_PIPELINE, terminal)
+            spec for spec in compute_ready(pipeline, terminal)
             if spec.key not in _inflight_keys()
         ]
         if not ready and not inflight:
@@ -831,7 +933,7 @@ async def run_orchestration(
                     await _mark_inflight_cancelled(session, run_id)
                     return await _finalize_node_failure(
                         session, task, run, spec, nr.id, host_workdir, store,
-                        final_verdict, e, on_node_event,
+                        final_verdict, e, on_node_event, verify_mode,
                     )
                 nr.input_json = json.dumps(
                     InputAssembler.dump_for_persistence(node_input),
@@ -855,14 +957,18 @@ async def run_orchestration(
                         output = await _complete_discovery_aggregate_report(
                             session, run_id, nr_id,
                         )
+                        store.set(spec.key, output)
                     else:
-                        output = await _execute_one(
+                        success = await _execute_one(
                             spec=spec, node=node, nr_id=nr_id, node_input=node_input,
                             task_snap=task_snap, run_id=run_id, host_workdir=host_workdir,
                             source_path=source_path, runner_env=runner_env,
                             on_ai_event=on_ai_event, node_session=session,
                             previous_outputs=prev,
                         )
+                        store.set(spec.key, success.output)
+                        _apply_handoff_updates(store, success.handoff_updates)
+                        output = success.output
                 except _NodeCancelled:
                     await _mark_inflight_cancelled(session, run_id)
                     return _cancelled_result()
@@ -870,9 +976,8 @@ async def run_orchestration(
                     await _mark_inflight_cancelled(session, run_id)
                     return await _finalize_node_failure(
                         session, task, run, spec, nr_id, host_workdir, store,
-                        final_verdict, f.error, on_node_event,
+                        final_verdict, f.error, on_node_event, verify_mode,
                     )
-                store.set(spec.key, output)
                 terminal.add(spec.key)
                 if spec.updates_source_path:
                     source_path = output.get("project_path") or source_path
@@ -902,12 +1007,19 @@ async def run_orchestration(
         for (spec, _node, _nr_id, _ni, _prev), outcome in batch:
             if isinstance(outcome, (_NodeFailure, _NodeCancelled)):
                 continue
-            store.set(spec.key, outcome)
+            if isinstance(outcome, _NodeSuccess):
+                store.set(spec.key, outcome.output)
+                _apply_handoff_updates(store, outcome.handoff_updates)
+                payload = outcome.output
+            else:
+                # 聚合 report 等仍直接返回 dict
+                store.set(spec.key, outcome)
+                payload = outcome
             terminal.add(spec.key)
             if spec.updates_source_path:
-                source_path = outcome.get("project_path") or source_path
+                source_path = payload.get("project_path") or source_path
             if on_node_event:
-                await on_node_event(spec.key, "completed", outcome)
+                await on_node_event(spec.key, "completed", payload)
 
         cancel_hit = next(
             (item for item in batch if isinstance(item[1], _NodeCancelled)), None
@@ -926,7 +1038,7 @@ async def run_orchestration(
             await _mark_inflight_cancelled(session, run_id)
             return await _finalize_node_failure(
                 session, task, run, spec, nr_id, host_workdir, store,
-                final_verdict, outcome.error, on_node_event,
+                final_verdict, outcome.error, on_node_event, verify_mode,
             )
 
     previous_outputs = store.as_previous_outputs()
@@ -935,7 +1047,11 @@ async def run_orchestration(
         final_verdict = report_out["final_verdict"]
 
     audit_gate = store.signals(verify_mode=verify_mode).gate_verdict
-    if audit_gate == "uncertain":
+    summary = (report_out.get("report_data") or {}).get("audit_summary") or {}
+    discovery_needs_review = (
+        not verify_mode and int(summary.get("needs_review_count") or 0) > 0
+    )
+    if audit_gate == "uncertain" or discovery_needs_review:
         if await _is_cancelled(session, task, run):
             return _cancelled_result()
         task.verdict = None
@@ -943,6 +1059,7 @@ async def run_orchestration(
         task.status = "needs_review"
         run.finished_at = datetime.now(timezone.utc)
         await session.commit()
+        await _start_lab_ttl_after_task(session, task)
         return {
             "status": "needs_review",
             "verdict": report_out.get("final_verdict") if report_out else None,
@@ -960,6 +1077,7 @@ async def run_orchestration(
     task.status = "completed"
     run.finished_at = datetime.now(timezone.utc)
     await session.commit()
+    await _start_lab_ttl_after_task(session, task)
 
     return {
         "status": "completed",
@@ -1026,6 +1144,7 @@ async def _finalize_node_failure(
     run.finished_at = datetime.now(timezone.utc)
     task.status = "failed"
     await session.commit()
+    await _start_lab_ttl_after_task(session, task)
     await _maybe_upload_node_failure(
         session, task, run, nr, host_workdir, store, detail
     )

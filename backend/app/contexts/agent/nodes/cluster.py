@@ -67,7 +67,11 @@ class ClusterNode:
                 if legacy:
                     profile_ids.append(str(legacy))
 
-        index_langs = resolve_index_languages(profile_ids or None)
+        # profile 存在但 languages 为空 → 空索引（不静默全扫）；profile is None → 全语言
+        if profile is None:
+            index_langs = resolve_index_languages(None)
+        else:
+            index_langs = resolve_index_languages(profile_ids)
         emit_phase(
             ctx,
             f"构建函数索引（语言 {', '.join(index_langs) or '无'}）",

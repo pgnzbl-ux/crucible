@@ -2,10 +2,13 @@
 
 需出网访问 api.osv.dev，配置可禁用；依赖 CVE 直报(bypass)不进 triage。
 退出码 0/1 均视为成功(1 = 有漏洞)，>1 才是执行错误。
+
+若 profile.osv_manifests 非空，按清单路径传 --lockfile；否则 -r 扫整树。
 """
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from .base import EngineScanNode
@@ -29,10 +32,20 @@ class OsvScanNode(EngineScanNode):
 
     def build_command(self, ctx, inp, settings) -> list[str]:
         # v2 已删除 --json（未知 flag 退出 127）；scan --format=json 是现行契约
-        return [
-            self._binary(settings), "scan", "--format=json", "-r",
-            self._repo_root(inp, ctx),
-        ]
+        binary = self._binary(settings)
+        root = self._repo_root(inp, ctx)
+        base = [binary, "scan", "--format=json"]
+        profile = getattr(inp, "profile", None)
+        manifests = list(getattr(profile, "osv_manifests", None) or []) if profile else []
+        if manifests:
+            cmd = list(base)
+            for rel in manifests:
+                path = Path(root) / str(rel)
+                if path.is_file():
+                    cmd.append(f"--lockfile={path}")
+            if len(cmd) > len(base):
+                return cmd
+        return [*base, "-r", root]
 
     def timeout_seconds(self, settings) -> int:
         return settings.scanner_osv_timeout_seconds
@@ -46,4 +59,10 @@ class OsvScanNode(EngineScanNode):
         return normalize("osv", json.loads(stdout or "{}"))
 
     def config_summary(self, ctx, inp, settings) -> dict[str, Any]:
-        return {"engine": "osv", "network": True}
+        profile = getattr(inp, "profile", None)
+        manifests = list(getattr(profile, "osv_manifests", None) or []) if profile else []
+        return {
+            "engine": "osv",
+            "network": True,
+            "manifest_count": len(manifests),
+        }

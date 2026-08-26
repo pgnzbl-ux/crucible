@@ -39,6 +39,15 @@ def test_ttl_remaining_ready_without_last_seen_is_zero():
     assert ttl_remaining_seconds("ready", None, 3600, now) == 0
 
 
+def test_ttl_remaining_full_while_live_tasks_hold_lab():
+    """有 live 任务时倒计时未开始，对外显示满额 TTL。"""
+    now = datetime(2026, 8, 19, 6, 0, tzinfo=timezone.utc)
+    last_seen = now - timedelta(hours=2)
+    assert (
+        ttl_remaining_seconds("ready", last_seen, 3600, now, live_task_count=1) == 3600
+    )
+
+
 @pytest_asyncio.fixture
 async def session():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -152,6 +161,68 @@ async def test_ttl_skips_lab_with_running_task(session):
     assert expired == []
     down.assert_not_awaited()
     assert (await session.get(Lab, result.lab_id)).status == "ready"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["completed", "failed", "cancelled", "needs_review"])
+async def test_ttl_clock_starts_when_task_ends(session, terminal):
+    """长任务结束后才重置 last_seen，避免中间 AI 超时后靶场被立刻清掉。"""
+    from app.contexts.lab.models import Lab
+    from app.contexts.task.models import Task
+
+    svc, result = await ready_lab(session, task_status="running")
+    now = datetime(2026, 8, 14, 4, 0, tzinfo=timezone.utc)
+    lab = await session.get(Lab, result.lab_id)
+    lab.last_seen_at = now - timedelta(hours=2)
+    await session.commit()
+
+    (await session.get(Task, "t1")).status = terminal
+    await session.commit()
+    started = await svc.start_ttl_when_idle(result.lab_id, now=now)
+    assert started is True
+    await session.refresh(lab)
+    from app.shared.time import as_utc
+
+    assert as_utc(lab.last_seen_at) == now
+
+    with patch(
+        "app.contexts.lab.docker_ops.compose_down", new_callable=AsyncMock
+    ) as down:
+        expired = await svc.expire_silent_labs(now=now)
+    assert expired == []
+    down.assert_not_awaited()
+
+    later = now + timedelta(seconds=3600)
+    with patch(
+        "app.contexts.lab.docker_ops.compose_down", new_callable=AsyncMock
+    ) as down:
+        expired = await svc.expire_silent_labs(now=later)
+    assert expired == [result.lab_id]
+    down.assert_awaited_once_with(result.compose_project)
+
+
+@pytest.mark.asyncio
+async def test_start_ttl_when_idle_skips_if_other_live_task(session):
+    from app.contexts.lab.models import Lab
+    from app.contexts.task.models import Task
+
+    svc, result = await ready_lab(session, task_status="running")
+    await seed(session, task_id="t2", status="running")
+    task2 = await session.get(Task, "t2")
+    task2.lab_id = result.lab_id
+    lab = await session.get(Lab, result.lab_id)
+    old = datetime(2026, 8, 14, 1, 0, tzinfo=timezone.utc)
+    lab.last_seen_at = old
+    await session.commit()
+
+    (await session.get(Task, "t1")).status = "failed"
+    await session.commit()
+    now = datetime(2026, 8, 14, 4, 0, tzinfo=timezone.utc)
+    assert await svc.start_ttl_when_idle(result.lab_id, now=now) is False
+    await session.refresh(lab)
+    from app.shared.time import as_utc
+
+    assert as_utc(lab.last_seen_at) == old
 
 
 @pytest.mark.asyncio

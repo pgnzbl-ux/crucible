@@ -456,6 +456,11 @@ async def test_reproduce_touches_lab_when_lab_id_present():
         db_session=_dummy_session(),
     )
     with patch("app.contexts.lab.service.LabService") as LS, \
+         patch(
+             "app.contexts.agent.nodes.reproduce._ensure_lab_reachable",
+             new_callable=AsyncMock,
+             side_effect=lambda ctx, env: env,
+         ), \
          patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", new_callable=AsyncMock) as ai:
         LS.return_value.touch = AsyncMock()
         LS.return_value.align_runtime_status = AsyncMock()
@@ -464,6 +469,137 @@ async def test_reproduce_touches_lab_when_lab_id_present():
     LS.return_value.touch.assert_awaited_once_with("lab1")
     LS.return_value.align_runtime_status.assert_awaited_once_with("lab1")
     LS.return_value.ensure_running.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime", ["none", "exited"])
+async def test_reproduce_reschedules_env_ready_when_lab_gone_or_stopped(runtime):
+    """靶场访问超时且 Docker 已销毁/停止时，重跑一次 env_ready。"""
+    from types import SimpleNamespace
+
+    from app.contexts.agent.nodes.reproduce import ReproduceNode
+
+    ctx = NodeContext(
+        task_id="t1", run_id="r1", host_workdir="/tmp/w",
+        source_path="/tmp/w", vulnerability_description="d",
+        project_address="x", project_ref=None,
+        previous_outputs={
+            "source": {
+                "repo_dirname": "b",
+                "workspace_path": "/workspace/b",
+                "commit_sha": "a" * 40,
+            },
+            "profile": {"is_web": True, "primary_language": "python"},
+            "env_ready": {
+                "target_url": "http://10.0.0.8:3001",
+                "compose_path": ".vuln-env/docker-compose.yml",
+                "initial_creds": {"username": "a", "password": "b"},
+            },
+            "audit": {"gate_verdict": "pass", "payloads": [{"path": "/x"}]},
+        },
+        lab_id="lab1",
+        owner_id="u1",
+        project_id="p1",
+        db_session=_dummy_session(),
+    )
+    revived = {
+        "target_url": "http://10.0.0.8:4001",
+        "compose_path": ".vuln-env/docker-compose.yml",
+        "initial_creds": {"username": "a", "password": "b"},
+        "transport_shape": {"protocol": "http"},
+        "started_containers": ["web"],
+        "ok": True,
+    }
+    captured: dict = {}
+
+    async def _capture_ai(**kwargs):
+        captured["input_json"] = kwargs["input_json"]
+        return {"verdict": "confirmed", "reproduced": True}
+
+    with patch("app.contexts.lab.service.LabService") as LS, \
+         patch(
+             "app.contexts.agent.nodes.reproduce._probe_lab_access",
+             new_callable=AsyncMock,
+             return_value=False,
+         ), \
+         patch(
+             "app.contexts.agent.nodes.reproduce._lab_runtime_kind",
+             new_callable=AsyncMock,
+             return_value=runtime,
+         ), \
+         patch(
+             "app.contexts.agent.nodes.env_ready.EnvReadyNode.execute",
+             new_callable=AsyncMock,
+             return_value=revived,
+         ) as env_exec, \
+         patch(
+             "app.contexts.agent.ai_runner.run_ai_node_with_shape_retry",
+             new_callable=AsyncMock,
+             side_effect=_capture_ai,
+         ):
+        LS.return_value.touch = AsyncMock()
+        LS.return_value.align_runtime_status = AsyncMock()
+        LS.return_value.repository = SimpleNamespace(
+            get=AsyncMock(return_value=SimpleNamespace(
+                compose_project="crucible-lab-lab1",
+                target_url="http://10.0.0.8:3001",
+            ))
+        )
+        await ReproduceNode().execute(ctx)
+
+    env_exec.assert_awaited_once()
+    assert ctx.updated_handoffs["env_ready"]["target_url"] == "http://10.0.0.8:4001"
+    assert "4001" in captured["input_json"]["target_url"]
+
+
+@pytest.mark.asyncio
+async def test_reproduce_does_not_reschedule_env_ready_when_containers_still_running():
+    """访问超时但容器仍在跑：不重调度 env_ready（仅销毁/停止才复活）。"""
+    from app.contexts.agent.nodes.reproduce import ReproduceNode
+
+    ctx = NodeContext(
+        task_id="t1", run_id="r1", host_workdir="/tmp/w",
+        source_path="/tmp/w", vulnerability_description="d",
+        project_address="x", project_ref=None,
+        previous_outputs={
+            "source": {"repo_dirname": "b", "workspace_path": "/workspace/b"},
+            "env_ready": {"target_url": "http://10.0.0.8:3001"},
+            "audit": {"gate_verdict": "pass"},
+        },
+        lab_id="lab1",
+        db_session=_dummy_session(),
+    )
+    with patch("app.contexts.lab.service.LabService") as LS, \
+         patch(
+             "app.contexts.agent.nodes.reproduce._probe_lab_access",
+             new_callable=AsyncMock,
+             return_value=False,
+         ), \
+         patch(
+             "app.contexts.agent.nodes.reproduce._compose_project_for",
+             new_callable=AsyncMock,
+             return_value="crucible-lab-lab1",
+         ), \
+         patch(
+             "app.contexts.agent.nodes.reproduce._lab_runtime_kind",
+             new_callable=AsyncMock,
+             return_value="running",
+         ), \
+         patch(
+             "app.contexts.agent.nodes.env_ready.EnvReadyNode.execute",
+             new_callable=AsyncMock,
+         ) as env_exec, \
+         patch(
+             "app.contexts.agent.ai_runner.run_ai_node_with_shape_retry",
+             new_callable=AsyncMock,
+             return_value={"verdict": "not_reproduced", "reproduced": False},
+         ):
+        LS.return_value.touch = AsyncMock()
+        LS.return_value.align_runtime_status = AsyncMock()
+        await ReproduceNode().execute(ctx)
+
+    env_exec.assert_not_awaited()
+    assert "env_ready" not in ctx.updated_handoffs
 
 
 @pytest.mark.asyncio

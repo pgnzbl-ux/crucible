@@ -1,10 +1,12 @@
-"""按画像语言选择确定性 parser；禁止 AI 列端点。"""
+"""按画像语言 + 框架选择确定性 parser；禁止 AI 列端点。"""
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from app.contexts.agent.stacks.registry import INVENTORY_LANGUAGES
 
 from .django_parser import parse_django_repo
 from .express_parser import parse_express_repo
@@ -13,7 +15,6 @@ from .flask_parser import parse_flask_repo
 from .gin_parser import parse_gin_repo
 from .laravel_parser import parse_laravel_repo
 from .models import (
-    SUPPORTED_INVENTORY_LANGUAGES,
     EndpointRecord,
     canonical_language_ids,
     records_to_bom,
@@ -22,9 +23,13 @@ from .nestjs_parser import parse_nestjs_repo
 from .nextjs_parser import parse_nextjs_repo
 from .openapi_parser import parse_openapi_repo
 from .php_script_parser import parse_php_script_repo
+from .selection import inventory_plan_for_profile
 from .spring_parser import parse_spring_repo
 
 ParseFn = Callable[[Path], list[EndpointRecord]]
+
+# 兼容旧 import
+SUPPORTED_INVENTORY_LANGUAGES = INVENTORY_LANGUAGES
 
 
 @dataclass(frozen=True)
@@ -49,19 +54,20 @@ PARSER_SPECS: tuple[ParserSpec, ...] = (
     ParserSpec("gin", "go", parse_gin_repo),
 )
 
+_SPECS_BY_KEY = {s.key: s for s in PARSER_SPECS}
+
 
 def select_parsers(profile: Any) -> list[ParserSpec]:
-    langs = set(canonical_language_ids(profile))
+    plan = inventory_plan_for_profile(profile)
     selected: list[ParserSpec] = []
-    for spec in PARSER_SPECS:
-        if spec.always:
+    for key in plan.parser_keys:
+        spec = _SPECS_BY_KEY.get(key)
+        if spec is not None:
             selected.append(spec)
-            continue
-        if spec.language and spec.language in langs:
-            selected.append(spec)
-    if langs:
+    if selected:
         return selected
-    return [s for s in selected if s.always]
+    # 无语言：仅 openapi
+    return [s for s in PARSER_SPECS if s.always]
 
 
 def parser_keys_for_profile(profile: Any) -> list[str]:
@@ -72,19 +78,31 @@ def unsupported_for_profile(profile: Any) -> list[str]:
     langs = canonical_language_ids(profile)
     if not langs:
         return ["unknown"]
-    return sorted({lid for lid in langs if lid not in SUPPORTED_INVENTORY_LANGUAGES})
+    return sorted({lid for lid in langs if lid not in INVENTORY_LANGUAGES})
 
 
 def phase_message_for_profile(profile: Any) -> str:
+    from app.contexts.agent.api_inventory.models import profile_frameworks
+
     langs = canonical_language_ids(profile)
+    fws = profile_frameworks(profile)
     keys = parser_keys_for_profile(profile)
+    plan = inventory_plan_for_profile(profile)
     lang_label = "、".join(langs) if langs else "未知"
+    fw_label = "+".join(fws) if fws else ""
+    head = f"按画像 {lang_label}"
+    if fw_label:
+        head += f"+{fw_label}"
     parser_label = "/".join(keys) if keys else "openapi"
-    return f"按画像 {lang_label} 解析 {parser_label}"
+    msg = f"{head} 解析 {parser_label}"
+    if plan.degraded and plan.note:
+        msg += f"（{plan.note}）"
+    return msg
 
 
 def build_inventory_bom(repo_root: str | Path, profile: Any = None) -> dict[str, Any]:
     root = Path(repo_root)
+    plan = inventory_plan_for_profile(profile)
     specs = select_parsers(profile)
     endpoints: list[EndpointRecord] = []
     ran: list[str] = []
@@ -96,4 +114,7 @@ def build_inventory_bom(repo_root: str | Path, profile: Any = None) -> dict[str,
         for ep in chunk:
             if ep.acquisition and ep.acquisition not in kinds:
                 kinds.append(ep.acquisition)
-    return records_to_bom(endpoints, parsers=ran, acquisition_kinds=kinds)
+    bom = records_to_bom(endpoints, parsers=ran, acquisition_kinds=kinds)
+    bom["stack_ids"] = list(plan.stack_ids)
+    bom["surface_frameworks"] = list(plan.surface_frameworks)
+    return bom

@@ -121,6 +121,7 @@ def test_resolve_index_languages_from_profile():
     assert resolve_index_languages(["go", "php"]) == ["go", "php"]
     # 有画像但无一可索引 → 空，不回退全扫
     assert resolve_index_languages(["rust"]) == []
+    assert resolve_index_languages([]) == []
     assert resolve_index_languages(None) == [
         "go", "java", "javascript", "php", "python", "typescript",
     ]

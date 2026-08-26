@@ -108,6 +108,8 @@ class NodeContext:
     project_id: str | None = None
     owner_id: str | None = None
     lab_id: str | None = None
+    # 节点执行中修正上游 handoff（如 reproduce 复活靶场后回写 env_ready）
+    updated_handoffs: dict[str, dict] = field(default_factory=dict)
 
 
 def emit_phase(ctx: NodeContext, message: str, *, phase: str) -> None:

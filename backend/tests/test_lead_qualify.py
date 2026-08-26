@@ -1,4 +1,4 @@
-"""合格线索门表驱动（discovery-spec §2.7）：T2/传播/无证据/路径/OSV 不得入队。"""
+"""合格线索门表驱动（discovery-spec §2.7）：漏报优先；快审仍禁入；置信度不挡入队。"""
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -50,8 +50,12 @@ def _rep(**kw):
         ({"group": {"ai_verdict": "fp"}}, False),
         ({"group": {"ai_verdict": "need_more_context"}}, False),
         ({"group": {"verdict_source": "fast_model"}}, False),
-        ({"group": {"verdict_source": "propagated"}}, False),
-        ({"group": {"ai_confidence": 0.5}}, False),
+        ({"group": {"verdict_source": "rule"}}, False),
+        ({"group": {"verdict_source": "carryover"}}, False),
+        # 漏报优先：传播 + 低置信只要字段齐备即可入队
+        ({"group": {"verdict_source": "propagated"}}, True),
+        ({"group": {"ai_confidence": 0.5}}, True),
+        ({"group": {"ai_confidence": 0.1}}, True),
         ({"adj": {"why": [], "qualify": {
             "attacker_controlled": True, "reaches_sink": True, "sanitizer": "none",
         }}}, False),

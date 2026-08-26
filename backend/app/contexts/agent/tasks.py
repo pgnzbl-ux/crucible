@@ -402,6 +402,10 @@ async def apply_analysis_failure(
         if task.status not in _PROTECTED_TERMINAL_STATUSES:
             task.status = "failed"
     await session.flush()
+    if task is not None:
+        from app.contexts.lab.service import LabService
+
+        await LabService(session).start_ttl_when_idle(getattr(task, "lab_id", None))
 
 
 # ── 取消信号钩子（保险 A）──
@@ -566,6 +570,9 @@ async def _run_analysis(task_id: str, run_id: str, *, celery_task: object) -> di
                     },
                 )
                 await session.commit()
+                from app.contexts.lab.service import LabService
+
+                await LabService(session).start_ttl_when_idle(getattr(task, "lab_id", None))
                 summary.update(status="failed", error=title)
                 return summary
 

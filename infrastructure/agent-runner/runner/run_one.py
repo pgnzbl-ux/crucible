@@ -22,6 +22,7 @@ agent-runner 容器内 entrypoint。
   worker 侧只 json.loads 每行，不感知 SDK 类型。
 - 完整 Claude Code 工具集配合 bypassPermissions 实现无人值守自动化；
   PreToolUse hook 只拦截平台明确禁止的 Bash 命令并输出审计事件。
+  Stop hook 在节点尚未 submit_result 时催交一次，避免会话正常结束却无产物。
 - stderr 走 SDK 自身 logging（便于 docker logs 调试），不污染 JSONL 流。
 """
 
@@ -102,6 +103,11 @@ BLACKLIST_RES = [
     (re.compile(r"/sys/"), "/sys/"),
 ]
 
+# docker / docker-compose 作可执行命令时拒绝；不得误伤 host.docker.internal
+_DOCKER_CMD_RE = re.compile(
+    r"(?:^|[;&|]\s*)(?:sudo\s+)?(?:\S*/)?docker(?:-compose)?(?:\s|$)"
+)
+
 # env_ready 额外拒绝：装依赖 / docker（配方由平台 compose 启动，Agent 只写文件）
 ENV_READY_DENY_RES = [
     (re.compile(r"\bnpm\b"), "npm"),
@@ -112,7 +118,7 @@ ENV_READY_DENY_RES = [
     (re.compile(r"\bapt(-get)?\b"), "apt"),
     (re.compile(r"\bapk\b"), "apk"),
     (re.compile(r"\b(yum|dnf)\b"), "yum"),
-    (re.compile(r"\bdocker\b"), "docker"),
+    (_DOCKER_CMD_RE, "docker"),
 ]
 
 # audit 额外拒绝：HTTP 客户端（白盒节点禁止打活靶；不拦 python urllib）
@@ -124,7 +130,7 @@ AUDIT_DENY_RES = [
 
 # reproduce 额外拒绝：靶场已由平台 compose 启动，禁止 Agent 自己 docker
 REPRODUCE_DENY_RES = [
-    (re.compile(r"\bdocker\b"), "docker"),
+    (_DOCKER_CMD_RE, "docker"),
 ]
 
 def _allowed_tools_for(node_key: str | None) -> list[str]:
@@ -235,6 +241,44 @@ async def _pre_tool_use_hook(
             "updatedInput": updated,
         }
     }
+
+
+async def _stop_hook(input_data: dict, tool_use_id: str | None, context: Any) -> dict:
+    """会话欲结束时：若本节点还没写 submit_result 产物，block 一次催交。
+
+    stop_hook_active=true 表示已经催过一轮。再 block 会在上下文将满时空转烧钱，
+    交给现有 no_submit 失败路径。
+    """
+    del tool_use_id, context
+    if not os.environ.get("NODE_KEY"):
+        return {}
+    out_path = Path(
+        os.environ.get("NODE_OUTPUT_PATH", "/workspace/.node_output.json")
+    )
+    if out_path.is_file():
+        return {}
+    hook_input = input_data if isinstance(input_data, dict) else {}
+    if hook_input.get("stop_hook_active"):
+        return {}
+    reason = (
+        "本节点尚未调用 submit_result。"
+        "立即调用 mcp__crucible__submit_result 提交完整结构化结果。"
+        "不要再做探索性工具调用（不要再发 HTTP、不要再读大段源码、不要写报告）。"
+        "按本节点 skill 的完成条款提交；打不出危害也要提交当前能确定的判定。"
+    )
+    print(
+        json.dumps(
+            {
+                "type": "phase.updated",
+                "phase": "submit_nudge",
+                "message": "会话欲结束但未调用 submit_result，已催交一次",
+                "timestamp": time.time(),
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
+    return {"decision": "block", "reason": reason}
 
 
 _CRED_UNSET_PREFIX = (
@@ -901,11 +945,14 @@ def _build_options(
         #
         # 必须用 HookMatcher 实例：SDK _convert_hooks_to_internal_format 用
         # hasattr(matcher, "hooks")；裸 dict 没有该属性，会静默变成 hooks=[]，
-        # 导致黑名单与凭据剥离全部不生效。
+        # 导致黑名单、凭据剥离与 Stop 催交全部不生效。
         "sandbox": {"enabled": False},
         "hooks": {
             "PreToolUse": [
                 HookMatcher(matcher="Bash", hooks=[_pre_tool_use_hook]),
+            ],
+            "Stop": [
+                HookMatcher(hooks=[_stop_hook]),
             ],
         },
     }

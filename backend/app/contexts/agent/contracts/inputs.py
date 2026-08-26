@@ -55,8 +55,7 @@ class ScanGitleaksInput(_RepoInput):
 
 
 class ScanOsvInput(_RepoInput):
-    pass
-
+    profile: ProfileHandoff | None = None  # 可选；osv_manifests 非空则按清单扫
 
 class ScanSemgrepInput(_RepoInput):
     profile: ProfileHandoff  # 只消费 semgrep_configs；语言选择禁止节点内启发式
@@ -88,7 +87,7 @@ class TriageInput(_RepoInput):
 
 class DispatchInput(_RepoInput):
     triage: TriageHandoff
-    profile: ProfileHandoff  # NON_WEB 判定：非 web 不选主线索(§6.4)
+    profile: ProfileHandoff  # 画像上下文；合格门见 finding.qualify（不用 is_web / NON_WEB 挡线索）
     api_hunt: ApiHuntHandoff | None = None  # 并列线索流终态摘要；合格组已在 DB
 
 

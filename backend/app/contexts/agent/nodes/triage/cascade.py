@@ -618,33 +618,48 @@ async def propagate_family_verdicts(
 
     代表 tp/fp 且置信达标 → 成员同判决、置信度打折(factor 可由验证一致率
     自校准，缺省用 settings 默认)、来源 propagated；
+    tp 时拷贝代表的 evidence + 合格门字段，便于成员直接入终认（§2.7 漏报优先）；
     否则成员转 needs_review（宁可人工也不错误传播）。
     """
+    from app.contexts.finding.qualify import qualify_fields_from_adjudication
+
     verdict = rep.ai_verdict
     confidence = float(rep.ai_confidence or 0)
     discount = factor if factor is not None else float(getattr(settings, "triage_propagate_confidence_factor", 0.85))
     propagated = review = 0
+    rep_adj = None
+    if verdict == "tp":
+        _, adjs = await svc.reps_and_adjudications([rep])
+        rep_adj = adjs.get(rep.id)
+    rep_evidence = list(getattr(rep_adj, "evidence", None) or []) if rep_adj else []
+    rep_qualify = qualify_fields_from_adjudication(rep_adj) if rep_adj else {}
     for member in family.members:
         if member.id == rep.id:
             continue
         if verdict in ("tp", "fp") and confidence >= settings.triage_propagate_min_confidence:
+            detail: dict[str, Any] = {
+                "family_key": family.key,
+                "representative_id": rep.id,
+                "propagate_factor": discount,
+            }
+            if verdict == "tp" and rep_qualify:
+                detail["qualify"] = dict(rep_qualify)
+            adj = _tier_adjudication(
+                verdict=verdict,
+                confidence=round(confidence * discount, 3),
+                source="propagated",
+                why=[
+                    f"同根因族 {family.key[:8]} 代表判决传播"
+                    f"（代表 {verdict}，置信 {confidence}，折扣 {discount:.2f}）"
+                ],
+                detail=detail,
+            )
+            if verdict == "tp" and rep_evidence:
+                adj.evidence = list(rep_evidence)
             await _apply(
                 svc,
                 member,
-                _tier_adjudication(
-                    verdict=verdict,
-                    confidence=round(confidence * discount, 3),
-                    source="propagated",
-                    why=[
-                        f"同根因族 {family.key[:8]} 代表判决传播"
-                        f"（代表 {verdict}，置信 {confidence}，折扣 {discount:.2f}）"
-                    ],
-                    detail={
-                        "family_key": family.key,
-                        "representative_id": rep.id,
-                        "propagate_factor": discount,
-                    },
-                ),
+                adj,
                 source="propagated",
             )
             propagated += 1

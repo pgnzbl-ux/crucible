@@ -44,9 +44,13 @@ from .outputs import (
 from .registry import (
     DEFAULT_PIPELINE,
     NODE_BY_KEY,
+    VERIFY_PIPELINE,
     NodeSpec,
     SkipWhen,
+    ancestor_keys,
+    descendant_keys,
     node_by_key,
+    pipeline_for,
     validate_pipeline,
 )
 from .signals import ControlSignals
@@ -71,6 +75,9 @@ __all__ = [
     "HandoffStore",
     "InputAssembler",
     "NODE_BY_KEY",
+    "VERIFY_PIPELINE",
+    "ancestor_keys",
+    "descendant_keys",
     "NodeSpec",
     "ProfileHandoff",
     "ProfileInput",
@@ -91,6 +98,7 @@ __all__ = [
     "TriageInput",
     "audit_for_reproduce",
     "node_by_key",
+    "pipeline_for",
     "project_handoff",
     "validate_pipeline",
 ]

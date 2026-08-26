@@ -9,7 +9,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 from app.contexts.agent.lead_worker import build_discovery_report_from_leads
+from app.contexts.agent.lead_worker import whitebox_only_verdict
 from app.contexts.finding.models import LeadRun
+
+
+def test_whitebox_only_pass_is_code_reachable():
+    assert whitebox_only_verdict({"gate_verdict": "pass"}) == "code_reachable"
+    assert whitebox_only_verdict({"gate_verdict": "uncertain"}) == "needs_review"
 
 
 def test_aggregate_report_includes_code_reachable_in_body():
@@ -246,6 +252,106 @@ async def test_lead_queue_concurrency_cap(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_budget_exhaustion_terminalizes_unclaimed_leads(monkeypatch):
+    """预算耗尽不得在任务收口后留下 queued LeadRun / Redis 队列。"""
+    import asyncio
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    from app.contexts.agent import lead_queue as lq
+    from app.contexts.agent import lead_worker as lw
+    from app.contexts.task.models import Task, TaskRun
+    from app.shared.base import Base
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        from app.shared.models import register_models
+
+        register_models()
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    class _MemRedis:
+        def __init__(self):
+            self.lists: dict[str, list] = {}
+            self.sets: dict[str, set] = {}
+        async def lpush(self, key, *values):
+            self.lists.setdefault(key, []).extend(values)
+        async def rpop(self, key):
+            rows = self.lists.get(key) or []
+            return rows.pop() if rows else None
+        async def sadd(self, key, *members):
+            self.sets.setdefault(key, set()).update(members)
+        async def srem(self, key, *members):
+            self.sets.setdefault(key, set()).difference_update(members)
+        async def llen(self, key):
+            return len(self.lists.get(key) or [])
+        async def lrange(self, key, start, end):
+            rows = self.lists.get(key) or []
+            return list(rows[start:] if end == -1 else rows[start:end + 1])
+        async def smembers(self, key):
+            return set(self.sets.get(key) or set())
+        async def scard(self, key):
+            return len(self.sets.get(key) or set())
+        async def delete(self, *keys):
+            for key in keys:
+                self.lists.pop(key, None)
+                self.sets.pop(key, None)
+
+    mem = _MemRedis()
+    lq.set_redis_client(mem)
+    try:
+        async with factory() as session:
+            task = Task(project_address="x", task_type="discovery",
+                        vulnerability_description=None, owner_id="u1", status="running")
+            session.add(task)
+            await session.flush()
+            run = TaskRun(task_id=task.id, status="running")
+            session.add(run)
+            await session.flush()
+            leads = [
+                LeadRun(task_id=task.id, run_id=run.id, alert_group_id=f"g{i}",
+                        queue_position=i, lead_description=f"lead {i}", status="queued")
+                for i in range(2)
+            ]
+            session.add_all(leads)
+            await session.commit()
+            await lq.enqueue_leads(task.id, [
+                {"lead_run_id": lead.id, "group_id": lead.alert_group_id, "run_id": run.id}
+                for lead in leads
+            ])
+
+        async def exhausted(*args, **kwargs):
+            return True, 100, 100
+
+        monkeypatch.setattr("app.contexts.agent.usage_ledger.budget_state", exhausted)
+        async def must_not_process(**kwargs):
+            raise AssertionError("budget exhausted leads must not be claimed")
+        monkeypatch.setattr(lw, "process_one_lead", must_not_process)
+        monkeypatch.setattr(
+            "app.contexts.agent.lead_worker.get_settings",
+            lambda: type("S", (), {"lead_verify_per_task": 1})(),
+        )
+        await asyncio.wait_for(
+            lw.drain_lead_queue(
+                session_factory=factory, task_id=task.id, host_workdir="/tmp",
+                source_path="/tmp", runner_env={}, profile={}, env_ready=None,
+            ),
+            timeout=3,
+        )
+
+        async with factory() as session:
+            rows = (await session.execute(
+                __import__("sqlalchemy").select(LeadRun).where(LeadRun.task_id == task.id)
+            )).scalars().all()
+            assert {row.status for row in rows} == {"skipped"}
+            assert all(row.error == "budget_exhausted" for row in rows)
+        assert await lq.is_drained(task.id)
+    finally:
+        lq.set_redis_client(None)
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_drain_reclaims_inflight_orphan(monkeypatch):
     """claim 后进程崩溃遗留 inflight 孤儿：drain 回收入队并消费，不卡死。"""
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -434,9 +540,10 @@ async def test_lead_path_reuses_nodes_with_container_semantics():
             # audit 走容器路径（节点行为），不再是宿主绝对路径
             assert audit_call["input_json"]["source_path"] == "/workspace/repo"
             assert audit_call["input_json"]["vulnerability_description"] == "【疑似漏洞】SQL注入"
-            # reproduce 经节点做了容器侧 URL 重写
+            # reproduce：localhost 回环改写为 advertise IP:port
             assert repro_call["input_json"]["target_url"] != "http://localhost:8080"
-            assert "host.docker.internal" in repro_call["input_json"]["target_url"]
+            assert "host.docker.internal" not in repro_call["input_json"]["target_url"]
+            assert repro_call["input_json"]["target_url"].startswith("http://")
     finally:
         await engine.dispose()
 

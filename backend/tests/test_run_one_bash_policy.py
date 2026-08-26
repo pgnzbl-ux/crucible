@@ -29,6 +29,13 @@ def test_env_ready_denies_install_and_docker(cmd):
     assert reason and "blocked by policy" in reason
 
 
+def test_env_ready_allows_host_docker_internal_in_echo():
+    decision, reason = _classify_bash(
+        "echo http://host.docker.internal:8080", node_key="env_ready"
+    )
+    assert decision == "allow", reason
+
+
 def test_env_ready_allows_node_eval():
     decision, _ = _classify_bash("node -e \"console.log(1)\"", node_key="env_ready")
     assert decision == "allow"
@@ -51,11 +58,36 @@ def test_reproduce_still_allows_curl():
     assert decision == "allow"
 
 
-@pytest.mark.parametrize("cmd", ["docker compose up", "docker-compose up", "docker ps"])
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "docker compose up",
+        "docker-compose up",
+        "docker ps",
+        "sudo docker ps",
+        "/usr/bin/docker inspect x",
+        "echo ok; docker ps",
+    ],
+)
 def test_reproduce_denies_docker(cmd):
     decision, reason = _classify_bash(cmd, node_key="reproduce")
     assert decision == "deny"
     assert reason and "docker" in reason
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "curl -s http://host.docker.internal:80/",
+        'curl -s -o /dev/null -w "%{http_code}\\n" http://host.docker.internal:80/user-login.html',
+        "curl -s http://x",
+        "echo host.docker.internal",
+    ],
+)
+def test_reproduce_allows_host_docker_internal(cmd):
+    """host.docker.internal 含 docker 字样，不得当成 docker CLI 误杀。"""
+    decision, reason = _classify_bash(cmd, node_key="reproduce")
+    assert decision == "allow", reason
 
 
 def test_reproduce_keeps_write_and_webfetch():
@@ -148,6 +180,13 @@ def test_build_options_registers_hook_matcher_surviving_sdk_convert(monkeypatch)
     assert not isinstance(pre[0], dict)
     assert pre[0].matcher == "Bash"
     assert pre[0].hooks == [run_one._pre_tool_use_hook]
+
+    stop = captured["hooks"]["Stop"]
+    assert len(stop) == 1
+    assert isinstance(stop[0], FakeHookMatcher)
+    assert not isinstance(stop[0], dict)
+    assert stop[0].matcher is None
+    assert stop[0].hooks == [run_one._stop_hook]
 
     m = pre[0]
     internal = {

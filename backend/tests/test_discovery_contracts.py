@@ -40,7 +40,7 @@ def test_pipeline_topology_valid():
 
 
 def test_pipeline_shape_per_spec():
-    from app.contexts.agent.contracts import DEFAULT_PIPELINE, node_by_key
+    from app.contexts.agent.contracts import DEFAULT_PIPELINE, node_by_key, pipeline_for
 
     keys = [s.key for s in DEFAULT_PIPELINE]
     assert keys[:2] == ["source", "profile"]
@@ -56,6 +56,11 @@ def test_pipeline_shape_per_spec():
     # cluster 等齐三个扫描；audit 等dispatch(验证模式 dispatch 被 skip 视为满足)
     assert set(node_by_key("cluster").requires) == {"scan_semgrep", "scan_gitleaks", "scan_osv"}
     assert "dispatch" in node_by_key("audit").requires
+    assert node_by_key("env_ready").requires == ("source", "profile", "dispatch")
+    assert [s.key for s in pipeline_for("verify")] == [
+        "source", "profile", "env_ready", "audit", "reproduce", "report",
+    ]
+    assert node_by_key("audit", task_type="verify").requires == ("source", "profile")
     # 声明式出口与策略（原 heavy 标记已删除：从未被强制且与 lead 并发矛盾）
     assert node_by_key("reproduce").skip_verdict == {"gate_fail": "false_positive"}
     assert node_by_key("report").lead_driven_aggregate is True
@@ -66,7 +71,7 @@ def test_pipeline_shape_per_spec():
 
 
 def test_discovery_ready_waves_parallel_scans():
-    """审计任务就绪波次：profile ∥ gitleaks ∥ osv，随后 semgrep ∥ api_inventory ∥ env_ready。"""
+    """审计任务就绪波次：发现链先跑，有合格线索后才准备靶场。"""
     from app.contexts.agent.contracts import DEFAULT_PIPELINE
     from app.contexts.agent.orchestrator import compute_ready
 
@@ -79,12 +84,12 @@ def test_discovery_ready_waves_parallel_scans():
 
     after_scans = after_source | wave2
     wave3 = {s.key for s in compute_ready(DEFAULT_PIPELINE, after_scans)}
-    assert wave3 == {"scan_semgrep", "api_inventory", "env_ready"}
+    assert wave3 == {"scan_semgrep", "api_inventory"}
 
-    # 扫描齐即可开 cluster，无需等 env_ready / api_inventory（靶场不阻断发现复核）
+    # 扫描齐即可开 cluster，无需等 api_inventory
     after_semgrep = after_scans | {"scan_semgrep"}
     assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_semgrep)} == {
-        "api_inventory", "env_ready", "cluster",
+        "api_inventory", "cluster",
     }
 
     after_deep = after_scans | wave3
@@ -115,7 +120,27 @@ def test_discovery_ready_waves_parallel_scans():
     after_triage = after_screen | {"triage"}
     assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_triage)} == {"dispatch"}
     after_dispatch = after_triage | {"dispatch"}
-    assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_dispatch)} == {"audit"}
+    assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_dispatch)} == {
+        "env_ready", "audit",
+    }
+
+
+def test_verify_pipeline_is_pruned_not_skip_chain():
+    from app.contexts.agent.contracts import descendant_keys, pipeline_for, validate_pipeline
+    from app.contexts.agent.orchestrator import compute_ready
+
+    pipeline = pipeline_for("verify")
+    validate_pipeline(pipeline)
+    keys = {spec.key for spec in pipeline}
+    assert keys == {"source", "profile", "env_ready", "audit", "reproduce", "report"}
+    assert {s.key for s in compute_ready(pipeline, {"source", "profile"})} == {
+        "env_ready", "audit",
+    }
+    discovery = pipeline_for("discovery")
+    assert "env_ready" in descendant_keys(discovery, "triage")
+    assert "api_hunt" not in descendant_keys(discovery, "triage")
+    with pytest.raises(ValueError, match="未知任务类型"):
+        pipeline_for("banana")
 
 
 def test_verify_mode_skip_signals():
@@ -357,8 +382,8 @@ async def test_discovery_with_lead_runs_terminal_nodes(session_factory):
 
 
 @pytest.mark.asyncio
-async def test_verify_task_skips_discovery_nodes(session_factory):
-    """非 Web 定向验证跳过发现链与动态复现，但保留白盒审计和报告。"""
+async def test_verify_task_instantiates_only_verify_subgraph(session_factory):
+    """非 Web 定向验证不创建发现链 NodeRun。"""
     from app.contexts.agent import orchestrator as orch
     from app.contexts.task.models import NodeRun
 
@@ -400,9 +425,10 @@ async def test_verify_task_skips_discovery_nodes(session_factory):
         assert by_key["source"] == "completed"
         assert by_key["profile"] == "completed"
         for key in ("scan_gitleaks", "scan_osv", "scan_semgrep", "api_inventory", "api_hunt",
-                    "cluster", "screen", "triage",
-                    "dispatch", "env_ready", "reproduce"):
-            assert by_key[key] == "skipped", f"{key} 应 skip"
+                    "cluster", "screen", "triage", "dispatch"):
+            assert key not in by_key, f"{key} 不应实例化"
+        assert by_key["env_ready"] == "skipped"
+        assert by_key["reproduce"] == "skipped"
         assert by_key["audit"] == "completed"
         assert by_key["report"] == "completed"
 

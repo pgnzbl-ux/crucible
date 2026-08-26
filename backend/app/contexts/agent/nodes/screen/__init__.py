@@ -11,7 +11,6 @@ from sqlalchemy import select
 from ..base import NodeContext, emit_phase, task_run_cancelled
 from ..triage import cascade
 from ..triage.queue import order_groups, scan_review_groups, should_skip_llm
-from ..triage.streamer import LeadStreamer
 
 
 class ScreenNode:
@@ -78,35 +77,12 @@ class ScreenNode:
             phase=self.node_key,
         )
 
-        streamer = (
-            LeadStreamer(ctx, settings, phase=self.node_key)
-            if getattr(settings, "triage_stream_dispatch_enabled", True)
-            else None
-        )
-        try:
-            cancelled = await self._run_light(
-                ctx, svc, queue, settings, stats, streamer=streamer,
-            )
-        except BaseException:
-            if streamer is not None:
-                await streamer.cancel_and_reap()
-            raise
+        cancelled = await self._run_light(ctx, svc, queue, settings, stats)
 
         if cancelled:
-            if streamer is not None:
-                await streamer.cancel_and_reap()
             await ctx.db_session.commit()
             return self._output(stats, len(skipped_llm), cancelled=True)
 
-        if streamer is not None:
-            await streamer.poll()
-            if streamer.enqueued:
-                emit_phase(
-                    ctx,
-                    f"轻量定案完成，等待 {streamer.enqueued} 条流式终认线索排空",
-                    phase=self.node_key,
-                )
-            await streamer.join()
         await ctx.db_session.commit()
         verdict_counts = await self._verdict_counts(ctx, candidate_ids)
         await svc.discard_task_false_positives(ctx.task_id)
@@ -129,8 +105,6 @@ class ScreenNode:
         queue: list,
         settings,
         stats: cascade.TierStats,
-        *,
-        streamer: LeadStreamer | None = None,
     ) -> bool:
         """T0–T2。cascade 关闭时整层跳过，全部留给 triage。返回 True=取消。"""
         if not getattr(settings, "triage_cascade_enabled", False):
@@ -162,8 +136,6 @@ class ScreenNode:
         )
         await ctx.db_session.commit()
         stats.escalated = len(queue)
-        if streamer is not None:
-            await streamer.poll()
         return False
 
     async def _verdict_counts(

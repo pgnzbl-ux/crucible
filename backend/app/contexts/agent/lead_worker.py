@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.contexts.agent.ai_runner import authoritative_verdict
 from app.contexts.agent.lead_queue import (
     claim_lead,
+    clear_task_queue,
     complete_lead,
     is_drained,
 )
@@ -54,6 +55,13 @@ async def _reconcile_group(session: AsyncSession, group_id: str, verdict: str | 
         await svc.mark_needs_review(group)
 
 
+def whitebox_only_verdict(audit: dict[str, Any] | None) -> str | None:
+    """无靶场时，audit pass 表示代码路径已闭环，但未做动态确认。"""
+    if (audit or {}).get("gate_verdict") == "pass":
+        return "code_reachable"
+    return authoritative_verdict(None, audit)
+
+
 async def process_one_lead(
     *,
     session: AsyncSession,
@@ -71,8 +79,8 @@ async def process_one_lead(
     """对单条 LeadRun 跑 audit（必）+ reproduce（gate 允许且 env_ready 有靶场时）。
 
     终认工位单一实现（discovery-spec §5.8）：复用 AuditNode/ReproduceNode +
-    typed Input，与 DAG 验证路径同构——容器内 source_path、target_url 容器
-    侧重写、lab touch 等行为自动对齐，不再各写一份。
+    typed Input，与 DAG 验证路径同构——容器内 source_path、target_url 宿主机
+    IP:port、lab touch 等行为自动对齐，不再各写一份。
     """
     from app.contexts.agent.contracts import AuditInput, ReproduceInput
     from app.contexts.agent.contracts.outputs import (
@@ -114,6 +122,11 @@ async def process_one_lead(
             vulnerability_description="", project_address="", project_ref=None,
             runner_env=runner_env, on_event=_ctx_on_event, db_session=session,
             lab_id=lab_id,
+            previous_outputs={
+                "source": source or {},
+                "profile": profile or {},
+                "env_ready": env_ready or {},
+            },
         )
         # 线索描述经 DispatchHandoff.lead_description 注入（与 DAG audit 输入同构）
         audit_out = await AuditNode().execute(ctx, AuditInput(
@@ -142,9 +155,14 @@ async def process_one_lead(
             ))
             lead.reproduce_output = repro_out
             lead.verdict = authoritative_verdict(repro_out, audit_out)
+            # 动态复现中复活靶场：回写共享 env_ready，供后续线索与聚合报告使用
+            revived = ctx.updated_handoffs.get("env_ready")
+            if revived and isinstance(env_ready, dict):
+                env_ready.clear()
+                env_ready.update(revived)
         else:
-            # 无靶场：仅白盒（节点内对缺 target_url 会 raise，这里是有意的降级分支）
-            lead.verdict = authoritative_verdict(None, audit_out)
+            # 无靶场：LeadWorker 不调用动态复现，仅保留白盒结论。
+            lead.verdict = whitebox_only_verdict(audit_out)
 
         lead.status = "completed"
         basis = "lab" if repro_out is not None else "code_path"
@@ -213,6 +231,30 @@ async def _reclaim_orphan_leads(session_factory, task_id: str) -> int:
     return actions
 
 
+async def _terminalize_unclaimed_leads(
+    session_factory, task_id: str, *, reason: str,
+) -> int:
+    """把已停止消费的线索收敛到可观察终态。
+
+    必须在 worker 全部 join 后调用，此时 queued/running 均已没有合法消费者。
+    """
+    async with session_factory() as session:
+        rows = (await session.execute(
+            select(LeadRun).where(
+                LeadRun.task_id == task_id,
+                LeadRun.status.in_(("queued", "running")),
+            )
+        )).scalars().all()
+        for lead in rows:
+            lead.status = "skipped"
+            lead.verdict = None
+            lead.error = reason
+            await _reconcile_group(session, lead.alert_group_id, "needs_review")
+        await session.commit()
+    await clear_task_queue(task_id)
+    return len(rows)
+
+
 async def drain_lead_queue(
     *,
     session_factory: async_sessionmaker[AsyncSession],
@@ -240,6 +282,7 @@ async def drain_lead_queue(
     ))
     done_ids: list[str] = []
     lock = asyncio.Lock()
+    budget_stop = asyncio.Event()
 
     async def _worker() -> None:
         from app.contexts.agent.nodes.base import task_run_cancelled
@@ -256,6 +299,7 @@ async def drain_lead_queue(
 
                     exhausted, spent, budget = await budget_state(s, task_id)
                     if exhausted:
+                        budget_stop.set()
                         if on_event:
                             on_event({
                                 "type": "phase.updated", "phase": "lead_verify",
@@ -302,6 +346,8 @@ async def drain_lead_queue(
     await asyncio.gather(*workers, return_exceptions=True)
     # 队列残留再消费 + 孤儿回收，直到队列与 DB 均无未完成线索（有界轮次防死循环）
     for _ in range(_MAX_RECLAIM_ROUNDS):
+        if budget_stop.is_set():
+            break
         reclaimed = (
             await _reclaim_orphan_leads(session_factory, task_id) if allow_reclaim else 0
         )
@@ -309,6 +355,16 @@ async def drain_lead_queue(
             break
         extra = [asyncio.create_task(_worker()) for _ in range(concurrency)]
         await asyncio.gather(*extra, return_exceptions=True)
+    if budget_stop.is_set():
+        skipped = await _terminalize_unclaimed_leads(
+            session_factory, task_id, reason="budget_exhausted",
+        )
+        if skipped:
+            await _emit(on_event, {
+                "type": "phase.updated",
+                "phase": "lead_verify",
+                "message": f"预算耗尽，{skipped} 条未终认线索已转人工复核",
+            })
     return done_ids
 
 

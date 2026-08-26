@@ -50,15 +50,15 @@ _SKIP_DIRS = {
 def resolve_index_languages(profile_language_ids: Iterable[str] | None = None) -> list[str]:
     """由画像 languages[].id 决定索引语言。
 
-    - 无画像语言列表：扫全部已支持语言（兼容缺 profile 的调用）。
-    - 有画像但无一映射到索引语言（如仅 rust）：返回空，聚类降级 rule_id。
+    - None（无画像）：扫全部已支持语言。
+    - 空可迭代（有画像但 languages=[]）：返回空，聚类降级。
+    - 有语言但无一映射到索引语言（如仅 rust）：返回空，聚类降级 rule_id。
     """
-    if not profile_language_ids:
-        return sorted(_ALL_INDEX_LANGS)
-    wanted: set[str] = set()
-    for lid in profile_language_ids:
-        wanted.update(_PROFILE_TO_INDEX_LANGS.get(lid, ()))
-    return sorted(wanted & _ALL_INDEX_LANGS)
+    from app.contexts.agent.stacks.registry import index_langs_for_profile_ids
+
+    if profile_language_ids is None:
+        return index_langs_for_profile_ids(None)
+    return index_langs_for_profile_ids([str(x) for x in profile_language_ids])
 
 
 def _parse_functions(language: str, source: str) -> list[tuple[str, int, int]]:

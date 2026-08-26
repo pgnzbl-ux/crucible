@@ -1,10 +1,14 @@
-"""靶场地址：探活走回环，对外展示用宿主机可达 IP，容器内复现走 host.docker.internal。"""
+"""靶场地址：探活走回环，对外与复现一律用宿主机可达 IP:port。
+
+禁止写入 host.docker.internal。回环地址改写成 advertise IP。
+"""
 from __future__ import annotations
 
 import socket
 from urllib.parse import urlparse, urlunparse
 
 _LOOPBACK = {"localhost", "127.0.0.1", "::1"}
+_FORBIDDEN_DOCKER_INTERNAL = "host.docker.internal"
 
 
 def host_advertise_ip() -> str:
@@ -49,7 +53,7 @@ def publish_target_url(port: int, advertise_ip: str | None = None, scheme: str =
 
 
 def rewrite_loopback_host(url: str, advertise_ip: str) -> str:
-    """把 localhost / 127.0.0.1 换成对外 IP，端口保留。"""
+    """把 localhost / 127.0.0.1 / ::1 换成对外 IP，端口保留。"""
     parsed = urlparse(url if "://" in url else f"http://{url}")
     host = (parsed.hostname or "").lower()
     if host not in _LOOPBACK:
@@ -61,17 +65,11 @@ def rewrite_loopback_host(url: str, advertise_ip: str) -> str:
 
 
 def rewrite_url_for_agent_container(url: str | None, advertise_ip: str | None = None) -> str | None:
-    """复现容器内把宿主机靶标改成 host.docker.internal。"""
+    """复现注入：回环与遗留 host.docker.internal 一律改成 advertise IP:port。"""
     if not url:
         return url
-    rewritten = (
-        url.replace("http://localhost", "http://host.docker.internal")
-        .replace("https://localhost", "https://host.docker.internal")
-        .replace("http://127.0.0.1", "http://host.docker.internal")
-        .replace("https://127.0.0.1", "https://host.docker.internal")
-    )
     ip = advertise_ip if advertise_ip is not None else host_advertise_ip()
-    if ip and ip not in _LOOPBACK:
-        rewritten = rewritten.replace(f"http://{ip}", "http://host.docker.internal")
-        rewritten = rewritten.replace(f"https://{ip}", "https://host.docker.internal")
-    return rewritten
+    raw = url if "://" in url else f"http://{url}"
+    if _FORBIDDEN_DOCKER_INTERNAL in raw:
+        raw = raw.replace(_FORBIDDEN_DOCKER_INTERNAL, ip)
+    return rewrite_loopback_host(raw, ip)

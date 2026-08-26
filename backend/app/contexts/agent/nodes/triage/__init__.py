@@ -15,7 +15,6 @@ from ..base import NodeContext, emit_phase, task_run_cancelled
 from . import cascade
 from .adjudicate import adjudicate_group
 from .queue import order_groups, scan_review_groups
-from .streamer import LeadStreamer
 
 
 class TriageNode:
@@ -94,36 +93,12 @@ class TriageNode:
             phase=self.node_key,
         )
 
-        streamer = (
-            LeadStreamer(ctx, settings, phase=self.node_key)
-            if getattr(settings, "triage_stream_dispatch_enabled", True)
-            else None
-        )
-        try:
-            cancelled = await self._run_agent(
-                ctx, svc, queue, settings, stats, streamer=streamer,
-            )
-        except BaseException:
-            if streamer is not None:
-                await streamer.cancel_and_reap()
-            raise
+        cancelled = await self._run_agent(ctx, svc, queue, settings, stats)
 
         if cancelled:
-            if streamer is not None:
-                await streamer.cancel_and_reap()
             await ctx.db_session.commit()
             return self._output(stats, skipped_llm, 0, cancelled=True)
 
-        if streamer is not None:
-            await streamer.poll()
-            if streamer.enqueued:
-                emit_phase(
-                    ctx,
-                    f"AI 二审完成，等待 {streamer.enqueued} 条流式终认线索排空"
-                    "（验证与报告随后就绪）",
-                    phase=self.node_key,
-                )
-            await streamer.join()
         await ctx.db_session.commit()
         leftover = await svc.mark_unaudited_for_review(ctx.task_id)
         await ctx.db_session.commit()
@@ -147,8 +122,6 @@ class TriageNode:
         queue: list,
         settings,
         stats: cascade.TierStats,
-        *,
-        streamer: LeadStreamer | None = None,
     ) -> bool:
         """T3 族审 + 传播；cascade 关闭则串行全价 agent。返回 True=取消。"""
         from app.contexts.finding.models import AlertGroup
@@ -203,8 +176,6 @@ class TriageNode:
             )
             stats.propagated += propagated
             stats.propagated_review += review
-            if streamer is not None:
-                await streamer.offer(family.members + [rep])
         await ctx.db_session.commit()
         return False
 

@@ -86,7 +86,7 @@ class Settings(BaseSettings):
     # Provider Base URL：生产必须 false。本地开发可 true（.env）；false=仅 HTTPS 公网域名
     llm_base_url_relaxed: bool = True
     triage_hide_sast_conclusion: bool = True  # 结论信号默认不注入(§2.2 反锚定)
-    triage_high_confidence: float = 0.8  # dispatch HIGH 阈值
+    triage_high_confidence: float = 0.8  # 历史 HIGH 水位；dispatch 入队不再用硬门槛（漏报优先）
     triage_medium_confidence: float = 0.5
     # 仅用于首次创建 PlatformSetting / 旧调用方兜底；运行时以设置页 DB 值为准。
     lead_verify_per_task: int = 2

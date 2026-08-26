@@ -1,10 +1,9 @@
-"""节点拓扑声明 — 换列表即可换驱动，不改节点实现。
+"""节点拓扑声明 — 15 个能力节点，按任务模式裁剪子图。
 
 权威契约：docs/discovery-spec.md。DEFAULT_PIPELINE 为一张图：
 - 仓库审计(task_type=discovery)：全图；dispatch 入队；无队 NO_DISPATCH_LEAD skip 终认；
   有队 LEAD_DRIVEN skip DAG audit/reproduce；两种出口都生成聚合审计 report。
-- 漏洞验证(task_type=verify)：scan_*/api_inventory/api_hunt/cluster/screen/triage/dispatch
-  被 VERIFY_MODE skip，走终认工位；skip 视为 completed，满足下游 requires。
+- 漏洞验证(task_type=verify)：只实例化 source/profile/env_ready/audit/reproduce/report。
 """
 from __future__ import annotations
 
@@ -83,9 +82,9 @@ DEFAULT_PIPELINE: tuple[NodeSpec, ...] = (
     NodeSpec(
         key="env_ready",
         index=6,
-        requires=("source", "profile"),
+        requires=("source", "profile", "dispatch"),
         produces="env_ready",
-        skip_when=frozenset({SkipWhen.NON_WEB}),
+        skip_when=frozenset({SkipWhen.NON_WEB, SkipWhen.NO_DISPATCH_LEAD}),
     ),
     NodeSpec(
         key="cluster",
@@ -158,10 +157,80 @@ DEFAULT_PIPELINE: tuple[NodeSpec, ...] = (
 
 NODE_BY_KEY: dict[str, NodeSpec] = {spec.key: spec for spec in DEFAULT_PIPELINE}
 
+# verify 保留 catalog index，但依赖只指向子图内节点。NodeRun 因此仍可
+# 与历史数据/前端能力编号稳定对齐，同时不再产生九个伪 skip 行。
+VERIFY_PIPELINE: tuple[NodeSpec, ...] = (
+    NODE_BY_KEY["source"],
+    NODE_BY_KEY["profile"],
+    NodeSpec(
+        key="env_ready", index=6, requires=("source", "profile"),
+        produces="env_ready", skip_when=frozenset({SkipWhen.NON_WEB}),
+    ),
+    NodeSpec(
+        key="audit", index=12, requires=("source", "profile"), produces="audit",
+    ),
+    NodeSpec(
+        key="reproduce", index=13, requires=("source", "env_ready", "audit"),
+        produces="reproduce",
+        skip_when=frozenset({
+            SkipWhen.NON_WEB, SkipWhen.GATE_FAIL, SkipWhen.GATE_UNCERTAIN,
+        }),
+        skip_verdict={"gate_fail": "false_positive"},
+    ),
+    NodeSpec(
+        key="report", index=14,
+        requires=("profile", "env_ready", "audit", "reproduce"),
+        produces="report", failure_policy="preserve_audit_verdict",
+    ),
+)
 
-def node_by_key(key: str) -> NodeSpec:
+
+def pipeline_for(task_type: str | None) -> tuple[NodeSpec, ...]:
+    """返回任务真正执行的子图；None 仅兼容历史 verify 记录。"""
+    if task_type == "discovery":
+        return DEFAULT_PIPELINE
+    if task_type in (None, "verify"):
+        return VERIFY_PIPELINE
+    raise ValueError(f"未知任务类型: {task_type}")
+
+
+def ancestor_keys(pipeline: tuple[NodeSpec, ...], key: str) -> set[str]:
+    """返回 key 的全部递归前置（不含自身）。"""
+    by_key = {spec.key: spec for spec in pipeline}
+    if key not in by_key:
+        raise KeyError(f"未知子图节点: {key}")
+    found: set[str] = set()
+    stack = list(by_key[key].requires)
+    while stack:
+        current = stack.pop()
+        if current in found:
+            continue
+        found.add(current)
+        stack.extend(by_key[current].requires)
+    return found
+
+
+def descendant_keys(pipeline: tuple[NodeSpec, ...], key: str) -> set[str]:
+    """返回从 key 开始必须失效的节点（含自身）。"""
+    keys = {spec.key for spec in pipeline}
+    if key not in keys:
+        raise KeyError(f"未知子图节点: {key}")
+    found = {key}
+    changed = True
+    while changed:
+        changed = False
+        for spec in pipeline:
+            if spec.key not in found and any(dep in found for dep in spec.requires):
+                found.add(spec.key)
+                changed = True
+    return found
+
+
+def node_by_key(key: str, *, task_type: str | None = None) -> NodeSpec:
     try:
-        return NODE_BY_KEY[key]
+        if task_type is None:
+            return NODE_BY_KEY[key]
+        return {spec.key: spec for spec in pipeline_for(task_type)}[key]
     except KeyError as e:
         raise KeyError(f"未知节点: {key}") from e
 
@@ -172,9 +241,10 @@ def validate_pipeline(pipeline: tuple[NodeSpec, ...] = DEFAULT_PIPELINE) -> None
     assert len(keys) == len(set(keys)), "节点 key 重复"
     indexes = [s.index for s in pipeline]
     assert indexes == sorted(set(indexes)), "node_index 必须唯一且递增"
+    pipeline_keys = set(keys)
     for spec in pipeline:
         for dep in spec.requires:
-            assert dep in NODE_BY_KEY, f"{spec.key} 依赖未知节点 {dep}"
+            assert dep in pipeline_keys, f"{spec.key} 依赖子图外节点 {dep}"
     # 无环(Kahn)
     pending = {s.key: set(s.requires) for s in pipeline}
     resolved: set[str] = set()

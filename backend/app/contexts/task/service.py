@@ -5,6 +5,8 @@ import logging
 
 from sqlalchemy import select, update
 
+from app.contexts.agent.contracts import DEFAULT_PIPELINE as _PIPELINE
+from app.contexts.agent.contracts import ancestor_keys, descendant_keys, pipeline_for
 from app.shared.time import iso_utc
 
 from .models import Task, TaskRun, AgentEvent
@@ -18,20 +20,12 @@ class TaskDispatchError(RuntimeError):
     """任务已落库，但无法投递给 Agent worker。"""
 
 
-# 节点顺序 → 索引(从 registry 派生，discovery-spec §4.2.4 后 DEFAULT_PIPELINE 是 13 节点)。
+# 可重试能力集合从 15 节点 catalog 派生；具体依赖按任务子图计算。
 # 单节点重试不允许从 source/profile 起步——它们便宜且确定性，想重跑直接整轮 retry(from_node=None)。
-from app.contexts.agent.contracts import DEFAULT_PIPELINE as _PIPELINE
-from app.contexts.agent.contracts import SkipWhen as _SkipWhen
-
-_NODE_INDEX = {spec.key: spec.index for spec in _PIPELINE}
 _RETRYABLE_FROM_NODES = tuple(
     spec.key for spec in _PIPELINE if spec.key not in ("source", "profile")
 )
-# verify 任务会被 VERIFY_MODE skip 的节点：旧 run 缺行可容忍(新 run 重新 skip)
-_VERIFY_MODE_SKIP_KEYS = frozenset(
-    spec.key for spec in _PIPELINE if _SkipWhen.VERIFY_MODE in spec.skip_when
-)
-# Lab 占用：pending/queued/running。needs_review 不算 live（不续 TTL）。
+# Lab 占用：pending/queued/running。needs_review 不算 live（任务终态后起算 TTL）。
 LIVE_TASK_STATUSES = frozenset({"pending", "queued", "running"})
 # 前置节点视为"可续跑"的终态:completed(有产出可复用)或 skipped(分支出口跳过)。
 _RESUMABLE_STATUSES = ("completed", "skipped")
@@ -353,10 +347,12 @@ class TaskService:
         await self.repo.update_status(task, "cancelled")
         await self.repo.session.commit()
 
-        # 4. 创建中的 Lab 若失去创建者，标记失败供其他任务回收
+        # 4. 创建中的 Lab 若失去创建者，标记失败供其他任务回收；空闲则起算 TTL
         from app.contexts.lab.service import LabService
 
-        await LabService(self.session).mark_creator_cancelled(task_id)
+        lab_svc = LabService(self.session)
+        await lab_svc.mark_creator_cancelled(task_id)
+        await lab_svc.start_ttl_when_idle(task.lab_id)
 
         # 5. 只拆 agent-runner（后台；HTTP 立刻返回）
         from app.contexts.agent.runtime_cleanup import schedule_teardown_task_runtime
@@ -421,8 +417,8 @@ class TaskService:
 
         from_node 为空:从节点 0（源码获取）整条重跑，不拷贝上一 run 的 NodeRun。
         from_node 指定(除 source/profile 外的管线节点，含 triage/cluster/dispatch/scan_*):
-        把上一 run 里该节点**之前**的 completed/skipped NodeRun 原样拷进新 run，
-        编排器据此断点续跑，只重跑该节点及之后。
+        使上一 run 的目标节点及其 DAG 后代失效，复用其余
+        completed/skipped NodeRun，只重跑受影响子图。
         上一 run 的节点/事件保留作历史；工作区是否重置由 worker 按新 run 是否已有 completed 节点决定。
         """
         task = await self.repo.get_by_id_with_runs(task_id, owner_id)
@@ -508,49 +504,44 @@ class TaskService:
     async def _copy_prior_nodes_for_resume(
         self, task: Task, new_run_id: str, from_node: str, *, source_run: TaskRun | None
     ) -> None:
-        """把 source_run 里 from_node 之前的可续跑节点拷进新 run,供编排器断点续跑。
+        """按 DAG 失效目标及后代，复用其余可续跑节点。
 
         按节点 key 匹配并**重写为新拓扑 node_index**(旧 run 的 index 与新
         DEFAULT_PIPELINE 不一致，直接拷 index 会让编排器找不到行)。
-        verify 任务里被 VERIFY_MODE skip 的节点(扫描/聚类/二审/调度)在旧 run
-        可能没有行——缺行不视为失败，新 run 会重新 skip。
+        verify 任务仅在裁剪后子图内重试，发现侧节点直接拒绝。
         """
         from .models import NodeRun
 
-        if from_node not in _RETRYABLE_FROM_NODES:
+        task_type = getattr(task, "task_type", None) or "verify"
+        pipeline = pipeline_for(task_type)
+        active_keys = {spec.key for spec in pipeline}
+        if from_node not in _RETRYABLE_FROM_NODES or from_node not in active_keys:
             raise ValueError(f"不支持的重试起点: {from_node}")
-        target_index = _NODE_INDEX[from_node]
 
         if source_run is None:
             raise ValueError("任务尚无运行记录，无法从指定节点重试")
 
-        task_type = getattr(task, "task_type", None) or "verify"
         prior_nodes = await self.repo.get_node_runs(source_run.id)
         by_key = {nr.node_key: nr for nr in prior_nodes}
+        prerequisites = ancestor_keys(pipeline, from_node)
+        invalidated = descendant_keys(pipeline, from_node)
 
-        for spec in _PIPELINE:
-            if spec.index >= target_index:
+        for spec in pipeline:
+            if spec.key not in prerequisites:
                 continue
             src = by_key.get(spec.key)
             if src is not None and src.status in _RESUMABLE_STATUSES:
-                continue
-            # 缺行/不可续跑：verify 任务里本就会被 VERIFY_MODE skip 的节点放行
-            if (
-                task_type == "verify"
-                and _VERIFY_MODE_SKIP_KEYS
-                and spec.key in _VERIFY_MODE_SKIP_KEYS
-            ):
                 continue
             raise ValueError(
                 f"前置节点未完成，无法从 {from_node} 重试（缺 {spec.key}）"
             )
 
-        for spec in _PIPELINE:
-            if spec.index >= target_index:
+        for spec in pipeline:
+            if spec.key in invalidated:
                 continue
             src = by_key.get(spec.key)
             if src is None or src.status not in _RESUMABLE_STATUSES:
-                continue  # VERIFY_MODE 容忍的缺行
+                continue
             self.repo.session.add(
                 NodeRun(
                     run_id=new_run_id,

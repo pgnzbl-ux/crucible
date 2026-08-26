@@ -479,6 +479,183 @@ def test_runtime_bindings_reject_loopback_only_and_database_ports():
     ]
 
 
+def test_web_host_ports_excludes_object_storage_sidecar_ports():
+    from app.contexts.agent.nodes.env_ready.ports import web_host_ports
+
+    maps = [(13000, 3000), (19000, 9000), (19001, 9001), (6379, 6379)]
+    assert web_host_ports(maps) == [13000]
+
+
+def test_filter_bindings_for_recipe_keeps_only_declared_entry():
+    from app.contexts.agent.nodes.env_ready.ports import filter_bindings_for_recipe
+
+    bindings = [
+        {
+            "host_ip": "0.0.0.0",
+            "host_port": 19000,
+            "container_port": 8080,
+            "protocol": "tcp",
+            "probe_host": "127.0.0.1",
+            "public_host": "10.0.0.8",
+        },
+        {
+            "host_ip": "0.0.0.0",
+            "host_port": 13000,
+            "container_port": 3000,
+            "protocol": "tcp",
+            "probe_host": "127.0.0.1",
+            "public_host": "10.0.0.8",
+        },
+    ]
+    matched, err = filter_bindings_for_recipe(
+        bindings, target_url="http://localhost:13000"
+    )
+    assert err is None
+    assert [int(item["host_port"]) for item in matched] == [13000]
+
+    by_container, err2 = filter_bindings_for_recipe(
+        bindings, target_url="http://localhost:3000"
+    )
+    assert err2 is None
+    assert [int(item["host_port"]) for item in by_container] == [13000]
+
+
+def test_filter_bindings_for_recipe_refuses_sidecar_fallback():
+    from app.contexts.agent.nodes.env_ready.ports import filter_bindings_for_recipe
+
+    bindings = [
+        {
+            "host_ip": "0.0.0.0",
+            "host_port": 19000,
+            "container_port": 8080,
+            "protocol": "tcp",
+            "probe_host": "127.0.0.1",
+            "public_host": "10.0.0.8",
+        },
+    ]
+    matched, err = filter_bindings_for_recipe(
+        bindings, target_url="http://localhost:13000"
+    )
+    assert matched == []
+    assert err is not None
+    assert "13000" in err
+    assert "禁止" in err
+
+
+@pytest.mark.asyncio
+async def test_env_ready_probes_only_recipe_declared_port(tmp_path):
+    """多口同时发布时只探活配方声明入口，旁路 HTTP 口不得进入 health_check。"""
+    from app.contexts.agent.nodes import env_ready as mod
+    from app.contexts.agent.nodes.env_ready import ai_recipe, compose_host, health, ports
+
+    d = tmp_path / "project" / ".vuln-env"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "docker-compose.yml").write_text(
+        "services:\n"
+        "  web:\n"
+        "    image: x\n"
+        "    ports:\n"
+        "      - \"13000:3000\"\n"
+        "  admin:\n"
+        "    image: y\n"
+        "    ports:\n"
+        "      - \"19000:8080\"\n",
+        encoding="utf-8",
+    )
+    ctx = _exec_ctx(tmp_path, {"is_web": True, "port": 3000})
+    runtime = [
+        {
+            "host_ip": "0.0.0.0",
+            "host_port": 19000,
+            "container_port": 8080,
+            "protocol": "tcp",
+        },
+        {
+            "host_ip": "0.0.0.0",
+            "host_port": 13000,
+            "container_port": 3000,
+            "protocol": "tcp",
+        },
+    ]
+    with patch.object(ai_recipe, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
+         patch.object(compose_host, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
+         patch.object(health, "health_check", new_callable=AsyncMock) as mock_hc, \
+         patch.object(
+             ports,
+             "load_runtime_web_bindings",
+             new_callable=AsyncMock,
+             return_value=runtime,
+         ), \
+         patch("app.contexts.agent.target_url.host_advertise_ip", return_value="10.0.0.8"):
+        mock_ai.return_value = _recipe(
+            ".vuln-env/docker-compose.yml",
+            "http://localhost:13000",
+        )
+        mock_up.return_value = (True, "")
+        mock_hc.return_value = (True, 13000, "http")
+        out = await mod.EnvReadyNode().execute(ctx)
+
+    assert mock_hc.await_args.args[0] == [13000]
+    assert mock_hc.await_args.kwargs["container_ports"] == [3000]
+    assert out["target_url"] == "http://10.0.0.8:13000"
+
+
+@pytest.mark.asyncio
+async def test_env_ready_rejects_when_recipe_port_not_published(tmp_path):
+    """声明口未发布时不得用其它已通 HTTP 口冒充就绪。"""
+    from app.contexts.agent.nodes import env_ready as mod
+    from app.contexts.agent.nodes.env_ready import ai_recipe, compose_host, health, ports
+
+    d = tmp_path / "project" / ".vuln-env"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "docker-compose.yml").write_text(
+        "services:\n"
+        "  admin:\n"
+        "    image: y\n"
+        "    ports:\n"
+        "      - \"19000:8080\"\n",
+        encoding="utf-8",
+    )
+    ctx = _exec_ctx(tmp_path, {"is_web": True})
+    runtime = [
+        {
+            "host_ip": "0.0.0.0",
+            "host_port": 19000,
+            "container_port": 8080,
+            "protocol": "tcp",
+        },
+    ]
+    with patch.object(ai_recipe, "run_ai_turn", new_callable=AsyncMock) as mock_ai, \
+         patch.object(compose_host, "docker_compose_up", new_callable=AsyncMock) as mock_up, \
+         patch.object(
+             compose_host, "collect_compose_logs", new_callable=AsyncMock, return_value=""
+         ), \
+         patch.object(compose_host, "docker_compose_down", new_callable=AsyncMock), \
+         patch.object(health, "health_check", new_callable=AsyncMock) as mock_hc, \
+         patch.object(
+             ports,
+             "load_runtime_web_bindings",
+             new_callable=AsyncMock,
+             return_value=runtime,
+         ), \
+         patch("app.contexts.agent.target_url.host_advertise_ip", return_value="10.0.0.8"):
+        mock_ai.side_effect = [
+            _recipe(".vuln-env/docker-compose.yml", "http://localhost:13000"),
+            _recipe(".vuln-env/docker-compose.yml", "http://localhost:19000"),
+        ]
+        mock_up.return_value = (True, "")
+        mock_hc.return_value = (True, 19000, "http")
+        out = await mod.EnvReadyNode().execute(ctx)
+
+    assert mock_ai.call_count == 2
+    assert mock_ai.call_args_list[1].kwargs["failed_stage"] == "health_check"
+    assert "13000" in mock_ai.call_args_list[1].args[2]
+    assert "禁止" in mock_ai.call_args_list[1].args[2]
+    mock_hc.assert_awaited_once()
+    assert mock_hc.await_args.args[0] == [19000]
+    assert out["target_url"] == "http://10.0.0.8:19000"
+
+
 def _urlopen_cm(body: str, status: int = 200):
     resp = MagicMock()
     resp.status = status

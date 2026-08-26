@@ -1,5 +1,6 @@
 """合格可疑真洞门（discovery-spec §2.7）。dispatch 与 LeadStreamer 共用。
 
+漏报优先：置信度不挡入队；agent / propagated 可入；快审/规则/携带禁入。
 Agent 输出不可信：why/evidence/三布尔由 schema 拒收后再过本门。
 """
 from __future__ import annotations
@@ -9,6 +10,9 @@ from typing import Any
 from app.contexts.finding.clustering import should_downgrade
 
 SANITIZER_OK = frozenset({"none", "bypassable"})
+
+# T3 亲审、猎洞直出、族传播；不含快审/规则/携带
+DISPATCH_VERDICT_SOURCES = frozenset({"agent", "propagated"})
 
 # 对用户文案；禁止把 tp/fp 当标签原文
 USER_VERDICT_LABELS = {
@@ -41,17 +45,16 @@ def rejection_reason(
     adjudication: Any = None,
     high_confidence: float = 0.8,
 ) -> str | None:
-    """返回拒绝原因；None 表示可入终认队。"""
+    """返回拒绝原因；None 表示可入终认队。
+
+    high_confidence 保留兼容调用方，**不再**作为入队硬门槛（只排序用）。
+    """
+    del high_confidence  # 漏报优先：置信度不挡入队
     if (getattr(group, "ai_verdict", None) or "") != "tp":
         return "不是可疑真洞"
-    if (getattr(group, "verdict_source", None) or "") != "agent":
-        return "须 T3 亲审"
-    try:
-        conf = float(getattr(group, "ai_confidence", None) or 0.0)
-    except (TypeError, ValueError):
-        conf = 0.0
-    if conf < high_confidence:
-        return "置信不足"
+    source = getattr(group, "verdict_source", None) or ""
+    if source not in DISPATCH_VERDICT_SOURCES:
+        return "须 T3 亲审或族传播"
     why = list(getattr(adjudication, "why", None) or [])
     if not any(str(item).strip() for item in why):
         return "缺少 why"

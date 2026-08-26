@@ -63,6 +63,75 @@ def test_compose_progress_throttle_emits_first_urgent_and_flush():
     assert emitted[-1] == "exporting to image"
 
 
+def test_compose_progress_throttle_dedupes_repeated_urgent_errors():
+    """同类 error 即使匹配 urgent，也不能每条都突破节流刷屏。"""
+    from app.contexts.agent.nodes.env_ready.compose_host import ComposeProgressThrottle
+
+    emitted: list[str] = []
+    t = ComposeProgressThrottle(emitted.append, min_interval=10.0)
+    t.push("Building app")
+    for i in range(50):
+        t.push(f"#13 {180 + i * 0.1:.1f} Error: connect ECONNREFUSED 127.0.0.1:6379")
+    t.flush()
+    error_lines = [x for x in emitted if "ECONNREFUSED" in x]
+    assert 1 <= len(error_lines) <= 3
+    assert len(emitted) < 10
+
+
+def test_compose_diag_stall_guard_trips_on_repeated_fingerprint():
+    from app.contexts.agent.nodes.env_ready.compose_host import (
+        COMPOSE_DIAG_REPEAT_ABORT,
+        ComposeDiagStallGuard,
+    )
+
+    guard = ComposeDiagStallGuard(limit=5)
+    assert guard.observe("Building…") is None
+    reason = None
+    for _ in range(5):
+        reason = guard.observe("#13 181.9 Error: connection refused")
+    assert reason is not None
+    assert "connection refused" in reason.lower() or "反复" in reason
+
+
+@pytest.mark.asyncio
+async def test_compose_up_aborts_on_repeating_diagnostic_spam(tmp_path):
+    """同类诊断日志反复出现时必须 kill 并失败，便于回喂下一轮。"""
+    from app.contexts.agent.nodes.env_ready.compose_host import (
+        classify_compose_failure_stage,
+        docker_compose_up,
+    )
+
+    compose = tmp_path / "repo" / ".vuln-env"
+    compose.mkdir(parents=True)
+    (compose / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+
+    spam = "\n".join(
+        f"#13 {180 + i * 0.1:.1f} Error: connect ECONNREFUSED 127.0.0.1:6379"
+        for i in range(50)
+    ) + "\n"
+    fake = MagicMock()
+    fake.stdout = StringIO(spam)
+    fake.wait.return_value = -9
+    fake.kill = MagicMock()
+
+    with patch(
+        "app.contexts.agent.nodes.env_ready.compose_host.subprocess.Popen",
+        return_value=fake,
+    ), patch(
+        "app.contexts.agent.nodes.env_ready.compose_host.COMPOSE_DIAG_REPEAT_ABORT",
+        10,
+    ):
+        ok, err = await docker_compose_up(
+            ".vuln-env/docker-compose.yml", str(tmp_path), "repo", lab_id="Lab-1"
+        )
+
+    assert ok is False
+    assert "反复" in err or "中止" in err
+    assert "failed to build" in err.lower() or "repeating" in err.lower()
+    assert classify_compose_failure_stage(err) == "compose_build"
+    fake.kill.assert_called()
+
+
 @pytest.mark.asyncio
 async def test_compose_up_uses_lab_project_name(tmp_path):
     """up 必须带 -p crucible-lab-{lab_id}，否则巡检扫不到历史靶场。"""

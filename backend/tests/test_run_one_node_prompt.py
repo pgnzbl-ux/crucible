@@ -67,12 +67,12 @@ def test_reproduce_prompt_includes_target_url_in_json():
     text = _build_node_prompt(
         "reproduce",
         {
-            "target_url": "http://host.docker.internal:8080",
+            "target_url": "http://10.0.0.8:8080",
             "initial_creds": {"username": "admin", "password": "admin123"},
             "audit": {"gate_verdict": "pass"},
         },
     )
-    assert "host.docker.internal:8080" in text
+    assert "10.0.0.8:8080" in text
     assert "admin123" in text
     dumped = json.dumps({"gate_verdict": "pass"})
     assert "gate_verdict" in text
@@ -153,12 +153,15 @@ def test_node_skills_exist_and_are_sliced():
             assert "上一轮产物" in body
             assert "failed_stage" in body
         if key == "reproduce":
-            assert "host.docker.internal" in body
+            assert "原样使用" in body
+            assert "initial_creds" in body
+            assert "IP:port" in body or "target_url" in body
             assert "attempts" in body
             assert "`type`" in body
             assert "`detail`" in body
             assert "report_data" in body
             assert "禁止" in body
+            assert "host.docker.internal" in body  # 明确禁止该项
         if key == "report":
             assert "verification_record" in body
             assert "vulnerability_report" in body
@@ -250,6 +253,9 @@ def test_build_options_keeps_full_automation_and_isolates_repo_config():
     pre_hooks = captured["hooks"]["PreToolUse"]
     assert len(pre_hooks) == 1
     assert not isinstance(pre_hooks[0], dict), "裸 dict 会被 SDK 静默丢掉 hooks"
+    stop_hooks = captured["hooks"]["Stop"]
+    assert len(stop_hooks) == 1
+    assert not isinstance(stop_hooks[0], dict)
     assert "crucible" in captured["mcp_servers"]
     assert "mcp__crucible__submit_result" in captured["allowed_tools"]
     assert "submit_result" not in captured["allowed_tools"]
@@ -332,6 +338,8 @@ def test_reproduce_skill_drops_attempt_cap_and_requires_first_shot():
     assert "判定即停" in text
     assert "poc" in text
     assert "python" in text.lower()
+    assert "禁止空转" in text
+    assert "不设验证次数上限" not in text
 
 
 def test_report_skill_poc_is_platform_owned():

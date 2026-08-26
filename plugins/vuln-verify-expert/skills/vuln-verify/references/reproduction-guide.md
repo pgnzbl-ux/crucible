@@ -196,10 +196,11 @@ target server can reach a host you control AND that you can observe the hit:
    server with an `/inbox` route, or webhook.site / oast.fun / interactsh). Bind
    `0.0.0.0`, never `localhost`.
 2. Confirm reachability **from inside the target's network context**: `docker exec` a
-   `wget`/`curl` from the container to your listener and require a 200. On Docker
-   Desktop use `host.docker.internal`; on a Linux bridge use the gateway IP; on a custom
+   `wget`/`curl` from the container to your listener and require a 200. Prefer the
+   host advertise `IP:port` (same form as Crucible `target_url`); on a custom
    compose network confirm the actual gateway. **Never assume `127.0.0.1` or
    `172.17.0.1` works** — verify, or you will chase false negatives and misread them.
+   Do **not** use `host.docker.internal`.
 3. Only after the preflight listener returns 200, point the vulnerable setting
    (e.g. `webdav_url`, webhook URL, avatar URL) at your listener and trigger.
 

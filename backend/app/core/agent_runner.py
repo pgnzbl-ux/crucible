@@ -38,7 +38,8 @@ logger = logging.getLogger(__name__)
 
 AGENT_RUNNER_NAME_PREFIX = "crucible-agent-runner"
 AGENT_RUNNER_NETWORK = "crucible-sandbox-net"
-AGENT_EXTRA_HOSTS = {"host.docker.internal": "host-gateway"}
+# 复现一律走宿主机 IP:port，不再注入 host.docker.internal。
+AGENT_EXTRA_HOSTS: dict[str, str] = {}
 # 自定义 bridge 在 Docker Desktop 上 127.0.0.11 经常解析不了公网；写死公共 DNS。
 AGENT_RUNNER_DNS = ["223.5.5.5", "8.8.8.8", "1.1.1.1"]
 
@@ -264,7 +265,6 @@ class AgentRunnerManager:
             "security_opt": ["no-new-privileges"],
             "network_disabled": spec.network_disabled,
             "network": None if spec.network_disabled else spec.network,
-            "extra_hosts": AGENT_EXTRA_HOSTS,
             "dns": None if spec.network_disabled else AGENT_RUNNER_DNS,
             "log_config": LogConfig(
                 type="json-file",
@@ -272,6 +272,8 @@ class AgentRunnerManager:
             ),
             "detach": True,
         }
+        if AGENT_EXTRA_HOSTS:
+            container_config["extra_hosts"] = AGENT_EXTRA_HOSTS
 
         try:
             client = self._client_or_connect()

@@ -256,12 +256,36 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 )
                 continue
 
+            raw_url = recipe.get("target_url") or ""
+            usable_bindings, recipe_port_err = ports.filter_bindings_for_recipe(
+                usable_bindings,
+                target_url=str(raw_url) if raw_url else None,
+            )
+            if recipe_port_err or not usable_bindings:
+                logs = await compose_host.collect_compose_logs(
+                    ctx.host_workdir, compose_rel, repo, lab_id=result.lab_id
+                )
+                last_error = (
+                    f"attempt {attempt} {recipe_port_err or '配方声明入口无可用绑定'}\n"
+                    f"--- logs ---\n{compose_host.summarize_compose_failure(logs)}"
+                )
+                failed_stage = "health_check"
+                _snapshot_failed_attempt(ctx, attempt, last_error, failed_stage, recipe)
+                events._emit(
+                    ctx,
+                    f"配方入口未发布，回喂 AI 回溯（{attempt}/{MAX_ATTEMPTS}）",
+                )
+                await cache_recipe._require_creation_owner(ctx, svc, result.lab_id)
+                await compose_host.docker_compose_down(
+                    ctx.host_workdir, compose_rel, repo, lab_id=result.lab_id
+                )
+                continue
+
             runtime_host_ports = [int(item["host_port"]) for item in usable_bindings]
             events._emit(
                 ctx,
                 f"正在探活实际发布端口 {runtime_host_ports}"
             )
-            raw_url = recipe.get("target_url") or ""
             parsed = urlparse(
                 str(raw_url) if "://" in str(raw_url) else f"http://{raw_url}"
             ) if raw_url else None
