@@ -104,6 +104,10 @@ class Settings(BaseSettings):
     triage_propagate_min_confidence: float = 0.6  # 代表判决低于此值时成员转人工
     triage_propagate_confidence_factor: float = 0.85  # 传播判决置信度折扣(无验证数据时的默认)
     triage_concurrency: int = 4  # agent 审议并发（受 runner 并发上限约束）
+    # 瞬时 LLM 错误（5xx/断连/限流）每组退避重试次数；耗尽后该组转人工不中止节点
+    triage_llm_transient_retries: int = 1
+    # 连续多组瞬时降级达此数视为平台级网关故障，升级中止二审（防静默全转人工）
+    triage_llm_transient_fatal_streak: int = 3
     # ── 验证结果回流：lead 终态(resolution)是真值，反哺级联先验 ──
     # 一条已验证判决的证据权重（相对 agent 亲审的 1.0）
     triage_feedback_resolved_weight: float = 3.0

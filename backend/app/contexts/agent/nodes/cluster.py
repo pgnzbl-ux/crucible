@@ -1,7 +1,7 @@
 """cluster 节点 — 确定性降噪 + 函数索引 + 指纹分组 + grade/降权。
 
-入口检查：三个 ScanRun 全 failed → raise「全引擎失败」。
-只汇入 semgrep/gitleaks/osv RawFinding（不含 api_hunt）。
+入口检查：四路 handoff 指向的 ScanRun 全 failed → raise「全引擎失败」。
+只汇入 handoff 明确指向的 semgrep/gitleaks/osv/api_hunt RawFinding，禁止跨运行全扫。
 按 profile.languages 建索引（python/java/js/ts）；产出 ClusterHandoff 计数与进度事件。
 """
 from __future__ import annotations
@@ -47,12 +47,48 @@ class ClusterNode:
         inp = self._resolve_input(ctx, node_input)
         ctx.node_input = inp
 
+        from app.contexts.discovery.models import ScanRun
         from app.contexts.discovery.service import DiscoveryService
 
-        scan_runs = await DiscoveryService(ctx.db_session).get_scan_runs(ctx.run_id)
+        scan_handoffs = list(getattr(inp, "scans", None) or [])
+        handed_ids = {
+            str(scan.scan_run_id)
+            for scan in scan_handoffs
+            if getattr(scan, "scan_run_id", None)
+        }
+        missing_provenance = [
+            str(getattr(scan, "engine", None) or "unknown")
+            for scan in scan_handoffs
+            if not getattr(scan, "scan_run_id", None)
+            and int(getattr(scan, "finding_count", 0) or 0) > 0
+        ]
+        if missing_provenance:
+            raise RuntimeError(
+                "发现节点产出非零 finding 但缺少 scan_run_id："
+                + ", ".join(sorted(missing_provenance))
+            )
+
+        if handed_ids:
+            scan_runs = list((await ctx.db_session.execute(
+                select(ScanRun).where(
+                    ScanRun.id.in_(handed_ids),
+                    ScanRun.task_id == ctx.task_id,
+                )
+            )).scalars().all())
+            resolved_ids = {scan.id for scan in scan_runs}
+            unresolved_ids = sorted(handed_ids - resolved_ids)
+            if unresolved_ids:
+                raise RuntimeError(
+                    "发现 handoff 引用了无效或跨任务 ScanRun："
+                    + ", ".join(unresolved_ids)
+                )
+        else:
+            # 兼容升级前无 scan_run_id 的历史 NodeRun；新运行必须走上面的显式 handoff。
+            scan_runs = await DiscoveryService(ctx.db_session).get_scan_runs(ctx.run_id)
+            resolved_ids = {scan.id for scan in scan_runs}
         terminal = [s for s in scan_runs if s.status in ("completed", "failed", "skipped")]
         if scan_runs and terminal and all(s.status == "failed" for s in terminal):
-            raise RuntimeError("全引擎失败：semgrep/gitleaks/osv 均未产出，请从扫描节点重试")
+            raise RuntimeError("全引擎失败：semgrep/gitleaks/osv/api_hunt 均未产出，请从发现节点重试")
 
         profile = getattr(inp, "profile", None)
         profile_ids: list[str] = []
@@ -87,19 +123,23 @@ class ClusterNode:
             save_index(ctx.host_workdir, index)
         emit_phase(ctx, f"索引完成：{len(index)} 个符号", phase=self.node_key)
 
-        from app.contexts.finding.clustering import is_scan_engine
+        from app.contexts.finding.clustering import is_cluster_engine
 
-        all_rows = (await ctx.db_session.execute(
-            select(RawFinding).where(RawFinding.task_id == ctx.task_id)
-        )).scalars().all()
-        # 只汇入三扫描引擎；api_hunt 由猎洞节点自建组，避免同 locus 合并短路 T3
-        findings = [f for f in all_rows if is_scan_engine(f.engine)]
-        skipped_hunt = len(all_rows) - len(findings)
+        all_rows = []
+        if resolved_ids:
+            all_rows = list((await ctx.db_session.execute(
+                select(RawFinding).where(
+                    RawFinding.task_id == ctx.task_id,
+                    RawFinding.scan_run_id.in_(resolved_ids),
+                )
+            )).scalars().all())
+        findings = [f for f in all_rows if is_cluster_engine(f.engine)]
+        skipped_unknown = len(all_rows) - len(findings)
         emit_phase(
             ctx,
             (
-                f"读取扫描 findings {len(findings)} 条"
-                + (f"（忽略猎洞 {skipped_hunt}）" if skipped_hunt else "")
+                f"读取本轮四路 findings {len(findings)} 条 / ScanRun {len(resolved_ids)} 个"
+                + (f"（忽略未知引擎 {skipped_unknown}）" if skipped_unknown else "")
             ),
             phase=self.node_key,
         )
@@ -108,6 +148,10 @@ class ClusterNode:
                 "id": f.id, "engine": f.engine, "rule_id": f.rule_id, "cwe": f.cwe,
                 "severity": f.severity, "file_path": f.file_path,
                 "line_start": f.line_start, "line_end": f.line_end,
+                "function_symbol": (
+                    (f.raw or {}).get("function_symbol")
+                    if isinstance(f.raw, dict) else None
+                ),
                 "message": f.message, "source_to_sink": f.source_to_sink,
                 "raw": f.raw or {},
             }

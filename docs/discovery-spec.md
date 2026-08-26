@@ -1,7 +1,7 @@
 # Crucible 代码审计与漏洞挖掘规格
 
 > 状态：已确认  
-> 版本：1.5  
+> 版本：1.7
 > 业务定位：AI 辅助下的代码审计漏洞挖掘平台
 
 ## 1. 产品边界
@@ -41,7 +41,7 @@ Crucible 的主流程是“项目资产 → 代码审计 → 漏洞线索 → �
 | `tp` | true positive | **可疑真洞** | 二审认为像真漏洞，**尚未终认** |
 | `need_more_context` | — | **二审未决** | 切片上三问答不上，不是误报也不是真洞 |
 
-终认另有一套词：`confirmed` / `partial` = 已确认；`false_positive` = 终认证伪；`code_reachable` = 无靶场时的代码可达。全程都在当前 15 节点编排里（含 `api_inventory` / `api_hunt`）。
+终认另有一套词：`confirmed` / `partial` = 已确认；`false_positive` = 终认证伪；`code_reachable` = 无靶场时的代码可达。全程落在能力 catalog + 模式化子图里（discovery 含 `api_inventory` / `api_hunt` / `lead_verify` / `finalize`；verify 走终认子图）。
 
 验证方式对用户文案：`lab` = **靶场验证**；`code_path` = **代码闭环**（无靶场或未跑动态复现时的白盒终局）。
 
@@ -49,7 +49,7 @@ Crucible 的主流程是“项目资产 → 代码审计 → 漏洞线索 → �
 
 ### 2.1 发现来源
 
-四条并行线索：Semgrep、Gitleaks、OSV、API 猎洞（`engine=api_hunt`）。前三条经扫描节点独立执行、独立记账，汇入 `cluster`（**不含** `api_hunt` RawFinding）；猎洞经 `api_inventory → api_hunt` 自建 AlertGroup。单引擎/猎洞失败不得抹去其它线索。扫描复核链（`cluster → screen → triage`）与猎洞并列，互不阻塞；`dispatch` 等两端都 terminal 后统一按 §2.7 入队。
+四条发现来源：Semgrep、Gitleaks、OSV、API 猎洞（`engine=api_hunt`）。四者都只产出 `ScanRun + RawFinding`，然后汇入同一条 `cluster → screen → triage → dispatch` 复核链。`api_hunt` 是候选生成器，不得自建 AlertGroup、直出 Adjudication 或绕过二审；其安全判断允许 `false/null/unknown/effective`，发现阶段不得用终审合格门丢弃可定位候选。单引擎/猎洞失败不得抹去其它线索；`cluster` 在四条发现分支都 terminal 后统一收口。
 
 ### 2.2 反锚定
 
@@ -61,7 +61,7 @@ AI 二审默认不接收静态引擎的最终结论措辞，只接收规则身�
 
 ### 2.3.1 线索叙事（规范化人读字段）
 
-不论引擎原文形态如何，凡进入 Adjudication（含 `api_hunt` 直出）的线索必须写入统一叙事字段，供线索详情与后续漏洞报告复用。引擎 RawFinding 原文保留，叙事是规范化层，不得覆盖命中片段。
+不论引擎原文形态如何，凡进入 Adjudication 的线索必须写入统一叙事字段，供线索详情与后续漏洞报告复用。引擎 RawFinding 原文保留，叙事是规范化层，不得覆盖命中片段。
 
 | 字段 | 要求 |
 |---|---|
@@ -73,7 +73,7 @@ AI 二审默认不接收静态引擎的最终结论措辞，只接收规则身�
 
 - **Semgrep / Gitleaks**：T3 `triage` 的 `submit_result` 对 `tp`（建议 `fp` 亦然）必填 `summary` + `reasoning`。
 - **OSV**：默认 `bypass`，**不进**昂贵 T3；用确定性模板写入同一 `summary` / `reasoning`（依赖、编号、严重度、`called`、修复版本等）。仅 `called=true` 且后续 T3 认为可达才允许入终认队（§2.7）。
-- **API 猎洞**：仍绕过 screen/triage，但直出 Adjudication 时必须带同一叙事字段。
+- **API 猎洞**：在 RawFinding.raw 保留 `why` / `evidence` / `summary` / `reasoning` 作为候选证据；最终 Adjudication 仍由统一 screen/triage 链生成。
 
 二审输入仍遵守 §2.2 反锚定；叙事是**输出**给人类，不是把引擎结论当真理喂回模型。
 
@@ -115,7 +115,7 @@ OSV 不是 SAST。不得把全部 GHSA 当白盒真洞；仅当本仓库**调用
 必须**同时**满足：
 
 1. `verdict == tp`（可疑真洞，不是误报）。
-2. `verdict_source ∈ {agent, propagated}`：T3 亲审、`api_hunt` 猎洞直出（`context_log.via=api_hunt`）、或同根因族内由代表 T3 判决传播的成员。T2 `fast_model` / 规则层 `rule` / 携带 `carryover` 的 tp **禁止入队**（仍遵守 §2.6：不得把快审 tp 整包送终认）。猎洞嫌疑在字段齐备时即写 `verdict_source=agent` 判决并计 `qualified_count`；置信度不挡直出。
+2. `verdict_source ∈ {agent, propagated}`：T3 亲审（包括由 `api_hunt` 候选升级的线索），或同根因族内由代表 T3 判决传播的成员。T2 `fast_model` / 规则层 `rule` / 携带 `carryover` 的 tp **禁止入队**（仍遵守 §2.6：不得把快审 tp 整包送终认）。
 3. 族传播：一家族仍只让代表走 T3；成员可带传播判决入终认（各自 locus 独立 LeadRun）。传播落库时必须拷贝代表的 `evidence` 与合格门字段，否则成员会被 schema 门挡下。
 4. `confidence`：**不作为入队硬门槛**；dispatch 排序仍可按置信度优先（高置信先跑）。
 5. schema 强制：`why` 非空、`evidence` 非空、`summary`/`reasoning` 非空（§2.3.1）；平台拒收不合格 `submit_result`：
@@ -165,12 +165,12 @@ OSV 不是 SAST。不得把全部 GHSA 当白盒真洞；仅当本仓库**调用
 ### 4.1 两种模式
 
 - `discovery`：执行画像、扫描、聚类、二审、调度、多线索终认和聚合报告。
-- `verify`：仅实例化 `source → profile → (audit ∥ env_ready) → reproduce → report`
+- `verify`：仅实例化 `source → profile → (audit ∥ env_ready) → reproduce → finalize → report`
   子图；不得创建一串 `VERIFY_MODE skipped` 的发现侧 NodeRun 伪装成执行轨迹。
 
 ### 4.2 调度与分支
 
-编排器按依赖就绪渐进调度：节点 `requires` 全部 terminal（completed/skipped）即准入开跑；任一完成立即写入 terminal 并解锁下游，**同批就绪的兄弟节点不构成整波屏障**。发现侧不等待靶场；`env_ready` 在 `dispatch` 已证明有合格线索后才就绪，完成或降级后再由 LeadWorker 排空终认队列。skip 是可观察终态并满足下游依赖。分支信号包括 `non_web`、`no_dispatch_lead`、`lead_driven`、`gate_fail`、`gate_uncertain`；模式选择由子图解决，不是运行时连续 skip。
+编排器按依赖就绪渐进调度：节点 `requires` 全部 terminal（completed/skipped）即准入开跑；任一完成立即写入 terminal 并解锁下游，**同批就绪的兄弟节点不构成整波屏障**。发现侧不等待靶场；`env_ready` 在 `dispatch` 已证明有合格线索后才就绪，完成或降级后再由 `lead_verify`（LeadWorker）排空终认队列。skip 是可观察终态并满足下游依赖。分支信号包括 `non_web`（仅 `is_web is False`；未知不得当成非 Web）、`no_dispatch_lead`、`gate_fail`、`gate_uncertain`；模式选择由子图解决，不是运行时连续 skip。
 
 #### 4.2.2 数据前提
 
@@ -182,21 +182,23 @@ OSV 不是 SAST。不得把全部 GHSA 当白盒真洞；仅当本仓库**调用
 
 #### 4.2.4 当前拓扑
 
-平台保留 15 个能力节点，但按任务模式裁剪为不同子图。当前 discovery 拓扑为：
+平台保留能力 catalog（discovery 子图 15 键；verify 另有 catalog 内的 `audit`/`reproduce`），按任务模式裁剪为不同子图。当前 discovery 拓扑为：
 
 `source → profile → (scan_gitleaks ∥ scan_osv ∥ scan_semgrep ∥ api_inventory)`
 
-`(scan_* → cluster → screen → triage) ∥ (api_inventory → api_hunt) → dispatch`
+`(scan_gitleaks ∥ scan_osv ∥ scan_semgrep ∥ (api_inventory → api_hunt)) → cluster`
 
-`dispatch(has_lead) → env_ready → lead audit[*] → lead reproduce[*] → report`
+`cluster → screen → triage → dispatch`
 
-`screen` / `triage` 只产出判决与漏斗统计，不得创建 LeadRun、写 Redis 队列或等待终认。`dispatch` 是创建 LeadRun 和入队的唯一节点。零合格线索不起靶场；仍生成零漏洞审计摘要。
+`dispatch(has_lead) → env_ready → lead_verify → finalize`；`report` 为 finalize 后的文档后处理
+
+`screen` / `triage` 只产出判决与漏斗统计，不得创建 LeadRun、写 Redis 队列或等待终认。`dispatch` 是创建 LeadRun 和入队的唯一节点。`lead_verify` 是编排器显式终认工位（调用 LeadWorker 逐条 audit/reproduce，落 `LeadNodeRun`）；discovery 子图**不**再实例化单例 `audit`/`reproduce`。零合格线索时 `lead_verify` 与靶场均 skip，仍生成零漏洞审计摘要。`finalize` 固化 `analysis_verdict` / `analysis_status`（任务权威结论）；`report` 只消费该结论写文档（discovery 确定性聚合，verify AI），文档失败不得改写权威结论。
 
 - `api_inventory`：按画像 `languages` / `frameworks` 表驱动选择确定性 parser，产出 BOM + `resource_key` 索引；获取方式分 `router`（框架路由表）、`script_file`（PHP/Next pages 式文件入口）、`export_handler`（Next `route.ts` 导出方法）、`openapi`（OpenAPI/Swagger）。PHP `script_file` 另用 tree-sitter 抽取请求传参面（超全局 + Laravel/ThinkPHP/CI/Yii 等常见封装白名单的字面量参数名）写入 `id_params`/`is_pve`；动态名与未知私有封装不保证。**禁止**用 AI 列端点；AI 不得把自拟 path 写入 BOM。详见 [`research-api-hunting.md`](research-api-hunting.md)。
-- `api_hunt`：`requires=(api_inventory,)`；只审清单中的优先 PVE；若 BOM 无 `is_pve` 但仍有 `script_file` 入口，则按写操作/路径启发从 script_file 降级抽 Top-K，避免传统 PHP 永久空跑。`submit_result` 嫌疑项必须带 §2.7 合格门字段；写 `engine=api_hunt` 线索、upsert AlertGroup，并对**字段齐备**的项落 `verdict_source=agent` 判决（`qualified_count` = 直出数；置信度不挡直出）。失败不得抹杀 cluster / screen 结果。
-- `cluster`：只读 `semgrep` / `gitleaks` / `osv` 的 RawFinding；不得把 `api_hunt` 并入扫描组。
-- `screen`：`requires=(cluster,)`，只审扫描聚类工作集（`status=clustered` 且 `engine_set` 不含 `api_hunt`）；猎洞组无论是否已判决均不进快审。
-- `dispatch`：`requires=(triage, api_hunt)`，等扫描复核链与猎洞都 terminal 后再按统一合格门入队。
+- `api_hunt`：`requires=(api_inventory,)`；只审清单中的优先 PVE；若 BOM 无 `is_pve` 但仍有 `script_file` 入口，则按写操作/路径启发从 script_file 降级抽 Top-K，避免传统 PHP 永久空跑。`submit_result` 候选项必须可定位并带 `why/evidence/summary/reasoning`；三个安全判断必须显式输出但允许未知/反证。仅写 `engine=api_hunt` 的 ScanRun / RawFinding，不建组、不判决、不入队。
+- `cluster`：`requires=(scan_semgrep, scan_gitleaks, scan_osv, api_hunt)`；只读取四个上游 handoff 的 `scan_run_id` 所指向的 RawFinding，禁止按 `task_id` 全量扫描历史发现。同 CWE / 文件 / 函数的跨引擎证据允许合并；只有纯 OSV 组 bypass，混合 OSV 组必须进二审。
+- `screen`：`requires=(cluster,)`，对全部非纯 OSV 的 A/B 组执行统一快审，不再按 `api_hunt` 引擎排除。
+- `dispatch`：`requires=(triage,)`，只消费统一二审的最终状态并按合格门入队。
 
 ### 4.3 AI 交接
 
@@ -210,16 +212,20 @@ AI 节点只接收结构化、已裁剪、已脱敏的输入并返回结构化�
 
 `env_ready` 失败降级为节点 `completed`（`ok=false`，无 `target_url`），不得 `_finalize_node_failure` 整任务。LeadWorker 与 verify 子图在无靶场时均只保留白盒 audit，以 `code_reachable` 收口；动态 `reproduce` 产出明确降级结果，不得因缺 `target_url` 把整任务标记为 failed。
 
-报告渲染是分析结论的消费者。当 audit/reproduce/LeadRun 已形成终局时，`report` 失败只记录报告节点失败与错误提示，不得改写任务的权威 verdict；尚无权威结论时才允许整任务 failed。
+报告渲染是分析结论的消费者。`finalize` 节点固化 `analysis_verdict` / `analysis_status` 后**立即**写入任务权威终态；`report` 标记为 `async_consumer` 后处理（discovery 聚合摘要 / verify AI），可在终态可见之后继续跑。verify 上 AI 文档的 `final_verdict` 必须等于已固化的分析结论。报告/文档失败只记录报告节点失败，不得改写任务权威 verdict；尚无权威结论时才允许整任务 failed。
 
 终认工位保持两个节点职责，不另拆第三汇总节点：
 
 | 节点 | 职责 |
 |---|---|
 | `audit` | 白盒终判：代码层判断漏洞是否成立，产出报告依据（`core_claim` / `gate_*` 等） |
-| `reproduce` | 动态验证：仅在有 `target_url` 且 audit 允许时执行。开跑前短探活；访问失败且 Docker 已销毁/停止时重调度一次 `env_ready`，再用新 `target_url` 复现 |
+| `reproduce` | 动态验证：仅在有 `target_url` 且 audit 允许时执行。开跑前短探活；访问失败且 Docker 已销毁/停止时**不得**在节点内反向调度 `env_ready`，以降级 `code_reachable`（`degraded_reason=lab_unreachable`）收口；容器仍在跑则把原 URL 交给 Agent 自行探测 |
 
-每条 LeadRun 必须落 `verification_basis`：`lab`（实际跑过 reproduce 并形成有效动态证据）或 `code_path`（仅白盒终局）。discovery 下 DAG 单例 audit/reproduce 可因 `LEAD_DRIVEN` skip，但线索详情与 LeadRun 必须按两阶段展示，不得只剩空 skip。
+每条 LeadRun 必须落 `verification_basis`：`lab`（实际跑过 reproduce 并形成有效动态证据）或 `code_path`（仅白盒终局）。discovery 子图**不**实例化单例 `audit`/`reproduce` NodeRun；终认只落 `LeadRun` + `LeadNodeRun`，由 `lead_verify` 编排。线索详情与 LeadRun 必须按两阶段展示，不得只剩空 skip。
+
+每条 LeadRun 下必须另落持久化的阶段执行记录 `LeadNodeRun`：`node_key ∈ {audit, reproduce}`、`status ∈ {pending, running, completed, failed, skipped}`，并保留 `attempt` / `input_json` / `output_json` / `error` / `started_at` / `finished_at`。无靶场、gate fail/uncertain 时仍要落 reproduce=`skipped`，不得用缺行表示未执行。
+
+任务运行节点接口必须返回真实的 `lead_verify` NodeRun（编排器落库）；并用 `LeadRun + LeadNodeRun` 聚合丰富其 output（线索状态计数、audit/reproduce 阶段计数、时间与失败数）。前端不得再用「dispatch 已入队且 report 未启动」反推 LeadWorker 正在运行；仅对旧后端响应保留兼容推断。
 
 LeadWorker 在线索终态为 `confirmed` / `partial` / `code_reachable` 时，必须触发该线索的**独立漏洞报告**生成（§11.1）；其它终态不生成。
 
@@ -231,7 +237,7 @@ LeadWorker 在线索终态为 `confirmed` / `partial` / `code_reachable` 时，�
 
 ### 5.2 ScanRun
 
-每个引擎、每次任务运行对应一个 ScanRun，记录配置摘要、状态、发现数、错误和降级信息。原始扫描条本期仍在 Postgres `raw_findings` + MinIO SARIF，不迁 Redis。
+每个引擎、每次任务运行对应一个 ScanRun，记录配置摘要、状态、发现数、错误和降级信息。RawFinding 通过 `scan_run_id → ScanRun.run_id` 形成规范化运行级溯源，不重复存 `run_id`。Cluster 必须按上游 handoff 的 ScanRun ID 集合取数；部分重跑复用的已完成 NodeRun 会携带原 ScanRun ID，因此既能合法复用前序结果，也不会混入未被本轮依赖声明引用的历史数据。原始扫描条本期仍在 Postgres `raw_findings` + MinIO SARIF，不迁 Redis。
 
 ### 5.3 AlertGroup 状态机
 
@@ -270,21 +276,21 @@ LeadRun 另记 `verification_basis ∈ {lab, code_path}`，与六档 verdict 正
 
 ### 6.2 Cluster
 
-聚类输出原始发现数、分组数、各 CWE/引擎/等级统计及函数索引覆盖情况。必须包含降噪漏斗：`dropped_c_count`、按引擎的降噪计数（C 档未建组条目），以及 OSV bypass 组数。输入范围仅限三扫描引擎 RawFinding，排除 `api_hunt`。
+聚类输出原始发现数、分组数、各 CWE/引擎/等级统计及函数索引覆盖情况。必须包含降噪漏斗：`dropped_c_count`、按引擎的降噪计数（C 档未建组条目），以及纯 OSV bypass 组数。输入范围是四个 handoff 所指 ScanRun 下的 `semgrep` / `gitleaks` / `osv` / `api_hunt` RawFinding；非零 finding 的 handoff 缺 `scan_run_id`、或引用跨任务/不存在的 ScanRun，必须显式失败，禁止回退任务全量读取。
 
 ### 6.2.1 API Inventory / Hunt
 
 - `api_inventory`：输出 `endpoint_count`、`pve_count`、`parser`（汇合主键）、`parsers`、`acquisition_kinds`、`bom_path`、`unsupported_languages`、`stack_ids`、`ok`。BOM 落工作区 JSON；Handoff 只带摘要。无适配 parser 的画像语言列入 `unsupported_languages`；已跑 parser 但 0 端点**不算**语言不支持，禁止把 0 端点说成「无 API=安全」。
-- `api_hunt`：输入 inventory（不依赖 cluster）；按 `resource_key` 批审 Top-K PVE（无 PVE 时对 `script_file` 降级 Top-K）；产出 `reviewed_count`、`suspect_count`、`finding_count`、`qualified_count`、`ok`。嫌疑项 schema 对齐 §2.7 + §2.3.1（`why`/`evidence`/`summary`/`reasoning`/`attacker_controlled`/`reaches_sink`/`sanitizer`/`confidence`）；归一为 RawFinding（`engine=api_hunt`）并 upsert AlertGroup；字段齐备时写 Adjudication（`verdict_source=agent`，`context_log.via=api_hunt`；**置信度不挡直出**），`qualified_count` 计此类直出数；**不进** screen/triage。验证任务 `VERIFY_MODE` skip。动态 BOLA 确认仍在 lead/reproduce，不在本节点发 HTTP。
+- `api_hunt`：输入 inventory（不依赖 cluster）；按 `resource_key` 批审 Top-K PVE（无 PVE 时对 `script_file` 降级 Top-K）；产出 `scan_run_id`、`status`、`reviewed_count`、`suspect_count`、`finding_count`、`candidate_count`、`candidate_state_counts`、`ok`。候选项必须带 §2.3.1 的 `why/evidence/summary/reasoning`；`attacker_controlled/reaches_sink` 可为 `true/false/null`，`sanitizer` 可为 `none/bypassable/effective/unknown/null`，`confidence` 可为空。节点仅按证据状态标记 `supported/uncertain/contradicted` 并归一为 RawFinding（`engine=api_hunt`），不得执行 TP 合格门。每次节点执行都必须落 ScanRun：正常空结果=`completed/0`，功能关闭或无清单=`skipped/0`，异常=`failed/0`，禁止用「缺少 ScanRun」表示空跑。验证任务 `VERIFY_MODE` skip。动态 BOLA 确认仍在 lead/reproduce，不在本节点发 HTTP。
 
 ### 6.3 Screen / Triage
 
-二审拆为两个节点，按是否启动 Docker / Claude SDK 切分（验证任务二者均 `VERIFY_MODE` skip）；**仅覆盖扫描聚类线索**（显式排除 `engine_set` 含 `api_hunt` 的组）：
+二审拆为两个节点，按是否启动 Docker / Claude SDK 切分（验证任务二者均 `VERIFY_MODE` skip）；覆盖四路发现聚类后的全部非纯 OSV A/B 线索：
 
 - `screen`（轻量快审）：T0 指纹携带 + T1 规则 FP 率 + T2 `llm_complete` 快审。T2 **不得**创建 LeadRun 或入队；高置信 tp 只能升级 T3。无 Docker。`requires=(cluster,)`。
-- `triage`（AI 二审）：T3 族代表 + `adjudicate_group` + 族内传播；只消费仍为 `clustered` 的扫描升级组（Semgrep/Gitleaks；OSV bypass 组不在此队列）。有 Docker。T3 `submit_result` 按 §2.7 + §2.3.1 拒收假 tp / 缺叙事。本节点只落判决，不等待终认。
+- `triage`（AI 二审）：T3 族代表 + `adjudicate_group` + 族内传播；只消费仍为 `clustered` 的升级组（纯 OSV bypass 组不在此队列）。有 Docker。T3 输入需保留 API Hunt 候选的 why/evidence，`submit_result` 按 §2.7 + §2.3.1 拒收假 tp / 缺叙事。本节点只落判决，不等待终认。
 
-事件文案用「可疑真洞 N / 误报 N」，禁止只打未翻译的 `tp_count` 给用户看。`dispatch.requires = (triage, api_hunt)`。Agent 段失败时可 `retry?from_node=triage` 复用已 completed 的 `screen`，不重跑 T0–T2。旧 run 无 `screen` completed 行时不得伪造成功，须从 `screen` 或整条重试。
+事件文案用「可疑真洞 N / 误报 N」，禁止只打未翻译的 `tp_count` 给用户看。`dispatch.requires = (triage,)`。Agent 段失败时可 `retry?from_node=triage` 复用已 completed 的 `screen`，不重跑 T0–T2。旧 run 无 `screen` completed 行时不得伪造成功，须从 `screen` 或整条重试。
 
 ### 6.4 Dispatch
 

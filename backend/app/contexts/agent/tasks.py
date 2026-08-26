@@ -623,7 +623,7 @@ async def _run_analysis(task_id: str, run_id: str, *, celery_task: object) -> di
             except Exception as e:  # noqa: BLE001 — 凭据注入失败不阻断（任务可无凭据继续）
                 logger.warning(f"凭据注入失败（任务继续）: {e}")
 
-            # 4. 6 节点编排(替代旧的单次 executor.run)
+            # 4. 模式化子图编排（discovery=DEFAULT_PIPELINE；verify=VERIFY_PIPELINE）
             from app.contexts.agent.orchestrator import run_orchestration
 
             captured: dict = {}

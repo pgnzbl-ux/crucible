@@ -135,6 +135,18 @@ class ReviewActionDetail(BaseModel):
     created_at: datetime | None = None
 
 
+class LeadNodeRunSummary(BaseModel):
+    id: str
+    node_key: str
+    status: str
+    attempt: int
+    input_json: dict[str, Any] = Field(default_factory=dict)
+    output_json: dict[str, Any] | None = None
+    error: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
 class LeadRunSummary(BaseModel):
     id: str
     status: str
@@ -144,6 +156,7 @@ class LeadRunSummary(BaseModel):
     error: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    node_runs: list[LeadNodeRunSummary] = Field(default_factory=list)
 
 
 class AlertGroupDetail(AlertGroupSummary):

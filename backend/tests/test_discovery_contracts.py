@@ -52,19 +52,27 @@ def test_pipeline_shape_per_spec():
     assert node_by_key("api_inventory").requires == ("source", "profile")
     assert node_by_key("api_hunt").requires == ("api_inventory",)
     assert node_by_key("screen").requires == ("cluster",)
-    assert node_by_key("dispatch").requires == ("triage", "api_hunt")
-    # cluster 等齐三个扫描；audit 等dispatch(验证模式 dispatch 被 skip 视为满足)
-    assert set(node_by_key("cluster").requires) == {"scan_semgrep", "scan_gitleaks", "scan_osv"}
-    assert "dispatch" in node_by_key("audit").requires
-    assert node_by_key("env_ready").requires == ("source", "profile", "dispatch")
+    assert node_by_key("dispatch").requires == ("triage",)
+    # cluster 等齐四路发现；discovery 终认走 lead_verify（无单例 audit）
+    assert set(node_by_key("cluster").requires) == {
+        "scan_semgrep", "scan_gitleaks", "scan_osv", "api_hunt",
+    }
+    assert "audit" not in {s.key for s in pipeline_for("discovery")}
+    assert "reproduce" not in {s.key for s in pipeline_for("discovery")}
+    assert node_by_key("lead_verify").requires == ("dispatch", "env_ready")
+    assert node_by_key("finalize").requires == ("profile", "env_ready", "lead_verify")
+    assert node_by_key("report").requires == ("finalize",)
     assert [s.key for s in pipeline_for("verify")] == [
-        "source", "profile", "env_ready", "audit", "reproduce", "report",
+        "source", "profile", "env_ready", "audit", "reproduce", "finalize", "report",
     ]
+    assert "lead_verify" not in {s.key for s in pipeline_for("verify")}
     assert node_by_key("audit", task_type="verify").requires == ("source", "profile")
     # 声明式出口与策略（原 heavy 标记已删除：从未被强制且与 lead 并发矛盾）
     assert node_by_key("reproduce").skip_verdict == {"gate_fail": "false_positive"}
-    assert node_by_key("report").lead_driven_aggregate is True
     assert node_by_key("report").failure_policy == "preserve_audit_verdict"
+    assert node_by_key("finalize", task_type="verify").requires == (
+        "profile", "env_ready", "audit", "reproduce",
+    )
     assert node_by_key("source").requires_workspace is True
     assert node_by_key("source").updates_source_path is True
     assert not any(getattr(s, "heavy", False) for s in DEFAULT_PIPELINE)
@@ -86,42 +94,46 @@ def test_discovery_ready_waves_parallel_scans():
     wave3 = {s.key for s in compute_ready(DEFAULT_PIPELINE, after_scans)}
     assert wave3 == {"scan_semgrep", "api_inventory"}
 
-    # 扫描齐即可开 cluster，无需等 api_inventory
+    # 扫描齐仍需等 API 候选分支，先继续 inventory
     after_semgrep = after_scans | {"scan_semgrep"}
     assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_semgrep)} == {
-        "api_inventory", "cluster",
+        "api_inventory",
     }
 
     after_deep = after_scans | wave3
     assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_deep)} == {
-        "cluster", "api_hunt",
+        "api_hunt",
     }
 
-    # 清单齐即可猎洞，无需等 cluster；扫描齐即可 cluster，无需等猎洞
+    # 清单齐即可猎洞；cluster 必须等猎洞候选落库
     after_inventory = after_scans | {"api_inventory"}
     assert "api_hunt" in {s.key for s in compute_ready(DEFAULT_PIPELINE, after_inventory)}
-    assert "screen" not in {s.key for s in compute_ready(DEFAULT_PIPELINE, after_inventory)}
+    assert "cluster" not in {s.key for s in compute_ready(DEFAULT_PIPELINE, after_inventory)}
 
-    # cluster 齐即可开 screen，无需等 api_hunt
-    after_cluster_only = after_deep | {"cluster"}
-    assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_cluster_only)} == {
-        "api_hunt", "screen",
-    }
+    # 四路齐后才 cluster，随后严格经 screen → triage → dispatch
     after_hunt_only = after_deep | {"api_hunt"}
     assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_hunt_only)} == {"cluster"}
-
-    # 扫描复核链与猎洞并列汇入 dispatch
-    after_screen = after_deep | {"cluster", "api_hunt", "screen"}
+    after_cluster = after_hunt_only | {"cluster"}
+    assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_cluster)} == {"screen"}
+    after_screen = after_cluster | {"screen"}
     assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_screen)} == {"triage"}
-    after_triage_no_hunt = after_deep | {"cluster", "screen", "triage"}
-    assert "dispatch" not in {
-        s.key for s in compute_ready(DEFAULT_PIPELINE, after_triage_no_hunt)
-    }
     after_triage = after_screen | {"triage"}
     assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_triage)} == {"dispatch"}
     after_dispatch = after_triage | {"dispatch"}
     assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_dispatch)} == {
-        "env_ready", "audit",
+        "env_ready",
+    }
+    after_env = after_dispatch | {"env_ready"}
+    assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_env)} == {
+        "lead_verify",
+    }
+    after_leads = after_env | {"lead_verify"}
+    assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_leads)} == {
+        "finalize",
+    }
+    after_finalize = after_leads | {"finalize"}
+    assert {s.key for s in compute_ready(DEFAULT_PIPELINE, after_finalize)} == {
+        "report",
     }
 
 
@@ -132,7 +144,7 @@ def test_verify_pipeline_is_pruned_not_skip_chain():
     pipeline = pipeline_for("verify")
     validate_pipeline(pipeline)
     keys = {spec.key for spec in pipeline}
-    assert keys == {"source", "profile", "env_ready", "audit", "reproduce", "report"}
+    assert keys == {"source", "profile", "env_ready", "audit", "reproduce", "finalize", "report"}
     assert {s.key for s in compute_ready(pipeline, {"source", "profile"})} == {
         "env_ready", "audit",
     }
@@ -193,18 +205,25 @@ async def _seed(session, task_type="discovery"):
     return task, run
 
 
-def test_lead_driven_signal_skips_audit_reproduce():
-    from app.contexts.agent.contracts import HandoffStore, SkipWhen, node_by_key
+def test_discovery_graph_has_no_singleton_audit_reproduce():
+    """discovery 终认只走 lead_verify → LeadNodeRun，DAG 无单例 audit/reproduce。"""
+    from app.contexts.agent.contracts import HandoffStore, SkipWhen, node_by_key, pipeline_for
     from app.contexts.agent.orchestrator import _evaluate_skip
+
+    keys = {s.key for s in pipeline_for("discovery")}
+    assert "audit" not in keys and "reproduce" not in keys
+    assert "lead_verify" in keys
 
     store = HandoffStore()
     store.set("profile", {"is_web": True})
     store.set("dispatch", {"has_lead": True, "queued_count": 2})
-    assert store.signals(verify_mode=False).lead_driven is True
-    assert _evaluate_skip(node_by_key("audit"), store, verify_mode=False) == SkipWhen.LEAD_DRIVEN
-    assert _evaluate_skip(node_by_key("reproduce"), store, verify_mode=False) == SkipWhen.LEAD_DRIVEN
-    # verify 不命中
-    assert _evaluate_skip(node_by_key("audit"), store, verify_mode=True) is None
+    assert _evaluate_skip(node_by_key("lead_verify"), store, verify_mode=False) is None
+    store.set("dispatch", {"has_lead": False, "queued_count": 0})
+    assert (
+        _evaluate_skip(node_by_key("lead_verify"), store, verify_mode=False)
+        == SkipWhen.NO_DISPATCH_LEAD
+    )
+    assert _evaluate_skip(node_by_key("audit", task_type="verify"), store, verify_mode=True) is None
 
 
 @pytest.mark.asyncio
@@ -262,8 +281,9 @@ async def test_discovery_no_lead_completes_with_terminal_skipped(session_factory
         assert by_key["triage"] == "completed"
         assert by_key["dispatch"] == "completed"
         # 无主线索 → 终认被 NO_DISPATCH_LEAD skip；聚合报告仍完成
-        assert by_key["audit"] == "skipped"
-        assert by_key["reproduce"] == "skipped"
+        assert by_key["lead_verify"] == "skipped"
+        assert "audit" not in by_key
+        assert "reproduce" not in by_key
         assert by_key["report"] == "completed"
         report_node = next(n for n in nodes if n.node_key == "report")
         assert "code_audit_report" in (report_node.output_json or "")
@@ -274,7 +294,7 @@ async def test_discovery_no_lead_completes_with_terminal_skipped(session_factory
 
 @pytest.mark.asyncio
 async def test_discovery_with_lead_runs_terminal_nodes(session_factory):
-    """dispatch 有入队线索 → DAG audit/reproduce LEAD_DRIVEN skip；report 聚合完成。"""
+    """dispatch 有入队线索 → lead_verify 执行；DAG 无 audit/reproduce；report 聚合完成。"""
     from app.contexts.agent import orchestrator as orch
     from app.contexts.agent.lead_queue import set_redis_client
     from app.contexts.task.models import NodeRun
@@ -374,8 +394,9 @@ async def test_discovery_with_lead_runs_terminal_nodes(session_factory):
                 await session.execute(select(NodeRun).where(NodeRun.run_id == run.id))
             ).scalars().all()
             by_key = {n.node_key: n.status for n in nodes}
-            assert by_key["audit"] == "skipped"  # LEAD_DRIVEN
-            assert by_key["reproduce"] == "skipped"
+            assert by_key["lead_verify"] == "completed"
+            assert "audit" not in by_key
+            assert "reproduce" not in by_key
             assert by_key["report"] == "completed"
     finally:
         set_redis_client(None)
@@ -673,7 +694,7 @@ def test_retryable_from_nodes_cover_discovery():
     from app.contexts.task.service import _RETRYABLE_FROM_NODES
 
     for key in ("scan_gitleaks", "scan_osv", "scan_semgrep", "cluster", "screen", "triage",
-                "dispatch", "env_ready", "audit", "reproduce", "report"):
+                "dispatch", "env_ready", "lead_verify", "finalize", "audit", "reproduce", "report"):
         assert key in _RETRYABLE_FROM_NODES
     assert "source" not in _RETRYABLE_FROM_NODES
     assert "profile" not in _RETRYABLE_FROM_NODES

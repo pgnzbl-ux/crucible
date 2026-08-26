@@ -68,6 +68,38 @@ def is_llm_api_failure(text: str | None) -> bool:
     return _LLM_SIGNAL_RE.search(raw) is not None
 
 
+def is_fatal_llm_error(text: str | None) -> bool:
+    """LLM API 错误中不可恢复的一类（鉴权/余额/模型/上下文超限）。
+
+    重试不可能成功，须中止节点；返回 False 的 LLM 错误视为瞬时
+    （5xx/断连/限流/SDK 误报），由调用方退避重试或降级转人工。
+    """
+    raw = (text or "").strip()
+    if not raw or _is_platform_preflight(raw):
+        return False
+    low = raw.lower()
+    json_msg = _extract_json_message(raw)
+    if _has_http_status(low, 401) or _has_http_status(low, 403):
+        return True
+    if "余额不足" in raw or (json_msg is not None and "余额" in json_msg):
+        return True
+    if re.search(r'"code"\s*:\s*"1004"', raw):
+        return True
+    if "model_not_found" in low or "model not found" in low:
+        return True
+    if any(
+        marker in low
+        for marker in (
+            "context size has been exceeded",
+            "context window exceeded",
+            "maximum context length",
+            "prompt is too long",
+        )
+    ):
+        return True
+    return False
+
+
 def classify_llm_api_error(text: str | None) -> tuple[str, str] | None:
     """返回 (标题, 下一步)；非 LLM API 错误则 None。"""
     raw = (text or "").strip()

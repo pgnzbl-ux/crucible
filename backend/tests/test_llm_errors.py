@@ -7,7 +7,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-from app.contexts.agent.llm_errors import classify_llm_api_error, is_llm_api_failure
+from app.contexts.agent.llm_errors import (
+    classify_llm_api_error,
+    is_fatal_llm_error,
+    is_llm_api_failure,
+)
 
 
 @pytest.mark.parametrize(
@@ -51,6 +55,30 @@ def test_is_llm_api_failure_balance():
 
 def test_is_llm_api_failure_accepts_gateway_api_error_format():
     assert is_llm_api_failure("API Error: 500 Context size has been exceeded")
+
+
+@pytest.mark.parametrize(
+    "raw,fatal",
+    [
+        ('HTTP 401: {"error":{"message":"invalid api key"}}', True),
+        ("AI 节点 triage LLM 调用失败: API Error: 403 forbidden", True),
+        ('HTTP 401: {"error":{"code":"1004","message":"余额不足"}}', True),
+        ("API Error: 404 model_not_found: no such model", True),
+        ("API Error: 400 prompt is too long", True),
+        # 瞬时类：重试/降级处理，不得中止节点
+        ("AI 节点 triage LLM 调用失败: API Error: 502 upstream unavailable", False),
+        ("API Error: 500 Internal Server Error", False),
+        ("HTTP 429: rate limit exceeded", False),
+        ("API Error: Connection closed mid-response", False),
+        ("Claude Code returned an error result: success", False),
+        # 平台侧预检文案（含 git clone），不是 LLM 错误
+        ("源码克隆失败: HTTP 401 repository not found", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_is_fatal_llm_error(raw, fatal):
+    assert is_fatal_llm_error(raw) is fatal
 
 
 def test_humanize_prefers_balance_over_no_submit():

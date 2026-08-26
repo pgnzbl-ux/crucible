@@ -1,9 +1,10 @@
-"""节点拓扑声明 — 15 个能力节点，按任务模式裁剪子图。
+"""节点拓扑声明 — 能力 catalog + 按任务模式裁剪的子图。
 
-权威契约：docs/discovery-spec.md。DEFAULT_PIPELINE 为一张图：
-- 仓库审计(task_type=discovery)：全图；dispatch 入队；无队 NO_DISPATCH_LEAD skip 终认；
-  有队 LEAD_DRIVEN skip DAG audit/reproduce；两种出口都生成聚合审计 report。
-- 漏洞验证(task_type=verify)：只实例化 source/profile/env_ready/audit/reproduce/report。
+权威契约：docs/discovery-spec.md。
+- 仓库审计(task_type=discovery)：发现链 + dispatch → env_ready → lead_verify → finalize；
+  report 为 async_consumer 后处理（不挡任务权威终态）。
+- 漏洞验证(task_type=verify)：source/profile/env_ready/audit/reproduce/finalize；
+  report 同样为后处理文档消费者。
 """
 from __future__ import annotations
 
@@ -17,7 +18,6 @@ class SkipWhen(StrEnum):
     GATE_UNCERTAIN = "gate_uncertain"
     VERIFY_MODE = "verify_mode"
     NO_DISPATCH_LEAD = "no_dispatch_lead"
-    LEAD_DRIVEN = "lead_driven"
 
 
 @dataclass(frozen=True)
@@ -37,10 +37,26 @@ class NodeSpec:
     requires_workspace: bool = False
     # 完成后把 output.project_path 发布为整条编排链的 source_path
     updates_source_path: bool = False
-    # lead_driven 时代替节点执行器，改由聚合报告完成（discovery 主路径）
-    lead_driven_aggregate: bool = False
     # 失败收尾策略：fail(默认) | preserve_audit_verdict(报告失败保留审计结论)
     failure_policy: str = "fail"
+    # 分析后处理：不阻塞任务权威终态；finalize 固化后即可对用户显示完成
+    async_consumer: bool = False
+
+
+# verify 子图专用终认节点（discovery 不实例化；终认走 lead_verify → LeadNodeRun）
+_VERIFY_AUDIT = NodeSpec(
+    key="audit", index=12, requires=("source", "profile"), produces="audit",
+)
+_VERIFY_REPRODUCE = NodeSpec(
+    key="reproduce",
+    index=13,
+    requires=("source", "env_ready", "audit"),
+    produces="reproduce",
+    skip_when=frozenset({
+        SkipWhen.NON_WEB, SkipWhen.GATE_FAIL, SkipWhen.GATE_UNCERTAIN,
+    }),
+    skip_verdict={"gate_fail": "false_positive"},
+)
 
 
 DEFAULT_PIPELINE: tuple[NodeSpec, ...] = (
@@ -89,7 +105,7 @@ DEFAULT_PIPELINE: tuple[NodeSpec, ...] = (
     NodeSpec(
         key="cluster",
         index=7,
-        requires=("scan_semgrep", "scan_gitleaks", "scan_osv"),
+        requires=("scan_semgrep", "scan_gitleaks", "scan_osv", "api_hunt"),
         produces="cluster",
         skip_when=frozenset({SkipWhen.VERIFY_MODE}),
     ),
@@ -117,45 +133,40 @@ DEFAULT_PIPELINE: tuple[NodeSpec, ...] = (
     NodeSpec(
         key="dispatch",
         index=11,
-        requires=("triage", "api_hunt"),
+        requires=("triage",),
         produces="dispatch",
         skip_when=frozenset({SkipWhen.VERIFY_MODE}),
     ),
-    # 审计模式 audit 等 dispatch；有队则 LEAD_DRIVEN skip（LeadWorker 跑）；
-    # 验证模式 dispatch 被 skip 后照常就绪，不命中 LEAD_DRIVEN
+    # discovery 显式终认工位：排空 Lead 队列（per-lead audit/reproduce → LeadNodeRun）；
+    # 无线索时 NO_DISPATCH_LEAD skip
     NodeSpec(
-        key="audit",
-        index=12,
-        requires=("source", "profile", "dispatch"),
-        produces="audit",
-        skip_when=frozenset({
-            SkipWhen.NO_DISPATCH_LEAD, SkipWhen.LEAD_DRIVEN,
-        }),
+        key="lead_verify",
+        index=14,
+        requires=("dispatch", "env_ready"),
+        produces="lead_verify",
+        skip_when=frozenset({SkipWhen.NO_DISPATCH_LEAD}),
     ),
     NodeSpec(
-        key="reproduce",
-        index=13,
-        requires=("source", "env_ready", "audit"),
-        produces="reproduce",
-        skip_when=frozenset({
-            SkipWhen.NON_WEB, SkipWhen.NO_DISPATCH_LEAD, SkipWhen.LEAD_DRIVEN,
-            SkipWhen.GATE_FAIL, SkipWhen.GATE_UNCERTAIN,
-        }),
-        # audit gate 判 fail → 复现无意义，任务以 false_positive 收口（§5.8 出口 B）
-        skip_verdict={"gate_fail": "false_positive"},
+        key="finalize",
+        index=15,
+        requires=("profile", "env_ready", "lead_verify"),
+        produces="finalize",
     ),
     NodeSpec(
         key="report",
-        index=14,
-        requires=("profile", "env_ready", "audit", "reproduce"),
+        index=16,
+        requires=("finalize",),
         produces="report",
-        # discovery 始终由聚合报告代替执行器（包括零线索）；报告失败不推翻审计结论
-        lead_driven_aggregate=True,
+        # 文档失败不推翻 finalize 已固化的权威结论；后处理不挡任务终态
         failure_policy="preserve_audit_verdict",
+        async_consumer=True,
     ),
 )
 
 NODE_BY_KEY: dict[str, NodeSpec] = {spec.key: spec for spec in DEFAULT_PIPELINE}
+# verify 终认能力也进 catalog，供 node_by_key / 执行器注册查找
+NODE_BY_KEY["audit"] = _VERIFY_AUDIT
+NODE_BY_KEY["reproduce"] = _VERIFY_REPRODUCE
 
 # verify 保留 catalog index，但依赖只指向子图内节点。NodeRun 因此仍可
 # 与历史数据/前端能力编号稳定对齐，同时不再产生九个伪 skip 行。
@@ -166,21 +177,19 @@ VERIFY_PIPELINE: tuple[NodeSpec, ...] = (
         key="env_ready", index=6, requires=("source", "profile"),
         produces="env_ready", skip_when=frozenset({SkipWhen.NON_WEB}),
     ),
+    _VERIFY_AUDIT,
+    _VERIFY_REPRODUCE,
     NodeSpec(
-        key="audit", index=12, requires=("source", "profile"), produces="audit",
-    ),
-    NodeSpec(
-        key="reproduce", index=13, requires=("source", "env_ready", "audit"),
-        produces="reproduce",
-        skip_when=frozenset({
-            SkipWhen.NON_WEB, SkipWhen.GATE_FAIL, SkipWhen.GATE_UNCERTAIN,
-        }),
-        skip_verdict={"gate_fail": "false_positive"},
-    ),
-    NodeSpec(
-        key="report", index=14,
+        key="finalize", index=15,
         requires=("profile", "env_ready", "audit", "reproduce"),
-        produces="report", failure_policy="preserve_audit_verdict",
+        produces="finalize",
+    ),
+    NodeSpec(
+        key="report", index=16,
+        requires=("finalize", "profile", "env_ready", "audit", "reproduce"),
+        produces="report",
+        failure_policy="preserve_audit_verdict",
+        async_consumer=True,
     ),
 )
 

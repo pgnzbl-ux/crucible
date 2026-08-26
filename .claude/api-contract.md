@@ -93,7 +93,7 @@
 }
 ```
 
-`task_type`（默认 `verify`）：`verify`=漏洞验证（人工给描述，扫描/聚类/二审/调度节点 `VERIFY_MODE` skip，走 6 个终认节点）；`discovery`=仓库审计（禁止填描述，跑全 13 节点，dispatch 把**全部合格可疑真洞**入 Redis db3 终认队，LeadWorker 复用同一套 audit/reproduce）。
+`task_type`（默认 `verify`）：`verify`=漏洞验证（人工给描述，跑 `VERIFY_PIPELINE` 共 7 节点：source/profile/env_ready/audit/reproduce/finalize/report）；`discovery`=仓库审计（禁止填描述，跑 `DEFAULT_PIPELINE` 共 15 节点，含 api_inventory/api_hunt/lead_verify/finalize/report；dispatch 把**全部合格可疑真洞**入 Redis db3 终认队，由 `lead_verify`/LeadWorker 复用 audit/reproduce 落 `LeadNodeRun`）。`finalize` 固化任务权威终态；`report` 为后处理文档，失败不改写权威结论。
 
 `clone_depth`：浅克隆层数，默认 `1`；`0` 表示全量 clone（流量更大）。`project_ref_type` 显式指定可避免 tag 名被误判为 branch 导致缓存 SHA 对不上。`source_type` 默认 `git`；`local_upload` 时 `project_address` 必须是已登记的 `upload://local/{project_id}`，节点 0 从 MinIO 解开原始包，不再 clone。
 
@@ -143,7 +143,7 @@
 重试任务(202 返 `{task_id, run_id, status:retrying, from_node}`)。任务不存在或非 owner → **404** `TASK_NOT_FOUND`（不是 400）。非法状态 / 非法 `from_node` / 前置节点未完成 → **400**。未配置默认 LLM Provider、默认项无 API Key、或 agent-runner 镜像不存在/Docker 不可用 → **400**，不改任务状态、不新建 run。
 
 - 默认：新建 TaskRun，**从节点 0（源码获取）整条重跑**，不复用上一 run 的 NodeRun。
-- 可选 query `from_node=`（除 `source`/`profile` 外的管线节点：`scan_*`/`env_ready`/`cluster`/`screen`/`triage`/`dispatch`/`audit`/`reproduce`/`report`）：拷贝上一 run 里该节点**之前**已 `completed`/`skipped` 的 NodeRun 进新 run，编排器断点续跑，只重跑该节点及之后。前置未完成 → 400。`source`/`profile` 不是合法起点（请整条重试）。
+- 可选 query `from_node=`（除 `source`/`profile` 外、当前任务子图内的管线节点：discovery 含 `scan_*`/`api_inventory`/`api_hunt`/`env_ready`/`cluster`/`screen`/`triage`/`dispatch`/`lead_verify`/`finalize`/`report`；verify 含 `env_ready`/`audit`/`reproduce`/`finalize`/`report`）：拷贝上一 run 里该节点**之前**已 `completed`/`skipped` 的 NodeRun 进新 run，编排器断点续跑，只重跑该节点及之后。前置未完成 → 400。`source`/`profile` 不是合法起点（请整条重试）。
 - 上一 run 的节点/事件保留作历史。工作区按 `task_id` 固定路径；新 run 已有 completed 节点则保留工作区（失败任务本就会留目录），否则清空重拉。不拆可复用靶场。
 - 同一次 run 内 worker 崩溃仍可靠 NodeRun 断点续跑，与用户点「重试」不是同一条路径。
 
@@ -516,7 +516,7 @@ Provider **没有独立启用/停用字段**。Agent 运行时只读取唯一的
 
 ## 待补（P0/P1/P2 路线）
 
-- ~~P0-0: Agent 编排~~ ✅ 平台 13 节点编排(见 docs/discovery-spec.md)
+- ~~P0-0: Agent 编排~~ ✅ 平台模式化子图编排（discovery 15 / verify 7；见 docs/discovery-spec.md）
 - ~~P0-1: `GET /tasks/{id}/events/stream` SSE 端点~~ ✅
 - ~~P0-2: `POST /tasks/{id}/cancel` 真正生效~~ ✅（revoke + 容器销毁）
 - ~~P0-3: JWT 闭环 + SSE `?token=` 鉴权~~ ✅

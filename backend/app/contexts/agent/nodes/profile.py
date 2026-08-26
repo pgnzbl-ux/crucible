@@ -3,6 +3,7 @@
 discovery-spec §6.0：画像升为权威结构化契约。
 - languages[] 多事实，AI 只能追加 source=ai 低置信项，不得覆盖文件证据；
 - semgrep_configs / primary_language 由纯函数派生，AI 输出里出现也一律重算；
+- 强 Web / 强非 Web 时规则画像直接落库，AI 不出关键路径；
 - 旧缓存缺派生字段时重算补齐，不整份作废；
 - 同 SHA 缓存命中跳过 AI；SDK 关闭时规则结果直接落库。
 """
@@ -17,6 +18,7 @@ from app.contexts.agent.profile_detector import (
     derive_primary_language,
     derive_semgrep_configs,
     detect_profile,
+    profile_needs_ai,
 )
 
 from .base import NodeContext, emit_phase, workspace_repo_path
@@ -242,8 +244,17 @@ class ProfileNode:
 
         from app.core.config import get_settings
 
-        if not get_settings().claude_agent_sdk_enabled:
+        settings = get_settings()
+        # 强 Web / 强非 Web：规则已足够，AI 不出关键路径（降低阻塞 Semgrep/清单的成本）
+        if (
+            not settings.claude_agent_sdk_enabled
+            or not profile_needs_ai(root, hints)
+        ):
             facts = require_is_web(sanitize_profile(hints))
+            if not settings.claude_agent_sdk_enabled:
+                emit_phase(ctx, "SDK 关闭，采用规则画像", phase=self.node_key)
+            else:
+                emit_phase(ctx, "规则画像已充分，跳过 AI", phase=self.node_key)
             await _persist_profile(ctx, commit_sha, facts)
             return facts
 

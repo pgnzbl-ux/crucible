@@ -209,9 +209,10 @@ async def test_profile_node_sdk_off_uses_detector(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_profile_node_sdk_on_always_calls_ai_with_hints(tmp_path):
-    """SDK 开启且无缓存：即使强 Web 证据也一律轻度 AI，hints 必须传入。"""
+async def test_profile_node_sdk_on_skips_ai_when_rules_sufficient(tmp_path):
+    """SDK 开启：强 Web 规则画像充分时跳过 AI，不阻塞下游。"""
     (tmp_path / "requirements.txt").write_text("fastapi\n")
+    (tmp_path / "main.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
     events: list[dict] = []
     ctx = NodeContext(
         task_id="t1", run_id="r1", host_workdir=str(tmp_path),
@@ -228,9 +229,49 @@ async def test_profile_node_sdk_on_always_calls_ai_with_hints(tmp_path):
         },
     )
     fake_settings = MagicMock(claude_agent_sdk_enabled=True)
-    ai_out = {"is_web": True, "language": "python", "framework": "fastapi", "port": 8000}
     with (
         patch("app.core.config.get_settings", return_value=fake_settings),
+        patch(
+            "app.contexts.agent.ai_runner.run_ai_node",
+            new_callable=AsyncMock,
+        ) as mocked,
+    ):
+        out = await ProfileNode().execute(ctx)
+    mocked.assert_not_awaited()
+    assert out["is_web"] is True
+    assert out["profile_source"] == "rules"
+    phase_msgs = [e["message"] for e in events if e.get("type") == "phase.updated"]
+    assert any("跳过 AI" in m for m in phase_msgs)
+
+
+@pytest.mark.asyncio
+async def test_profile_node_sdk_on_calls_ai_when_rules_ambiguous(tmp_path):
+    """SDK 开启且规则不足以判定时，仍走轻度 AI，hints 必须传入。"""
+    (tmp_path / "readme.md").write_text("a small utility script\n")
+    (tmp_path / "app.py").write_text("print('hi')\n")
+    events: list[dict] = []
+    ctx = NodeContext(
+        task_id="t1", run_id="r1", host_workdir=str(tmp_path),
+        source_path=str(tmp_path), vulnerability_description="d",
+        project_address="x", project_ref=None,
+        on_event=events.append,
+        previous_outputs={
+            "source": {
+                "project_path": str(tmp_path),
+                "repo_dirname": "demo",
+                "workspace_path": "/workspace/demo",
+                "commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            }
+        },
+    )
+    fake_settings = MagicMock(claude_agent_sdk_enabled=True)
+    ai_out = {"is_web": False, "language": "python", "non_web_reason": "cli"}
+    with (
+        patch("app.core.config.get_settings", return_value=fake_settings),
+        patch(
+            "app.contexts.agent.nodes.profile.profile_needs_ai",
+            return_value=True,
+        ),
         patch(
             "app.contexts.agent.ai_runner.run_ai_node",
             new_callable=AsyncMock,
@@ -240,10 +281,7 @@ async def test_profile_node_sdk_on_always_calls_ai_with_hints(tmp_path):
         out = await ProfileNode().execute(ctx)
     mocked.assert_awaited_once()
     call_kw = mocked.await_args.kwargs
-    assert call_kw["input_json"]["hints"]["primary_language"] == "python"
-    assert call_kw["input_json"]["hints"]["framework"] == "fastapi"
-    assert out["is_web"] is True
-    assert out["language"] == "python"
+    assert "hints" in call_kw["input_json"]
     assert out["profile_source"] == "rules+ai"
     phase_msgs = [e["message"] for e in events if e.get("type") == "phase.updated"]
     assert any("规则扫描完成" in m for m in phase_msgs)

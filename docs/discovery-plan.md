@@ -6,7 +6,7 @@
 
 - Task/TaskRun 继续作为执行聚合根，`task_type` 区分 discovery 与 verify。
 - Finding Context 持有 RawFinding、AlertGroup、Adjudication、ReviewAction、LeadRun。误报组不长期占 `alert_groups`。
-- Agent Context 持有声明式拓扑、Handoff 契约、扫描/聚类/二审/终认执行器。合格门为 Finding Context 纯函数，`dispatch` 与 `LeadStreamer` 共用。
+- Agent Context 持有声明式拓扑、Handoff 契约、扫描/聚类/二审/终认执行器。合格门为 Finding Context 纯函数，仅 `dispatch` 调用入队。
 - 合格线索 + 终认队在 Redis db3（`REDIS_CLUE_URL`）；事件/槽位仍 db0，Celery 仍 db1/2。
 - Report Context 持有用户可见的**聚合审计报告**；另在 Finding/Lead 路径上为每个 `confirmed|partial|code_reachable` 线索生成**独立漏洞报告**（discovery-spec §11.1）。报告不直接读取 Redis 队列，读 LeadRun 终态与节点漏斗计数。
 - Context 间仅通过 ID、服务方法和结构化 Handoff 交接。
@@ -17,10 +17,10 @@
 2. 三个扫描器独立写 ScanRun 与 RawFinding（本期不把 raw 搬进 Redis）。
 3. cluster 形成工作集 AlertGroup；screen/triage 按 T0–T3 裁剪。T2 只允许定 fp 或升级 T3。
 4. dispatch 按 §2.7 合格门幂等创建 LeadRun，投递 Redis db3 队列（禁止复用 db0）。
-5. LeadWorker 有界并发复用 AuditNode/ReproduceNode。无 `target_url` 时只跑 audit；落 `verification_basis`（`lab`|`code_path`）。
+5. 编排显式节点 `lead_verify` 调用 LeadWorker：有界并发复用 AuditNode/ReproduceNode，落 `LeadNodeRun`（discovery 子图**不**实例化单例 audit/reproduce）。无 `target_url` 时只跑 audit；落 `verification_basis`（`lab`|`code_path`）。
 6. 仅 `confirmed/partial/code_reachable` 长期回写 Postgres 线索台，并**生成一漏洞一份独立报告**；终认证伪与误报只进漏斗。
 7. `env_ready` 失败返回 `{ok:false, target_url:null}` 且节点 `completed`，不得杀整任务。
-8. 聚合 report 汇总画像、扫描、漏斗与终认清单，并索引/嵌入各漏洞报告；`code_reachable` 进正文；零确认也生成审计总报告。
+8. `finalize` 固化 `analysis_verdict` / `analysis_status` 并**立即**写入任务权威终态；`report` 为 `async_consumer` 后处理（discovery 确定性聚合摘要 / verify AI 文档），可在终态可见后继续跑，文档失败不得改写权威结论。零确认也生成审计总报告；`code_reachable` 进正文。
 
 ## 2.1 扫描降噪与 AI 二审入口
 
@@ -51,7 +51,7 @@
 对应规格 §4.2.4 / §6.2.1；调研见 [`research-api-hunting.md`](research-api-hunting.md)。
 
 1. **`api_inventory`**：`requires=(source, profile)`，与 `scan_*` / `env_ready` 同波；按画像语言表驱动 parser（OpenAPI 恒跑；Python/Node/PHP/Java/Go 各有路由或文件入口解析）。产出 BOM + resource_key。
-2. **`api_hunt`**：`requires=(api_inventory,)`，与 `cluster→screen→triage` 并列；嫌疑经 §2.7 **全部门**（含 conf≥阈值）直出 Adjudication，绕过 screen/triage；`cluster` 只吃三扫描引擎；`screen`/`triage` 排除猎洞组；`dispatch.requires=(triage, api_hunt)`。
+2. **`api_hunt`**：`requires=(api_inventory,)`，只写 ScanRun / RawFinding 候选，允许安全判断未知，禁止提前套 TP 合格门；`cluster.requires=(scan_semgrep, scan_gitleaks, scan_osv, api_hunt)` 按四路 handoff 的 ScanRun ID 精确汇入，禁止按任务全量读取历史发现，随后全部经 `screen→triage`；`dispatch.requires=(triage,)`。
 3. **VERIFY_MODE** skip inventory/hunt；失败隔离：hunt `ok=false` 不阻断扫描复核链。
 4. **扩展栈**：只加确定性 parser；禁止 AI 列端点。动态前缀等解不出的只记 incomplete，不让模型编 path。
 

@@ -221,7 +221,7 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
         "properties": {
             "suspects": {
                 "type": "array",
-                "description": "鉴权/逻辑嫌疑列表；无证据则空数组。每项必须齐备合格门字段",
+                "description": "鉴权/逻辑候选列表；允许安全判断未知，最终由 triage 判定",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -231,19 +231,27 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
                         "function_symbol": {"type": "string"},
                         "line_start": {"type": "integer"},
                         "why": {"type": "array", "items": {"type": "string"}},
+                        "summary": {
+                            "type": "string",
+                            "description": "1～3 句候选风险简述",
+                        },
+                        "reasoning": {
+                            "type": "string",
+                            "description": "当前证据与仍未知事实的推理",
+                        },
                         "evidence": {
                             "type": "array",
                             "description": "证据条目：字符串或 {file, lines}",
                             "items": {},
                         },
-                        "attacker_controlled": {"type": "boolean"},
-                        "reaches_sink": {"type": "boolean"},
+                        "attacker_controlled": {"type": ["boolean", "null"]},
+                        "reaches_sink": {"type": ["boolean", "null"]},
                         "sanitizer": {
-                            "type": "string",
-                            "enum": ["none", "bypassable", "effective"],
+                            "type": ["string", "null"],
+                            "enum": ["none", "bypassable", "effective", "unknown", None],
                         },
                         "confidence": {
-                            "description": "0–1 浮点；也接受 HIGH/MEDIUM 字符串",
+                            "description": "0–1 浮点、HIGH/MEDIUM/LOW；证据不足可为 null",
                         },
                         "evidence_kind": {"type": "string"},
                         "owasp_api": {"type": "string"},
@@ -255,6 +263,8 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
                         "file_path",
                         "endpoint_id",
                         "why",
+                        "summary",
+                        "reasoning",
                         "evidence",
                         "attacker_controlled",
                         "reaches_sink",

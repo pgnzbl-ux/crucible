@@ -1,4 +1,4 @@
-"""api_hunt 直出合格门：字段齐备即可直出（漏报优先，置信度不挡）。"""
+"""api_hunt 是候选生成器：只写 RawFinding，统一进 cluster/screen/triage。"""
 from __future__ import annotations
 
 import os
@@ -27,116 +27,196 @@ async def session_factory():
     await engine.dispose()
 
 
-def _hunt_raw(*, confidence_score: float) -> dict:
-    return {
-        "confidence_score": confidence_score,
-        "confidence": "HIGH" if confidence_score >= 0.8 else "MEDIUM",
-        "endpoint_id": "GET /items/{id}",
-        "why": ["缺少对象归属校验"],
-        "evidence": [{"file": "app.py", "lines": "10-20"}],
-        "qualify": {
-            "attacker_controlled": True,
-            "reaches_sink": True,
-            "sanitizer": "none",
-        },
-    }
+@pytest.mark.asyncio
+async def test_api_hunt_persists_candidate_only(session_factory, tmp_path, monkeypatch):
+    """猎洞节点不得越权建组/判决；候选由后续统一链处理。"""
+    import json
 
+    from sqlalchemy import func, select
 
-async def _seed_hunt_group(session, *, confidence_score: float):
-    from app.contexts.discovery.service import DiscoveryService
-    from app.contexts.finding.models import AlertGroup, RawFinding
-    from app.contexts.finding.sarif import fingerprint
+    from app.contexts.agent.contracts import ApiHuntInput, ApiInventoryHandoff, SourceHandoff
+    from app.contexts.agent.nodes.api_hunt import ApiHuntNode
+    from app.contexts.agent.nodes.base import NodeContext
+    from app.contexts.discovery.models import ScanRun
+    from app.contexts.finding.models import Adjudication, AlertGroup, RawFinding
     from app.contexts.task.models import Task, TaskRun
 
-    task = Task(
-        project_address="x",
-        task_type="discovery",
-        vulnerability_description=None,
-        owner_id="u1",
-        status="running",
-    )
-    session.add(task)
-    await session.flush()
-    run = TaskRun(task_id=task.id, status="running")
-    session.add(run)
-    await session.flush()
-    disc = DiscoveryService(session)
-    scan_run = await disc.start_scan_run(
-        task_id=task.id,
-        run_id=run.id,
-        node_run_id="nr-hunt",
-        engine="api_hunt",
-        config_summary={},
-    )
-    await disc.finish_scan_run(scan_run, status="completed", finding_count=1)
-    fp = fingerprint("api_hunt", "missing|ep", "app.py", 10, "CWE-639")
-    finding = RawFinding(
-        task_id=task.id,
-        scan_run_id=scan_run.id,
-        engine="api_hunt",
-        rule_id="missing_ownership_check",
-        cwe="CWE-639",
-        severity="warning",
-        file_path="app.py",
-        line_start=10,
-        line_end=10,
-        message="hunt",
-        fingerprint=fp,
-        raw=_hunt_raw(confidence_score=confidence_score),
-    )
-    session.add(finding)
-    await session.flush()
-    group = AlertGroup(
-        task_id=task.id,
-        group_key=f"hunt-{confidence_score}",
-        cwe="CWE-639",
-        file_path="app.py",
-        function_symbol="get_item",
-        member_count=1,
-        representative_finding_id=finding.id,
-        engine_set=["api_hunt"],
-        status="clustered",
-        clue_grade="B",
-        priority="medium",
-    )
-    session.add(group)
-    await session.commit()
-    return task, group
+    bom = tmp_path / "api-bom.json"
+    bom.write_text(json.dumps({"endpoints": [{
+        "endpoint_id": "GET /items/{id}", "method": "GET",
+        "path_template": "/items/{id}", "handler_file": "app.py",
+        "handler_symbol": "get_item", "line_start": 10,
+        "resource_key": "item", "is_pve": True, "has_object_id": True,
+    }]}), encoding="utf-8")
+
+    async with session_factory() as session:
+        task = Task(project_address="x", task_type="discovery",
+                    vulnerability_description=None, owner_id="u1", status="running")
+        session.add(task)
+        await session.flush()
+        run = TaskRun(task_id=task.id, status="running")
+        session.add(run)
+        await session.flush()
+        ctx = NodeContext(
+            task_id=task.id, run_id=run.id, host_workdir=str(tmp_path),
+            source_path=str(tmp_path), vulnerability_description="",
+            project_address="x", project_ref=None, db_session=session,
+            node_run_id="nr-hunt",
+        )
+        inp = ApiHuntInput(
+            source=SourceHandoff(project_path=str(tmp_path)),
+            host_workdir=str(tmp_path), source_path=str(tmp_path),
+            inventory=ApiInventoryHandoff(ok=True, bom_path=bom.name, endpoint_count=1),
+        )
+        node = ApiHuntNode()
+
+        async def fake_batch(*args, **kwargs):
+            return {"reviewed_count": 1, "suspects": [{
+                "endpoint_id": "GET /items/{id}", "file_path": "app.py",
+                "function_symbol": "get_item", "line_start": 10,
+                "cwe": "CWE-639", "confidence": 0.75,
+                "why": ["缺少对象归属校验"],
+                "evidence": [{"file": "app.py", "lines": "10-20"}],
+                "attacker_controlled": True, "reaches_sink": True,
+                "sanitizer": "none",
+            }], "budget_exhausted": False}
+
+        monkeypatch.setattr(node, "_hunt_batch", fake_batch)
+        # execute 内部局部 import，直接 patch 配置源。
+        with patch("app.core.config.get_settings", return_value=type("S", (), {
+            "api_hunt_enabled": True, "api_hunt_top_k": 20,
+            "api_hunt_max_batches": 8,
+        })()):
+            out = await node.execute(ctx, inp)
+
+        assert out["finding_count"] == 1
+        assert out["candidate_count"] == 1
+        assert out["scan_run_id"]
+        assert out["status"] == "completed"
+        assert out["candidate_state_counts"] == {"supported": 1}
+        assert await session.scalar(select(func.count(RawFinding.id))) == 1
+        assert await session.scalar(select(func.count(AlertGroup.id))) == 0
+        assert await session.scalar(select(func.count(Adjudication.id))) == 0
+        scan = (await session.execute(select(ScanRun))).scalar_one()
+        assert (scan.engine, scan.status, scan.finding_count) == ("api_hunt", "completed", 1)
 
 
 @pytest.mark.asyncio
-async def test_adjudicate_hunt_medium_confidence_now_qualifies(session_factory):
-    """漏报优先：猎洞字段齐备即可直出，不再要求 conf >= 0.8。"""
-    from app.contexts.agent.nodes.api_hunt import _adjudicate_hunt_groups
-    from app.contexts.finding.service import FindingService
+async def test_api_hunt_keeps_uncertain_candidate_for_triage(
+    session_factory, tmp_path, monkeypatch,
+):
+    """发现层不得因合格门尚未证明就丢弃可定位候选。"""
+    import json
+
+    from sqlalchemy import select
+
+    from app.contexts.agent.contracts import ApiHuntInput, ApiInventoryHandoff, SourceHandoff
+    from app.contexts.agent.nodes.api_hunt import ApiHuntNode
+    from app.contexts.agent.nodes.base import NodeContext
+    from app.contexts.finding.models import RawFinding
+    from app.contexts.task.models import Task, TaskRun
+
+    bom = tmp_path / "api-bom-uncertain.json"
+    bom.write_text(json.dumps({"endpoints": [{
+        "endpoint_id": "GET /items/{id}", "method": "GET",
+        "path_template": "/items/{id}", "handler_file": "app.py",
+        "handler_symbol": "get_item", "line_start": 10,
+        "resource_key": "item", "is_pve": True, "has_object_id": True,
+    }]}), encoding="utf-8")
 
     async with session_factory() as session:
-        task, group = await _seed_hunt_group(session, confidence_score=0.75)
-        svc = FindingService(session)
-        n = await _adjudicate_hunt_groups(svc, task_id=task.id)
-        assert n == 1
-        await session.refresh(group)
-        assert group.status == "adjudicated"
-        assert group.ai_verdict == "tp"
-        assert group.verdict_source == "agent"
-        assert float(group.ai_confidence) == pytest.approx(0.75)
+        task = Task(
+            project_address="x", task_type="discovery",
+            vulnerability_description=None, owner_id="u1", status="running",
+        )
+        session.add(task)
+        await session.flush()
+        run = TaskRun(task_id=task.id, status="running")
+        session.add(run)
+        await session.flush()
+        ctx = NodeContext(
+            task_id=task.id, run_id=run.id, host_workdir=str(tmp_path),
+            source_path=str(tmp_path), vulnerability_description="",
+            project_address="x", project_ref=None, db_session=session,
+            node_run_id="nr-hunt-uncertain",
+        )
+        inp = ApiHuntInput(
+            source=SourceHandoff(project_path=str(tmp_path)),
+            host_workdir=str(tmp_path), source_path=str(tmp_path),
+            inventory=ApiInventoryHandoff(
+                ok=True, bom_path=bom.name, endpoint_count=1,
+            ),
+        )
+        node = ApiHuntNode()
+
+        async def fake_batch(*args, **kwargs):
+            return {"reviewed_count": 1, "suspects": [{
+                "endpoint_id": "GET /items/{id}", "file_path": "app.py",
+                "function_symbol": "get_item", "line_start": 10,
+                "cwe": "CWE-639", "confidence": None,
+                "why": ["存在对象级读取，但调用方约束尚未确认"],
+                "evidence": [{"file": "app.py", "lines": "10-20"}],
+                "attacker_controlled": None, "reaches_sink": True,
+                "sanitizer": "unknown",
+            }], "budget_exhausted": False}
+
+        monkeypatch.setattr(node, "_hunt_batch", fake_batch)
+        with patch("app.core.config.get_settings", return_value=type("S", (), {
+            "api_hunt_enabled": True, "api_hunt_top_k": 20,
+            "api_hunt_max_batches": 8,
+        })()):
+            out = await node.execute(ctx, inp)
+
+        assert out["candidate_count"] == 1
+        assert out["candidate_state_counts"] == {"uncertain": 1}
+        finding = (await session.execute(select(RawFinding))).scalar_one()
+        assert finding.raw["confidence"] == "UNKNOWN"
+        assert finding.raw["qualify"] == {
+            "attacker_controlled": None,
+            "reaches_sink": True,
+            "sanitizer": "unknown",
+        }
 
 
 @pytest.mark.asyncio
-async def test_adjudicate_hunt_qualifies_high_confidence(session_factory):
-    from app.contexts.agent.nodes.api_hunt import _adjudicate_hunt_groups
-    from app.contexts.finding.service import FindingService
+async def test_api_hunt_skipped_still_records_scan_run(session_factory, tmp_path):
+    """空跑/关闭也必须落 ScanRun，否则 cluster 无法区分「0 候选」与「没跑」。"""
+    from sqlalchemy import select
+
+    from app.contexts.agent.contracts import ApiHuntInput, ApiInventoryHandoff, SourceHandoff
+    from app.contexts.agent.nodes.api_hunt import ApiHuntNode
+    from app.contexts.agent.nodes.base import NodeContext
+    from app.contexts.discovery.models import ScanRun
+    from app.contexts.task.models import Task, TaskRun
 
     async with session_factory() as session:
-        task, group = await _seed_hunt_group(session, confidence_score=0.9)
-        svc = FindingService(session)
-        n = await _adjudicate_hunt_groups(svc, task_id=task.id)
-        assert n == 1
-        await session.refresh(group)
-        assert group.status == "adjudicated"
-        assert group.ai_verdict == "tp"
-        assert group.verdict_source == "agent"
-        assert float(group.ai_confidence) >= 0.8
+        task = Task(project_address="x", task_type="discovery",
+                    vulnerability_description=None, owner_id="u1", status="running")
+        session.add(task)
+        await session.flush()
+        run = TaskRun(task_id=task.id, status="running")
+        session.add(run)
+        await session.flush()
+        ctx = NodeContext(
+            task_id=task.id, run_id=run.id, host_workdir=str(tmp_path),
+            source_path=str(tmp_path), vulnerability_description="",
+            project_address="x", project_ref=None, db_session=session,
+            node_run_id="nr-hunt",
+        )
+        inp = ApiHuntInput(
+            source=SourceHandoff(project_path=str(tmp_path)),
+            host_workdir=str(tmp_path), source_path=str(tmp_path),
+            inventory=ApiInventoryHandoff(ok=True),
+        )
+        with patch("app.core.config.get_settings", return_value=type("S", (), {
+            "api_hunt_enabled": False, "api_hunt_top_k": 20,
+            "api_hunt_max_batches": 8,
+        })()):
+            out = await ApiHuntNode().execute(ctx, inp)
+
+        assert out["skipped"] is True
+        scan = (await session.execute(select(ScanRun))).scalar_one()
+        assert (scan.status, scan.finding_count) == ("skipped", 0)
 
 
 @pytest.mark.asyncio

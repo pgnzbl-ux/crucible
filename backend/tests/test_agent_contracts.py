@@ -143,18 +143,28 @@ def test_assemble_profile_from_store():
 
 def test_control_signals_non_web_and_gate():
     store = HandoffStore()
-    assert store.signals().non_web is True
+    # 未知 is_web 不得当成 non_web（否则会误 skip 靶场）
+    assert store.signals().non_web is False
     store.set("profile", {"is_web": True, "language": "php"})
     assert store.signals().non_web is False
+    store.set("profile", {"is_web": False, "language": "python"})
+    assert store.signals().non_web is True
     store.set("audit", {"gate_verdict": "fail"})
     assert store.signals().gate_verdict == "fail"
 
 
 def test_default_pipeline_skip_when_covers_branches():
+    from app.contexts.agent.contracts import NODE_BY_KEY, VERIFY_PIPELINE
+
     by_key = {s.key: s for s in DEFAULT_PIPELINE}
     assert SkipWhen.NON_WEB in by_key["env_ready"].skip_when
-    assert SkipWhen.GATE_FAIL in by_key["reproduce"].skip_when
-    assert SkipWhen.GATE_UNCERTAIN in by_key["reproduce"].skip_when
+    assert SkipWhen.NO_DISPATCH_LEAD in by_key["lead_verify"].skip_when
+    assert "audit" not in by_key and "reproduce" not in by_key
+    # gate 出口只在 verify 子图的 reproduce 上
+    verify_repro = NODE_BY_KEY["reproduce"]
+    assert SkipWhen.GATE_FAIL in verify_repro.skip_when
+    assert SkipWhen.GATE_UNCERTAIN in verify_repro.skip_when
+    assert {s.key for s in VERIFY_PIPELINE} >= {"audit", "reproduce", "finalize", "report"}
     assert SkipWhen.GATE_FAIL not in by_key["report"].skip_when
 
 

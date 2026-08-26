@@ -16,12 +16,9 @@ from app.shared.base import Base
 async def session_factory():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
-        from app.contexts.identity.models import User  # noqa: F401
-        from app.contexts.lab.models import Lab  # noqa: F401
-        from app.contexts.project.models import Project  # noqa: F401
-        from app.contexts.task.models import Task, TaskRun, NodeRun, AgentEvent  # noqa: F401
-        from app.contexts.report.models import Report  # noqa: F401
-        from app.contexts.settings.models import LlmProvider  # noqa: F401
+        from app.shared.models import register_models
+
+        register_models()
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     yield factory
@@ -166,3 +163,61 @@ async def test_get_run_nodes_serializes_started_at_as_utc(session_factory):
 
     assert nodes[0]["started_at"] == "2026-08-18T09:18:33+00:00"
     assert nodes[0]["finished_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_discovery_run_nodes_include_real_lead_phase_progress(session_factory):
+    """discovery 终认状态来自 LeadRun/LeadNodeRun，不得靠 report 是否启动反推。"""
+    from app.contexts.finding.models import LeadNodeRun, LeadRun
+    from app.contexts.task.models import NodeRun, Task, TaskRun
+    from app.contexts.task.repository import TaskRepository
+    from app.contexts.task.service import TaskService
+
+    async with session_factory() as session:
+        task = Task(
+            project_address="x", task_type="discovery", vulnerability_description=None,
+            owner_id="u1", status="running",
+        )
+        session.add(task)
+        await session.flush()
+        run = TaskRun(task_id=task.id, status="running")
+        session.add(run)
+        await session.flush()
+        session.add(NodeRun(
+            run_id=run.id, task_id=task.id, node_index=11, node_key="dispatch",
+            status="completed", output_json='{"has_lead":true,"queued_count":1}',
+        ))
+        lead = LeadRun(
+            task_id=task.id, run_id=run.id, alert_group_id="group-1",
+            queue_position=0, lead_description="lead", status="running",
+        )
+        session.add(lead)
+        await session.flush()
+        audit = LeadNodeRun(
+            lead_run_id=lead.id, task_id=task.id, run_id=run.id,
+            node_key="audit", status="completed", attempt=1,
+            input_json={}, output_json={"gate_verdict": "pass"},
+        )
+        reproduce = LeadNodeRun(
+            lead_run_id=lead.id, task_id=task.id, run_id=run.id,
+            node_key="reproduce", status="running", attempt=1, input_json={},
+        )
+        session.add_all([audit, reproduce])
+        await session.flush()
+
+        svc = TaskService(TaskRepository(session))
+        nodes = await svc.get_run_nodes(task.id, run.id, "u1")
+        lead_node = next(node for node in nodes if node["node_key"] == "lead_verify")
+        assert lead_node["status"] == "running"
+        assert lead_node["output"]["lead_status_counts"] == {"running": 1}
+        assert lead_node["output"]["phase_status_counts"] == {
+            "audit": {"completed": 1}, "reproduce": {"running": 1},
+        }
+
+        lead.status = "completed"
+        reproduce.status = "completed"
+        reproduce.output_json = {"verdict": "confirmed"}
+        await session.flush()
+        nodes = await svc.get_run_nodes(task.id, run.id, "u1")
+        lead_node = next(node for node in nodes if node["node_key"] == "lead_verify")
+        assert lead_node["status"] == "completed"

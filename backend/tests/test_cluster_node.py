@@ -294,17 +294,33 @@ async def _seed_discovery_task(session, tmp_path, scan_runs_spec, findings):
     await session.flush()
 
     svc = DiscoveryService(session)
+    scan_by_engine = {}
+    status_by_engine = {}
     for engine, status in scan_runs_spec:
         sr = await svc.start_scan_run(
             task_id=task.id, run_id=run.id, node_run_id=f"nr-{engine}", engine=engine,
             config_summary={},
         )
         await svc.finish_scan_run(sr, status=status)
+        scan_by_engine[engine] = sr
+        status_by_engine[engine] = status
     if findings:
-        count = await svc.upsert_raw_findings(
-            task_id=task.id, scan_run_id=f"sr-{findings[0]['engine']}", findings=findings,
-        )
-        assert count == len(findings)
+        for engine in {f["engine"] for f in findings}:
+            if engine not in scan_by_engine:
+                sr = await svc.start_scan_run(
+                    task_id=task.id, run_id=run.id,
+                    node_run_id=f"nr-{engine}", engine=engine, config_summary={},
+                )
+                await svc.finish_scan_run(sr, status="completed")
+                scan_by_engine[engine] = sr
+                status_by_engine[engine] = "completed"
+            engine_findings = [f for f in findings if f["engine"] == engine]
+            count = await svc.upsert_raw_findings(
+                task_id=task.id,
+                scan_run_id=scan_by_engine[engine].id,
+                findings=engine_findings,
+            )
+            assert count == len(engine_findings)
 
     ctx = NodeContext(
         task_id=task.id, run_id=run.id, host_workdir=str(tmp_path),
@@ -312,11 +328,20 @@ async def _seed_discovery_task(session, tmp_path, scan_runs_spec, findings):
         project_address="x", project_ref=None, db_session=session,
         node_run_id="nr-cluster",
     )
-    from app.contexts.agent.contracts import ClusterInput, SourceHandoff
+    from app.contexts.agent.contracts import ClusterInput, EngineScanHandoff, SourceHandoff
 
     inp = ClusterInput(
         source=SourceHandoff(project_path=str(repo), repo_dirname="repo"),
-        host_workdir=str(tmp_path), source_path=str(repo), scans=[],
+        host_workdir=str(tmp_path), source_path=str(repo),
+        scans=[
+            EngineScanHandoff(
+                engine=engine,
+                scan_run_id=scan.id,
+                status=status_by_engine[engine],
+                finding_count=sum(1 for f in findings if f["engine"] == engine),
+            )
+            for engine, scan in scan_by_engine.items()
+        ],
     )
     return ctx, task, run, inp
 
@@ -378,6 +403,61 @@ async def test_cluster_node_groups_and_grades(session_factory, tmp_path):
             select(AlertGroup).where(AlertGroup.task_id == task.id)
         )).scalars().all()
         assert len(groups2) == 1
+
+
+@pytest.mark.asyncio
+async def test_cluster_only_consumes_scan_runs_declared_by_handoffs(
+    session_factory, tmp_path,
+):
+    """同任务历史运行的 RawFinding 不得混入当前 cluster。"""
+    from app.contexts.agent.nodes.cluster import ClusterNode
+    from app.contexts.discovery.service import DiscoveryService
+    from app.contexts.finding.models import AlertGroup
+    from app.contexts.finding.sarif import fingerprint
+    from app.contexts.task.models import TaskRun
+
+    current = {
+        "engine": "semgrep", "rule_id": "current.sqli", "cwe": "CWE-89",
+        "severity": "error", "file_path": "app.py", "line_start": 2, "line_end": 2,
+        "message": "current", "source_to_sink": None, "code_snippet": None,
+        "fingerprint": fingerprint("semgrep", "current.sqli", "app.py", 2, "CWE-89"),
+        "raw": {},
+    }
+    historical = {
+        "engine": "semgrep", "rule_id": "historical.cmd", "cwe": "CWE-78",
+        "severity": "error", "file_path": "old.py", "line_start": 8, "line_end": 8,
+        "message": "historical", "source_to_sink": None, "code_snippet": None,
+        "fingerprint": fingerprint(
+            "semgrep", "historical.cmd", "old.py", 8, "CWE-78",
+        ),
+        "raw": {},
+    }
+
+    async with session_factory() as session:
+        ctx, task, _run, inp = await _seed_discovery_task(
+            session, tmp_path,
+            [("semgrep", "completed"), ("gitleaks", "skipped"), ("osv", "skipped")],
+            [current],
+        )
+        old_run = TaskRun(task_id=task.id, status="completed")
+        session.add(old_run)
+        await session.flush()
+        svc = DiscoveryService(session)
+        old_scan = await svc.start_scan_run(
+            task_id=task.id, run_id=old_run.id, node_run_id="nr-old-semgrep",
+            engine="semgrep", config_summary={},
+        )
+        await svc.finish_scan_run(old_scan, status="completed", finding_count=1)
+        assert await svc.upsert_raw_findings(
+            task_id=task.id, scan_run_id=old_scan.id, findings=[historical],
+        ) == 1
+
+        out = await ClusterNode().execute(ctx, inp)
+        groups = (await session.execute(select(AlertGroup))).scalars().all()
+        assert out["finding_count"] == 1
+        assert out["group_count"] == 1
+        assert len(groups) == 1
+        assert groups[0].cwe == "CWE-89"
 
 
 @pytest.mark.asyncio
@@ -480,6 +560,46 @@ async def test_osv_groups_marked_bypass(session_factory, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_mixed_osv_group_does_not_bypass_triage(session_factory):
+    """统一聚类后若 OSV 组含其他引擎证据，不得整组短路二审。"""
+    from app.contexts.discovery.models import ScanRun
+    from app.contexts.finding.models import AlertGroup, RawFinding
+    from app.contexts.finding.service import FindingService
+    from app.contexts.task.models import Task, TaskRun
+
+    async with session_factory() as session:
+        task = Task(project_address="x", task_type="discovery",
+                    vulnerability_description=None, owner_id="u1", status="running")
+        session.add(task)
+        await session.flush()
+        run = TaskRun(task_id=task.id, status="running")
+        session.add(run)
+        await session.flush()
+        scan = ScanRun(task_id=task.id, run_id=run.id, node_run_id="nr",
+                       engine="semgrep", status="completed", config_summary={})
+        session.add(scan)
+        await session.flush()
+        finding = RawFinding(
+            task_id=task.id, scan_run_id=scan.id, engine="semgrep", rule_id="r",
+            cwe="CWE-89", severity="error", file_path="app.py", line_start=1,
+            line_end=1, message="m", fingerprint="m" * 64, raw={},
+        )
+        session.add(finding)
+        await session.flush()
+        group = AlertGroup(
+            task_id=task.id, group_key="mixed", cwe="CWE-89", file_path="app.py",
+            member_count=2, representative_finding_id=finding.id,
+            engine_set=["osv", "semgrep"], status="clustered", clue_grade="A",
+        )
+        session.add(group)
+        await session.flush()
+
+        assert await FindingService(session).mark_bypass_groups(task.id) == 0
+        assert group.status == "clustered"
+        assert group.ai_verdict is None
+
+
+@pytest.mark.asyncio
 async def test_cluster_uses_profile_languages(session_factory, tmp_path):
     """画像只有 nodejs 时不应索引 Python 文件。"""
     from app.contexts.agent.contracts import ClusterInput, ProfileHandoff, SourceHandoff
@@ -568,8 +688,8 @@ def test_should_skip_llm_only_a_b():
 
 
 @pytest.mark.asyncio
-async def test_cluster_ignores_api_hunt_findings(session_factory, tmp_path):
-    """cluster 只汇入三扫描；同 locus 的 api_hunt 不得并入扫描组。"""
+async def test_cluster_unifies_api_hunt_with_scanner_findings(session_factory, tmp_path):
+    """cluster 统一汇入四路发现；同 locus 的猎洞证据并入扫描组。"""
     from app.contexts.agent.nodes.cluster import ClusterNode
     from app.contexts.finding.models import AlertGroup
     from app.contexts.finding.sarif import fingerprint
@@ -583,11 +703,11 @@ async def test_cluster_ignores_api_hunt_findings(session_factory, tmp_path):
             "raw": {},
         },
         {
-            "engine": "api_hunt", "rule_id": "missing_ownership_check", "cwe": "CWE-639",
+            "engine": "api_hunt", "rule_id": "missing_ownership_check", "cwe": "CWE-89",
             "severity": "warning", "file_path": "app.py", "line_start": 2, "line_end": 2,
             "message": "hunt", "source_to_sink": None, "code_snippet": None,
             "fingerprint": fingerprint(
-                "api_hunt", "missing_ownership_check|ep1", "app.py", 2, "CWE-639",
+                "api_hunt", "missing_ownership_check|ep1", "app.py", 2, "CWE-89",
             ),
             "raw": {"endpoint_id": "ep1"},
         },
@@ -599,24 +719,26 @@ async def test_cluster_ignores_api_hunt_findings(session_factory, tmp_path):
             findings,
         )
         out = await ClusterNode().execute(ctx, inp)
-        assert out["finding_count"] == 1
+        assert out["finding_count"] == 2
         assert out["group_count"] == 1
         assert out["groups_by_engine"].get("semgrep") == 1
-        assert "api_hunt" not in out["groups_by_engine"]
+        assert out["groups_by_engine"].get("api_hunt") == 1
         groups = (await session.execute(
             select(AlertGroup).where(AlertGroup.task_id == task.id)
         )).scalars().all()
         assert len(groups) == 1
-        assert groups[0].engine_set == ["semgrep"]
+        assert set(groups[0].engine_set) == {"semgrep", "api_hunt"}
+        assert groups[0].member_count == 2
 
 
-def test_scan_review_groups_excludes_hunt():
-    from app.contexts.agent.nodes.triage.queue import scan_review_groups
+def test_review_groups_includes_hunt_and_mixed_groups():
+    from app.contexts.agent.nodes.triage.queue import review_groups
 
     class _G:
         def __init__(self, engines):
             self.engine_set = engines
 
-    kept = scan_review_groups([_G(["semgrep"]), _G(["api_hunt"]), _G(["semgrep", "api_hunt"])])
-    assert len(kept) == 1
-    assert kept[0].engine_set == ["semgrep"]
+    kept = review_groups([_G(["semgrep"]), _G(["api_hunt"]), _G(["semgrep", "api_hunt"])])
+    assert [g.engine_set for g in kept] == [
+        ["semgrep"], ["api_hunt"], ["semgrep", "api_hunt"],
+    ]

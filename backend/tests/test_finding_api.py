@@ -44,7 +44,13 @@ async def _seed_review_env(factory):
     import hashlib
 
     from app.contexts.discovery.models import ScanRun
-    from app.contexts.finding.models import Adjudication, AlertGroup, LeadRun, RawFinding
+    from app.contexts.finding.models import (
+        Adjudication,
+        AlertGroup,
+        LeadNodeRun,
+        LeadRun,
+        RawFinding,
+    )
     from app.contexts.identity.models import User
     from app.contexts.settings.models import LlmProvider
     from app.contexts.task.models import Task, TaskRun
@@ -86,11 +92,26 @@ async def _seed_review_env(factory):
         )
         s.add(g)
         await s.flush()
-        s.add(LeadRun(
+        lead = LeadRun(
             task_id=task.id, run_id=run.id, alert_group_id=g.id,
             queue_position=0, lead_description="SQL injection hypothesis",
             status="completed", verdict="code_reachable", gate_verdict="pass",
-        ))
+        )
+        s.add(lead)
+        await s.flush()
+        s.add_all([
+            LeadNodeRun(
+                lead_run_id=lead.id, task_id=task.id, run_id=run.id,
+                node_key="audit", status="completed", attempt=1,
+                input_json={"lead_description": lead.lead_description},
+                output_json={"gate_verdict": "pass"},
+            ),
+            LeadNodeRun(
+                lead_run_id=lead.id, task_id=task.id, run_id=run.id,
+                node_key="reproduce", status="skipped", attempt=1,
+                input_json={"gate_verdict": "pass"}, error="无可用靶场 target_url",
+            ),
+        ])
         s.add(Adjudication(
             alert_group_id=g.id, attempt=1, verdict="tp", confidence=0.9,
             why=["拼接"], evidence=[], need=[], context_log=[],
@@ -491,6 +512,12 @@ def test_group_detail_lazy_reconcile(client_env):
     assert data["representative"]["raw"]["has_dataflow"] is True
     assert data["representative"]["raw"]["confidence"] == "HIGH"
     assert data["lead_runs"][0]["verdict"] == "code_reachable"
+    assert [row["node_key"] for row in data["lead_runs"][0]["node_runs"]] == [
+        "audit", "reproduce",
+    ]
+    assert [row["status"] for row in data["lead_runs"][0]["node_runs"]] == [
+        "completed", "skipped",
+    ]
 
 
 def test_group_detail_tolerates_dirty_legacy_adjudication(client_env):

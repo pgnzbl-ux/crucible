@@ -36,9 +36,9 @@ async def test_reproduce_rewrites_localhost_to_advertise_ip():
         },
     )
     with patch(
-        "app.contexts.agent.nodes.reproduce._ensure_lab_reachable",
+        "app.contexts.agent.nodes.reproduce._resolve_lab_for_reproduce",
         new_callable=AsyncMock,
-        side_effect=lambda ctx, env: env,
+        side_effect=lambda ctx, env: (env, None),
     ), patch(
         "app.contexts.agent.target_url.host_advertise_ip",
         return_value="10.0.0.8",
@@ -84,9 +84,9 @@ async def test_reproduce_keeps_published_lan_target_url():
         },
     )
     with patch(
-        "app.contexts.agent.nodes.reproduce._ensure_lab_reachable",
+        "app.contexts.agent.nodes.reproduce._resolve_lab_for_reproduce",
         new_callable=AsyncMock,
-        side_effect=lambda ctx, env: env,
+        side_effect=lambda ctx, env: (env, None),
     ), patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", fake_run_ai_node):
         await ReproduceNode().execute(ctx)
 

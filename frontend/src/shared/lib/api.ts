@@ -144,7 +144,7 @@ export interface TaskDetail extends TaskSummary {
   runs: RunSummary[]
 }
 
-// 节点状态(6 节点步骤条数据源)
+// 节点状态（模式化子图步骤条数据源）
 export interface NodeUsage {
   prompt_tokens: number
   completion_tokens: number
@@ -864,6 +864,19 @@ export interface LeadRunSummary {
   error: string | null
   created_at: string | null
   updated_at: string | null
+  node_runs: LeadNodeRunSummary[]
+}
+
+export interface LeadNodeRunSummary {
+  id: string
+  node_key: 'audit' | 'reproduce' | string
+  status: string
+  attempt: number
+  input_json: Record<string, unknown>
+  output_json: Record<string, unknown> | null
+  error: string | null
+  started_at: string | null
+  finished_at: string | null
 }
 
 export interface AlertGroupDetail extends AlertGroupSummary {

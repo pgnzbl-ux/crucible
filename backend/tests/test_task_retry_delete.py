@@ -314,6 +314,7 @@ async def test_retry_from_node_copies_skipped_prereq(session_factory):
                 ("env_ready", "completed"),
                 ("audit", "completed"),
                 ("reproduce", "skipped"),
+                ("finalize", "completed"),
                 ("report", "completed"),
             ]
         ):
@@ -334,7 +335,7 @@ async def test_retry_from_node_copies_skipped_prereq(session_factory):
         by_key = {n.node_key: n.status for n in new_nodes}
         assert by_key == {
             "source": "completed", "profile": "completed", "env_ready": "completed",
-            "audit": "completed", "reproduce": "skipped",
+            "audit": "completed", "reproduce": "skipped", "finalize": "completed",
         }
 
 

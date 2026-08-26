@@ -1,7 +1,7 @@
-/** 运行流程图，与 backend `DEFAULT_PIPELINE` 及 LeadWorker 语义对齐。
+/** 运行流程图，与 backend `DEFAULT_PIPELINE` / `VERIFY_PIPELINE` 对齐。
  *
- * discovery 不展示必然 skipped 的 DAG audit/reproduce 占位，改由合成
- * `lead_verify` 表示真正执行的多 LeadRun 终认。verify 则展示单漏洞节点链。
+ * discovery 终认只展示 `lead_verify`（per-lead LeadNodeRun）；旧响应里
+ * skipped 的 audit/reproduce 占位会被过滤。verify 展示单漏洞 audit/reproduce。
  */
 
 import { PIPELINE_NODE_ORDER } from './meta'
@@ -17,20 +17,22 @@ export const PIPELINE_REQUIRES: Record<string, readonly string[]> = {
   scan_semgrep: ['source', 'profile'],
   api_inventory: ['source', 'profile'],
   env_ready: ['source', 'profile', 'dispatch'],
-  cluster: ['scan_semgrep', 'scan_gitleaks', 'scan_osv'],
+  cluster: ['scan_semgrep', 'scan_gitleaks', 'scan_osv', 'api_hunt'],
   api_hunt: ['api_inventory'],
   screen: ['cluster'],
   triage: ['screen'],
-  dispatch: ['triage', 'api_hunt'],
+  dispatch: ['triage'],
   audit: ['source', 'profile', 'dispatch'],
   reproduce: ['source', 'env_ready', 'audit'],
-  report: ['profile', 'env_ready', 'audit', 'reproduce'],
+  lead_verify: ['dispatch', 'env_ready'],
+  finalize: ['profile', 'env_ready', 'lead_verify'],
+  report: ['finalize'],
 }
 
-export const SYNTHETIC_KEYS = ['lead_verify', 'over'] as const
+export const SYNTHETIC_KEYS = ['over'] as const
 export type SyntheticKey = (typeof SYNTHETIC_KEYS)[number]
 
-/** discovery 中由 LeadWorker 取代执行、因而在 NodeRun 上必然 skipped 的节点。 */
+/** 旧 discovery NodeRun 可能仍含 skipped 的 audit/reproduce；展示时过滤。 */
 export const DISCOVERY_REPLACED_NODE_KEYS: ReadonlySet<string> = new Set(['audit', 'reproduce'])
 
 /** 仅控制展开拓扑的纵向排布；画像居中对齐 Semgrep；清单在 Semgrep 上方填满深度列。
@@ -102,26 +104,26 @@ export function pipelineOverviewStages(mode: PipelineMode): PipelineOverviewStag
       {
         key: 'deep',
         label: '深度分析',
-        caption: 'Semgrep · API 清单',
-        nodeKeys: ['scan_semgrep', 'api_inventory'],
+        caption: 'Semgrep · API 清单/猎洞',
+        nodeKeys: ['scan_semgrep', 'api_inventory', 'api_hunt'],
         parallel: true,
       },
       {
         key: 'clues',
         label: '线索归并',
-        caption: '扫描聚类 ∥ API 猎洞直出',
-        nodeKeys: ['cluster', 'api_hunt'],
-        parallel: true,
+        caption: '四路发现统一聚类',
+        nodeKeys: ['cluster'],
       },
       {
         key: 'review',
-        label: '扫描复核',
+        label: '统一复核',
         caption: '轻量快审 · AI 二审',
         nodeKeys: ['screen', 'triage'],
       },
-      { key: 'dispatch', label: '线索调度', caption: '扫描复核 ∪ 猎洞合格', nodeKeys: ['dispatch'] },
+      { key: 'dispatch', label: '线索调度', caption: '二审合格线索入队', nodeKeys: ['dispatch'] },
       { key: 'verify', label: '多线索终认', caption: '按需靶场 → 白盒/复现', nodeKeys: ['env_ready', 'lead_verify'] },
-      { key: 'report', label: '审计报告', caption: '聚合最终结果', nodeKeys: ['report'] },
+      { key: 'finalize', label: '结论固化', caption: '分析终态（任务完成）', nodeKeys: ['finalize'] },
+      { key: 'report', label: '审计报告', caption: '后处理文档', nodeKeys: ['report'] },
     ]
   }
   return [
@@ -130,7 +132,8 @@ export function pipelineOverviewStages(mode: PipelineMode): PipelineOverviewStag
     { key: 'env', label: '运行环境', caption: '非 Web 自动跳过', nodeKeys: ['env_ready'] },
     { key: 'audit', label: '白盒审计', caption: '确认代码路径', nodeKeys: ['audit'] },
     { key: 'reproduce', label: '动态复现', caption: 'Gate 未通过则跳过', nodeKeys: ['reproduce'] },
-    { key: 'report', label: '验证报告', caption: '输出最终结论', nodeKeys: ['report'] },
+    { key: 'finalize', label: '结论固化', caption: '分析终态（任务完成）', nodeKeys: ['finalize'] },
+    { key: 'report', label: '验证报告', caption: '后处理文档', nodeKeys: ['report'] },
   ]
 }
 
@@ -194,14 +197,15 @@ export function flowColumn(key: string, _mode: PipelineMode): number {
   if (key === 'source') return 0
   if (key === 'profile' || key === 'scan_gitleaks' || key === 'scan_osv') return 1
   if (key === 'scan_semgrep' || key === 'api_inventory') return 2
-  // 两条线索流并列：scans→cluster ∥ inventory→hunt；复核仅扫描支路
-  if (key === 'cluster' || key === 'api_hunt') return 3
-  if (key === 'screen' || key === 'triage') return 4
-  if (key === 'dispatch') return 5
-  if (key === 'audit' || key === 'env_ready') return 6
-  if (key === 'reproduce' || key === 'lead_verify') return 7
-  if (key === 'report') return 8
-  if (key === 'over') return 9
+  if (key === 'api_hunt') return 3
+  if (key === 'cluster') return 4
+  if (key === 'screen' || key === 'triage') return 5
+  if (key === 'dispatch') return 6
+  if (key === 'audit' || key === 'env_ready') return 7
+  if (key === 'reproduce' || key === 'lead_verify') return 8
+  if (key === 'finalize') return 9
+  if (key === 'report') return 10
+  if (key === 'over') return 11
   return 1
 }
 
@@ -222,9 +226,21 @@ function withSynthetics(keys: readonly string[], mode: PipelineMode): string[] {
     for (let i = out.length - 1; i >= 0; i -= 1) {
       if (DISCOVERY_REPLACED_NODE_KEYS.has(out[i])) out.splice(i, 1)
     }
-    if (out.includes('dispatch') && out.includes('report')) {
+    // 后端已把 lead_verify / finalize 纳入 DEFAULT_PIPELINE；仅旧响应缺席时再合成
+    if (out.includes('dispatch') && out.includes('report') && !out.includes('lead_verify')) {
       out.splice(out.indexOf('report'), 0, 'lead_verify')
     }
+    if (
+      (out.includes('lead_verify') || out.includes('dispatch'))
+      && out.includes('report')
+      && !out.includes('finalize')
+    ) {
+      out.splice(out.indexOf('report'), 0, 'finalize')
+    }
+  } else {
+    // verify 子图不含 lead_verify（终认是单例 audit/reproduce）
+    const idx = out.indexOf('lead_verify')
+    if (idx >= 0) out.splice(idx, 1)
   }
   out.push('over')
   return out
@@ -264,22 +280,21 @@ export function flowEdges(
   add(edges, 'scan_semgrep', 'cluster')
   add(edges, 'scan_gitleaks', 'cluster')
   add(edges, 'api_inventory', 'api_hunt')
+  add(edges, 'api_hunt', 'cluster')
   add(edges, 'cluster', 'screen')
   add(edges, 'screen', 'triage')
   if (vis.has('dispatch')) {
     add(edges, 'triage', 'dispatch')
-    add(edges, 'api_hunt', 'dispatch')
   }
 
   if (mode === 'discovery') {
     if (vis.has('dispatch')) {
       add(edges, 'dispatch', 'env_ready', 'conditional', '有线索且为 Web')
       add(edges, 'env_ready', 'lead_verify', 'support', '就绪 / 降级')
-      add(edges, 'lead_verify', 'report')
+      add(edges, 'lead_verify', 'finalize')
+      add(edges, 'finalize', 'report')
     } else {
-      addChain(edges, vis, ['triage', 'lead_verify', 'report'])
-      if (vis.has('lead_verify')) add(edges, 'api_hunt', 'lead_verify')
-      else add(edges, 'api_hunt', 'report')
+      addChain(edges, vis, ['triage', 'lead_verify', 'finalize', 'report'])
     }
     if (!vis.has('dispatch')) add(edges, 'env_ready', 'lead_verify', 'support', 'Web 靶场')
   } else {
@@ -287,7 +302,8 @@ export function flowEdges(
     add(edges, 'profile', 'audit')
     add(edges, 'audit', 'reproduce', 'conditional', 'Gate 通过')
     add(edges, 'env_ready', 'reproduce', 'support', '动态环境')
-    add(edges, 'reproduce', 'report')
+    add(edges, 'reproduce', 'finalize')
+    add(edges, 'finalize', 'report')
   }
   add(edges, 'report', 'over')
   return edges
@@ -396,13 +412,12 @@ function routeBox(
       labelY: (y1 + y2) / 2,
     }
   }
-  // 三扫描汇入 cluster：先汇到同一合并点，再一根进入节点
-  if (b.key === 'cluster' && a.key.startsWith('scan_')) {
+  // 四路发现汇入 cluster：先汇到同一合并点，再一根进入节点
+  if (b.key === 'cluster' && (a.key.startsWith('scan_') || a.key === 'api_hunt')) {
     return routeScanIntoCluster(a, b, gitleaksCy, hopY)
   }
-  // 扫描复核与猎洞汇入 dispatch（猎洞从复核列顶上飞过，避免横穿快审/二审）
-  if (b.key === 'dispatch' && (a.key === 'triage' || a.key === 'api_hunt')) {
-    return routeIntoDispatch(a, b, gitleaksCy)
+  if (b.key === 'dispatch' && a.key === 'triage') {
+    return routeIntoDispatch(a, b)
   }
   const x1 = a.x + a.width
   const y1 = a.y + a.height / 2
@@ -461,26 +476,16 @@ function routeScanIntoCluster(
   }
 }
 
-/** 复核 / 猎洞 → 调度。猎洞走深度列空出来的顶轨飞过复核列，避免横穿快审。 */
+/** 统一复核 → 调度。 */
 function routeIntoDispatch(
   a: DagLayoutNode,
   dispatch: DagLayoutNode,
-  gitleaksCy: number | null,
 ): { d: string; labelX: number; labelY: number } {
   const x1 = a.x + a.width
   const y1 = a.y + a.height / 2
   const x2 = dispatch.x
   const cy = dispatch.y + dispatch.height / 2
   const mergeX = x2 - SIZE.gapX / 3
-  if (a.key === 'api_hunt') {
-    const dropX = x1 + SIZE.gapX / 3
-    const railY = gitleaksCy ?? SIZE.padY + SIZE.nodeH / 2
-    return {
-      d: `M ${x1} ${y1} H ${dropX} V ${railY} H ${mergeX} V ${cy} H ${x2}`,
-      labelX: (dropX + mergeX) / 2,
-      labelY: railY - 7,
-    }
-  }
   if (Math.abs(y1 - cy) < 1) {
     return {
       d: `M ${x1} ${y1} H ${x2}`,
@@ -502,6 +507,7 @@ function toneForStage(key: string): DagLayoutGroup['tone'] {
   if (key === 'clues') return 'clues'
   if (key === 'review') return 'review'
   if (key === 'dispatch') return 'dispatch'
+  if (key === 'finalize') return 'result'
   if (key === 'report') return 'result'
   return 'verify'
 }
@@ -532,12 +538,12 @@ function groupDefinitions(mode: PipelineMode, visible: ReadonlySet<string>): Gro
   if (!showsDiscovery) return pipelineOverviewStages('verify').map(toGroupDefinition)
 
   // 用户显式打开 verify 中被跳过的发现节点时，按 discovery 的真实阶段补充展示；
-  // audit/reproduce/report 仍沿用 verify 的阶段定义。
+  // audit/reproduce/finalize/report 仍沿用 verify 的阶段定义。
   const discoveryPrefix = pipelineOverviewStages('discovery').filter(
-    (stage) => !['verify', 'report'].includes(stage.key),
+    (stage) => !['verify', 'finalize', 'report'].includes(stage.key),
   )
   const verifyTail = pipelineOverviewStages('verify').filter((stage) =>
-    ['audit', 'reproduce', 'report'].includes(stage.key),
+    ['audit', 'reproduce', 'finalize', 'report'].includes(stage.key),
   )
   return [...discoveryPrefix, ...verifyTail].map(toGroupDefinition)
 }
@@ -724,6 +730,9 @@ export function dagVisualStatus(input: {
     return status
   }
   if (status === 'completed') {
+    if (output?.outcome === 'degraded' || output?.outcome === 'blocked') {
+      return 'degraded'
+    }
     const engineFailed = output?.status === 'failed' || Boolean(error_message)
     return engineFailed ? 'degraded' : 'completed'
   }

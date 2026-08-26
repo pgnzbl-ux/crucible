@@ -14,7 +14,7 @@ from sqlalchemy import select
 from ..base import NodeContext, emit_phase, task_run_cancelled
 from . import cascade
 from .adjudicate import adjudicate_group
-from .queue import order_groups, scan_review_groups
+from .queue import order_groups, review_groups
 
 
 class TriageNode:
@@ -46,9 +46,8 @@ class TriageNode:
         settings = get_settings()
         svc = FindingService(ctx.db_session)
 
-        # screen 已定案/转人工的组不再是 clustered；此处只拿扫描升级队列
-        # （猎洞组绕过本节点，由 api_hunt 直出或保持 clustered 不进 T3）
-        groups = scan_review_groups(
+        # screen 已定案/转人工的组不再是 clustered；此处消费四路统一升级队列。
+        groups = review_groups(
             await svc.list_groups(ctx.task_id, status="clustered")
         )
         rep_ids = [
@@ -182,6 +181,8 @@ class TriageNode:
     async def _adjudicate_all_serial(
         self, ctx: NodeContext, queue: list, settings, stats: cascade.TierStats,
     ) -> bool:
+        # 瞬时 LLM 错误连败计数：升级 raise 直接上抛（本路径无逐组兜底）
+        transient_state: dict[str, Any] = {"streak": 0, "escalated": False}
         for i, group in enumerate(queue):
             if await task_run_cancelled(ctx.db_session, ctx.task_id, ctx.run_id):
                 emit_phase(ctx, "任务已取消，中止二审", phase=self.node_key)
@@ -203,7 +204,7 @@ class TriageNode:
             emit_phase(
                 ctx, f"二审 {i + 1}/{len(queue)}：{label}", phase=self.node_key
             )
-            if await adjudicate_group(ctx, group, settings):
+            if await adjudicate_group(ctx, group, settings, transient_state):
                 stats.agent += 1
                 await self._emit_progress(
                     ctx,
@@ -219,7 +220,7 @@ class TriageNode:
     async def _adjudicate_representatives(
         self, ctx: NodeContext, families: list, settings, stats: cascade.TierStats,
     ) -> bool:
-        from app.contexts.agent.llm_errors import is_llm_api_failure
+        from app.contexts.agent.llm_errors import is_fatal_llm_error
         from app.contexts.finding.models import AlertGroup
         from app.core.agent_runner import AgentRunnerError
 
@@ -235,6 +236,8 @@ class TriageNode:
         total = len(families)
         llm_stop = asyncio.Event()
         llm_fatal: list[str] = []
+        # 瞬时 LLM 错误连败计数（跨组共享）：连续多组降级视为网关故障升级中止
+        transient_state: dict[str, Any] = {"streak": 0, "escalated": False}
         emit_phase(
             ctx,
             f"族级代表审议启动：{total} 族 · 并发 {concurrency}"
@@ -275,11 +278,14 @@ class TriageNode:
                     try:
                         ok = await adjudicate_group(
                             replace(ctx, db_session=ws), group, settings,
+                            transient_state,
                         )
                     except asyncio.CancelledError:
                         raise
                     except AgentRunnerError as e:
-                        if is_llm_api_failure(str(e)):
+                        if is_fatal_llm_error(str(e)) or transient_state.get(
+                            "escalated"
+                        ):
                             llm_fatal.append(str(e))
                             llm_stop.set()
                             emit_phase(
@@ -297,7 +303,9 @@ class TriageNode:
                     except Exception as e:  # noqa: BLE001
                         import logging
 
-                        if is_llm_api_failure(str(e)):
+                        if is_fatal_llm_error(str(e)) or transient_state.get(
+                            "escalated"
+                        ):
                             llm_fatal.append(str(e))
                             llm_stop.set()
                             emit_phase(

@@ -162,8 +162,8 @@ describe('NodeSteps audit detail wiring', () => {
 
     expect(html).toContain('crucible-node-progress__summary')
     expect(html).toContain('role="progressbar"')
-    expect(html).toContain('aria-valuenow="17"')
-    expect(html).toContain('显示跳过的节点(9)')
+    expect(html).toContain('aria-valuenow="14"')
+    expect(html).toContain('显示跳过的节点(10)')
     expect(html).not.toContain('data-node-key="api_hunt"')
     expect(html).not.toContain('data-node-key="api_inventory"')
     expect(html).toContain('正在执行：项目画像')
@@ -581,7 +581,8 @@ describe('NodeSteps compact topology', () => {
     expect(discovery).toContain('data-stage-key="initial"')
     expect(discovery).toContain('data-stage-key="deep"')
     expect(discovery).toContain('画像 + Gitleaks + OSV')
-    expect(discovery).toContain('Semgrep · API 清单 · Web 靶场')
+    expect(discovery).toContain('Semgrep · API 清单/猎洞')
+    expect(discovery).toContain('四路发现统一聚类')
     expect(discovery).toContain('data-stage-key="verify"')
     expect(discoveryDetailed).toContain('crucible-dag-node--scan_gitleaks')
     expect(discoveryDetailed).toContain('crucible-dag-node--dispatch')
@@ -589,7 +590,7 @@ describe('NodeSteps compact topology', () => {
     expect(discoveryDetailed).not.toContain('crucible-dag-node--audit')
     expect(discoveryDetailed).toContain('data-group-key="initial"')
     expect(discoveryDetailed).toContain('data-group-key="deep"')
-    for (const label of ['准备源码', '并行初筛', '深度分析', '线索归并', '扫描复核', '线索调度', '多线索终认', '审计报告']) {
+    for (const label of ['准备源码', '并行初筛', '深度分析', '线索归并', '统一复核', '线索调度', '多线索终认', '审计报告']) {
       expect(discovery).toContain(label)
       expect(discoveryDetailed).toContain(label)
     }
@@ -618,7 +619,7 @@ describe('NodeSteps compact topology', () => {
       {
         id: 'n-hunt', node_index: 8, node_key: 'api_hunt', status: 'completed',
         attempt: 1, error_message: null, started_at: null, finished_at: null,
-        output: { qualified_count: 1 }, usage: usage(40, 8),
+        output: { candidate_count: 1 }, usage: usage(40, 8),
       },
       {
         id: 'n-dispatch', node_index: 11, node_key: 'dispatch', status: 'completed',
@@ -683,10 +684,49 @@ describe('NodeSteps compact topology', () => {
     expect(html).toContain('多线索终认')
   })
 
+  it('discovery uses persisted lead_verify status instead of inferring from report', () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    qc.setQueryData(['run-nodes', 't1', 'r1'], [
+      ...runningPipeline().map((node) => (
+        node.node_key === 'env_ready' ? { ...node, status: 'skipped' as const } : node
+      )),
+      {
+        id: 'n-dispatch', node_index: 11, node_key: 'dispatch', status: 'completed',
+        attempt: 1, error_message: null, started_at: null, finished_at: null,
+        output: { has_lead: true, queued_count: 1 },
+      },
+      {
+        id: 'lead-verify:r1', node_index: 13.5, node_key: 'lead_verify', status: 'completed',
+        attempt: 1, error_message: null, started_at: null, finished_at: null,
+        output: {
+          lead_count: 1,
+          lead_status_counts: { completed: 1 },
+          phase_status_counts: {
+            audit: { completed: 1 }, reproduce: { skipped: 1 },
+          },
+        },
+      },
+      {
+        id: 'n-report', node_index: 14, node_key: 'report', status: 'pending',
+        attempt: 1, error_message: null, started_at: null, finished_at: null, output: {},
+      },
+    ] satisfies NodeRun[])
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={qc}>
+        <App>
+          <NodeSteps taskId="t1" runId="r1" compact expanded taskType="discovery" />
+        </App>
+      </QueryClientProvider>,
+    )
+    expect(html).toContain('crucible-dag-node--lead_verify is-completed')
+  })
+
   it('discovery compact skips LeadWorker when dispatch has no eligible lead', () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     qc.setQueryData(['run-nodes', 't1', 'r1'], [
-      ...runningPipeline(),
+      ...runningPipeline().map((node) => (
+        node.node_key === 'env_ready' ? { ...node, status: 'skipped' as const } : node
+      )),
       {
         id: 'n-dispatch',
         node_index: 8,

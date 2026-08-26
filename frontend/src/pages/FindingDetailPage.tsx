@@ -340,6 +340,11 @@ export function FindingDetailPage() {
                       </Tag>
                     )}
                     {lead.gate_verdict && <Text type="secondary">白盒结论：{lead.gate_verdict}</Text>}
+                    {(lead.node_runs ?? []).map((nodeRun) => (
+                      <Tag key={nodeRun.id} color={nodeRun.status === 'failed' ? 'red' : nodeRun.status === 'skipped' ? 'default' : 'blue'}>
+                        {nodeRun.node_key === 'audit' ? '白盒审计' : '动态复现'} · {nodeRun.status} · #{nodeRun.attempt}
+                      </Tag>
+                    ))}
                     {lead.error && <Text type="danger">{lead.error}</Text>}
                   </Space>
                 </Descriptions.Item>

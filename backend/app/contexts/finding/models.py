@@ -1,10 +1,12 @@
 """finding context 数据模型。"""
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
     JSON,
+    DateTime,
     Float,
     ForeignKey,
     Index,
@@ -179,3 +181,40 @@ class LeadRun(BaseModel):
 
     def __repr__(self) -> str:
         return f"<LeadRun {self.alert_group_id[:8]} [{self.status}]>"
+
+
+class LeadNodeRun(BaseModel):
+    """单条 LeadRun 内的 audit/reproduce 阶段执行记录。
+
+    LeadRun 是队列/终局单元；本表是可回放的节点级轨迹，显式记录 skipped。
+    """
+
+    __tablename__ = "lead_node_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "lead_run_id", "node_key", "attempt",
+            name="uq_lead_node_runs_lead_node_attempt",
+        ),
+        Index("idx_lead_node_runs_task_status", "task_id", "status"),
+        Index("idx_lead_node_runs_lead_node", "lead_run_id", "node_key"),
+    )
+
+    lead_run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("lead_runs.id", ondelete="CASCADE"), index=True,
+    )
+    task_id: Mapped[str] = mapped_column(String(36), ForeignKey("tasks.id"), index=True)
+    run_id: Mapped[str] = mapped_column(String(36), ForeignKey("task_runs.id"), index=True)
+    node_key: Mapped[str] = mapped_column(String(20), comment="audit | reproduce")
+    status: Mapped[str] = mapped_column(
+        String(20), default="pending",
+        comment="pending | running | completed | failed | skipped",
+    )
+    attempt: Mapped[int] = mapped_column(Integer, default=1)
+    input_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    output_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    error: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    def __repr__(self) -> str:
+        return f"<LeadNodeRun {self.node_key}#{self.attempt} [{self.status}]>"

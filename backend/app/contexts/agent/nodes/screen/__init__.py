@@ -10,7 +10,7 @@ from sqlalchemy import select
 
 from ..base import NodeContext, emit_phase, task_run_cancelled
 from ..triage import cascade
-from ..triage.queue import order_groups, scan_review_groups, should_skip_llm
+from ..triage.queue import order_groups, review_groups, should_skip_llm
 
 
 class ScreenNode:
@@ -42,7 +42,7 @@ class ScreenNode:
         settings = get_settings()
         svc = FindingService(ctx.db_session)
 
-        groups = scan_review_groups(
+        groups = review_groups(
             await svc.list_groups(ctx.task_id, status="clustered")
         )
         rep_ids = [

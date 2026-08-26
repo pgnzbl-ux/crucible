@@ -37,6 +37,7 @@ describe('VERIFY_MODE_SKIPPED_KEYS', () => {
       'api_inventory',
       'cluster',
       'dispatch',
+      'lead_verify',
       'scan_gitleaks',
       'scan_osv',
       'scan_semgrep',

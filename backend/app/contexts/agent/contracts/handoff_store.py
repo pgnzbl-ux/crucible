@@ -11,6 +11,8 @@ from .inputs import (
     ClusterInput,
     DispatchInput,
     EnvReadyInput,
+    FinalizeInput,
+    LeadVerifyInput,
     ProfileInput,
     ReportInput,
     ReproduceInput,
@@ -28,6 +30,8 @@ from .outputs import (
     DispatchHandoff,
     EngineScanHandoff,
     EnvReadyHandoff,
+    FinalizeHandoff,
+    LeadVerifyHandoff,
     ProfileHandoff,
     ReproduceHandoff,
     SourceHandoff,
@@ -154,6 +158,9 @@ class InputAssembler:
                 EngineScanHandoff.model_validate(store.get_raw(key))
                 for key in ("scan_gitleaks", "scan_osv", "scan_semgrep")
             ]
+            hunt_raw = store.get_raw("api_hunt")
+            if hunt_raw:
+                scans.append(EngineScanHandoff.model_validate(hunt_raw))
             profile_raw = store.get_raw("profile")
             return ClusterInput(
                 source=SourceHandoff.model_validate(store.get_raw("source")),
@@ -225,9 +232,43 @@ class InputAssembler:
                 audit=audit_for_reproduce(store.get_raw("audit")),
                 vulnerability_description=task.vulnerability_description or "",
             )
+        if node_key == "lead_verify":
+            return LeadVerifyInput(
+                dispatch=DispatchHandoff.model_validate(store.get_raw("dispatch")),
+                env_ready=EnvReadyHandoff.model_validate(store.get_raw("env_ready")),
+            )
+        if node_key == "finalize":
+            if task.task_type == "discovery":
+                return FinalizeInput(
+                    profile=ProfileHandoff.model_validate(store.get_raw("profile")),
+                    env_ready=EnvReadyHandoff.model_validate(store.get_raw("env_ready")),
+                    lead_verify=LeadVerifyHandoff.model_validate(
+                        store.get_raw("lead_verify")
+                    ),
+                )
+            return FinalizeInput(
+                profile=ProfileHandoff.model_validate(store.get_raw("profile")),
+                env_ready=EnvReadyHandoff.model_validate(store.get_raw("env_ready")),
+                audit=AuditHandoff.model_validate(store.get_raw("audit")),
+                reproduce=ReproduceHandoff.model_validate(store.get_raw("reproduce")),
+            )
         if node_key == "report":
+            if task.task_type == "discovery":
+                # discovery 文档节点不吃单例 audit；权威结论来自 finalize
+                return ReportInput(
+                    profile=ProfileHandoff.model_validate(store.get_raw("profile")),
+                    env_ready=EnvReadyHandoff.model_validate(store.get_raw("env_ready")),
+                    audit=AuditHandoff.model_validate({}),
+                    reproduce=ReproduceHandoff.model_validate({}),
+                    vulnerability_description=task.vulnerability_description or "",
+                    project_address=task.project_address,
+                    expected_verdict=(store.get_raw("finalize") or {}).get(
+                        "analysis_verdict"
+                    ),
+                )
             repro_raw = dict(store.get_raw("reproduce"))
             repro_raw.pop("report_data", None)
+            finalize = store.get_raw("finalize")
             return ReportInput(
                 profile=ProfileHandoff.model_validate(store.get_raw("profile")),
                 env_ready=EnvReadyHandoff.model_validate(store.get_raw("env_ready")),
@@ -235,6 +276,7 @@ class InputAssembler:
                 reproduce=ReproduceHandoff.model_validate(repro_raw),
                 vulnerability_description=task.vulnerability_description or "",
                 project_address=task.project_address,
+                expected_verdict=finalize.get("analysis_verdict"),
             )
         raise KeyError(f"无法组装未知节点 Input: {node_key}")
 

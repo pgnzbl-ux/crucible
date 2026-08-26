@@ -20,7 +20,7 @@ Crucible 是一个 AI 驱动的漏洞自动验证平台。安全研究员提交�
 - **模块化单体** — Bounded Context 组织代码（task / agent / lab / project / report / settings / identity），不盲目微服务
 - **事件驱动** — Context 间通过 Redis Pub/Sub 异步通信
 - **Agent GateWay** — Agent 执行抽象为平台能力而非胶水代码
-- **Agent 平台 15 节点编排** — Celery worker 的 `orchestrator.py` 按 `DEFAULT_PIPELINE` 驱动 15 节点(source/profile/scan_gitleaks/scan_osv/scan_semgrep/api_inventory/env_ready/cluster/api_hunt/screen/triage/dispatch/audit/reproduce/report)。验证任务(`task_type=verify`)跑其中 6 个终认节点、扫描/清单/猎洞/聚类/轻量快审/AI 二审/调度 `VERIFY_MODE` skip；审计任务(`discovery`)跑全图、dispatch 把合格可疑真洞入 Redis db3 终认队（LeadWorker 复用同一套 audit/reproduce）。AI 节点用独立 agent-runner 容器 + `submit_result` 回传结构化 output
+- **Agent 平台模式化子图编排** — Celery worker 的 `orchestrator.py` 按 `pipeline_for(task_type)` 驱动：`discovery`=`DEFAULT_PIPELINE`（source/profile/scan_*/api_inventory/env_ready/cluster/api_hunt/screen/triage/dispatch/lead_verify/finalize/report）；`verify`=`VERIFY_PIPELINE`（source/profile/env_ready/audit/reproduce/finalize/report，共 7 节点，发现侧不实例化）。审计任务 dispatch 入 Redis db3 终认队，由 `lead_verify`（LeadWorker）逐线索复用 audit/reproduce 落 `LeadNodeRun`；`finalize` 固化任务终态，`report` 为后处理文档。AI 节点用独立 agent-runner 容器 + `submit_result` 回传结构化 output
 - **Security by Default** — 沙箱真隔离、Agent 零信任。LLM 凭据通过 `docker run --env` 注入容器(容器销毁 env 消失,这部分零落盘成立)。LLM API Key / 任务凭据 **Fernet 加密落库**（`seal_secret` / `reveal_secret`，存量明文可读），响应层 `mask_secret` 掩码。
 
 ## 快速启动
@@ -54,10 +54,10 @@ Crucible/
 │   │   ├── core/                # 配置、数据库、安全、Celery、agent-runner 编排
 │   │   ├── contexts/            # Bounded Contexts
 │   │   │   ├── task/            # 任务管理 (models/schemas/service/repo/api) + NodeRun/重试/删除
-│   │   │   ├── agent/           # Agent 执行平台（15 节点编排 + SDK 适配 + 容器编排）
-│   │   │   │   ├── orchestrator.py     # ★ 15 节点编排器（就绪波次 + 分支出口 + 断点续跑）
-│   │   │   │   ├── contracts/          # 公开 Input/Handoff/ControlSignals + DEFAULT_PIPELINE
-│   │   │   │   ├── nodes/              # ★ 15 节点实现（含 api_inventory / api_hunt + scan_*/env_ready/cluster/screen/triage/dispatch/audit/reproduce/report）
+│   │   │   ├── agent/           # Agent 执行平台（模式化子图 + SDK 适配 + 容器编排）
+│   │   │   │   ├── orchestrator.py     # ★ 编排器（就绪波次 + 分支出口 + 断点续跑；finalize 封口）
+│   │   │   │   ├── contracts/          # 公开 Input/Handoff/ControlSignals + DEFAULT/VERIFY_PIPELINE
+│   │   │   │   ├── nodes/              # ★ 节点实现（含 api_*/scan_*/lead_verify/finalize/report；verify 另有 audit/reproduce）
 │   │   │   │   ├── api_inventory/      # 确定性 API 清单 parsers
 │   │   │   │   ├── stacks/             # 语言/框架单一注册表
 │   │   │   │   ├── ai_runner.py        # AI 节点容器编排 + submit_result 工具 + schema 校验

@@ -14,6 +14,7 @@ from .outputs import (
     DispatchHandoff,
     EngineScanHandoff,
     EnvReadyHandoff,
+    LeadVerifyHandoff,
     ProfileHandoff,
     ReproduceHandoff,
     ScreenHandoff,
@@ -62,7 +63,7 @@ class ScanSemgrepInput(_RepoInput):
 
 
 class ClusterInput(_RepoInput):
-    # 仅作状态摘要(数量/引擎)，真实 findings 由 cluster 节点从 DB 按 task_id 读取
+    # 权威发现清单：cluster 只消费这些 handoff 指向的 ScanRun，禁止按 task 全量读取。
     scans: list[EngineScanHandoff] = []
     profile: ProfileHandoff | None = None  # 决定函数索引语言；缺失则扫全部已支持语言
 
@@ -88,7 +89,7 @@ class TriageInput(_RepoInput):
 class DispatchInput(_RepoInput):
     triage: TriageHandoff
     profile: ProfileHandoff  # 画像上下文；合格门见 finding.qualify（不用 is_web / NON_WEB 挡线索）
-    api_hunt: ApiHuntHandoff | None = None  # 并列线索流终态摘要；合格组已在 DB
+    api_hunt: ApiHuntHandoff | None = None  # 候选漏斗摘要；仅供统计，组/判决已由统一链落 DB
 
 
 class EnvReadyInput(_InputBase):
@@ -120,3 +121,20 @@ class ReportInput(_InputBase):
     project_address: str
     expected_verdict: str | None = None
     document_kind: str | None = None
+
+
+class FinalizeInput(_InputBase):
+    """固化分析结论；discovery 主要读 DB LeadRun，verify 读 audit/reproduce。"""
+
+    profile: ProfileHandoff | None = None
+    env_ready: EnvReadyHandoff | None = None
+    lead_verify: LeadVerifyHandoff | None = None
+    audit: AuditHandoff | None = None
+    reproduce: ReproduceHandoff | None = None
+
+
+class LeadVerifyInput(_InputBase):
+    """终认调度节点：线索在 DB/Redis，Input 只带上游摘要锚点。"""
+
+    dispatch: DispatchHandoff
+    env_ready: EnvReadyHandoff

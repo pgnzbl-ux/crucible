@@ -1,4 +1,4 @@
-"""合格可疑真洞门（discovery-spec §2.7）。dispatch 与 LeadStreamer 共用。
+"""合格可疑真洞门（discovery-spec §2.7）。仅由 dispatch 节点调用。
 
 漏报优先：置信度不挡入队；agent / propagated 可入；快审/规则/携带禁入。
 Agent 输出不可信：why/evidence/三布尔由 schema 拒收后再过本门。
@@ -11,7 +11,7 @@ from app.contexts.finding.clustering import should_downgrade
 
 SANITIZER_OK = frozenset({"none", "bypassable"})
 
-# T3 亲审、猎洞直出、族传播；不含快审/规则/携带
+# T3 亲审（含猎洞候选）、族传播；不含快审/规则/携带
 DISPATCH_VERDICT_SOURCES = frozenset({"agent", "propagated"})
 
 # 对用户文案；禁止把 tp/fp 当标签原文

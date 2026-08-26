@@ -458,6 +458,7 @@ async def test_lead_path_reuses_nodes_with_container_semantics():
     与 target_url 容器重写自动对齐（旧实现传宿主路径、不重写 URL）。"""
     from unittest.mock import patch
 
+    from sqlalchemy import select
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
     from app.shared.base import Base
@@ -472,7 +473,7 @@ async def test_lead_path_reuses_nodes_with_container_semantics():
 
     from app.contexts.agent.lead_worker import process_one_lead
     from app.contexts.discovery.models import ScanRun
-    from app.contexts.finding.models import AlertGroup, LeadRun, RawFinding
+    from app.contexts.finding.models import AlertGroup, LeadNodeRun, LeadRun, RawFinding
     from app.contexts.task.models import Task, TaskRun
 
     try:
@@ -544,6 +545,43 @@ async def test_lead_path_reuses_nodes_with_container_semantics():
             assert repro_call["input_json"]["target_url"] != "http://localhost:8080"
             assert "host.docker.internal" not in repro_call["input_json"]["target_url"]
             assert repro_call["input_json"]["target_url"].startswith("http://")
+            node_rows = (await session.execute(
+                select(LeadNodeRun)
+                .where(LeadNodeRun.lead_run_id == lead_id)
+                .order_by(LeadNodeRun.node_key)
+            )).scalars().all()
+            assert [row.node_key for row in node_rows] == ["audit", "reproduce"]
+            assert all(row.status == "completed" for row in node_rows)
+            assert node_rows[0].input_json["lead_description"] == "【疑似漏洞】SQL注入"
+            assert node_rows[0].output_json["gate_verdict"] == "pass"
+            assert node_rows[1].output_json["verdict"] == "confirmed"
+            assert all(row.started_at is not None and row.finished_at is not None for row in node_rows)
+
+            # 同一 LeadRun 重试时 attempt 递增；无靶场也显式落 reproduce=skipped。
+            with patch(
+                "app.contexts.agent.ai_runner.run_ai_node_with_shape_retry",
+                new=fake_run,
+            ):
+                out2 = await process_one_lead(
+                    session=session, lead_run_id=lead_id,
+                    host_workdir="/tmp/w", source_path="/tmp/w/repo", runner_env={},
+                    source={"repo_dirname": "repo", "project_path": "/tmp/w/repo",
+                            "workspace_path": "/workspace/repo"},
+                    profile={"is_web": True}, env_ready=None,
+                )
+            assert out2.verdict == "code_reachable"
+            reproduce_rows = (await session.execute(
+                select(LeadNodeRun)
+                .where(
+                    LeadNodeRun.lead_run_id == lead_id,
+                    LeadNodeRun.node_key == "reproduce",
+                )
+                .order_by(LeadNodeRun.attempt)
+            )).scalars().all()
+            assert [(row.attempt, row.status) for row in reproduce_rows] == [
+                (1, "completed"), (2, "skipped"),
+            ]
+            assert "target_url" in reproduce_rows[-1].error
     finally:
         await engine.dispose()
 

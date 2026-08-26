@@ -22,7 +22,7 @@ paths: ["backend/app/**/*.py", "backend/tests/**/*.py"]
 
 - **必须 Mock**：LLM API（外部依赖、不稳定）、Redis Pub/Sub（集成测试用 fake）、MinIO（S3 fake）
 - **必须真实**：pytest 用 SQLite（禁止连 `.env` 的 PostgreSQL）；Docker 沙箱（smoke）
-- Agent 默认走 Mock,`CLAUDE_AGENT_SDK_ENABLED=true` 时切换真实 Executor(13 节点编排)
+- Agent 默认走 Mock,`CLAUDE_AGENT_SDK_ENABLED=true` 时切换真实编排（discovery 15 / verify 7）
 
 ## 3. 测试数据
 

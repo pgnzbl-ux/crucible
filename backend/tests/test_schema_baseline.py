@@ -83,7 +83,10 @@ def test_alembic_chain_from_baseline():
     )
     assert 'revision: str = "s2f9c1a08e47"' in uniques
     assert 'down_revision: Union[str, None] = "r1e8a0b97d36"' in uniques
-    assert _alembic_head() == "s2f9c1a08e47"
+    lead_nodes = (versions / "t3a0d2b19e58_lead_node_runs.py").read_text(encoding="utf-8")
+    assert 'revision: str = "t3a0d2b19e58"' in lead_nodes
+    assert 'down_revision: Union[str, None] = "s2f9c1a08e47"' in lead_nodes
+    assert _alembic_head() == "t3a0d2b19e58"
 
 
 @pytest.mark.asyncio
@@ -147,6 +150,12 @@ async def test_create_all_schema_matches_models():
             } <= usage_cols
             finding_cols = {c["name"] for c in insp.get_columns("raw_findings")}
             assert "alert_group_id" in finding_cols
+            assert "lead_node_runs" in insp.get_table_names()
+            lead_node_cols = {c["name"] for c in insp.get_columns("lead_node_runs")}
+            assert {
+                "lead_run_id", "task_id", "run_id", "node_key", "status", "attempt",
+                "input_json", "output_json", "error", "started_at", "finished_at",
+            } <= lead_node_cols
 
         await conn.run_sync(_check)
     await engine.dispose()

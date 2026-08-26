@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from app.contexts.finding.clustering import is_hunt_group, should_downgrade
+from app.contexts.finding.clustering import should_downgrade
 from app.contexts.finding.hypothesis import RUBRIC_COVERED_CWES
 
 _PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2, None: 3}
@@ -39,9 +39,9 @@ def order_groups(
     )
 
 
-def scan_review_groups(groups) -> list:
-    """扫描复核链工作集：排除猎洞自建组（绕过 screen/triage）。"""
-    return [g for g in groups if not is_hunt_group(g)]
+def review_groups(groups) -> list:
+    """统一复核工作集：四路发现均不按引擎绕过二审。"""
+    return list(groups)
 
 
 def should_skip_llm(group) -> bool:

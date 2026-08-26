@@ -271,6 +271,7 @@ class TaskRepository:
         from app.contexts.finding.models import (
             Adjudication,
             AlertGroup,
+            LeadNodeRun,
             LeadRun,
             RawFinding,
             ReviewAction,
@@ -314,6 +315,9 @@ class TaskRepository:
             await self.session.execute(
                 delete(ReviewAction).where(ReviewAction.alert_group_id.in_(group_ids))
             )
+        await self.session.execute(
+            delete(LeadNodeRun).where(LeadNodeRun.task_id == task_id)
+        )
         await self.session.execute(delete(LeadRun).where(LeadRun.task_id == task_id))
         from app.contexts.task.models import AgentUsage
 

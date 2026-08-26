@@ -6,9 +6,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.contexts.agent.ai_runner import authoritative_verdict
@@ -18,7 +19,7 @@ from app.contexts.agent.lead_queue import (
     complete_lead,
     is_drained,
 )
-from app.contexts.finding.models import AlertGroup, LeadRun
+from app.contexts.finding.models import AlertGroup, LeadNodeRun, LeadRun
 from app.contexts.finding.service import FindingService
 from app.core.config import get_settings
 
@@ -60,6 +61,65 @@ def whitebox_only_verdict(audit: dict[str, Any] | None) -> str | None:
     if (audit or {}).get("gate_verdict") == "pass":
         return "code_reachable"
     return authoritative_verdict(None, audit)
+
+
+async def _start_lead_node_run(
+    session: AsyncSession,
+    lead: LeadRun,
+    *,
+    node_key: str,
+    input_json: dict[str, Any],
+) -> LeadNodeRun:
+    """建立一次可回放的 Lead 阶段执行；重试在同一 LeadRun 下递增 attempt。"""
+    previous = await session.scalar(
+        select(func.max(LeadNodeRun.attempt)).where(
+            LeadNodeRun.lead_run_id == lead.id,
+            LeadNodeRun.node_key == node_key,
+        )
+    )
+    row = LeadNodeRun(
+        lead_run_id=lead.id,
+        task_id=lead.task_id,
+        run_id=lead.run_id,
+        node_key=node_key,
+        status="running",
+        attempt=int(previous or 0) + 1,
+        input_json=input_json,
+        started_at=datetime.now(timezone.utc),
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def _finish_lead_node_run(
+    session: AsyncSession,
+    row: LeadNodeRun,
+    *,
+    status: str,
+    output_json: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> None:
+    row.status = status
+    row.output_json = output_json
+    row.error = error[:8000] if error else None
+    row.finished_at = datetime.now(timezone.utc)
+    await session.flush()
+
+
+async def _skip_lead_node_run(
+    session: AsyncSession,
+    lead: LeadRun,
+    *,
+    node_key: str,
+    input_json: dict[str, Any],
+    reason: str,
+) -> LeadNodeRun:
+    row = await _start_lead_node_run(
+        session, lead, node_key=node_key, input_json=input_json,
+    )
+    await _finish_lead_node_run(session, row, status="skipped", error=reason)
+    return row
 
 
 async def process_one_lead(
@@ -114,6 +174,8 @@ async def process_one_lead(
         if asyncio.iscoroutine(result):
             asyncio.get_running_loop().create_task(result)
 
+    audit_run: LeadNodeRun | None = None
+    reproduce_run: LeadNodeRun | None = None
     try:
         source_handoff = SourceHandoff.model_validate(source or {})
         ctx = NodeContext(
@@ -129,12 +191,31 @@ async def process_one_lead(
             },
         )
         # 线索描述经 DispatchHandoff.lead_description 注入（与 DAG audit 输入同构）
-        audit_out = await AuditNode().execute(ctx, AuditInput(
+        audit_input = AuditInput(
             source=source_handoff,
             profile=ProfileHandoff.model_validate(profile),
             vulnerability_description="",
             dispatch=DispatchHandoff(lead_description=lead.lead_description),
-        ))
+        )
+        audit_run = await _start_lead_node_run(
+            session,
+            lead,
+            node_key="audit",
+            input_json={
+                "lead_description": lead.lead_description,
+                "contract": audit_input.model_dump(mode="json"),
+            },
+        )
+        try:
+            audit_out = await AuditNode().execute(ctx, audit_input)
+        except Exception as e:
+            await _finish_lead_node_run(
+                session, audit_run, status="failed", error=str(e),
+            )
+            raise
+        await _finish_lead_node_run(
+            session, audit_run, status="completed", output_json=audit_out,
+        )
         lead.audit_output = audit_out
         gate = str(audit_out.get("gate_verdict") or "")
         lead.gate_verdict = gate or None
@@ -146,16 +227,42 @@ async def process_one_lead(
             )
             if gate == "uncertain":
                 lead.verdict = None  # 任务级 needs_review；组退回人工
+            reproduce_run = await _skip_lead_node_run(
+                session,
+                lead,
+                node_key="reproduce",
+                input_json={"gate_verdict": gate, "env_ready": env_ready or {}},
+                reason=f"audit gate={gate}",
+            )
         elif env_ready and env_ready.get("target_url"):
-            repro_out = await ReproduceNode().execute(ctx, ReproduceInput(
+            reproduce_input = ReproduceInput(
                 source=source_handoff,
                 env_ready=EnvReadyHandoff.model_validate(env_ready),
                 audit=audit_for_reproduce(audit_out),
                 vulnerability_description=lead.lead_description,
-            ))
+            )
+            reproduce_run = await _start_lead_node_run(
+                session,
+                lead,
+                node_key="reproduce",
+                input_json={
+                    "lead_description": lead.lead_description,
+                    "contract": reproduce_input.model_dump(mode="json"),
+                },
+            )
+            try:
+                repro_out = await ReproduceNode().execute(ctx, reproduce_input)
+            except Exception as e:
+                await _finish_lead_node_run(
+                    session, reproduce_run, status="failed", error=str(e),
+                )
+                raise
+            await _finish_lead_node_run(
+                session, reproduce_run, status="completed", output_json=repro_out,
+            )
             lead.reproduce_output = repro_out
             lead.verdict = authoritative_verdict(repro_out, audit_out)
-            # 动态复现中复活靶场：回写共享 env_ready，供后续线索与聚合报告使用
+            # 动态复现若回写 env_ready（历史路径）；现行 reproduce 不再反向调度靶场
             revived = ctx.updated_handoffs.get("env_ready")
             if revived and isinstance(env_ready, dict):
                 env_ready.clear()
@@ -163,6 +270,13 @@ async def process_one_lead(
         else:
             # 无靶场：LeadWorker 不调用动态复现，仅保留白盒结论。
             lead.verdict = whitebox_only_verdict(audit_out)
+            reproduce_run = await _skip_lead_node_run(
+                session,
+                lead,
+                node_key="reproduce",
+                input_json={"gate_verdict": gate, "env_ready": env_ready or {}},
+                reason="无可用靶场 target_url",
+            )
 
         lead.status = "completed"
         basis = "lab" if repro_out is not None else "code_path"
@@ -179,6 +293,14 @@ async def process_one_lead(
         await session.flush()
         return lead
     except Exception as e:  # noqa: BLE001
+        if reproduce_run is None:
+            await _skip_lead_node_run(
+                session,
+                lead,
+                node_key="reproduce",
+                input_json={"env_ready": env_ready or {}},
+                reason="audit 未成功，动态复现未执行",
+            )
         lead.status = "failed"
         lead.error = str(e)[:8000]
         # 失败转人工（spec §1.3：未审≠误报，网关/runner 失败入 needs_review）
@@ -405,6 +527,7 @@ def build_discovery_report_from_leads(
     reachable_n = len(reachable)
     total = len(leads)
     needs_review = verdict_counts["needs_review"] + verdict_counts["code_smell"] + verdict_counts["not_reproduced"]
+    failed_leads = sum(1 for lr in leads if getattr(lr, "status", None) == "failed")
     denoise = denoise or {}
     dropped_c = int(denoise.get("dropped_c_count") or 0)
     finding_count = denoise.get("finding_count")
@@ -456,16 +579,19 @@ def build_discovery_report_from_leads(
         "confirmed" if any(lr.verdict == "confirmed" for lr in confirmed)
         else "partial" if confirmed else None
     )
+    analysis_status = "needs_review" if needs_review or failed_leads else "completed"
     first = confirmed[0] if confirmed else None
     repro0 = (first.reproduce_output or {}) if first else {}
     return {
         "report_data": report_data,
         "final_verdict": final,
+        "analysis_verdict": final,
+        "analysis_status": analysis_status,
         "vulnerable_file": repro0.get("vulnerable_file"),
         "cvss": repro0.get("cvss"),
         "poc": repro0.get("poc"),
         "empty_aggregate": not confirmed,
-        "authored_by": "discovery_aggregate",
+        "authored_by": "discovery_report",
     }
 
 

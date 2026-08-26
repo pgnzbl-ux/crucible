@@ -1,16 +1,50 @@
 """单组判决 — host 切切片 + agent-runner（Claude SDK）submit_result。"""
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
+from sqlalchemy import select
+
 from app.contexts.finding.hypothesis import Slice, build_pack
-from app.contexts.finding.models import Adjudication
+from app.contexts.finding.models import Adjudication, RawFinding
 from app.contexts.finding.service import FindingService
 from app.core.agent_runner import AgentRunnerError
 
-from ..base import task_run_cancelled, workspace_repo_path
+from ..base import emit_phase, task_run_cancelled, workspace_repo_path
 
 _CONTEXT_TOKEN_BUDGET = 8_000  # 兼容旧引用；新逻辑用 slice_char_budget
+# 瞬时 LLM 错误（5xx/断连）退避基数，按重试次数线性放大；测试可置 0
+_TRANSIENT_BACKOFF_SECONDS = 2.0
+
+
+async def hunt_candidate_evidence(session, group_id: str) -> list[dict[str, Any]]:
+    """取本组 API Hunt 候选证据，避免混合组由 SAST 代表时丢失鉴权语义。"""
+    rows = (
+        await session.execute(
+            select(RawFinding).where(
+                RawFinding.alert_group_id == group_id,
+                RawFinding.engine == "api_hunt",
+            ).order_by(RawFinding.created_at).limit(8)
+        )
+    ).scalars().all()
+    out: list[dict[str, Any]] = []
+    for finding in rows:
+        raw = finding.raw if isinstance(finding.raw, dict) else {}
+        out.append({
+            "endpoint_id": raw.get("endpoint_id"),
+            "locus": {
+                "file_path": finding.file_path,
+                "line_start": finding.line_start,
+                "function_symbol": raw.get("function_symbol"),
+            },
+            "why": list(raw.get("why") or []),
+            "evidence": list(raw.get("evidence") or []),
+            "qualify": raw.get("qualify") if isinstance(raw.get("qualify"), dict) else {},
+            "summary": raw.get("summary"),
+            "reasoning": raw.get("reasoning"),
+        })
+    return out
 
 
 def slice_char_budget(max_context_tokens: int | None) -> int:
@@ -68,17 +102,29 @@ def extract_slices(
     return slices
 
 
-async def adjudicate_group(ctx, group, settings) -> bool:
+async def adjudicate_group(
+    ctx, group, settings, transient_state: dict[str, Any] | None = None,
+) -> bool:
     """一组判决：起 triage agent-runner；单组瞬时失败转人工，绝不下沉 fp。
 
-    平台级 LLM API 失败（余额不足 / 401 / 限流等）向上抛出，由节点中止流程，
-    不得伪装成「已转人工」后继续 dispatch/report。
+    致命 LLM API 失败（余额不足 / 401 / 模型不存在 / 上下文超限）向上抛出，
+    由节点中止流程，不得伪装成「已转人工」后继续 dispatch/report。
+    瞬时 LLM 失败（5xx / 断连 / 限流）按 triage_llm_transient_retries 退避重试，
+    耗尽后仅该组转人工；但连续多组瞬时降级（transient_state 计数达
+    triage_llm_transient_fatal_streak）视为平台级网关故障，同样向上抛出中止。
+
+    transient_state 由节点级调用方持有（{"streak": int, "escalated": bool}），
+    跨组共享：判决成功清零，瞬时降级累加，升级时置 escalated 并抛出。
 
     返回是否记录了判决(降级转人工的组返回 False，不占 adjudicated 计数)。
     """
     from app.contexts.agent.ai_runner import run_ai_node_with_shape_retry
-    from app.contexts.agent.llm_errors import is_llm_api_failure
+    from app.contexts.agent.llm_errors import (
+        is_fatal_llm_error,
+        is_llm_api_failure,
+    )
     from app.contexts.finding.context_extractor import load_index
+
     from .prompt import load_rubric
 
     svc = FindingService(ctx.db_session)
@@ -129,29 +175,68 @@ async def adjudicate_group(ctx, group, settings) -> bool:
     }
     if pack.rule_class:
         input_json["rule_class"] = pack.rule_class
+    candidate_evidence = await hunt_candidate_evidence(ctx.db_session, group.id)
+    if candidate_evidence:
+        input_json["api_hunt_candidate_evidence"] = candidate_evidence
     if not hide:
         input_json["engine_conclusion"] = f"{representative.rule_id}: {representative.message}"
 
     meta: dict[str, Any] = {}
-    try:
-        output = await run_ai_node_with_shape_retry(
-            node_key="triage",
-            input_json=input_json,
-            host_workdir=ctx.host_workdir,
-            runner_env=ctx.runner_env or {},
-            on_event=ctx.on_event,
-            task_id=ctx.task_id,
-            meta_out=meta,
-        )
-    except AgentRunnerError as e:
-        # 取消拆容器产生的 exit=137 不是真实失败：保持 clustered 原状，
-        # 由外层逐组取消检查收尾，避免污染成 needs_review
-        if await task_run_cancelled(ctx.db_session, ctx.task_id, ctx.run_id):
+    transient_retries = max(
+        0, int(getattr(settings, "triage_llm_transient_retries", 1) or 0)
+    )
+    streak_limit = max(
+        1, int(getattr(settings, "triage_llm_transient_fatal_streak", 3) or 1)
+    )
+    label = f"{group.cwe or '?'} {group.file_path or ''}".strip()
+    attempt = 0
+    while True:
+        try:
+            output = await run_ai_node_with_shape_retry(
+                node_key="triage",
+                input_json=input_json,
+                host_workdir=ctx.host_workdir,
+                runner_env=ctx.runner_env or {},
+                on_event=ctx.on_event,
+                task_id=ctx.task_id,
+                meta_out=meta,
+            )
+            if transient_state is not None:
+                transient_state["streak"] = 0
+            break
+        except AgentRunnerError as e:
+            # 取消拆容器产生的 exit=137 不是真实失败：保持 clustered 原状，
+            # 由外层逐组取消检查收尾，避免污染成 needs_review
+            if await task_run_cancelled(ctx.db_session, ctx.task_id, ctx.run_id):
+                return False
+            if not is_llm_api_failure(str(e)):
+                await svc.mark_needs_review(group)
+                return False
+            if is_fatal_llm_error(str(e)):
+                raise
+            # 瞬时 LLM 错误：先退避重试本组，耗尽后转人工；
+            # 连续多组降级则升级为平台级中止
+            if attempt < transient_retries:
+                attempt += 1
+                emit_phase(
+                    ctx,
+                    f"二审瞬时 LLM 错误，退避重试 {attempt}/{transient_retries}：{label}",
+                    phase="triage",
+                )
+                await asyncio.sleep(_TRANSIENT_BACKOFF_SECONDS * attempt)
+                continue
+            if transient_state is not None:
+                transient_state["streak"] = int(transient_state.get("streak", 0)) + 1
+                if transient_state["streak"] >= streak_limit:
+                    transient_state["escalated"] = True
+                    raise AgentRunnerError(
+                        f"AI 节点 triage LLM 调用失败: 连续 "
+                        f"{transient_state['streak']} 组瞬时错误"
+                        f"（疑似网关故障），中止二审: {str(e)[-300:]}"
+                    ) from e
+            emit_phase(ctx, f"二审瞬时 LLM 错误转人工：{label}", phase="triage")
+            await svc.mark_needs_review(group)
             return False
-        if is_llm_api_failure(str(e)):
-            raise
-        await svc.mark_needs_review(group)
-        return False
 
     verdict = output.get("verdict") or "need_more_context"
     if verdict not in ("tp", "fp", "need_more_context"):

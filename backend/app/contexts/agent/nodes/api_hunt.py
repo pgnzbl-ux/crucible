@@ -1,8 +1,8 @@
 """api_hunt 节点 — 对确定性清单中的 PVE 做鉴权/逻辑嫌疑猎洞。
 
-写 engine=api_hunt RawFinding 并 upsert AlertGroup；嫌疑项对齐 §2.7 合格门后
-直接落 agent 判决（via=api_hunt），绕过 screen/triage。
-失败隔离：ok=false 仍 completed，不抹杀 cluster。
+仅写 engine=api_hunt 的 ScanRun + RawFinding。AlertGroup / Adjudication / LeadRun
+由后续统一 cluster → screen → triage → dispatch 负责。
+失败隔离：ok=false 仍 completed，不抹杀其它发现。
 """
 from __future__ import annotations
 
@@ -73,6 +73,23 @@ def _confidence_label(score: float) -> str:
     return "LOW"
 
 
+def _candidate_evidence_state(candidate: dict[str, Any]) -> str:
+    """候选证据完整度；只是发现层标签，不是漏洞判决。"""
+    if (
+        candidate.get("attacker_controlled") is False
+        or candidate.get("reaches_sink") is False
+        or candidate.get("sanitizer") == "effective"
+    ):
+        return "contradicted"
+    if (
+        candidate.get("attacker_controlled") is True
+        and candidate.get("reaches_sink") is True
+        and candidate.get("sanitizer") in ("none", "bypassable")
+    ):
+        return "supported"
+    return "uncertain"
+
+
 def _normalize_evidence(
     evidence: Any, *, file_path: str, line_start: int | None,
 ) -> list[dict[str, Any]]:
@@ -95,93 +112,6 @@ def _normalize_evidence(
     return out
 
 
-async def _adjudicate_hunt_groups(
-    svc, *, task_id: str, high_confidence: float | None = None,
-) -> int:
-    """把仍为 clustered 且代表为 api_hunt 的组写成 §2.7 字段齐备的 agent 判决。
-
-    漏报优先：置信度不挡直出（high_confidence 保留兼容，忽略）；字段不齐则跳过。
-    """
-    del high_confidence
-    from app.contexts.agent.ai_runner import _normalize_hunt_confidence
-    from app.contexts.finding.models import Adjudication
-
-    qualified = 0
-    groups = await svc.list_groups(task_id, status="clustered")
-    for group in groups:
-        if "api_hunt" not in (group.engine_set or []):
-            continue
-        rep = await svc.representative_of(group)
-        if rep is None or (rep.engine or "") != "api_hunt":
-            continue
-        raw = rep.raw if isinstance(rep.raw, dict) else {}
-        qualify = raw.get("qualify") if isinstance(raw.get("qualify"), dict) else {}
-        why = list(raw.get("why") or [])
-        evidence = list(raw.get("evidence") or [])
-        conf = _normalize_hunt_confidence(raw.get("confidence_score", raw.get("confidence")))
-        if conf is None:
-            continue
-        if (
-            not why
-            or not evidence
-            or qualify.get("attacker_controlled") is not True
-            or qualify.get("reaches_sink") is not True
-            or qualify.get("sanitizer") not in ("none", "bypassable")
-        ):
-            continue
-        from app.contexts.finding.narrative import narrative_from_why
-
-        summary = str(raw.get("summary") or "").strip() or None
-        reasoning = str(raw.get("reasoning") or "").strip() or None
-        if not summary or not reasoning:
-            syn_s, syn_r = narrative_from_why(why, fallback=f"API 猎洞嫌疑 {raw.get('endpoint_id') or ''}")
-            summary = summary or syn_s
-            reasoning = reasoning or syn_r
-        group.verdict_source = "agent"
-        await svc.record_adjudication(
-            group=group,
-            adjudication=Adjudication(
-                alert_group_id=group.id,
-                attempt=1,
-                provider_id=None,
-                model=None,
-                verdict="tp",
-                confidence=conf,
-                why=why,
-                evidence=evidence,
-                need=[],
-                summary=summary,
-                reasoning=reasoning,
-                context_log=[{
-                    "round": 1,
-                    "via": "api_hunt",
-                    "tier": "api_hunt",
-                    "qualify": {
-                        "attacker_controlled": True,
-                        "reaches_sink": True,
-                        "sanitizer": qualify.get("sanitizer"),
-                    },
-                    "endpoint_id": raw.get("endpoint_id"),
-                }],
-                prompt_text="[api_hunt] 猎洞节点直出合格门判决，未走 screen/triage",
-                response_text=json.dumps(
-                    {
-                        "endpoint_id": raw.get("endpoint_id"),
-                        "why": why,
-                        "qualify": qualify,
-                        "summary": summary,
-                        "reasoning": reasoning,
-                    },
-                    ensure_ascii=False,
-                    default=str,
-                )[:20000],
-                usage={},
-            ),
-        )
-        qualified += 1
-    return qualified
-
-
 class ApiHuntNode:
     node_key = "api_hunt"
 
@@ -202,52 +132,71 @@ class ApiHuntNode:
         )
 
     async def execute(self, ctx: NodeContext, node_input=None) -> dict[str, Any]:
+        from app.contexts.agent.ai_runner import _normalize_hunt_confidence
         from app.contexts.agent.api_inventory import (
             group_by_resource_key,
             prioritize_pve,
         )
-        from app.contexts.agent.ai_runner import _normalize_hunt_confidence
         from app.contexts.discovery.service import DiscoveryService
-        from app.contexts.finding.clustering import cluster_findings
         from app.contexts.finding.sarif import fingerprint
-        from app.contexts.finding.service import FindingService
         from app.core.config import get_settings
 
         inp = self._resolve_input(ctx, node_input)
         ctx.node_input = inp
         settings = get_settings()
+        disc = DiscoveryService(ctx.db_session)
+        scan_run = await disc.start_scan_run(
+            task_id=ctx.task_id,
+            run_id=ctx.run_id,
+            node_run_id=getattr(ctx, "node_run_id", None) or "",
+            engine="api_hunt",
+            config_summary={
+                "top_k": int(getattr(settings, "api_hunt_top_k", 20) or 20),
+                "max_batches": int(getattr(settings, "api_hunt_max_batches", 8) or 8),
+            },
+        )
+        await ctx.db_session.commit()
+
+        async def finish_scan(status: str, finding_count: int = 0) -> None:
+            await disc.finish_scan_run(
+                scan_run, status=status, finding_count=finding_count,
+            )
+            await ctx.db_session.commit()
 
         empty = {
+            "engine": "api_hunt",
+            "scan_run_id": scan_run.id,
             "ok": True,
             "reviewed_count": 0,
             "suspect_count": 0,
             "finding_count": 0,
-            "qualified_count": 0,
+            "candidate_count": 0,
+            "candidate_state_counts": {},
             "budget_exhausted": False,
         }
 
         if not getattr(settings, "api_hunt_enabled", True):
             emit_phase(ctx, "API 猎洞未启用，已跳过", phase=self.node_key)
-            return {**empty, "skipped": True}
+            await finish_scan("skipped")
+            return {**empty, "status": "skipped", "skipped": True}
 
         inventory = getattr(inp, "inventory", None)
         bom_path = getattr(inventory, "bom_path", None) if inventory else None
         if not bom_path or not getattr(inventory, "ok", True):
             emit_phase(ctx, "无可用 API 清单，猎洞空跑", phase=self.node_key)
-            return empty
+            await finish_scan("skipped")
+            return {**empty, "status": "skipped"}
 
         bom_file = Path(ctx.host_workdir) / str(bom_path)
         try:
             bom = json.loads(bom_file.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as e:
             emit_phase(ctx, f"读取 BOM 失败：{e}", phase=self.node_key)
+            await finish_scan("failed")
             return {
+                **empty,
+                "status": "failed",
                 "ok": False,
-                "reviewed_count": 0,
-                "suspect_count": 0,
-                "finding_count": 0,
-                "qualified_count": 0,
-                "budget_exhausted": False,
                 "error": str(e),
             }
 
@@ -259,14 +208,13 @@ class ApiHuntNode:
 
         if not batches:
             emit_phase(ctx, "无 PVE 候选，猎洞空跑", phase=self.node_key)
-            return empty
+            await finish_scan("completed")
+            return {**empty, "status": "completed"}
 
         profile = getattr(inp, "profile", None)
         langs, fws = _profile_langs_fws(profile)
         stack_label = "+".join(langs + ([f"fw:{','.join(fws)}"] if fws else [])) or "unknown"
         stack_notes = _load_stack_notes(langs, fws)
-
-        svc = FindingService(ctx.db_session)
 
         emit_phase(
             ctx,
@@ -296,12 +244,13 @@ class ApiHuntNode:
         except Exception as e:  # noqa: BLE001 — 失败隔离
             logger.warning("api_hunt 失败(隔离): %s", e, exc_info=True)
             emit_phase(ctx, f"猎洞失败：{str(e)[:200]}", phase=self.node_key)
+            await finish_scan("failed")
             return {
+                **empty,
+                "status": "failed",
                 "ok": False,
                 "reviewed_count": reviewed,
                 "suspect_count": len(suspects),
-                "finding_count": 0,
-                "qualified_count": 0,
                 "budget_exhausted": budget_exhausted,
                 "error": str(e),
             }
@@ -322,22 +271,17 @@ class ApiHuntNode:
             if why:
                 msg = f"{msg} — {why[0]}"
             conf = _normalize_hunt_confidence(s.get("confidence"))
-            if conf is None:
-                continue
             evidence = _normalize_evidence(
                 s.get("evidence"), file_path=file_path, line_start=line_start,
             )
             if not evidence or not why:
                 continue
-            if s.get("attacker_controlled") is not True or s.get("reaches_sink") is not True:
-                continue
-            if s.get("sanitizer") not in ("none", "bypassable"):
-                continue
+            evidence_state = _candidate_evidence_state(s)
             fp = fingerprint(
                 "api_hunt", f"{rule_id}|{endpoint_id}", file_path, line_start, cwe,
             )
             raw = {
-                "confidence": _confidence_label(conf),
+                "confidence": _confidence_label(conf) if conf is not None else "UNKNOWN",
                 "confidence_score": conf,
                 "category": "security",
                 "has_dataflow": False,
@@ -348,14 +292,15 @@ class ApiHuntNode:
                 "auth_observed": s.get("auth_observed") or [],
                 "owasp_api": s.get("owasp_api") or "API1",
                 "evidence_kind": rule_id,
-                "hunt_verdict": "suspect",
+                "hunt_verdict": "candidate",
+                "candidate_evidence_state": evidence_state,
                 "why": why,
                 "evidence": evidence,
                 "summary": str(s.get("summary") or "").strip() or None,
                 "reasoning": str(s.get("reasoning") or "").strip() or None,
                 "qualify": {
-                    "attacker_controlled": True,
-                    "reaches_sink": True,
+                    "attacker_controlled": s.get("attacker_controlled"),
+                    "reaches_sink": s.get("reaches_sink"),
                     "sanitizer": s.get("sanitizer"),
                 },
             }
@@ -375,18 +320,12 @@ class ApiHuntNode:
                 "raw": raw,
             })
 
-        disc = DiscoveryService(ctx.db_session)
         finding_count = 0
-        qualified_count = 0
+        state_counts: dict[str, int] = {}
+        for finding in findings:
+            state = str((finding.get("raw") or {}).get("candidate_evidence_state") or "uncertain")
+            state_counts[state] = state_counts.get(state, 0) + 1
         if findings:
-            scan_run = await disc.start_scan_run(
-                task_id=ctx.task_id,
-                run_id=ctx.run_id,
-                node_run_id=getattr(ctx, "node_run_id", None) or "",
-                engine="api_hunt",
-                config_summary={"top_k": top_k, "max_batches": max_batches},
-            )
-            await ctx.db_session.commit()
             for f in findings:
                 sym = f.get("function_symbol")
                 if sym:
@@ -398,54 +337,26 @@ class ApiHuntNode:
                 scan_run_id=scan_run.id,
                 findings=findings,
             )
-            await disc.finish_scan_run(
-                scan_run, status="completed", finding_count=finding_count,
-            )
-            rows = await svc.list_findings(ctx.task_id)
-            hunt_rows = [r for r in rows if r.engine == "api_hunt"]
-            as_dicts = []
-            for r in hunt_rows:
-                raw = r.raw if isinstance(r.raw, dict) else {}
-                as_dicts.append({
-                    "id": r.id,
-                    "engine": r.engine,
-                    "rule_id": r.rule_id,
-                    "cwe": r.cwe,
-                    "severity": r.severity,
-                    "file_path": r.file_path,
-                    "line_start": r.line_start,
-                    "line_end": r.line_end,
-                    "function_symbol": raw.get("function_symbol"),
-                    "message": r.message,
-                    "fingerprint": r.fingerprint,
-                    "source_to_sink": r.source_to_sink,
-                    "raw": raw,
-                })
-            groups = cluster_findings(as_dicts, index=[])
-            finding_by_id = {r.id: r for r in hunt_rows}
-            await svc.upsert_groups(
-                task_id=ctx.task_id, groups=groups, finding_by_id=finding_by_id,
-            )
-            qualified_count = await _adjudicate_hunt_groups(
-                svc,
-                task_id=ctx.task_id,
-            )
-            await ctx.db_session.commit()
+        await finish_scan("completed", finding_count)
 
         emit_phase(
             ctx,
             (
                 f"猎洞完成：审 {reviewed} · 嫌疑 {len(suspects)} · 入库 {finding_count}"
-                f" · 合格直出 {qualified_count}"
+                f" · 候选 {finding_count}"
             ),
             phase=self.node_key,
         )
         return {
+            "engine": "api_hunt",
+            "scan_run_id": scan_run.id,
+            "status": "completed",
             "ok": True,
             "reviewed_count": reviewed,
             "suspect_count": len(suspects),
             "finding_count": finding_count,
-            "qualified_count": qualified_count,
+            "candidate_count": finding_count,
+            "candidate_state_counts": state_counts,
             "budget_exhausted": budget_exhausted,
         }
 
@@ -482,13 +393,13 @@ class ApiHuntNode:
         payload = {
             "batch": [_ep_payload(e) for e in batch],
             "closed_questions": [
-                "对象 id / 路径参数 / 角色是否可由攻击者控制？（attacker_controlled）",
-                "未做 ownership/租户校验前是否已读写资源或执行特权操作？（reaches_sink）",
-                "鉴权强度：none / bypassable / effective？（effective 不得报嫌疑）",
+                "对象 id / 路径参数 / 角色是否可由攻击者控制？未知写 null。",
+                "未做 ownership/租户校验前是否已读写资源或执行特权操作？未知写 null。",
+                "鉴权强度：none / bypassable / effective / unknown？",
             ],
             "rubric_hint": (
-                "CWE-639/CWE-863/API1/API5；嫌疑必须带 why/evidence/"
-                "attacker_controlled/reaches_sink/sanitizer/confidence"
+                "CWE-639/CWE-863/API1/API5；候选必须可定位并带 why/evidence；"
+                "安全判断允许 false/null/unknown，真假交由后续 triage"
             ),
         }
         input_json: dict[str, Any] = {

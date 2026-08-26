@@ -43,7 +43,7 @@ async def _seed_task_run(session, is_web=True, status="running"):
 
 
 def _legacy_order(orch):
-    """旧六节点顺序的执行器引用(source/profile/env_ready/audit/reproduce/report)。
+    """verify 子图执行器引用（不含 finalize：由真实 FinalizeNode 固化结论）。
 
     DEFAULT_PIPELINE 扩节点后(discovery-spec §4.2.4)，测试统一按键取执行器，
     位置索引不再稳定。
@@ -226,8 +226,8 @@ async def test_ai_event_callback_is_stamped_with_node_run(session_factory):
 
 
 @pytest.mark.asyncio
-async def test_missing_is_web_does_not_enter_env_ready(session_factory):
-    """画像缺少 is_web 时 fail-closed 跳过靶场，但白盒审计和报告仍继续。"""
+async def test_missing_is_web_does_not_skip_env_as_non_web(session_factory):
+    """画像缺少 is_web：未知≠非 Web，不得因 NON_WEB 跳过靶场；白盒与报告仍继续。"""
     from app.contexts.agent import orchestrator as orch
     from app.contexts.task.models import NodeRun
     from sqlalchemy import select
@@ -237,13 +237,34 @@ async def test_missing_is_web_does_not_enter_env_ready(session_factory):
         real_nodes = _legacy_order(orch)
 
         async def fake_source(ctx, node_input=None):
-            return {"source_path": ctx.source_path}
+            return {
+                "source_path": ctx.source_path,
+                "commit_sha": "a" * 40,
+                "repo_dirname": "demo",
+                "workspace_path": "/workspace/demo",
+            }
 
         async def fake_profile(ctx, node_input=None):
-            return {"language": "python"}
+            return {"language": "python"}  # 故意不写 is_web
+
+        async def fake_env(ctx, node_input=None):
+            return {
+                "ok": False,
+                "target_url": None,
+                "error": "profile.is_web 未知，靶场按降级继续",
+            }
 
         async def fake_audit(ctx, node_input=None):
             return {"gate_verdict": "pass", "core_claim": "代码路径可达"}
+
+        async def fake_reproduce(ctx, node_input=None):
+            return {
+                "verdict": "code_reachable",
+                "reproduced": False,
+                "attempts": [],
+                "evidence": [],
+                "degraded_reason": "env_unavailable",
+            }
 
         async def fake_report(ctx, node_input=None):
             return {
@@ -254,7 +275,9 @@ async def test_missing_is_web_does_not_enter_env_ready(session_factory):
         with (
             patch.object(real_nodes[0], "execute", fake_source),
             patch.object(real_nodes[1], "execute", fake_profile),
+            patch.object(real_nodes[2], "execute", fake_env),
             patch.object(real_nodes[3], "execute", fake_audit),
+            patch.object(real_nodes[4], "execute", fake_reproduce),
             patch.object(real_nodes[5], "execute", fake_report),
         ):
 
@@ -264,13 +287,13 @@ async def test_missing_is_web_does_not_enter_env_ready(session_factory):
             )
 
         assert result["status"] == "completed"
-        assert result["non_web"] is True
+        assert result["non_web"] is False
         nodes = (await session.execute(
             select(NodeRun).where(NodeRun.run_id == run.id).order_by(NodeRun.node_index)
         )).scalars().all()
         by_key = {n.node_key: n.status for n in nodes}
-        assert by_key["env_ready"] == "skipped"
-        assert by_key["reproduce"] == "skipped"
+        assert by_key["env_ready"] == "completed"
+        assert by_key["reproduce"] == "completed"
         assert by_key["audit"] == "completed"
         assert by_key["report"] == "completed"
 
@@ -375,21 +398,18 @@ async def test_gate_fail_skips_reproduce_and_sets_false_positive(session_factory
             return {"report_data": {"x": 1}, "final_verdict": "false_positive"}
 
         real_nodes = _legacy_order(orch)
-        patches = [
+        with (
             patch.object(real_nodes[0], "execute", fake_source),
             patch.object(real_nodes[1], "execute", fake_profile),
             patch.object(real_nodes[2], "execute", fake_env),
             patch.object(real_nodes[3], "execute", fake_audit),
             patch.object(real_nodes[4], "execute", AsyncMock(side_effect=AssertionError("gate fail 不该执行 reproduce"))),
             patch.object(real_nodes[5], "execute", fake_report),
-        ]
-        for p in patches:
-            p.__enter__()
-
-        result = await orch.run_orchestration(
-            task_id=task.id, run_id=run.id, session=session,
-            host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
-        )
+        ):
+            result = await orch.run_orchestration(
+                task_id=task.id, run_id=run.id, session=session,
+                host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
+            )
 
         assert result["status"] == "completed"
         assert result["verdict"] == "false_positive"
@@ -429,21 +449,18 @@ async def test_report_fail_after_gate_fail_keeps_false_positive(session_factory)
             return {"gate_verdict": "fail", "gate_reason": "链路不通"}
 
         real_nodes = _legacy_order(orch)
-        patches = [
+        with (
             patch.object(real_nodes[0], "execute", fake_source),
             patch.object(real_nodes[1], "execute", fake_profile),
             patch.object(real_nodes[2], "execute", fake_env),
             patch.object(real_nodes[3], "execute", fake_audit),
             patch.object(real_nodes[4], "execute", AsyncMock(side_effect=AssertionError("不该 reproduce"))),
             patch.object(real_nodes[5], "execute", AsyncMock(side_effect=RuntimeError("报告模型超时"))),
-        ]
-        for p in patches:
-            p.__enter__()
-
-        result = await orch.run_orchestration(
-            task_id=task.id, run_id=run.id, session=session,
-            host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
-        )
+        ):
+            result = await orch.run_orchestration(
+                task_id=task.id, run_id=run.id, session=session,
+                host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
+            )
 
         await session.refresh(task)
         await session.refresh(run)
@@ -480,26 +497,81 @@ async def test_report_fail_after_uncertain_keeps_needs_review(session_factory):
             return {"gate_verdict": "uncertain", "gate_reason": "描述对不上"}
 
         real_nodes = _legacy_order(orch)
-        patches = [
+        with (
             patch.object(real_nodes[0], "execute", fake_source),
             patch.object(real_nodes[1], "execute", fake_profile),
             patch.object(real_nodes[2], "execute", fake_env),
             patch.object(real_nodes[3], "execute", fake_audit),
             patch.object(real_nodes[4], "execute", AsyncMock(side_effect=AssertionError("不该 reproduce"))),
             patch.object(real_nodes[5], "execute", AsyncMock(side_effect=RuntimeError("报告写不出"))),
-        ]
-        for p in patches:
-            p.__enter__()
-
-        result = await orch.run_orchestration(
-            task_id=task.id, run_id=run.id, session=session,
-            host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
-        )
+        ):
+            result = await orch.run_orchestration(
+                task_id=task.id, run_id=run.id, session=session,
+                host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
+            )
 
         await session.refresh(task)
         assert result["status"] == "needs_review"
         assert task.status == "needs_review"
         assert task.verdict is None
+
+
+@pytest.mark.asyncio
+async def test_finalize_seals_task_before_report_consumer(session_factory):
+    """finalize 完成后任务即终态；report 后处理开始时已能看到 completed。"""
+    from app.contexts.agent import orchestrator as orch
+    from app.contexts.agent.contracts import node_by_key
+    from app.contexts.task.models import Task
+
+    assert node_by_key("report").async_consumer is True
+
+    async with session_factory() as session:
+        task, run = await _seed_task_run(session)
+        seen: list[str] = []
+
+        async def fake_source(ctx, node_input=None):
+            return {"source_path": ctx.source_path, "repo_dirname": "demo"}
+
+        async def fake_profile(ctx, node_input=None):
+            return {"is_web": True, "language": "python"}
+
+        async def fake_env(ctx, node_input=None):
+            return {"target_url": "http://localhost:5000", "compose_path": "x.yml"}
+
+        async def fake_audit(ctx, node_input=None):
+            return {"gate_verdict": "pass", "core_claim": "reachable"}
+
+        async def fake_reproduce(ctx, node_input=None):
+            return {"verdict": "confirmed", "reproduced": True, "attempts": []}
+
+        async def fake_report(ctx, node_input=None):
+            row = await ctx.db_session.get(Task, task.id)
+            await ctx.db_session.refresh(row)
+            seen.append(row.status)
+            return {
+                "final_verdict": "confirmed",
+                "analysis_verdict": "confirmed",
+                "report_data": {"document_kind": "vulnerability_report"},
+                "authored_by": "reporter",
+            }
+
+        real_nodes = _legacy_order(orch)
+        with (
+            patch.object(real_nodes[0], "execute", fake_source),
+            patch.object(real_nodes[1], "execute", fake_profile),
+            patch.object(real_nodes[2], "execute", fake_env),
+            patch.object(real_nodes[3], "execute", fake_audit),
+            patch.object(real_nodes[4], "execute", fake_reproduce),
+            patch.object(real_nodes[5], "execute", fake_report),
+        ):
+            result = await orch.run_orchestration(
+                task_id=task.id, run_id=run.id, session=session,
+                host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
+            )
+
+        assert result["status"] == "completed"
+        assert result.get("analysis_sealed") is True
+        assert seen == ["completed"]
 
 
 @pytest.mark.asyncio
@@ -861,21 +933,18 @@ async def test_gate_uncertain_skips_reproduce_but_runs_report(session_factory):
             }
 
         real_nodes = _legacy_order(orch)
-        patches = [
+        with (
             patch.object(real_nodes[0], "execute", fake_source),
             patch.object(real_nodes[1], "execute", fake_profile),
             patch.object(real_nodes[2], "execute", fake_env),
             patch.object(real_nodes[3], "execute", fake_audit),
             patch.object(real_nodes[4], "execute", AsyncMock(side_effect=AssertionError("uncertain 不该 reproduce"))),
             patch.object(real_nodes[5], "execute", fake_report),
-        ]
-        for p in patches:
-            p.__enter__()
-
-        result = await orch.run_orchestration(
-            task_id=task.id, run_id=run.id, session=session,
-            host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
-        )
+        ):
+            result = await orch.run_orchestration(
+                task_id=task.id, run_id=run.id, session=session,
+                host_workdir="/tmp/w", source_path="/tmp/w", runner_env={},
+            )
 
         assert result["status"] == "needs_review"
         # 任务级 verdict 仍为空（未确认漏洞），但补出了验证记录文档

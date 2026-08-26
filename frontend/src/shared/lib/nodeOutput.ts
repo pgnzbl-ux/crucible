@@ -98,6 +98,9 @@ export function summarizeNodeOutput(
     }
     case 'env_ready': {
       const url = str(o.target_url)
+      if (o.outcome === 'degraded' || o.ok === false || (!url && o.error)) {
+        return '靶场降级 · 白盒继续'
+      }
       if (!url) return '靶场已就绪'
       return `${url} · ${formatInitialCreds(o.initial_creds)}`
     }
@@ -119,6 +122,21 @@ export function summarizeNodeOutput(
       return VERDICT_LABEL[v] ? `报告已生成 · ${VERDICT_LABEL[v]}` : '报告已生成'
     }
     default:
+      if (nodeKey === 'lead_verify') {
+        const total = typeof o.lead_count === 'number' ? o.lead_count : null
+        const done = typeof o.completed_count === 'number' ? o.completed_count : null
+        const failed = typeof o.failed_count === 'number' ? o.failed_count : null
+        if (status === 'running') {
+          return total != null ? `正在终认 ${total} 条线索` : '正在逐条终认线索'
+        }
+        if (status === 'skipped') return '没有高置信线索，已跳过终认'
+        const parts = [
+          total != null ? `${total} 条线索` : '',
+          done != null ? `完成 ${done}` : '',
+          failed != null && failed > 0 ? `失败 ${failed}` : '',
+        ].filter(Boolean)
+        return parts.join(' · ') || '线索终认完成'
+      }
       if (nodeKey === 'triage') {
         const adjudicated = typeof o.adjudicated_count === 'number' ? o.adjudicated_count : null
         const families = typeof o.family_count === 'number' ? o.family_count : null

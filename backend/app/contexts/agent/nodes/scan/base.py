@@ -254,13 +254,24 @@ class EngineScanNode:
         await ctx.db_session.commit()
 
         def _finish(status: str, count: int = 0, error: str | None = None) -> dict[str, Any]:
+            from app.contexts.agent.contracts.outcome import attach_outcome
+
             payload: dict[str, Any] = {
                 "engine": self.engine, "scan_run_id": scan_run.id,
                 "status": status, "finding_count": count,
             }
             if error:
                 payload["error"] = str(error)
-            return payload
+            return attach_outcome(
+                payload,
+                status=status,
+                error=error,
+                coverage={
+                    "engine": self.engine,
+                    "finding_count": count,
+                    "scan_status": status,
+                },
+            )
 
         if not self.enabled(settings) or not self.applicable(ctx, inp):
             emit_phase(ctx, f"{self.engine} 未启用或不适用，已跳过", phase=self.node_key)

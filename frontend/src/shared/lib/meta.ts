@@ -96,7 +96,8 @@ export const NODE_LABELS: Record<string, string> = {
   audit: '白盒审计',
   reproduce: '复现验证',
   lead_verify: '多线索终认',
-  report: '报告生成',
+  finalize: '结论固化',
+  report: '报告文档',
   over: '结束',
 }
 
@@ -116,14 +117,17 @@ export const PIPELINE_NODE_ORDER: string[] = [
   'dispatch',
   'audit',
   'reproduce',
+  'lead_verify',
+  'finalize',
   'report',
 ]
 
 /** 调用过模型的节点（Agent 容器或快模型网关）；DAG / 阶段卡 AI 角标。
  * 与后端 `NodeExecutor.is_ai` 不完全等同：后者表示要起 Docker。
  * - screen：无 Docker，但 T2 快模型计费
- * - lead_verify：discovery UI 合成节点，承接被隐藏的 audit + reproduce
- * - report：verify 调模型；discovery 走代码聚合（角标仍标能力，0 tok） */
+ * - lead_verify：discovery 显式终认工位（per-lead audit/reproduce）
+ * - finalize：固化 analysis_verdict（无 AI）
+ * - report：verify 调模型；discovery 走代码聚合 */
 export const AI_NODE_KEYS = new Set([
   'profile',
   'env_ready',
@@ -196,6 +200,7 @@ export const VERIFY_MODE_SKIPPED_KEYS = new Set([
   'screen',
   'triage',
   'dispatch',
+  'lead_verify',
 ])
 
 export const NODE_STATUS_META: Record<string, { label: string; color: TagProps['color']; status: string }> = {
@@ -226,7 +231,8 @@ export const EVENT_PHASE_LABELS: Record<string, string> = {
   audit: '白盒审计',
   reproduce: '复现验证',
   lead_verify: '多线索终认',
-  report: '报告生成',
+  finalize: '结论固化',
+  report: '报告文档',
   scanning: '代码审计',
   reproducing: '尝试复现',
   completed: '完成',

@@ -310,6 +310,9 @@ def authoritative_verdict(repro: dict[str, Any] | None, audit: dict[str, Any] | 
         return "false_positive"
     if gate == "uncertain":
         return "needs_review"
+    # reproduce 已跳过/无动态结果时，gate=pass 以白盒 code_reachable 收口
+    if gate == "pass":
+        return "code_reachable"
     return None
 
 
@@ -648,7 +651,10 @@ def _normalize_hunt_confidence(value: Any) -> float | None:
 
 
 def _validate_api_hunt_output(output: dict) -> tuple[bool, str | None]:
-    """猎洞嫌疑对齐 §2.7：每项必须 why/evidence/三布尔，才能绕过 screen/triage。"""
+    """API Hunt 只校验候选形状，不在发现阶段执行 TP 合格门。
+
+    三个安全判断必须显式给出，但允许未知或反证；最终真假由 triage 决定。
+    """
     suspects = output.get("suspects")
     if not isinstance(suspects, list):
         return False, "suspects 必须为数组"
@@ -671,14 +677,23 @@ def _validate_api_hunt_output(output: dict) -> tuple[bool, str | None]:
         evidence = s.get("evidence")
         if not isinstance(evidence, list) or len(evidence) < 1:
             return False, f"suspects[{i}] 必须提供非空 evidence"
-        if s.get("attacker_controlled") is not True:
-            return False, f"suspects[{i}] 必须 attacker_controlled=true"
-        if s.get("reaches_sink") is not True:
-            return False, f"suspects[{i}] 必须 reaches_sink=true"
-        if s.get("sanitizer") not in ("none", "bypassable"):
-            return False, f"suspects[{i}].sanitizer 必须是 none 或 bypassable"
-        if _normalize_hunt_confidence(s.get("confidence")) is None:
-            return False, f"suspects[{i}].confidence 必须是 0–1 或 HIGH/MEDIUM/LOW"
+        for field in ("attacker_controlled", "reaches_sink"):
+            if field not in s:
+                return False, f"suspects[{i}].{field} 必须显式给出 true|false|null"
+            if s.get(field) is not None and not isinstance(s.get(field), bool):
+                return False, f"suspects[{i}].{field} 必须是 true|false|null"
+        if "sanitizer" not in s:
+            return False, f"suspects[{i}].sanitizer 必须显式给出"
+        if s.get("sanitizer") not in (None, "none", "bypassable", "effective", "unknown"):
+            return False, (
+                f"suspects[{i}].sanitizer 必须是 "
+                "none|bypassable|effective|unknown|null"
+            )
+        if "confidence" in s and s.get("confidence") is not None:
+            if _normalize_hunt_confidence(s.get("confidence")) is None:
+                return False, (
+                    f"suspects[{i}].confidence 必须是 0–1、HIGH/MEDIUM/LOW 或 null"
+                )
         summary = s.get("summary")
         if not (isinstance(summary, str) and summary.strip()):
             return False, f"suspects[{i}].summary 必须为非空字符串（§2.3.1）"

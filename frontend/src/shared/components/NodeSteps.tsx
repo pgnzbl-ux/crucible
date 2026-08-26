@@ -35,6 +35,7 @@ import {
 } from '../lib/pipelineDag'
 import { AuditDetail } from './AuditDetail'
 import { EnvReadyDetail } from './EnvReadyDetail'
+import { LeadVerifyDetail } from './LeadVerifyDetail'
 import { NodeDag } from './NodeDag'
 import { canRetryFromNode } from '../lib/taskActions'
 
@@ -58,7 +59,11 @@ interface NodeStepsProps {
 function nodeSummary(n: Pick<NodeRun, 'node_key' | 'status' | 'output' | 'error_message'>): string {
   if (n.error_message) return n.error_message
   if (n.node_key === 'lead_verify') {
-    const count = typeof n.output?.queued_count === 'number' ? n.output.queued_count : null
+    const count = typeof n.output?.queued_count === 'number'
+      ? n.output.queued_count
+      : typeof n.output?.lead_count === 'number'
+        ? n.output.lead_count
+        : null
     if (n.status === 'running') return count == null ? '正在逐条终认线索' : `正在终认 ${count} 条线索`
     if (n.status === 'completed') return count == null ? '线索终认完成' : `${count} 条线索终认完成`
     if (n.status === 'skipped') return '没有高置信线索，已跳过终认'
@@ -68,9 +73,11 @@ function nodeSummary(n: Pick<NodeRun, 'node_key' | 'status' | 'output' | 'error_
 
 /** 完成的 audit / env_ready 有结构化字段可排版，其余节点一句摘要就够。 */
 function nodeDetail(n: Pick<NodeRun, 'node_key' | 'status' | 'output'>) {
-  if (n.status !== 'completed') return null
-  if (n.node_key === 'audit') return <AuditDetail output={n.output} />
-  if (n.node_key === 'env_ready') return <EnvReadyDetail output={n.output} />
+  if (n.node_key === 'audit' && n.status === 'completed') return <AuditDetail output={n.output} />
+  if (n.node_key === 'env_ready' && n.status === 'completed') return <EnvReadyDetail output={n.output} />
+  if (n.node_key === 'lead_verify' && (n.status === 'completed' || n.status === 'skipped')) {
+    return <LeadVerifyDetail output={n.output} />
+  }
   return null
 }
 
@@ -99,7 +106,7 @@ function presentationStatus(node: Pick<NodeRun, 'status'>, taskStatus?: string):
 
 function discoveryLeadStatus(
   dispatch: Pick<NodeRun, 'status' | 'output'> | undefined,
-  report: Pick<NodeRun, 'status'> | undefined,
+  finalize: Pick<NodeRun, 'status'> | undefined,
   taskStatus?: string,
 ): NodeRun['status'] {
   if (!dispatch || dispatch.status === 'pending' || dispatch.status === 'running') return 'pending'
@@ -112,13 +119,13 @@ function discoveryLeadStatus(
   if (typeof hasLead !== 'boolean' && typeof queuedCount !== 'number') return 'pending'
   if (hasLead !== true && !(typeof queuedCount === 'number' && queuedCount > 0)) return 'skipped'
 
-  if (!report || report.status === 'pending') {
+  if (!finalize || finalize.status === 'pending') {
     if (taskStatus === 'cancelled') return 'cancelled'
     if (taskStatus === 'failed') return 'pending'
     return 'running'
   }
-  if (report.status === 'cancelled') return 'cancelled'
-  // report 只有在 LeadWorker 排空队列后才会进入 running/terminal。
+  if (finalize.status === 'cancelled') return 'cancelled'
+  // finalize 在 LeadWorker 排空后才会进入 running/terminal。
   return 'completed'
 }
 
@@ -195,27 +202,35 @@ export function NodeSteps({
   })
   const mode: PipelineMode = taskType === 'discovery' ? 'discovery' : 'verify'
   const dispatchNode = ordered.find((n) => n.node_key === 'dispatch')
+  const finalizeNode = ordered.find((n) => n.node_key === 'finalize')
   const reportNode = ordered.find((n) => n.node_key === 'report')
   const auditNode = ordered.find((n) => n.node_key === 'audit')
   const reproduceNode = ordered.find((n) => n.node_key === 'reproduce')
+  const leadVerifyRuntime = nodeMap.get('lead_verify')
   const progressOrdered: NodeRun[] = mode === 'discovery'
     ? ordered
         .filter((n) => !DISCOVERY_REPLACED_NODE_KEYS.has(n.node_key))
-        .flatMap((n) => n.node_key === 'report'
-          ? [{
-              id: 'synthetic-lead-verify',
-              node_index: n.node_index - 0.5,
-              node_key: 'lead_verify',
-              status: discoveryLeadStatus(dispatchNode, reportNode, taskStatus),
-              attempt: 0,
-              error_message: null,
-              started_at: null,
-              finished_at: null,
-              output: { queued_count: dispatchNode?.output?.queued_count },
-              // discovery 隐藏 audit/reproduce：用量合到合成终认节点
-              usage: mergeTokenUsage(auditNode?.usage, reproduceNode?.usage),
-            }, n]
-          : [n])
+        .map((n) => {
+          if (n.node_key !== 'lead_verify') return n
+          return {
+            ...n,
+            id: leadVerifyRuntime?.id ?? n.id,
+            status: (leadVerifyRuntime?.status
+              ?? (n.status !== 'pending' ? n.status : discoveryLeadStatus(dispatchNode, finalizeNode, taskStatus))) as NodeRun['status'],
+            attempt: leadVerifyRuntime?.attempt ?? n.attempt,
+            error_message: leadVerifyRuntime?.error_message ?? n.error_message,
+            started_at: leadVerifyRuntime?.started_at ?? n.started_at,
+            finished_at: leadVerifyRuntime?.finished_at ?? n.finished_at,
+            output: {
+              queued_count: dispatchNode?.output?.queued_count,
+              ...(n.output ?? {}),
+              ...(leadVerifyRuntime?.output ?? {}),
+            },
+            usage: leadVerifyRuntime?.usage
+              ?? n.usage
+              ?? mergeTokenUsage(auditNode?.usage, reproduceNode?.usage),
+          }
+        })
     : ordered
 
   const skipToggle =

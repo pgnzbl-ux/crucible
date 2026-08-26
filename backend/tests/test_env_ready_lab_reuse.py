@@ -457,9 +457,9 @@ async def test_reproduce_touches_lab_when_lab_id_present():
     )
     with patch("app.contexts.lab.service.LabService") as LS, \
          patch(
-             "app.contexts.agent.nodes.reproduce._ensure_lab_reachable",
+             "app.contexts.agent.nodes.reproduce._resolve_lab_for_reproduce",
              new_callable=AsyncMock,
-             side_effect=lambda ctx, env: env,
+             side_effect=lambda ctx, env: (env, None),
          ), \
          patch("app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", new_callable=AsyncMock) as ai:
         LS.return_value.touch = AsyncMock()
@@ -473,8 +473,8 @@ async def test_reproduce_touches_lab_when_lab_id_present():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("runtime", ["none", "exited"])
-async def test_reproduce_reschedules_env_ready_when_lab_gone_or_stopped(runtime):
-    """靶场访问超时且 Docker 已销毁/停止时，重跑一次 env_ready。"""
+async def test_reproduce_degrades_when_lab_gone_or_stopped(runtime):
+    """靶场访问超时且 Docker 已销毁/停止：降级 code_reachable，不反向调度 env_ready。"""
     from types import SimpleNamespace
 
     from app.contexts.agent.nodes.reproduce import ReproduceNode
@@ -502,19 +502,6 @@ async def test_reproduce_reschedules_env_ready_when_lab_gone_or_stopped(runtime)
         project_id="p1",
         db_session=_dummy_session(),
     )
-    revived = {
-        "target_url": "http://10.0.0.8:4001",
-        "compose_path": ".vuln-env/docker-compose.yml",
-        "initial_creds": {"username": "a", "password": "b"},
-        "transport_shape": {"protocol": "http"},
-        "started_containers": ["web"],
-        "ok": True,
-    }
-    captured: dict = {}
-
-    async def _capture_ai(**kwargs):
-        captured["input_json"] = kwargs["input_json"]
-        return {"verdict": "confirmed", "reproduced": True}
 
     with patch("app.contexts.lab.service.LabService") as LS, \
          patch(
@@ -530,13 +517,11 @@ async def test_reproduce_reschedules_env_ready_when_lab_gone_or_stopped(runtime)
          patch(
              "app.contexts.agent.nodes.env_ready.EnvReadyNode.execute",
              new_callable=AsyncMock,
-             return_value=revived,
          ) as env_exec, \
          patch(
              "app.contexts.agent.ai_runner.run_ai_node_with_shape_retry",
              new_callable=AsyncMock,
-             side_effect=_capture_ai,
-         ):
+         ) as ai:
         LS.return_value.touch = AsyncMock()
         LS.return_value.align_runtime_status = AsyncMock()
         LS.return_value.repository = SimpleNamespace(
@@ -545,16 +530,18 @@ async def test_reproduce_reschedules_env_ready_when_lab_gone_or_stopped(runtime)
                 target_url="http://10.0.0.8:3001",
             ))
         )
-        await ReproduceNode().execute(ctx)
+        out = await ReproduceNode().execute(ctx)
 
-    env_exec.assert_awaited_once()
-    assert ctx.updated_handoffs["env_ready"]["target_url"] == "http://10.0.0.8:4001"
-    assert "4001" in captured["input_json"]["target_url"]
+    env_exec.assert_not_awaited()
+    ai.assert_not_awaited()
+    assert out["verdict"] == "code_reachable"
+    assert out["degraded_reason"] == "lab_unreachable"
+    assert "env_ready" not in ctx.updated_handoffs
 
 
 @pytest.mark.asyncio
 async def test_reproduce_does_not_reschedule_env_ready_when_containers_still_running():
-    """访问超时但容器仍在跑：不重调度 env_ready（仅销毁/停止才复活）。"""
+    """访问超时但容器仍在跑：不重调度 env_ready，把原 URL 交给 Agent。"""
     from app.contexts.agent.nodes.reproduce import ReproduceNode
 
     ctx = NodeContext(

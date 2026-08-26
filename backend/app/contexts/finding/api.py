@@ -11,13 +11,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.contexts.task.models import Task
 from app.core.database import get_db_session
 from app.shared.deps import CurrentUserId
 
-from app.contexts.task.models import Task
-
 from .classification import infer_cwe, vulnerability_title
-from .models import Adjudication, AlertGroup, LeadRun, RawFinding
+from .models import Adjudication, AlertGroup, LeadNodeRun, LeadRun, RawFinding
 from .presentation import screening_presentation
 from .repository import FindingRepository
 from .schemas import (
@@ -30,8 +29,9 @@ from .schemas import (
     AlertGroupSummary,
     BatchDeleteGroupsRequest,
     BatchDeleteGroupsResponse,
-    FindingSummary,
     FindingStatsResponse,
+    FindingSummary,
+    LeadNodeRunSummary,
     LeadRunSummary,
     ManualDispatchRequest,
     ManualDispatchResponse,
@@ -328,6 +328,22 @@ async def get_group_detail(
         .order_by(LeadRun.created_at.desc())
     )
     lead_runs = list(lead_rows.scalars().all())
+    lead_node_rows = []
+    if lead_runs:
+        rows = await repo.session.execute(
+            select(LeadNodeRun)
+            .where(LeadNodeRun.lead_run_id.in_([lead.id for lead in lead_runs]))
+            .order_by(
+                LeadNodeRun.lead_run_id,
+                LeadNodeRun.created_at,
+                LeadNodeRun.node_key,
+                LeadNodeRun.attempt,
+            )
+        )
+        lead_node_rows = list(rows.scalars().all())
+    nodes_by_lead: dict[str, list[LeadNodeRun]] = {}
+    for node_run in lead_node_rows:
+        nodes_by_lead.setdefault(node_run.lead_run_id, []).append(node_run)
     return AlertGroupDetail(
         **_summary(group, task, rep, adjudications[-1] if adjudications else None).model_dump(),
         members=[_finding_summary(f) for f in members],
@@ -347,6 +363,15 @@ async def get_group_detail(
                 verification_basis=getattr(lead, "verification_basis", None),
                 error=lead.error,
                 created_at=lead.created_at, updated_at=lead.updated_at,
+                node_runs=[
+                    LeadNodeRunSummary(
+                        id=node.id, node_key=node.node_key, status=node.status,
+                        attempt=node.attempt, input_json=node.input_json or {},
+                        output_json=node.output_json, error=node.error,
+                        started_at=node.started_at, finished_at=node.finished_at,
+                    )
+                    for node in nodes_by_lead.get(lead.id, [])
+                ],
             )
             for lead in lead_runs
         ],

@@ -12,8 +12,8 @@ from .base import NodeContext, emit_phase, workspace_repo_path
 
 logger = logging.getLogger(__name__)
 
-# 访问超时且 Docker 已销毁/停止时才重调度 env_ready；容器仍在跑则交给 AI 自行探测。
-_REVIVE_RUNTIMES = frozenset({"none", "exited"})
+# 探活失败且 Docker 已销毁/停止：不再反向调度 env_ready，降级为白盒可达。
+_UNREACHABLE_RUNTIMES = frozenset({"none", "exited"})
 
 
 async def _probe_lab_access(
@@ -50,7 +50,7 @@ async def _probe_lab_access(
 async def _lab_runtime_kind(ctx: NodeContext) -> str:
     """读 compose 实际容器态：none / running / partial / exited / unknown。
 
-    无 lab_id 时返回 unknown，避免单测/白盒路径误判为已销毁并强行重调度。
+    无 lab_id 时返回 unknown，避免单测/白盒路径误判为已销毁。
     """
     from app.contexts.lab.docker_ops import list_containers
     from app.contexts.lab.service import LabService, container_runtime_kind
@@ -78,45 +78,38 @@ async def _compose_project_for(ctx: NodeContext) -> str | None:
     return lab.compose_project if lab is not None else None
 
 
-async def _ensure_lab_reachable(
+async def _resolve_lab_for_reproduce(
     ctx: NodeContext,
     env: EnvReadyHandoff,
-) -> EnvReadyHandoff:
-    """靶场访问失败时检测 Docker；销毁/停止则重调度一次 env_ready。"""
+) -> tuple[EnvReadyHandoff | None, str | None]:
+    """解析动态复现可用靶场。
+
+    返回 (env, degraded_reason)。degraded_reason 非空时不得调 AI，由调用方输出
+    code_reachable。禁止在节点内反向调度 EnvReadyNode（拓扑不得有隐藏边）。
+    """
     raw_url = env.target_url
     if not raw_url:
-        return env
+        return None, "env_unavailable"
 
     compose_project = await _compose_project_for(ctx)
     if await _probe_lab_access(str(raw_url), compose_project=compose_project):
-        return env
+        return env, None
 
     runtime = await _lab_runtime_kind(ctx)
-    if runtime not in _REVIVE_RUNTIMES:
+    if runtime in _UNREACHABLE_RUNTIMES:
         emit_phase(
             ctx,
-            f"靶场探活失败但 Docker 状态为 {runtime}，不重调度 env_ready",
+            f"靶场不可达且 Docker 为 {runtime}，降级为代码可达（不反向调度 env_ready）",
             phase="reproduce",
         )
-        return env
+        return None, "lab_unreachable"
 
     emit_phase(
         ctx,
-        f"靶场不可达且 Docker 为 {runtime}，重新调度靶场就绪",
+        f"靶场探活失败但 Docker 状态为 {runtime}，交由 Agent 继续探测",
         phase="reproduce",
     )
-    from app.contexts.agent.nodes.env_ready import EnvReadyNode
-
-    revived = await EnvReadyNode().execute(ctx)
-    new_url = (revived or {}).get("target_url") if isinstance(revived, dict) else None
-    if not new_url:
-        raise RuntimeError(
-            f"靶场已{('销毁' if runtime == 'none' else '停止')}，"
-            "重新调度 env_ready 后仍无 target_url"
-        )
-    ctx.updated_handoffs["env_ready"] = revived
-    ctx.previous_outputs["env_ready"] = revived
-    return EnvReadyHandoff.model_validate(revived)
+    return env, None
 
 
 class ReproduceNode:
@@ -151,9 +144,9 @@ class ReproduceNode:
             await svc.align_runtime_status(ctx.lab_id)
 
         inp = self._resolve_input(ctx, node_input)
-        env = await _ensure_lab_reachable(ctx, inp.env_ready)
-        raw_url = env.target_url
-        if not raw_url:
+        env, degraded = await _resolve_lab_for_reproduce(ctx, inp.env_ready)
+        if degraded or env is None or not env.target_url:
+            reason = degraded or "env_unavailable"
             emit_phase(
                 ctx,
                 "靶场未就绪，保留白盒代码可达结论",
@@ -164,9 +157,9 @@ class ReproduceNode:
                 "reproduced": False,
                 "attempts": [],
                 "evidence": [],
-                "degraded_reason": "env_unavailable",
+                "degraded_reason": reason,
             }
-        target_url = rewrite_url_for_agent_container(str(raw_url)) or str(raw_url)
+        target_url = rewrite_url_for_agent_container(str(env.target_url)) or str(env.target_url)
 
         src = inp.source
         input_json = {

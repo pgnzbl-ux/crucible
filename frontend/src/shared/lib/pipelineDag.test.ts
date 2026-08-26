@@ -24,10 +24,21 @@ describe('pipelineDag 前提表契约', () => {
     expect(PIPELINE_REQUIRES.env_ready).toEqual(['source', 'profile', 'dispatch'])
   })
 
-  it('hunt bypasses screen/triage and joins dispatch with triage', () => {
+  it('routes hunt candidates through the unified review chain', () => {
     expect(PIPELINE_REQUIRES.api_hunt).toEqual(['api_inventory'])
+    expect(PIPELINE_REQUIRES.cluster).toEqual([
+      'scan_semgrep', 'scan_gitleaks', 'scan_osv', 'api_hunt',
+    ])
     expect(PIPELINE_REQUIRES.screen).toEqual(['cluster'])
-    expect(PIPELINE_REQUIRES.dispatch).toEqual(['triage', 'api_hunt'])
+    expect(PIPELINE_REQUIRES.dispatch).toEqual(['triage'])
+  })
+
+    it('makes lead_verify then finalize explicit DAG nodes before report', () => {
+    expect(PIPELINE_REQUIRES.lead_verify).toEqual(['dispatch', 'env_ready'])
+    expect(PIPELINE_REQUIRES.finalize).toEqual([
+      'profile', 'env_ready', 'lead_verify',
+    ])
+    expect(PIPELINE_REQUIRES.report).toEqual(['finalize'])
   })
 })
 
@@ -36,15 +47,15 @@ describe('pipelineDag 运行流程', () => {
     const stages = pipelineOverviewStages('discovery')
     expect(stages[1].nodeKeys).toEqual(['profile', 'scan_gitleaks', 'scan_osv'])
     expect(stages[1].parallel).toBe(true)
-    expect(stages[2].nodeKeys).toEqual(['scan_semgrep', 'api_inventory'])
+    expect(stages[2].nodeKeys).toEqual(['scan_semgrep', 'api_inventory', 'api_hunt'])
     expect(stages[2].parallel).toBe(true)
-    expect(stages.find((stage) => stage.key === 'clues')?.nodeKeys).toEqual([
-      'cluster', 'api_hunt',
-    ])
+    expect(stages.find((stage) => stage.key === 'clues')?.nodeKeys).toEqual(['cluster'])
     expect(stages.find((stage) => stage.key === 'review')?.nodeKeys).toEqual([
       'screen', 'triage',
     ])
-    expect(stages.at(-2)?.nodeKeys).toEqual(['env_ready', 'lead_verify'])
+    expect(stages.at(-3)?.nodeKeys).toEqual(['env_ready', 'lead_verify'])
+    expect(stages.at(-2)?.nodeKeys).toEqual(['finalize'])
+    expect(stages.at(-1)?.nodeKeys).toEqual(['report'])
   })
 
   it('discovery: keeps dependency lanes readable before lead verification', () => {
@@ -55,13 +66,15 @@ describe('pipelineDag 运行流程', () => {
 
     expect(x('source')).toBeLessThan(x('profile'))
     expect(x('profile')).toBeLessThan(x('scan_semgrep'))
+    expect(x('scan_semgrep')).toBeLessThan(x('api_hunt'))
+    expect(x('api_hunt')).toBeLessThan(x('cluster'))
     expect(x('scan_semgrep')).toBeLessThan(x('cluster'))
-    expect(x('cluster')).toBeCloseTo(x('api_hunt'), 0)
     expect(x('cluster')).toBeLessThan(x('screen'))
     expect(x('screen')).toBeCloseTo(x('triage'), 0)
     expect(x('triage')).toBeLessThan(x('dispatch'))
     expect(x('dispatch')).toBeLessThan(x('lead_verify'))
-    expect(x('lead_verify')).toBeLessThan(x('report'))
+    expect(x('lead_verify')).toBeLessThan(x('finalize'))
+    expect(x('finalize')).toBeLessThan(x('report'))
 
     expect(node('scan_osv').x).toBeCloseTo(node('scan_gitleaks').x, 0)
     expect(node('profile').x).toBeCloseTo(node('scan_osv').x, 0)
@@ -90,6 +103,7 @@ describe('pipelineDag 运行流程', () => {
       'review',
       'dispatch',
       'verify',
+      'finalize',
       'report',
     ])
     expect(layout.groups.map(({ key, label, caption }) => ({ key, label, caption }))).toEqual(
@@ -97,15 +111,14 @@ describe('pipelineDag 运行流程', () => {
     )
   })
 
-  it('stacks parallel clue streams then scan review', () => {
+  it('unifies four finding streams before review', () => {
     const layout = layoutPipelineDag(PIPELINE_NODE_ORDER, { mode: 'discovery' })
     const node = (k: string) => layout.nodes.find((n) => n.key === k)!
 
-    expect(node('cluster').x).toBeCloseTo(node('api_hunt').x, 0)
-    expect(node('api_hunt').y).toBeLessThan(node('cluster').y)
+    expect(node('api_hunt').x).toBeLessThan(node('cluster').x)
     expect(node('screen').x).toBeCloseTo(node('triage').x, 0)
     expect(node('screen').y).toBeLessThan(node('triage').y)
-    expect(flowColumn('cluster', 'discovery')).toBe(flowColumn('api_hunt', 'discovery'))
+    expect(flowColumn('api_hunt', 'discovery')).toBeLessThan(flowColumn('cluster', 'discovery'))
     expect(flowColumn('screen', 'discovery')).toBe(flowColumn('triage', 'discovery'))
     expect(flowColumn('cluster', 'discovery')).toBeLessThan(flowColumn('screen', 'discovery'))
     expect(flowColumn('triage', 'discovery')).toBeLessThan(flowColumn('dispatch', 'discovery'))
@@ -115,18 +128,10 @@ describe('pipelineDag 运行流程', () => {
     expect(screenToTriage.d).toMatch(/^M [\d.]+ [\d.]+ V [\d.]+$/)
 
     expect(layout.edges.some((e) => e.from === 'api_hunt' && e.to === 'screen')).toBe(false)
-    expect(layout.edges).toContainEqual(expect.objectContaining({ from: 'api_hunt', to: 'dispatch' }))
+    expect(layout.edges).toContainEqual(expect.objectContaining({ from: 'api_hunt', to: 'cluster' }))
+    expect(layout.edges.some((e) => e.from === 'api_hunt' && e.to === 'dispatch')).toBe(false)
     expect(layout.edges).toContainEqual(expect.objectContaining({ from: 'triage', to: 'dispatch' }))
     expect(layout.edges).toContainEqual(expect.objectContaining({ from: 'cluster', to: 'screen' }))
-
-    const huntToDispatch = layout.edges.find((e) => e.from === 'api_hunt' && e.to === 'dispatch')!
-    const hunt = node('api_hunt')
-    const gitleaks = node('scan_gitleaks')
-    const rail = huntToDispatch.d.match(/V ([\d.]+) H ([\d.]+) V/)
-    expect(rail).toBeTruthy()
-    // 顶轨飞过复核列，高度与泄露扫描中线对齐
-    expect(Number(rail![1])).toBeLessThan(hunt.y)
-    expect(Number(rail![1])).toBeCloseTo(gitleaks.y + gitleaks.height / 2, 0)
 
     expect(layout.groups.some((g) => g.key === 'review')).toBe(true)
     expect(layout.groups.some((g) => g.key === 'deep')).toBe(true)
@@ -140,31 +145,20 @@ describe('pipelineDag 运行流程', () => {
       layout.edges.find((item) => item.from === from && item.to === to)!
 
     expect(y('api_hunt')).toBeCloseTo(y('api_inventory'), 0)
-    expect(y('cluster')).toBeCloseTo(y('scan_semgrep'), 0)
-    expect(y('api_hunt')).toBeLessThan(y('cluster'))
+    expect(node('api_hunt').x).toBeLessThan(node('cluster').x)
 
     const huntLane = edge('api_inventory', 'api_hunt')
-    const clusterLane = edge('scan_semgrep', 'cluster')
+    const clusterLane = edge('api_hunt', 'cluster')
     expect(huntLane.d).toMatch(/^M [\d.]+ [\d.]+ H [\d.]+$/)
     expect(clusterLane.d).not.toMatch(/ V /)
-
-    const clusterY = node('scan_semgrep').y + node('scan_semgrep').height / 2
-    expect(edge('scan_gitleaks', 'cluster').d).toContain(`V ${clusterY} H ${node('cluster').x}`)
+    expect(edge('scan_gitleaks', 'cluster').d).toMatch(new RegExp(`H ${node('cluster').x}$`))
   })
 
-  it('jumps the gitleaks/osv bus over the inventory-hunt lane like a circuit hop', () => {
+  it('connects every finding source to the unified cluster', () => {
     const layout = layoutPipelineDag(PIPELINE_NODE_ORDER, { mode: 'discovery' })
-    const node = (k: string) => layout.nodes.find((n) => n.key === k)!
-    const huntCy = node('api_hunt').y + node('api_hunt').height / 2
-    const gitleaksEdge = layout.edges.find((e) => e.from === 'scan_gitleaks' && e.to === 'cluster')!
-    const osvEdge = layout.edges.find((e) => e.from === 'scan_osv' && e.to === 'cluster')!
-    const hop = gitleaksEdge.d.match(/A ([\d.]+) \1 0 0 1 [\d.]+ ([\d.]+)/)
-    expect(hop).toBeTruthy()
-    const radius = Number(hop![1])
-    expect(radius).toBeGreaterThanOrEqual(5)
-    expect(Number(hop![2])).toBeCloseTo(huntCy + radius, 5)
-    expect(osvEdge.d).toContain(hop![0])
-    expect(gitleaksEdge.d).not.toMatch(new RegExp(`H ${node('cluster').x} V`))
+    for (const from of ['scan_gitleaks', 'scan_osv', 'scan_semgrep', 'api_hunt']) {
+      expect(layout.edges).toContainEqual(expect.objectContaining({ from, to: 'cluster' }))
+    }
   })
 
   it('leaves one vacant slot above two-node stages and centers single-node stages', () => {
@@ -173,9 +167,9 @@ describe('pipelineDag 运行流程', () => {
     const y = (k: string) => node(k).y
 
     expect(y('api_hunt')).toBeCloseTo(y('api_inventory'), 0)
-    expect(y('cluster')).toBeCloseTo(y('scan_semgrep'), 0)
+    expect(y('cluster')).toBeCloseTo(y('api_hunt'), 0)
     expect(y('screen')).toBeCloseTo(y('api_hunt'), 0)
-    expect(y('triage')).toBeCloseTo(y('cluster'), 0)
+    expect(y('triage')).toBeCloseTo(y('scan_semgrep'), 0)
     expect(y('api_hunt')).toBeGreaterThan(y('scan_gitleaks'))
     expect(node('env_ready').x).toBeLessThan(node('lead_verify').x)
 
@@ -189,45 +183,23 @@ describe('pipelineDag 运行流程', () => {
     expect(y('scan_osv')).toBeCloseTo(y('api_inventory'), 0)
   })
 
-  it('routes scan_osv up to merge with the gitleaks lane into cluster', () => {
-    const layout = layoutPipelineDag(PIPELINE_NODE_ORDER, { mode: 'discovery' })
-    const gitleaks = layout.nodes.find((n) => n.key === 'scan_gitleaks')!
-    const gitleaksCy = gitleaks.y + gitleaks.height / 2
-    const osvEdge = layout.edges.find((e) => e.from === 'scan_osv' && e.to === 'cluster')!
-    const gitleaksEdge = layout.edges.find((e) => e.from === 'scan_gitleaks' && e.to === 'cluster')!
-
-    // 上抬到泄露扫描中线，再走同一 mergeX → cluster
-    expect(osvEdge.d).toContain(`V ${gitleaksCy} H `)
-    const mergeXOf = (d: string) => {
-      const m = d.match(/H ([\d.]+) V [\d.]+ A /)
-      expect(m).toBeTruthy()
-      return Number(m![1])
-    }
-    expect(mergeXOf(osvEdge.d)).toBeCloseTo(mergeXOf(gitleaksEdge.d), 5)
-  })
-
-  it('merges three scan edges into cluster at a shared junction', () => {
+  it('routes scan_osv into the unified cluster without reversing direction', () => {
     const layout = layoutPipelineDag(PIPELINE_NODE_ORDER, { mode: 'discovery' })
     const cluster = layout.nodes.find((n) => n.key === 'cluster')!
-    const cy = cluster.y + cluster.height / 2
+    const osvEdge = layout.edges.find((e) => e.from === 'scan_osv' && e.to === 'cluster')!
+    expect(osvEdge.d).toMatch(new RegExp(`H ${cluster.x}$`))
+    expect(osvEdge.d).not.toMatch(new RegExp(`H ${cluster.x} V`))
+  })
+
+  it('merges four finding edges into cluster', () => {
+    const layout = layoutPipelineDag(PIPELINE_NODE_ORDER, { mode: 'discovery' })
+    const cluster = layout.nodes.find((n) => n.key === 'cluster')!
     const intoCluster = (from: string) =>
       layout.edges.find((e) => e.from === from && e.to === 'cluster')!
 
-    const gitleaks = intoCluster('scan_gitleaks')
-    const osv = intoCluster('scan_osv')
-    const semgrep = intoCluster('scan_semgrep')
-    const finalSeg = new RegExp(`V ${cy} H ${cluster.x}$`)
-    expect(gitleaks.d).toMatch(finalSeg)
-    expect(osv.d).toMatch(finalSeg)
-    expect(semgrep.d).toMatch(/^M [\d.]+ [\d.]+ H [\d.]+$/)
-
-    const mergeXs = [gitleaks, osv].map((edge) => {
-      const m = edge.d.match(/H ([\d.]+) V [\d.]+ A /)
-      expect(m).toBeTruthy()
-      return Number(m![1])
-    })
-    expect(mergeXs[0]).toBeCloseTo(mergeXs[1], 5)
-    expect(mergeXs[0]).toBeLessThan(cluster.x)
+    for (const from of ['scan_gitleaks', 'scan_osv', 'scan_semgrep', 'api_hunt']) {
+      expect(intoCluster(from).d).toMatch(new RegExp(`H ${cluster.x}$`))
+    }
   })
 
   it('discovery edges match runtime waves and LeadWorker handoff', () => {
@@ -238,11 +210,13 @@ describe('pipelineDag 运行流程', () => {
     expect(edges).toContainEqual(expect.objectContaining({ from: 'profile', to: 'scan_semgrep' }))
     expect(edges).toContainEqual(expect.objectContaining({ from: 'scan_gitleaks', to: 'cluster' }))
     expect(edges).toContainEqual(expect.objectContaining({ from: 'api_inventory', to: 'api_hunt' }))
-    expect(edges).toContainEqual(expect.objectContaining({ from: 'api_hunt', to: 'dispatch' }))
+    expect(edges).toContainEqual(expect.objectContaining({ from: 'api_hunt', to: 'cluster' }))
+    expect(edges.some((edge) => edge.from === 'api_hunt' && edge.to === 'dispatch')).toBe(false)
     expect(edges).toContainEqual(expect.objectContaining({ from: 'triage', to: 'dispatch' }))
     expect(edges).toContainEqual(expect.objectContaining({ from: 'env_ready', to: 'lead_verify' }))
     expect(edges.some((edge) => edge.from === 'dispatch' && edge.to === 'lead_verify')).toBe(false)
-    expect(edges).toContainEqual(expect.objectContaining({ from: 'lead_verify', to: 'report' }))
+    expect(edges).toContainEqual(expect.objectContaining({ from: 'lead_verify', to: 'finalize' }))
+    expect(edges).toContainEqual(expect.objectContaining({ from: 'finalize', to: 'report' }))
     expect(edges.some((e) => e.from === 'api_hunt' && e.to === 'screen')).toBe(false)
     expect(edges.some((e) => e.from === 'is_web' || e.to === 'is_web')).toBe(false)
     expect(edges.some((e) => e.from === 'audit' || e.to === 'audit')).toBe(false)
@@ -260,12 +234,14 @@ describe('pipelineDag 运行流程', () => {
   })
 
   it('keeps the backbone connected when dispatch is not on the canvas yet', () => {
-    const keys = PIPELINE_NODE_ORDER.filter((k) => k !== 'dispatch')
-    const layout = layoutPipelineDag(keys, { mode: 'discovery' })
+    const order = PIPELINE_NODE_ORDER.filter((k) => k !== 'dispatch')
+    const layout = layoutPipelineDag(order, { mode: 'discovery' })
     const edges = flowEdges(layout.nodes.map((n) => n.key), 'discovery')
-    // 无 dispatch 时也不插入 lead_verify 合成节点，复核/猎洞直接接到报告
-    expect(edges).toContainEqual(expect.objectContaining({ from: 'triage', to: 'report' }))
-    expect(edges).toContainEqual(expect.objectContaining({ from: 'api_hunt', to: 'report' }))
+    // 无 dispatch 时仍保留真实 lead_verify/finalize；复核经终认接到报告
+    expect(edges).toContainEqual(expect.objectContaining({ from: 'triage', to: 'lead_verify' }))
+    expect(edges).toContainEqual(expect.objectContaining({ from: 'lead_verify', to: 'finalize' }))
+    expect(edges).toContainEqual(expect.objectContaining({ from: 'finalize', to: 'report' }))
+    expect(edges).toContainEqual(expect.objectContaining({ from: 'api_hunt', to: 'cluster' }))
     expect(edges.some((e) => e.from === 'dispatch' || e.to === 'dispatch')).toBe(false)
   })
 
@@ -291,6 +267,8 @@ describe('pipelineDag 运行流程', () => {
     expect(edges).toContainEqual(expect.objectContaining({ from: 'profile', to: 'audit' }))
     expect(edges).toContainEqual(expect.objectContaining({ from: 'env_ready', to: 'reproduce' }))
     expect(edges).toContainEqual(expect.objectContaining({ from: 'audit', to: 'reproduce' }))
+    expect(edges).toContainEqual(expect.objectContaining({ from: 'reproduce', to: 'finalize' }))
+    expect(edges).toContainEqual(expect.objectContaining({ from: 'finalize', to: 'report' }))
     expect(edges.some((e) => e.from === 'dispatch')).toBe(false)
   })
 
@@ -314,6 +292,7 @@ describe('pipelineDag 运行流程', () => {
       'dispatch',
       'audit',
       'reproduce',
+      'finalize',
       'report',
     ])
   })
@@ -365,7 +344,7 @@ describe('pipelineDag 运行流程', () => {
     expect(edge.d).not.toMatch(new RegExp(`H ${osv.x} V`))
     const cluster = layout.nodes.find((n) => n.key === 'cluster')!
     const gitleaksMerge = layout.edges.find((e) => e.from === 'scan_gitleaks' && e.to === 'cluster')!
-    expect(gitleaksMerge.d.match(/ V /g) ?? []).toHaveLength(2)
+    expect((gitleaksMerge.d.match(/ V /g) ?? []).length).toBeGreaterThanOrEqual(1)
     const merge = layout.edges.find((e) => e.from === 'scan_osv' && e.to === 'cluster')!
     expect(merge.d).not.toMatch(new RegExp(`H ${cluster.x} V`))
     const support = layout.edges.find((e) => e.from === 'env_ready' && e.to === 'lead_verify')!

@@ -10,7 +10,14 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.contexts.finding.models import Adjudication, AlertGroup, LeadRun, RawFinding, ReviewAction
+from app.contexts.finding.models import (
+    Adjudication,
+    AlertGroup,
+    LeadNodeRun,
+    LeadRun,
+    RawFinding,
+    ReviewAction,
+)
 
 
 def numeric_usage(usage: dict | None) -> dict[str, int]:
@@ -64,7 +71,7 @@ class FindingService:
     async def reps_and_adjudications(
         self, groups: list[AlertGroup],
     ) -> tuple[dict[str, RawFinding], dict[str, Adjudication]]:
-        """一批组的代表成员 + 最高 attempt 判决，避免 dispatch/streamer 2N。"""
+        """一批组的代表成员 + 最高 attempt 判决，避免 dispatch 2N 查询。"""
         if not groups:
             return {}, {}
         rep_ids = [g.representative_finding_id for g in groups if g.representative_finding_id]
@@ -199,14 +206,17 @@ class FindingService:
                 finding.alert_group_id = row.id
 
     async def mark_bypass_groups(self, task_id: str) -> int:
-        """osv 组：clustered → adjudicated(bypass 直报，跳过 triage) + 模板叙事。"""
+        """纯 OSV 组：clustered → adjudicated(bypass 直报) + 模板叙事。
+
+        含其他引擎证据的混合组必须保持 clustered 进统一二审。
+        """
         from app.contexts.finding.models import Adjudication
         from app.contexts.finding.narrative import osv_template_narrative
 
         groups = await self.list_groups(task_id)
         n = 0
         for g in groups:
-            if "osv" not in (g.engine_set or []) or g.status != "clustered":
+            if set(g.engine_set or []) != {"osv"} or g.status != "clustered":
                 continue
             g.status = "adjudicated"
             g.ai_verdict = "bypass"
@@ -356,6 +366,13 @@ class FindingService:
         await self.session.execute(
             delete(ReviewAction).where(ReviewAction.alert_group_id == gid)
         )
+        lead_ids = list((await self.session.execute(
+            select(LeadRun.id).where(LeadRun.alert_group_id == gid)
+        )).scalars())
+        if lead_ids:
+            await self.session.execute(
+                delete(LeadNodeRun).where(LeadNodeRun.lead_run_id.in_(lead_ids))
+            )
         await self.session.execute(delete(LeadRun).where(LeadRun.alert_group_id == gid))
         await self.session.execute(delete(AlertGroup).where(AlertGroup.id == gid))
         await self.session.flush()
@@ -528,6 +545,13 @@ class FindingService:
         await self.session.execute(
             delete(ReviewAction).where(ReviewAction.alert_group_id.in_(deletable))
         )
+        lead_ids = list((await self.session.execute(
+            select(LeadRun.id).where(LeadRun.alert_group_id.in_(deletable))
+        )).scalars())
+        if lead_ids:
+            await self.session.execute(
+                delete(LeadNodeRun).where(LeadNodeRun.lead_run_id.in_(lead_ids))
+            )
         await self.session.execute(
             delete(LeadRun).where(LeadRun.alert_group_id.in_(deletable))
         )
@@ -558,6 +582,14 @@ class FindingService:
             await self._purge_groups_tree(task_id)
             await self.session.flush()
             return
+        if from_node in ("lead_verify", "dispatch"):
+            # 终认重试：清 LeadRun/LeadNodeRun，保留发现组与二审判决
+            await self.session.execute(
+                delete(LeadNodeRun).where(LeadNodeRun.task_id == task_id)
+            )
+            await self.session.execute(delete(LeadRun).where(LeadRun.task_id == task_id))
+            await self.session.flush()
+            return
         engine = self._SCAN_RETRY_ENGINES.get(from_node)
         if engine is None:
             return
@@ -579,6 +611,9 @@ class FindingService:
             )).scalars()
         )
         if not group_ids:
+            await self.session.execute(
+                delete(LeadNodeRun).where(LeadNodeRun.task_id == task_id)
+            )
             await self.session.execute(delete(LeadRun).where(LeadRun.task_id == task_id))
             return
         await self.session.execute(
@@ -586,6 +621,9 @@ class FindingService:
         )
         await self.session.execute(
             delete(ReviewAction).where(ReviewAction.alert_group_id.in_(group_ids))
+        )
+        await self.session.execute(
+            delete(LeadNodeRun).where(LeadNodeRun.task_id == task_id)
         )
         await self.session.execute(delete(LeadRun).where(LeadRun.task_id == task_id))
         await self.session.execute(

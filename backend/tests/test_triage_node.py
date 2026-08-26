@@ -37,6 +37,8 @@ def _settings(**kw):
         # 本文件验证串行旧路径；级联管线见 test_triage_cascade.py
         triage_cascade_enabled=False,
         triage_stream_dispatch_enabled=False,
+        triage_llm_transient_retries=1,
+        triage_llm_transient_fatal_streak=3,
     )
     base.update(kw)
     return MagicMock(**base)
@@ -342,6 +344,140 @@ async def test_triage_llm_balance_failure_aborts_node(session_factory, tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_triage_transient_llm_error_retries_then_succeeds(
+    session_factory, tmp_path, monkeypatch,
+):
+    """5xx/断连等瞬时 LLM 错误：单组退避重试，恢复后正常判决，不中止节点。"""
+    from app.contexts.agent.nodes.triage import TriageNode
+    from app.contexts.finding.models import AlertGroup
+    from app.core.agent_runner import AgentRunnerError
+
+    monkeypatch.setattr(
+        "app.contexts.agent.nodes.triage.adjudicate._TRANSIENT_BACKOFF_SECONDS", 0.0,
+    )
+
+    async with session_factory() as session:
+        ctx, task = await _seed_triage_env(
+            session, tmp_path, [("CWE-89", "high", "B", None)],
+        )
+
+        calls = 0
+
+        async def flaky(**kw):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                # 事故现场形态：SDK 对网关断流的误报，须按瞬时而非致命处理
+                raise AgentRunnerError(
+                    "AI 节点 triage LLM 调用失败: "
+                    "Claude Code returned an error result: success"
+                )
+            return _tp_output()
+
+        with patch("app.core.config.get_settings", return_value=_settings()), \
+             patch(
+                 "app.contexts.agent.ai_runner.run_ai_node_with_shape_retry",
+                 new=flaky,
+             ):
+            out = await TriageNode().execute(ctx, None)
+
+        assert calls == 2  # 失败 1 次 + 重试成功 1 次
+        assert out["adjudicated_count"] == 1
+        group = (await session.execute(
+            select(AlertGroup).where(AlertGroup.task_id == task.id)
+        )).scalars().one()
+        assert group.status == "adjudicated"
+        assert group.ai_verdict == "tp"
+
+
+@pytest.mark.asyncio
+async def test_triage_transient_llm_error_degrades_group_to_review(
+    session_factory, tmp_path, monkeypatch,
+):
+    """瞬时错误重试耗尽：仅该组转人工，节点继续完成后续组。"""
+    from app.contexts.agent.nodes.triage import TriageNode
+    from app.contexts.finding.models import AlertGroup
+    from app.core.agent_runner import AgentRunnerError
+
+    monkeypatch.setattr(
+        "app.contexts.agent.nodes.triage.adjudicate._TRANSIENT_BACKOFF_SECONDS", 0.0,
+    )
+
+    async with session_factory() as session:
+        ctx, task = await _seed_triage_env(
+            session, tmp_path,
+            [("CWE-89", "high", "B", None), ("CWE-89", "high", "B", None)],
+        )
+
+        calls = 0
+
+        async def flaky_first_group_only(**kw):
+            # 串行路径：第 1 组两次调用（首试+重试）都 502，第 2 组成功
+            nonlocal calls
+            calls += 1
+            if calls <= 2:
+                raise AgentRunnerError(
+                    "AI 节点 triage LLM 调用失败: API Error: 502 upstream unavailable"
+                )
+            return _tp_output()
+
+        with patch("app.core.config.get_settings", return_value=_settings()), \
+             patch(
+                 "app.contexts.agent.ai_runner.run_ai_node_with_shape_retry",
+                 new=flaky_first_group_only,
+             ):
+            out = await TriageNode().execute(ctx, None)
+
+        assert out["adjudicated_count"] == 1
+        groups = (await session.execute(
+            select(AlertGroup).where(AlertGroup.task_id == task.id)
+        )).scalars().all()
+        # 同优先级下队列顺序不作假设：恰一组转人工、一组已判决
+        statuses = sorted(g.status for g in groups)
+        assert statuses == ["adjudicated", "needs_review"]
+
+
+@pytest.mark.asyncio
+async def test_triage_transient_streak_escalates_to_abort(
+    session_factory, tmp_path, monkeypatch,
+):
+    """连续多组瞬时降级视为平台级网关故障：升级中止节点，不静默全转人工。"""
+    from app.contexts.agent.nodes.triage import TriageNode
+    from app.contexts.finding.models import AlertGroup
+    from app.core.agent_runner import AgentRunnerError
+
+    monkeypatch.setattr(
+        "app.contexts.agent.nodes.triage.adjudicate._TRANSIENT_BACKOFF_SECONDS", 0.0,
+    )
+
+    async with session_factory() as session:
+        ctx, task = await _seed_triage_env(
+            session, tmp_path,
+            [("CWE-89", "high", "B", None)] * 3,
+        )
+
+        async def always_502(**kw):
+            raise AgentRunnerError(
+                "AI 节点 triage LLM 调用失败: API Error: 502 upstream unavailable"
+            )
+
+        with patch("app.core.config.get_settings", return_value=_settings()), \
+             patch(
+                 "app.contexts.agent.ai_runner.run_ai_node_with_shape_retry",
+                 new=always_502,
+             ):
+            with pytest.raises(AgentRunnerError, match="疑似网关故障"):
+                await TriageNode().execute(ctx, None)
+
+        groups = (await session.execute(
+            select(AlertGroup).where(AlertGroup.task_id == task.id)
+        )).scalars().all()
+        statuses = sorted(g.status for g in groups)
+        # 前两组已降级转人工；第 3 组触发连败升级中止，保持 clustered 原状
+        assert statuses == ["clustered", "needs_review", "needs_review"]
+
+
+@pytest.mark.asyncio
 async def test_triage_input_hides_engine_conclusion_by_default(session_factory, tmp_path):
     from app.contexts.agent.nodes.triage import TriageNode
 
@@ -362,6 +498,58 @@ async def test_triage_input_hides_engine_conclusion_by_default(session_factory, 
         assert "engine_conclusion" not in captured["input_json"]
         assert captured["input_json"]["closed_question"]
         assert "CWE-89" in (captured["input_json"].get("rubric") or "")
+
+
+@pytest.mark.asyncio
+async def test_triage_input_keeps_api_hunt_evidence_for_mixed_group(session_factory, tmp_path):
+    """混合组代表可能是 Semgrep，但 API Hunt 的鉴权 why/evidence 不得丢失。"""
+    from app.contexts.agent.nodes.triage import TriageNode
+    from app.contexts.discovery.models import ScanRun
+    from app.contexts.finding.models import AlertGroup, RawFinding
+
+    async with session_factory() as session:
+        ctx, task = await _seed_triage_env(
+            session, tmp_path, [("CWE-89", "high", "B", None)],
+        )
+        group = (await session.execute(
+            select(AlertGroup).where(AlertGroup.task_id == task.id)
+        )).scalar_one()
+        scan_run = (await session.execute(
+            select(ScanRun).where(ScanRun.task_id == task.id)
+        )).scalar_one()
+        hunt = RawFinding(
+            task_id=task.id, scan_run_id=scan_run.id, alert_group_id=group.id,
+            engine="api_hunt", rule_id="missing_ownership_check", cwe="CWE-89",
+            severity="warning", file_path="app.py", line_start=2, line_end=2,
+            message="IDOR candidate", fingerprint="h" * 64,
+            raw={
+                "endpoint_id": "GET /items/{id}",
+                "why": ["未检查对象归属"],
+                "evidence": [{"file": "app.py", "lines": "1-2"}],
+                "qualify": {
+                    "attacker_controlled": True, "reaches_sink": True,
+                    "sanitizer": "none",
+                },
+            },
+        )
+        session.add(hunt)
+        group.engine_set = ["semgrep", "api_hunt"]
+        group.member_count = 2
+        await session.flush()
+        captured: dict = {}
+
+        async def capture(**kw):
+            captured.update(kw)
+            return _tp_output()
+
+        with patch("app.core.config.get_settings", return_value=_settings()), patch(
+            "app.contexts.agent.ai_runner.run_ai_node_with_shape_retry", new=capture,
+        ):
+            await TriageNode().execute(ctx, None)
+
+        evidence = captured["input_json"]["api_hunt_candidate_evidence"]
+        assert evidence[0]["endpoint_id"] == "GET /items/{id}"
+        assert evidence[0]["why"] == ["未检查对象归属"]
 
 
 @pytest.mark.asyncio

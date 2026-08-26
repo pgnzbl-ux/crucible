@@ -6,6 +6,7 @@ def register_models() -> None:
     from app.contexts.finding.models import (  # noqa: F401
         Adjudication,
         AlertGroup,
+        LeadNodeRun,
         LeadRun,
         RawFinding,
         ReviewAction,

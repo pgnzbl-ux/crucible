@@ -5,7 +5,7 @@ import logging
 
 from sqlalchemy import select, update
 
-from app.contexts.agent.contracts import DEFAULT_PIPELINE as _PIPELINE
+from app.contexts.agent.contracts import DEFAULT_PIPELINE, VERIFY_PIPELINE
 from app.contexts.agent.contracts import ancestor_keys, descendant_keys, pipeline_for
 from app.shared.time import iso_utc
 
@@ -20,15 +20,21 @@ class TaskDispatchError(RuntimeError):
     """任务已落库，但无法投递给 Agent worker。"""
 
 
-# 可重试能力集合从 15 节点 catalog 派生；具体依赖按任务子图计算。
+# 可重试能力集合覆盖 discovery + verify 子图；具体依赖按任务子图计算。
 # 单节点重试不允许从 source/profile 起步——它们便宜且确定性，想重跑直接整轮 retry(from_node=None)。
-_RETRYABLE_FROM_NODES = tuple(
-    spec.key for spec in _PIPELINE if spec.key not in ("source", "profile")
-)
+_RETRYABLE_FROM_NODES = tuple(sorted({
+    spec.key
+    for pipeline in (DEFAULT_PIPELINE, VERIFY_PIPELINE)
+    for spec in pipeline
+    if spec.key not in ("source", "profile")
+}))
 # Lab 占用：pending/queued/running。needs_review 不算 live（任务终态后起算 TTL）。
 LIVE_TASK_STATUSES = frozenset({"pending", "queued", "running"})
 # 前置节点视为"可续跑"的终态:completed(有产出可复用)或 skipped(分支出口跳过)。
 _RESUMABLE_STATUSES = ("completed", "skipped")
+# 旧 run（无真实 lead_verify NodeRun）合成该节点行的排序索引：排在 dispatch(11) 之后，
+# 避开 verify 侧保留的 audit(12)/reproduce(13)，且不与真实索引 14 冲突。
+_LEGACY_LEAD_VERIFY_NODE_INDEX = 13.5
 
 
 def _parse_refs(refs_raw: str | None) -> list[str]:
@@ -64,6 +70,121 @@ def _serialize_node_run(nr: Any, usage: dict[str, int] | None = None) -> dict[st
         "started_at": iso_utc(nr.started_at),
         "finished_at": iso_utc(nr.finished_at),
         "output": _parse_node_output(nr.output_json),
+    }
+    if usage:
+        out["usage"] = usage
+    return out
+
+
+async def _serialize_lead_verify_run(
+    session,
+    *,
+    task_id: str,
+    run_id: str,
+    dispatch_node: Any | None,
+    usage: dict[str, int] | None,
+) -> dict[str, Any]:
+    """把真实 LeadRun/LeadNodeRun 聚合为任务拓扑中的 lead_verify 节点。"""
+    from collections import Counter, defaultdict
+
+    from sqlalchemy import select as sa_select
+
+    from app.contexts.finding.models import LeadNodeRun, LeadRun
+
+    leads = list((await session.execute(
+        sa_select(LeadRun)
+        .where(LeadRun.task_id == task_id, LeadRun.run_id == run_id)
+        .order_by(LeadRun.queue_position)
+    )).scalars().all())
+    lead_ids = [lead.id for lead in leads]
+    phase_rows = []
+    if lead_ids:
+        phase_rows = list((await session.execute(
+            sa_select(LeadNodeRun)
+            .where(LeadNodeRun.lead_run_id.in_(lead_ids))
+            .order_by(LeadNodeRun.lead_run_id, LeadNodeRun.node_key, LeadNodeRun.attempt)
+        )).scalars().all())
+
+    latest: dict[tuple[str, str], LeadNodeRun] = {}
+    for row in phase_rows:
+        latest[(row.lead_run_id, row.node_key)] = row
+    phase_counts: dict[str, Counter] = defaultdict(Counter)
+    for row in latest.values():
+        phase_counts[row.node_key][row.status] += 1
+    lead_counts = Counter(lead.status for lead in leads)
+
+    dispatch_output = _parse_node_output(dispatch_node.output_json) if dispatch_node else {}
+    if not leads:
+        status = (
+            "skipped"
+            if dispatch_node is not None
+            and dispatch_node.status in ("completed", "skipped")
+            and not dispatch_output.get("has_lead")
+            and int(dispatch_output.get("queued_count") or 0) <= 0
+            else "pending"
+        )
+    elif any(lead.status in ("queued", "running") for lead in leads):
+        status = "running"
+    elif all(lead.status == "skipped" for lead in leads):
+        status = "skipped"
+    else:
+        # 单条失败不把整任务拓扑染成 failed；output.status 使前端显示「部分降级」。
+        status = "completed"
+
+    started_values = [row.started_at for row in phase_rows if row.started_at]
+    finished_values = [row.finished_at for row in phase_rows if row.finished_at]
+    failed_count = int(lead_counts.get("failed", 0))
+    leads_summary: list[dict[str, Any]] = []
+    for lead in leads:
+        phases = []
+        for node_key in ("audit", "reproduce"):
+            row = latest.get((lead.id, node_key))
+            if row is None:
+                continue
+            phases.append({
+                "node_key": node_key,
+                "status": row.status,
+                "attempt": row.attempt,
+                "error": row.error,
+                "started_at": iso_utc(row.started_at) if row.started_at else None,
+                "finished_at": iso_utc(row.finished_at) if row.finished_at else None,
+            })
+        leads_summary.append({
+            "id": lead.id,
+            "status": lead.status,
+            "verdict": lead.verdict,
+            "gate_verdict": lead.gate_verdict,
+            "verification_basis": lead.verification_basis,
+            "error": lead.error,
+            "queue_position": lead.queue_position,
+            "phases": phases,
+        })
+    output: dict[str, Any] = {
+        "lead_count": len(leads),
+        "lead_status_counts": dict(lead_counts),
+        "phase_status_counts": {
+            key: dict(counts) for key, counts in sorted(phase_counts.items())
+        },
+        "completed_count": int(lead_counts.get("completed", 0)),
+        "failed_count": failed_count,
+        "skipped_count": int(lead_counts.get("skipped", 0)),
+        "leads": leads_summary,
+    }
+    if failed_count:
+        output["status"] = "failed"
+    out: dict[str, Any] = {
+        "id": f"lead-verify:{run_id}",
+        "node_index": _LEGACY_LEAD_VERIFY_NODE_INDEX,
+        "node_key": "lead_verify",
+        "status": status,
+        "attempt": max((row.attempt for row in phase_rows), default=0),
+        "error_message": f"{failed_count} 条终认失败" if failed_count else None,
+        "started_at": iso_utc(min(started_values)) if started_values else None,
+        "finished_at": (
+            iso_utc(max(finished_values))
+            if finished_values and status in ("completed", "skipped") else None
+        ),
+        "output": output,
     }
     if usage:
         out["usage"] = usage
@@ -366,7 +487,8 @@ class TaskService:
         self, task_id: str, owner_id: str, limit: int = 1000
     ) -> list[dict[str, Any]] | None:
         """当前 run 的 Agent 事件流（前端进度展示用；不含历史重试）"""
-        if await self.repo.get_by_id_with_runs(task_id, owner_id) is None:
+        task = await self.repo.get_by_id_with_runs(task_id, owner_id)
+        if task is None:
             return None
         events = await self.repo.get_events_for_task(task_id, limit)
         result: list[dict[str, Any]] = []
@@ -468,6 +590,7 @@ class TaskService:
         await FindingService(self.session).purge_for_retry(task.id, from_node)
         if from_node is None or from_node in (
             "scan_semgrep", "scan_gitleaks", "scan_osv", "api_hunt", "cluster",
+            "lead_verify", "dispatch", "triage", "screen",
         ):
             await self._clear_lead_queue(task.id)
         await self.repo.session.commit()
@@ -635,11 +758,13 @@ class TaskService:
         self, task_id: str, run_id: str, owner_id: str
     ) -> list[dict] | None:
         """获取某 run 的节点状态(前端步骤条数据源)；附带按节点聚合的 usage。"""
-        from app.contexts.agent.usage_ledger import run_nodes_usage_map
-        from app.contexts.task.models import NodeRun
         from sqlalchemy import select as sa_select
 
-        if await self.repo.get_by_id_with_runs(task_id, owner_id) is None:
+        from app.contexts.agent.usage_ledger import run_nodes_usage_map
+        from app.contexts.task.models import NodeRun
+
+        task = await self.repo.get_by_id_with_runs(task_id, owner_id)
+        if task is None:
             return None
         result = await self.repo.session.execute(
             sa_select(NodeRun)
@@ -649,10 +774,44 @@ class TaskService:
         usage_map = await run_nodes_usage_map(
             self.repo.session, task_id=task_id, run_id=run_id,
         )
-        return [
+        node_rows = list(result.scalars().all())
+        nodes = [
             _serialize_node_run(nr, usage_map.get(nr.node_key))
-            for nr in result.scalars().all()
+            for nr in node_rows
         ]
+        if (getattr(task, "task_type", None) or "verify") == "discovery":
+            dispatch = next((nr for nr in node_rows if nr.node_key == "dispatch"), None)
+            lead_usage: dict[str, int] = {}
+            for node_key in ("audit", "reproduce"):
+                for key, value in (usage_map.get(node_key) or {}).items():
+                    lead_usage[key] = lead_usage.get(key, 0) + int(value)
+            serialized = await _serialize_lead_verify_run(
+                self.repo.session,
+                task_id=task_id,
+                run_id=run_id,
+                dispatch_node=dispatch,
+                usage=lead_usage or None,
+            )
+            existing_idx = next(
+                (i for i, n in enumerate(nodes) if n["node_key"] == "lead_verify"),
+                None,
+            )
+            if existing_idx is not None:
+                # 编排器已落真实 NodeRun：用 LeadRun 聚合丰富状态/用量，保留 DB id/index
+                base = nodes[existing_idx]
+                nodes[existing_idx] = {
+                    **serialized,
+                    "id": base["id"],
+                    "node_index": base["node_index"],
+                    "attempt": max(int(base.get("attempt") or 0), int(serialized.get("attempt") or 0)),
+                    "started_at": base.get("started_at") or serialized.get("started_at"),
+                    "finished_at": base.get("finished_at") or serialized.get("finished_at"),
+                    "usage": serialized.get("usage") or base.get("usage"),
+                }
+            else:
+                nodes.append(serialized)
+            nodes.sort(key=lambda node: float(node["node_index"]))
+        return nodes
 
     async def record_node_run_failure(
         self,

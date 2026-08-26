@@ -128,7 +128,7 @@ class NodeRun(BaseModel):
     node_index: Mapped[int] = mapped_column(comment="流水线节点序号")
     node_key: Mapped[str] = mapped_column(
         String(20),
-        comment="source|profile|scan_*|env_ready|cluster|triage|dispatch|audit|reproduce|report",
+        comment="source|profile|scan_*|api_inventory|env_ready|cluster|api_hunt|screen|triage|dispatch|audit|reproduce|lead_verify|finalize|report",
     )
     status: Mapped[str] = mapped_column(
         String(20), default="pending",

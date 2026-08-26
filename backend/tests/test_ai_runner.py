@@ -556,7 +556,7 @@ def test_authoritative_verdict_uncertain_is_needs_review():
     # gate fail 仍是误报；有 reproduce verdict 时以 reproduce 为准
     assert authoritative_verdict({}, {"gate_verdict": "fail"}) == "false_positive"
     assert authoritative_verdict({"verdict": "confirmed"}, {"gate_verdict": "uncertain"}) == "confirmed"
-    assert authoritative_verdict({}, {"gate_verdict": "pass"}) is None
+    assert authoritative_verdict({}, {"gate_verdict": "pass"}) == "code_reachable"
 
 
 def test_validate_report_accepts_needs_review_verification_record():
@@ -639,7 +639,7 @@ def test_validate_triage_rejects_fake_tp():
     assert "summary" in (err5 or "")
 
 
-def test_validate_api_hunt_requires_qualify_fields():
+def test_validate_api_hunt_accepts_explicit_uncertainty_but_requires_evidence():
     base = {
         "file_path": "app/api.py",
         "endpoint_id": "GET:/items/{id}",
@@ -671,8 +671,19 @@ def test_validate_api_hunt_requires_qualify_fields():
         "api_hunt",
         {"suspects": [{**base, "sanitizer": "effective"}], "reviewed_count": 1},
     )
-    assert not ok3
-    assert "sanitizer" in (err3 or "")
+    assert ok3, err3
+
+    uncertain = {
+        **base,
+        "attacker_controlled": None,
+        "reaches_sink": None,
+        "sanitizer": "unknown",
+        "confidence": None,
+    }
+    ok_uncertain, err_uncertain = validate_output(
+        "api_hunt", {"suspects": [uncertain], "reviewed_count": 1},
+    )
+    assert ok_uncertain, err_uncertain
 
     ok4, _ = validate_output("api_hunt", {"suspects": [], "reviewed_count": 0})
     assert ok4

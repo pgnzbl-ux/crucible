@@ -4,16 +4,17 @@
 osv 特例按依赖组件。写 clue_grade(A/B/F，osv 为 null) 与 priority（含攻击面降权）。
 C 档由 denoise.partition_for_cluster 在调用前剔除，不进本组。
 
-扫描复核链的 cluster 节点只汇入 SCAN_ENGINES；api_hunt 自建组，不进本节点。
+四路发现统一进 cluster → screen → triage；api_hunt 只是候选生成器。
 """
 from __future__ import annotations
 
 import hashlib
 from typing import Any
 
-# 扫描 → cluster → screen/triage 工作集引擎（不含猎洞）
+# cluster 统一工作集引擎
+FINDING_ENGINES = frozenset({"semgrep", "gitleaks", "osv", "api_hunt"})
+# 保留旧名供扫描器专属语义使用，不得再用于 cluster 过滤。
 SCAN_ENGINES = frozenset({"semgrep", "gitleaks", "osv"})
-HUNT_ENGINE = "api_hunt"
 
 # §2.4 攻击面降权：这些路径前缀/后缀的组 priority 不得高于 low
 _DOWNGRADE_PATH_PREFIXES = ("test/", "tests/", "docs/", "vendor/", "node_modules/")
@@ -28,13 +29,8 @@ def is_scan_engine(engine: str | None) -> bool:
     return (engine or "").lower() in SCAN_ENGINES
 
 
-def is_hunt_group(group: Any) -> bool:
-    """猎洞自建组（含仅 api_hunt，或历史误并入的混合组）。"""
-    if isinstance(group, dict):
-        engines = group.get("engine_set") or []
-    else:
-        engines = getattr(group, "engine_set", None) or []
-    return HUNT_ENGINE in engines
+def is_cluster_engine(engine: str | None) -> bool:
+    return (engine or "").lower() in FINDING_ENGINES
 
 
 def _group_key(cwe: str | None, file_path: str, function_symbol: str | None,

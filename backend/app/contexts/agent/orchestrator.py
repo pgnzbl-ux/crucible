@@ -7,9 +7,9 @@
 - 验证任务是线性链，行为与旧顺序循环一致；
 - 并发执行时每个节点持独立 session(node_session_factory)，主 session 只在准入/收尾使用。
 
-skip 信号：NON_WEB / GATE_*(audit 后) / VERIFY_MODE / NO_DISPATCH_LEAD / LEAD_DRIVEN。
+skip 信号：NON_WEB / GATE_*(audit 后) / VERIFY_MODE / NO_DISPATCH_LEAD。
 skip 视为 completed，满足下游 requires(验证任务 skip dispatch 后 audit 照常就绪)。
-审计有入队线索时 DAG audit/reproduce 由 LEAD_DRIVEN skip，LeadWorker 排空后再聚合 report。
+discovery 终认由显式 lead_verify 排空 Lead 队列（per-lead LeadNodeRun），finalize 固化任务终态后 report 作后处理。
 
 交接契约：docs/discovery-spec.md + contracts/
 """
@@ -53,6 +53,8 @@ from .nodes.base import NodeContext, repo_dirname_from_outputs, source_tree_pres
 from .nodes.cluster import ClusterNode
 from .nodes.dispatch import DispatchNode
 from .nodes.env_ready import EnvReadyNode
+from .nodes.finalize import FinalizeNode
+from .nodes.lead_verify import LeadVerifyNode
 from .nodes.profile import ProfileNode
 from .nodes.report import ReportNode
 from .nodes.reproduce import ReproduceNode
@@ -63,7 +65,7 @@ from .nodes.triage import TriageNode
 
 logger = logging.getLogger(__name__)
 
-# 节点执行器（与 DEFAULT_PIPELINE 顺序对齐）
+# 节点执行器（覆盖 discovery + verify 全部能力 key）
 _NODE_EXECUTORS = {
     "source": SourceNode(),
     "profile": ProfileNode(),
@@ -79,6 +81,8 @@ _NODE_EXECUTORS = {
     "dispatch": DispatchNode(),
     "audit": AuditNode(),
     "reproduce": ReproduceNode(),
+    "lead_verify": LeadVerifyNode(),
+    "finalize": FinalizeNode(),
     "report": ReportNode(),
 }
 
@@ -87,8 +91,12 @@ NODE_ORDER = [_NODE_EXECUTORS[spec.key] for spec in DEFAULT_PIPELINE]
 
 
 def _validate_executor_registry() -> None:
-    """执行器表必须与 pipeline 逐 key 对齐(单一事实来源 registry)。"""
-    pipeline_keys = {spec.key for spec in DEFAULT_PIPELINE}
+    """执行器表必须覆盖 discovery + verify 子图全部 key。"""
+    from app.contexts.agent.contracts import VERIFY_PIPELINE
+
+    pipeline_keys = {spec.key for spec in DEFAULT_PIPELINE} | {
+        spec.key for spec in VERIFY_PIPELINE
+    }
     executor_keys = set(_NODE_EXECUTORS)
     missing = pipeline_keys - executor_keys
     extra = executor_keys - pipeline_keys
@@ -186,6 +194,7 @@ class _TaskExecSnap:
     project_id: str | None
     owner_id: str | None
     lab_id: str | None
+    task_type: str = "verify"
 
 
 def _task_exec_snap(task: Task) -> _TaskExecSnap:
@@ -200,6 +209,7 @@ def _task_exec_snap(task: Task) -> _TaskExecSnap:
         project_id=getattr(task, "project_id", None),
         owner_id=getattr(task, "owner_id", None),
         lab_id=getattr(task, "lab_id", None),
+        task_type=getattr(task, "task_type", None) or "verify",
     )
 
 
@@ -295,6 +305,71 @@ async def _fail_corrupt_output(
     return {"status": "failed", "error": msg, "node": node_key, "verdict": None}
 
 
+async def _seal_analysis_terminal(
+    session: AsyncSession,
+    task: Task,
+    run: TaskRun,
+    store: HandoffStore,
+    *,
+    final_verdict: str | None,
+    skipped_due_to_non_web: bool,
+    verify_mode: bool,
+) -> dict[str, Any]:
+    """finalize 完成后立即固化任务权威终态；report 后处理不得再改写。"""
+    previous_outputs = store.as_previous_outputs()
+    finalize_out = store.get_raw("finalize")
+    analysis_verdict = finalize_out.get("analysis_verdict")
+    if analysis_verdict:
+        sealed_verdict = analysis_verdict
+    elif final_verdict == "false_positive":
+        sealed_verdict = final_verdict
+    else:
+        sealed_verdict = finalize_out.get("final_verdict") or final_verdict
+
+    audit_gate = store.signals(verify_mode=verify_mode).gate_verdict
+    analysis_status = finalize_out.get("analysis_status")
+    discovery_needs_review = (
+        (not verify_mode and analysis_status == "needs_review")
+        or (not verify_mode and int(finalize_out.get("needs_review_count") or 0) > 0)
+    )
+    if await _is_cancelled(session, task, run):
+        return _cancelled_result()
+
+    now = datetime.now(timezone.utc)
+    if audit_gate == "uncertain" or discovery_needs_review:
+        task.verdict = None
+        run.status = "completed"
+        task.status = "needs_review"
+        run.finished_at = now
+        await session.commit()
+        await _start_lab_ttl_after_task(session, task)
+        return {
+            "status": "needs_review",
+            "verdict": sealed_verdict,
+            "report_data": None,
+            "non_web": skipped_due_to_non_web,
+            "repo_dirname": repo_dirname_from_outputs(previous_outputs),
+            "project_path": store.get_raw("source").get("project_path"),
+            "analysis_sealed": True,
+        }
+
+    task.verdict = sealed_verdict
+    run.status = "completed"
+    task.status = "completed"
+    run.finished_at = now
+    await session.commit()
+    await _start_lab_ttl_after_task(session, task)
+    return {
+        "status": "completed",
+        "verdict": sealed_verdict,
+        "report_data": None,
+        "non_web": skipped_due_to_non_web,
+        "repo_dirname": repo_dirname_from_outputs(previous_outputs),
+        "project_path": store.get_raw("source").get("project_path"),
+        "analysis_sealed": True,
+    }
+
+
 async def _finish_after_report_fail(
     session: AsyncSession,
     task: Task,
@@ -311,14 +386,34 @@ async def _finish_after_report_fail(
     """报告是分析结论的消费者；已有权威结论时只失败报告节点。"""
     from app.contexts.agent.ai_runner import authoritative_verdict
 
-    analysis_verdict = final_verdict or authoritative_verdict(
+    now = datetime.now(timezone.utc)
+    # finalize 已封口：任务终态不可被文档失败改写
+    if task.status in ("completed", "needs_review") and run.status == "completed":
+        nr.status = "failed"
+        nr.error_message = clip_error_log(detail)
+        nr.finished_at = now
+        run.error_message = clip_error_log(
+            f"报告生成失败（审计结论已保留）: {title}", limit=RUN_ERROR_LOG_MAX
+        )
+        await session.commit()
+        return {
+            "status": task.status,
+            "verdict": task.verdict,
+            "error": title,
+            "hint": hint,
+            "node": "report",
+            "analysis_sealed": True,
+            "report_data": None,
+        }
+
+    analysis_verdict = final_verdict or (store.get_raw("finalize") or {}).get(
+        "analysis_verdict"
+    ) or authoritative_verdict(
         store.get_raw("reproduce"), store.get_raw("audit"),
     )
     keep_review = analysis_verdict == "needs_review"
 
     if not verify_mode:
-        # discovery 的 dispatch terminal 本身已定义“零线索也是完成的
-        # 分析结果”；LeadRun 中的未终认项则提升为 needs_review。
         from app.contexts.agent.lead_worker import load_lead_runs
 
         leads = await load_lead_runs(session, run.id)
@@ -333,7 +428,6 @@ async def _finish_after_report_fail(
                     break
     elif analysis_verdict is None:
         return None
-    now = datetime.now(timezone.utc)
     nr.status = "failed"
     nr.error_message = clip_error_log(detail)
     nr.finished_at = now
@@ -457,7 +551,6 @@ def _evaluate_skip(
     ordered = (
         SkipWhen.VERIFY_MODE,
         SkipWhen.NO_DISPATCH_LEAD,
-        SkipWhen.LEAD_DRIVEN,
         SkipWhen.NON_WEB,
         SkipWhen.GATE_FAIL,
         SkipWhen.GATE_UNCERTAIN,
@@ -470,8 +563,6 @@ def _evaluate_skip(
         if signal == SkipWhen.VERIFY_MODE and verify_mode:
             return signal
         if signal == SkipWhen.NO_DISPATCH_LEAD and signals.no_dispatch_lead:
-            return signal
-        if signal == SkipWhen.LEAD_DRIVEN and signals.lead_driven:
             return signal
         if signal == SkipWhen.GATE_FAIL and signals.gate_verdict == "fail":
             return signal
@@ -568,6 +659,7 @@ async def _execute_one(
             project_id=task_snap.project_id,
             owner_id=task_snap.owner_id,
             lab_id=task_snap.lab_id,
+            task_type=task_snap.task_type,
         )
         output = await node.execute(ctx, node_input)
         if await _is_cancelled_by_id(ns, task_snap.id, run_id):
@@ -607,115 +699,6 @@ async def _execute_one(
         if owns_session and session_factory is not None:
             with contextlib.suppress(Exception):
                 await ns.close()
-
-
-async def _drain_leads_before_report(
-    *,
-    session: AsyncSession,
-    session_factory,
-    task_id: str,
-    run_id: str,
-    host_workdir: str,
-    source_path: str,
-    runner_env: dict[str, str],
-    store: HandoffStore,
-    on_ai_event,
-    lab_id: str | None = None,
-) -> None:
-    """排空本任务 Redis 终认队列（有限并发），再让聚合 report 就绪。"""
-    from app.contexts.agent.lead_worker import drain_lead_queue
-    from app.contexts.settings.repository import SettingsRepository
-    from app.contexts.settings.service import SettingsService
-
-    profile = store.get_raw("profile")
-    env_ready = store.get_raw("env_ready") or None
-    if not env_ready:
-        env_ready = None
-
-    runtime = await SettingsService(SettingsRepository(session)).get_runtime_settings()
-
-    factory = session_factory
-    if factory is None:
-        # 单测/降级：用绑定同一 engine 的临时 factory
-        from sqlalchemy.ext.asyncio import async_sessionmaker
-
-        factory = async_sessionmaker(
-            session.bind, class_=AsyncSession, expire_on_commit=False,
-        )
-
-    await drain_lead_queue(
-        session_factory=factory,
-        task_id=task_id,
-        host_workdir=host_workdir,
-        source_path=source_path,
-        runner_env=runner_env,
-        source=store.get_raw("source"),
-        profile=profile,
-        env_ready=env_ready,
-        on_event=on_ai_event,
-        lab_id=lab_id,
-        # 降级工厂与主 session 共享单连接：额外 session 会破坏主事务，跳过回收
-        allow_reclaim=session_factory is not None,
-        concurrency=runtime.lead_verify_per_task,
-    )
-    # Lead 路径可能复活靶场并原地更新 env_ready dict；回写 store / NodeRun
-    if env_ready and env_ready.get("target_url"):
-        store.set("env_ready", env_ready)
-        await _persist_handoff_updates(
-            session,
-            run_id=run_id,
-            task_id=task_id,
-            updates={"env_ready": env_ready},
-        )
-        await session.commit()
-    # 主 session 可能被旁路更新；刷新 LeadRun 可见性
-    await session.commit()
-
-
-async def _complete_discovery_aggregate_report(
-    session: AsyncSession, run_id: str, nr_id: str,
-) -> dict[str, Any]:
-    """discovery 聚合报告：只把 confirmed/partial 写入漏洞清单，零确认仍出报告。"""
-    from app.contexts.agent.lead_worker import (
-        build_discovery_report_from_leads,
-        load_lead_runs,
-    )
-
-    leads = await load_lead_runs(session, run_id)
-    denoise: dict[str, Any] = {}
-    cluster_nr = (await session.execute(
-        select(NodeRun).where(
-            NodeRun.run_id == run_id, NodeRun.node_key == "cluster",
-        )
-    )).scalar_one_or_none()
-    if cluster_nr and cluster_nr.output_json:
-        try:
-            raw_out = json.loads(cluster_nr.output_json) if isinstance(
-                cluster_nr.output_json, str
-            ) else cluster_nr.output_json
-            if isinstance(raw_out, dict):
-                denoise = {
-                    "finding_count": raw_out.get("finding_count"),
-                    "dropped_c_count": raw_out.get("dropped_c_count"),
-                    "dropped_c_by_engine": raw_out.get("dropped_c_by_engine"),
-                    "group_count": raw_out.get("group_count"),
-                    "bypass_count": raw_out.get("bypass_count"),
-                }
-        except (TypeError, json.JSONDecodeError):
-            denoise = {}
-    output = build_discovery_report_from_leads(leads, denoise=denoise) or {
-        "final_verdict": None,
-        "report_data": None,
-        "empty_aggregate": True,
-        "authored_by": "discovery_aggregate",
-    }
-    nr = await session.get(NodeRun, nr_id)
-    if nr is not None:
-        nr.output_json = json.dumps(output, ensure_ascii=False, default=str)
-        nr.status = "completed"
-        nr.finished_at = datetime.now(timezone.utc)
-        await session.flush()
-    return output
 
 
 async def _mark_inflight_cancelled(session: AsyncSession, run_id: str) -> None:
@@ -758,6 +741,7 @@ async def run_orchestration(
     final_verdict: str | None = None
     skipped_due_to_non_web = False
     terminal: set[str] = set()
+    analysis_sealed: dict[str, Any] | None = None
     # 并发在飞：Task → (spec, node, nr_id, node_input, previous_outputs)
     inflight: dict[asyncio.Task, tuple] = {}
 
@@ -776,29 +760,30 @@ async def run_orchestration(
         inflight.clear()
         return keys
 
+    async def _maybe_seal_finalize(node_key: str) -> None:
+        """finalize 一完成就固化任务终态；report 后处理可继续跑。"""
+        nonlocal analysis_sealed, final_verdict
+        if analysis_sealed is not None or node_key != "finalize":
+            return
+        analysis_sealed = await _seal_analysis_terminal(
+            session, task, run, store,
+            final_verdict=final_verdict,
+            skipped_due_to_non_web=skipped_due_to_non_web,
+            verify_mode=verify_mode,
+        )
+        if analysis_sealed.get("verdict"):
+            final_verdict = analysis_sealed["verdict"]
+
     async def _spawn_prepared(prepared: list[tuple]) -> None:
         for spec, node, nr_id, node_input, prev in prepared:
-            if spec.lead_driven_aggregate and not verify_mode:
-                async def _agg(nr_id=nr_id):
-                    async with node_session_factory() as ns:
-                        try:
-                            out = await _complete_discovery_aggregate_report(
-                                ns, run_id, nr_id,
-                            )
-                            await ns.commit()
-                            return out
-                        except Exception as e:  # noqa: BLE001
-                            raise _NodeFailure("report", e) from e
-                t = asyncio.create_task(_agg())
-            else:
-                t = asyncio.create_task(_execute_one(
-                    spec=spec, node=node, nr_id=nr_id, node_input=node_input,
-                    task_snap=task_snap, run_id=run_id, host_workdir=host_workdir,
-                    source_path=source_path, runner_env=runner_env,
-                    on_ai_event=on_ai_event, node_session=None,
-                    session_factory=node_session_factory,
-                    previous_outputs=prev,
-                ))
+            t = asyncio.create_task(_execute_one(
+                spec=spec, node=node, nr_id=nr_id, node_input=node_input,
+                task_snap=task_snap, run_id=run_id, host_workdir=host_workdir,
+                source_path=source_path, runner_env=runner_env,
+                on_ai_event=on_ai_event, node_session=None,
+                session_factory=node_session_factory,
+                previous_outputs=prev,
+            ))
             inflight[t] = (spec, node, nr_id, node_input, prev)
 
     while True:
@@ -886,12 +871,14 @@ async def run_orchestration(
                     source_path = store.get_raw(spec.key).get("project_path") or source_path
                 if on_node_event:
                     await on_node_event(spec.key, "reused", store.get_raw(spec.key))
+                await _maybe_seal_finalize(spec.key)
                 continue
             if nr.status == "skipped":
                 store.set(spec.key, {})
                 terminal.add(spec.key)
                 if on_node_event:
                     await on_node_event(spec.key, "skipped", None)
+                await _maybe_seal_finalize(spec.key)
                 continue
             executable.append((spec, nr))
 
@@ -903,31 +890,15 @@ async def run_orchestration(
                 inflight.keys(), return_when=asyncio.FIRST_COMPLETED,
             )
         else:
-            # discovery 有入队线索：先排空 Lead 队列，再跑聚合 report(§4.4)
-            if (
-                any(spec.key == "report" for spec, _ in executable)
-                and store.signals(verify_mode=verify_mode).lead_driven
-            ):
-                await _drain_leads_before_report(
-                    session=session,
-                    session_factory=node_session_factory,
-                    task_id=task_id,
-                    run_id=run_id,
-                    host_workdir=host_workdir,
-                    source_path=source_path,
-                    runner_env=runner_env,
-                    store=store,
-                    on_ai_event=on_ai_event,
-                    lab_id=task_snap.lab_id,
-                )
-
             # 串行准备(主 session)：写 input_json / running，并组装 Input
+            # discovery 终认由 lead_verify 节点显式排空，不再在 report 前旁路 drain
             to_prepare = executable[:1] if node_session_factory is None else executable
             prepared: list[tuple] = []
             for spec, nr in to_prepare:
                 scalars = _task_scalars(task, host_workdir, source_path)
                 try:
                     node_input = InputAssembler.assemble(spec.key, store, scalars)
+                    persist_input = InputAssembler.dump_for_persistence(node_input)
                 except Exception as e:  # noqa: BLE001
                     await _cancel_inflight()
                     await _mark_inflight_cancelled(session, run_id)
@@ -936,7 +907,7 @@ async def run_orchestration(
                         final_verdict, e, on_node_event, verify_mode,
                     )
                 nr.input_json = json.dumps(
-                    InputAssembler.dump_for_persistence(node_input),
+                    persist_input,
                     ensure_ascii=False,
                     default=str,
                 )
@@ -953,22 +924,16 @@ async def run_orchestration(
             if node_session_factory is None:
                 spec, node, nr_id, node_input, prev = prepared[0]
                 try:
-                    if spec.lead_driven_aggregate and not verify_mode:
-                        output = await _complete_discovery_aggregate_report(
-                            session, run_id, nr_id,
-                        )
-                        store.set(spec.key, output)
-                    else:
-                        success = await _execute_one(
-                            spec=spec, node=node, nr_id=nr_id, node_input=node_input,
-                            task_snap=task_snap, run_id=run_id, host_workdir=host_workdir,
-                            source_path=source_path, runner_env=runner_env,
-                            on_ai_event=on_ai_event, node_session=session,
-                            previous_outputs=prev,
-                        )
-                        store.set(spec.key, success.output)
-                        _apply_handoff_updates(store, success.handoff_updates)
-                        output = success.output
+                    success = await _execute_one(
+                        spec=spec, node=node, nr_id=nr_id, node_input=node_input,
+                        task_snap=task_snap, run_id=run_id, host_workdir=host_workdir,
+                        source_path=source_path, runner_env=runner_env,
+                        on_ai_event=on_ai_event, node_session=session,
+                        previous_outputs=prev,
+                    )
+                    store.set(spec.key, success.output)
+                    _apply_handoff_updates(store, success.handoff_updates)
+                    output = success.output
                 except _NodeCancelled:
                     await _mark_inflight_cancelled(session, run_id)
                     return _cancelled_result()
@@ -983,6 +948,7 @@ async def run_orchestration(
                     source_path = output.get("project_path") or source_path
                 if on_node_event:
                     await on_node_event(spec.key, "completed", output)
+                await _maybe_seal_finalize(spec.key)
                 continue
 
             await _spawn_prepared(prepared)
@@ -1020,6 +986,7 @@ async def run_orchestration(
                 source_path = payload.get("project_path") or source_path
             if on_node_event:
                 await on_node_event(spec.key, "completed", payload)
+            await _maybe_seal_finalize(spec.key)
 
         cancel_hit = next(
             (item for item in batch if isinstance(item[1], _NodeCancelled)), None
@@ -1043,13 +1010,38 @@ async def run_orchestration(
 
     previous_outputs = store.as_previous_outputs()
     report_out = store.get_raw("report")
-    if final_verdict != "false_positive" and report_out.get("final_verdict"):
+    # finalize 应已封口；若断点续跑仅剩 report，补封一次
+    if analysis_sealed is None and "finalize" in terminal:
+        await _maybe_seal_finalize("finalize")
+    if analysis_sealed is not None:
+        result = dict(analysis_sealed)
+        if report_out:
+            result["report_data"] = report_out.get("report_data")
+            result["cvss"] = report_out.get("cvss")
+            result["vulnerable_file"] = report_out.get("vulnerable_file")
+            result["poc"] = report_out.get("poc")
+            if report_out.get("final_verdict") and not result.get("verdict"):
+                result["verdict"] = report_out.get("final_verdict")
+        return result
+
+    # 无 finalize 的异常路径（理论上不应到达）：回退旧收口
+    finalize_out = store.get_raw("finalize")
+    analysis_verdict = finalize_out.get("analysis_verdict")
+    if analysis_verdict:
+        final_verdict = analysis_verdict
+    elif final_verdict != "false_positive" and report_out.get("final_verdict"):
         final_verdict = report_out["final_verdict"]
 
     audit_gate = store.signals(verify_mode=verify_mode).gate_verdict
     summary = (report_out.get("report_data") or {}).get("audit_summary") or {}
+    analysis_status = finalize_out.get("analysis_status") or report_out.get("analysis_status")
     discovery_needs_review = (
-        not verify_mode and int(summary.get("needs_review_count") or 0) > 0
+        (not verify_mode and analysis_status == "needs_review")
+        or (not verify_mode and int(
+            finalize_out.get("needs_review_count")
+            or summary.get("needs_review_count")
+            or 0
+        ) > 0)
     )
     if audit_gate == "uncertain" or discovery_needs_review:
         if await _is_cancelled(session, task, run):
@@ -1062,7 +1054,9 @@ async def run_orchestration(
         await _start_lab_ttl_after_task(session, task)
         return {
             "status": "needs_review",
-            "verdict": report_out.get("final_verdict") if report_out else None,
+            "verdict": finalize_out.get("final_verdict") or (
+                report_out.get("final_verdict") if report_out else None
+            ),
             "report_data": report_out.get("report_data") if report_out else None,
             "vulnerable_file": report_out.get("vulnerable_file") if report_out else None,
             "non_web": skipped_due_to_non_web,

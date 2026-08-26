@@ -64,7 +64,7 @@ const NODE_CAPTIONS: Record<string, string> = {
   scan_semgrep: '静态代码检测',
   env_ready: '仅 Web 构建靶场',
   api_inventory: '确定性入口清单',
-  api_hunt: '鉴权/逻辑猎洞直出',
+  api_hunt: '鉴权/逻辑候选猎洞',
   cluster: '发现归并与去重',
   screen: '规则/快审过滤',
   triage: 'Agent 亲审',
@@ -72,7 +72,8 @@ const NODE_CAPTIONS: Record<string, string> = {
   audit: '白盒路径终认',
   reproduce: '动态验证利用链',
   lead_verify: '逐线索审计 / 复现',
-  report: '聚合证据与结论',
+  finalize: '固化分析结论',
+  report: '聚合证据与文档',
 }
 
 function aggregateStatus(models: readonly DagNodeModel[]): DagVisualStatus {

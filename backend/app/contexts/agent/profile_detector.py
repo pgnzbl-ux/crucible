@@ -383,15 +383,16 @@ def _root_languages(root: Path) -> list[str]:
 
 
 def profile_needs_ai(source_path: str, hints: dict) -> bool:
-    """遗留：强 Web / 强非 Web 是否可跳过 AI。
+    """强 Web / 强非 Web 且单语言时跳过 AI，避免阻塞 Semgrep/清单关键路径。
 
-    ProfileNode 在 SDK 开启且无缓存时已一律轻度 AI，不再调用本函数；
-    保留供单测与启发式对照。
+    ProfileNode 在 SDK 开启时调用：规则已充分则直接落库。
     """
     root = Path(source_path)
     language = hints.get("primary_language") or hints.get("language")
     framework = hints.get("framework")
     if not language:
+        return True
+    if not isinstance(hints.get("is_web"), bool):
         return True
     if len(_root_languages(root)) > 1:
         return True
