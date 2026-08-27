@@ -287,11 +287,24 @@ def symbol_lookup(index: list[dict[str, Any]], symbol: str) -> list[dict[str, An
     return [e for e in index if e["symbol"] == symbol]
 
 
+def _minified_placeholder(path: Path) -> str:
+    """压缩产物的有界占位切片：行级切片不可用，引导按命中点取上下文。"""
+    return (
+        f"[{path.name} 为压缩/打包产物（单行超长），行级切片不可用；"
+        "请用 read_slice(pattern=...) 或 grep -oE 按命中点提取上下文片段]"
+    )
+
+
 def read_function_source(repo_root: str, entry: dict[str, Any]) -> str | None:
     """切函数源码，带行号前缀(cat -n 风格)。"""
+    from app.contexts.project.source_minified import is_minified
+
     path = Path(repo_root) / entry["file"]
     if not path.exists():
         return None
+    if is_minified(path):
+        # 压缩产物单行超长：跳过 tree-sitter/行提取，产出有界占位而非超预算巨型切片
+        return _minified_placeholder(path)
     try:
         lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
     except OSError:
@@ -305,11 +318,15 @@ def read_function_source(repo_root: str, entry: dict[str, Any]) -> str | None:
 
 def context_around(repo_root: str, file_path: str, line: int | None) -> str | None:
     """无索引时的退化上下文：命中行 ±_CONTEXT_PAD 行，带行号。"""
+    from app.contexts.project.source_minified import is_minified
+
     if line is None:
         return None
     path = Path(repo_root) / (file_path or "").lstrip("/")
     if not path.exists():
         return None
+    if is_minified(path):
+        return _minified_placeholder(path)
     try:
         lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
     except OSError:

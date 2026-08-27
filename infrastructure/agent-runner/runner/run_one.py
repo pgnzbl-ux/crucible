@@ -133,6 +133,40 @@ REPRODUCE_DENY_RES = [
     (_DOCKER_CMD_RE, "docker"),
 ]
 
+# ── 压缩产物判定（与 backend app/contexts/project/source_minified.py 保持一致）──
+# 打包前端资源常被压成几行、每行数百 KB：Read 按行取必然 exceeds maximum
+# allowed size，Grep 会回吐整行截断噪声。命中即 deny 并引导改用 read_slice。
+_WORKSPACE_ROOT = "/workspace"
+_MINIFIED_MIN_BYTES = 300_000
+_MINIFIED_MAX_LINES = 500
+_MINIFIED_LINE_SCAN_BYTES = 4 * 1024 * 1024
+
+
+def _is_minified_file(path: Path) -> tuple[bool, int, int]:
+    """返回 (是否压缩产物, 大小字节, 行数)；stat/读失败按未命中处理。"""
+    try:
+        if not path.is_file():
+            return False, 0, 0
+        size = path.stat().st_size
+    except OSError:
+        return False, 0, 0
+    if size < _MINIFIED_MIN_BYTES:
+        return False, size, 0
+    lines = 0
+    try:
+        with path.open("rb") as fh:
+            while True:
+                chunk = fh.read(1 << 16)
+                if not chunk:
+                    break
+                lines += chunk.count(b"\n")
+                if fh.tell() >= _MINIFIED_LINE_SCAN_BYTES:
+                    break
+    except OSError:
+        return False, size, 0
+    lines += 1
+    return lines <= _MINIFIED_MAX_LINES, size, lines
+
 def _allowed_tools_for(node_key: str | None) -> list[str]:
     """返回节点常用工具的自动批准提示；不作为能力或安全边界。"""
     if node_key == "canary":
@@ -239,6 +273,70 @@ async def _pre_tool_use_hook(
             "hookEventName": "PreToolUse",
             "permissionDecision": "allow",
             "updatedInput": updated,
+        }
+    }
+
+
+async def _read_guard_hook(
+    hook_input: Any, _tool_use_id: str | None, _ctx: Any
+) -> dict | None:
+    """PreToolUse hook：Read/Grep 目标命中压缩产物（大而少行）时 deny。
+
+    压缩打包文件单行数百 KB：Read 按行取必然 exceeds maximum allowed size，
+    Grep 会回吐整行截断噪声烧上下文。deny reason 直接给出有界替代
+    （read_slice / grep -oE），模型可一次转向，不在报错上空转。
+    matcher 分两条注册（Read / Grep），本回调按 tool_name 分流。
+    """
+    tool_name = (
+        hook_input.get("tool_name")
+        if isinstance(hook_input, dict)
+        else getattr(hook_input, "tool_name", "")
+    ) or ""
+    if tool_name not in ("Read", "Grep"):
+        return {}
+    tool_input = (
+        hook_input.get("tool_input")
+        if isinstance(hook_input, dict)
+        else getattr(hook_input, "tool_input", {})
+    )
+    if not isinstance(tool_input, dict):
+        return {}
+    raw_path = str(tool_input.get("file_path") or tool_input.get("path") or "")
+    if not raw_path:
+        return {}
+    target = Path(raw_path)
+    if not target.is_absolute():
+        target = Path(_WORKSPACE_ROOT) / target
+    target = target.resolve()
+    minified, size, lines = _is_minified_file(target)
+    if not minified:
+        return {}
+    mb = size / 1_000_000
+    reason = (
+        f"{target.name} 是压缩/打包产物（{mb:.1f}MB 仅 {lines} 行），"
+        f"{tool_name} 按行操作必然超出工具大小上限。"
+        "改用 mcp__crucible__read_slice(file_path=..., pattern=<关键词或正则>, "
+        f"context=300) 按命中点取有界片段；或 Bash: grep -oE '.{{120}}<关键词>.{{0,240}}' <文件>。"
+        f"不要重试 {tool_name}。"
+    )
+    print(
+        json.dumps(
+            {
+                "type": "tool.call.denied",
+                "tool": tool_name,
+                "reason": f"minified artifact: {target.name} ({mb:.1f}MB/{lines} 行)",
+                "input": raw_path[:200],
+                "timestamp": time.time(),
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
         }
     }
 
@@ -892,6 +990,149 @@ def _usage_jsonable(value: Any) -> Any:
     return value
 
 
+# read_slice 输出边界：单次硬上限 8KB / 最多 20 处命中
+_READ_SLICE_MAX_OUTPUT = 8_192
+_READ_SLICE_MAX_MATCHES = 20
+
+READ_SLICE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "file_path": {
+            "type": "string",
+            "description": "目标文件路径，必须位于 /workspace 之内",
+        },
+        "pattern": {
+            "type": "string",
+            "description": "关键词或正则（Python re 语法）；给定时返回命中点 ±context 片段",
+        },
+        "byte_offset": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "窗口模式起始字节偏移（pattern 为空时生效）",
+        },
+        "byte_length": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "窗口长度（字节，上限 8192；pattern 为空时生效）",
+        },
+        "context": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2000,
+            "description": "命中点上下文字节数，默认 300",
+        },
+    },
+    "required": ["file_path"],
+}
+
+
+def _read_slice_impl(
+    file_path: str,
+    pattern: str | None = None,
+    byte_offset: int = 0,
+    byte_length: int = 4096,
+    context: int = 300,
+    *,
+    root: str = _WORKSPACE_ROOT,
+) -> dict:
+    """read_slice 的纯函数实现（容器外可单测）。
+
+    pattern 模式：全文按字节正则扫描，返回命中点 ±context 片段（附 byte_offset
+    供窗口模式翻页）；窗口模式：返回 [byte_offset, byte_offset+byte_length)。
+    两种模式输出都受 _READ_SLICE_MAX_OUTPUT 硬上限约束。
+    """
+    target = Path(file_path)
+    if not target.is_absolute():
+        target = Path(root) / target
+    target = target.resolve()
+    root_resolved = Path(root).resolve()
+    if root_resolved != target and root_resolved not in target.parents:
+        return {"error": f"路径必须在 {root} 之下: {file_path}"}
+    if not target.is_file():
+        return {"error": f"文件不存在: {file_path}"}
+    try:
+        data = target.read_bytes()
+    except OSError as e:
+        return {"error": f"读取失败: {e}"}
+    size = len(data)
+
+    if pattern:
+        try:
+            rx = re.compile(pattern.encode("utf-8"))
+        except re.error as e:
+            return {"error": f"正则无效: {e}"}
+        matches: list[dict] = []
+        budget = _READ_SLICE_MAX_OUTPUT
+        capped = False
+        for m in rx.finditer(data):
+            if len(matches) >= _READ_SLICE_MAX_MATCHES or budget <= 0:
+                capped = True
+                break
+            excerpt = data[max(m.start() - context, 0): min(m.end() + context, size)]
+            if len(excerpt) > budget:
+                excerpt = excerpt[:budget]
+                capped = True
+            budget -= len(excerpt)
+            matches.append(
+                {
+                    "byte_offset": m.start(),
+                    "match": m.group(0).decode("utf-8", errors="replace"),
+                    "excerpt": excerpt.decode("utf-8", errors="replace"),
+                }
+            )
+        return {
+            "file": str(target),
+            "size_bytes": size,
+            "capped": capped,
+            "matches": matches,
+        }
+
+    byte_offset = max(int(byte_offset), 0)
+    byte_length = min(max(int(byte_length), 1), _READ_SLICE_MAX_OUTPUT)
+    chunk = data[byte_offset: byte_offset + byte_length]
+    return {
+        "file": str(target),
+        "size_bytes": size,
+        "byte_offset": byte_offset,
+        "excerpt": chunk.decode("utf-8", errors="replace"),
+        "has_more": byte_offset + byte_length < size,
+    }
+
+
+def _make_read_slice_tool():
+    """构造 read_slice MCP 工具：对压缩产物等单行超长文件做有界读取。
+
+    Read/Grep 对压缩产物已被 _read_guard_hook deny，本工具是官方出路：
+    按命中点 ±context 或字节窗口取片段，输出有界不烧上下文。
+    """
+    from claude_agent_sdk import tool
+
+    @tool(
+        name="read_slice",
+        description=(
+            "有界读取超长单行文件（压缩/打包产物，如 *.min.js、bundle.js）的片段；"
+            "Read/Grep 对这类文件会被拒绝。pattern 给定时返回最多 20 处"
+            "命中点 ±context 字节的片段及 byte_offset；pattern 为空时返回"
+            "byte_offset 起的 byte_length 字节窗口（可用 byte_offset 翻页）。"
+            "单次输出 ≤8KB。file_path 必须位于 /workspace 之下。"
+        ),
+        input_schema=READ_SLICE_SCHEMA,
+    )
+    async def read_slice(input: dict) -> dict:
+        byte_offset = input.get("byte_offset")
+        byte_length = input.get("byte_length")
+        context = input.get("context")
+        return _read_slice_impl(
+            str(input.get("file_path") or ""),
+            pattern=input.get("pattern"),
+            byte_offset=0 if byte_offset is None else int(byte_offset),
+            byte_length=4096 if byte_length is None else int(byte_length),
+            context=300 if context is None else int(context),
+        )
+
+    return read_slice
+
+
 def _make_submit_result_tool(schema: dict):
     """构造 submit_result MCP 工具:agent 调用时把 input 写到 /workspace/.node_output.json。
 
@@ -950,6 +1191,9 @@ def _build_options(
         "hooks": {
             "PreToolUse": [
                 HookMatcher(matcher="Bash", hooks=[_pre_tool_use_hook]),
+                # 压缩产物按行读必超限：deny 并指路 read_slice（详见 _read_guard_hook）
+                HookMatcher(matcher="Read", hooks=[_read_guard_hook]),
+                HookMatcher(matcher="Grep", hooks=[_read_guard_hook]),
             ],
             "Stop": [
                 HookMatcher(hooks=[_stop_hook]),
@@ -969,10 +1213,13 @@ def _build_options(
 
         schema = NODE_INPUT_SCHEMAS[node_key]
         submit_tool = _make_submit_result_tool(schema)
-        server = create_sdk_mcp_server(name="crucible", tools=[submit_tool])
+        server = create_sdk_mcp_server(
+            name="crucible", tools=[submit_tool, _make_read_slice_tool()]
+        )
         common["mcp_servers"] = {"crucible": server}
         common["allowed_tools"] = common["allowed_tools"] + [
-            "mcp__crucible__submit_result"
+            "mcp__crucible__submit_result",
+            "mcp__crucible__read_slice",
         ]
 
     # SDK 版本已在镜像中固定。关键参数不再静默降级；构造失败由顶层统一

@@ -175,11 +175,13 @@ def test_build_options_registers_hook_matcher_surviving_sdk_convert(monkeypatch)
     run_one._build_options(model="m", max_turns=4, node_key="canary", cwd="/workspace")
 
     pre = captured["hooks"]["PreToolUse"]
-    assert len(pre) == 1
-    assert isinstance(pre[0], FakeHookMatcher)
-    assert not isinstance(pre[0], dict)
-    assert pre[0].matcher == "Bash"
-    assert pre[0].hooks == [run_one._pre_tool_use_hook]
+    assert len(pre) == 3, "Bash 黑名单 + Read/Grep 压缩产物拦截"
+    assert all(isinstance(m, FakeHookMatcher) for m in pre)
+    assert not any(isinstance(m, dict) for m in pre)
+    by_matcher = {m.matcher: m for m in pre}
+    assert by_matcher["Bash"].hooks == [run_one._pre_tool_use_hook]
+    assert by_matcher["Read"].hooks == [run_one._read_guard_hook]
+    assert by_matcher["Grep"].hooks == [run_one._read_guard_hook]
 
     stop = captured["hooks"]["Stop"]
     assert len(stop) == 1

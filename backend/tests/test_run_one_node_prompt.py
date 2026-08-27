@@ -251,13 +251,14 @@ def test_build_options_keeps_full_automation_and_isolates_repo_config():
     assert captured["strict_mcp_config"] is True
     assert captured["sandbox"] == {"enabled": False}
     pre_hooks = captured["hooks"]["PreToolUse"]
-    assert len(pre_hooks) == 1
+    assert len(pre_hooks) == 3, "Bash 黑名单 + Read/Grep 压缩产物拦截"
     assert not isinstance(pre_hooks[0], dict), "裸 dict 会被 SDK 静默丢掉 hooks"
     stop_hooks = captured["hooks"]["Stop"]
     assert len(stop_hooks) == 1
     assert not isinstance(stop_hooks[0], dict)
     assert "crucible" in captured["mcp_servers"]
     assert "mcp__crucible__submit_result" in captured["allowed_tools"]
+    assert "mcp__crucible__read_slice" in captured["allowed_tools"]
     assert "submit_result" not in captured["allowed_tools"]
 
 
