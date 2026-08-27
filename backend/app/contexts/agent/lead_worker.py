@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
@@ -391,6 +392,9 @@ async def drain_lead_queue(
     lab_id: str | None = None,
     allow_reclaim: bool = True,
     concurrency: int | None = None,
+    # 任务总时长预算的绝对截止(monotonic 秒)；编排器注入。认领前检查，
+    # 超限软停并把未认领线索转 needs_review（未审≠误报）。
+    time_budget_deadline: float | None = None,
 ) -> list[str]:
     """有限并发消费本任务队列，直到 drained（含孤儿回收）。返回完成的 lead_run_id 列表。
 
@@ -405,11 +409,24 @@ async def drain_lead_queue(
     done_ids: list[str] = []
     lock = asyncio.Lock()
     budget_stop = asyncio.Event()
+    stop_reason = {"value": "budget_exhausted"}
 
     async def _worker() -> None:
         from app.contexts.agent.nodes.base import task_run_cancelled
 
         while True:
+            if (
+                time_budget_deadline is not None
+                and time.monotonic() >= time_budget_deadline
+            ):
+                stop_reason["value"] = "time_budget_exhausted"
+                budget_stop.set()
+                if on_event:
+                    on_event({
+                        "type": "phase.updated", "phase": "lead_verify",
+                        "message": "任务总时长预算耗尽，停止领取新终认线索，剩余转人工复核",
+                    })
+                return
             if allow_reclaim:
                 # 取消穿透 + token 预算软停：停止领取新线索。仅生产路径
                 # (独立会话工厂)检查——降级工厂与主 session 共享单连接，
@@ -451,12 +468,14 @@ async def drain_lead_queue(
                         lab_id=lab_id,
                     )
                     await session.commit()
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
                     await session.rollback()
                     async with session_factory() as s2:
                         lead = await s2.get(LeadRun, lead_run_id)
                         if lead and lead.status != "failed":
+                            # 排障必需：不落错误文本的置败无法归因
                             lead.status = "failed"
+                            lead.error = str(exc)[:8000]
                             await _reconcile_group(s2, lead.alert_group_id, "needs_review")
                             await s2.commit()
                 finally:
@@ -479,13 +498,14 @@ async def drain_lead_queue(
         await asyncio.gather(*extra, return_exceptions=True)
     if budget_stop.is_set():
         skipped = await _terminalize_unclaimed_leads(
-            session_factory, task_id, reason="budget_exhausted",
+            session_factory, task_id, reason=stop_reason["value"],
         )
         if skipped:
+            label = "总时长预算耗尽" if stop_reason["value"] == "time_budget_exhausted" else "token 预算耗尽"
             await _emit(on_event, {
                 "type": "phase.updated",
                 "phase": "lead_verify",
-                "message": f"预算耗尽，{skipped} 条未终认线索已转人工复核",
+                "message": f"{label}，{skipped} 条未终认线索已转人工复核",
             })
     return done_ids
 

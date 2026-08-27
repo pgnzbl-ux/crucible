@@ -226,6 +226,19 @@ class TriageNode:
 
         factory = getattr(ctx, "session_factory", None)
         concurrency = max(1, int(getattr(settings, "triage_concurrency", 4) or 1))
+
+        # 批量子代理模式：整个二审一次容器，家族在其内部以 Task 子代理并行；
+        # 关闭开关（triage_subagent_mode=False）或降级工厂回退逐族容器路径。
+        # `is True` 是刻意的：测试里的 MagicMock 配置对象不应走进批量路径
+        if factory is not None and getattr(settings, "triage_subagent_mode", False) is True:
+            from .adjudicate import adjudicate_families_batch
+
+            outcome = await adjudicate_families_batch(ctx, families, settings, stats)
+            if outcome.get("cancelled"):
+                emit_phase(ctx, "任务已取消，中止二审", phase=self.node_key)
+                return True
+            return False
+
         if factory is None:
             return await self._adjudicate_all_serial(
                 ctx, [f.representative for f in families], settings, stats,

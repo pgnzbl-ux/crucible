@@ -53,3 +53,20 @@ paths: ["backend/app/**/*.py"]
 - 软超时（`task_soft_time_limit`）：优雅收尾（关闭 Agent）
 - 硬超时（`task_time_limit`）：强制 `revoke(terminate=True)` + `container.stop()`
 - 容器层 OOM：Docker 自动杀，worker 看 `State.OOMKilled` 标 failed
+
+## 7. 看门狗总账（2026-08-27 盘点）
+
+任务级时长控制只有两条，生效 deadline = **min(用户预算, Celery 软限)**：
+
+| 机制 | 配置来源 | 默认 | 命中行为 |
+|---|---|---|---|
+| `platform_settings.task_time_budget_seconds` | 设置页（0=不限） | 10800 (3h) | 编排器调度循环检查：取消在飞节点；finalize 已封口则保留权威结论只停后处理，否则整任务 failed（lead_worker 认领前同查，未认领线索转 needs_review） |
+| Celery soft/hard time limit | 仅 `.env`（部署级兜底） | 3.5h / 4h | 软→`_fail_on_wall_clock_timeout` 优雅收尾；硬→SIGKILL 由 acks_late 重派 |
+
+单执行体限制（新增）：`platform_settings.ai_node_timeout_seconds`（默认 3600s，0=不限）——
+单个 AI 容器从**获槽后**起计，超时强杀容器并抛 AgentRunnerError（节点失败、不做形状回喂）；
+进程内缓存 30s。代码改动请续写本表，禁止引入新的隐形看门狗。
+
+部署级保活常量（非用户可调，勿与上表混淆）：compose up 600s/wait 300s、健康探测 ~90s、
+扫描引擎 semgrep 1200s / gitleaks 600s / osv 300s、LLM Provider `timeout_ms`(DB 行)、
+canary 300s、agent-runner 槽租约 TTL 120s+30s 心跳（**租约不是超时**，AI 允许无限运行）。

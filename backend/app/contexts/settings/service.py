@@ -189,6 +189,8 @@ class SettingsService:
             lead_verify_per_task=min(_core_config.get_settings().lead_verify_per_task, hard_cap),
             reproduce_per_lab=1,
             task_token_budget=0,
+            task_time_budget_seconds=10800,
+            ai_node_timeout_seconds=3600,
         )
         try:
             async with self.repo.session.begin_nested():
@@ -206,12 +208,24 @@ class SettingsService:
         row.max_concurrent_agent_runners = min(max(1, row.max_concurrent_agent_runners), hard_cap)
         row.lead_verify_per_task = min(max(1, row.lead_verify_per_task), row.max_concurrent_agent_runners)
         row.reproduce_per_lab = min(max(1, row.reproduce_per_lab), row.lead_verify_per_task)
+        if row.task_time_budget_seconds < 0:
+            row.task_time_budget_seconds = 0
+        if row.ai_node_timeout_seconds < 0:
+            row.ai_node_timeout_seconds = 0
+        # 层级收敛：节点超时不得大于总预算（预算不限除外）
+        if (
+            row.task_time_budget_seconds > 0
+            and row.ai_node_timeout_seconds > row.task_time_budget_seconds
+        ):
+            row.ai_node_timeout_seconds = row.task_time_budget_seconds
         return RuntimeSettingsResponse(
             max_concurrent_tasks=row.max_concurrent_tasks,
             max_concurrent_agent_runners=row.max_concurrent_agent_runners,
             lead_verify_per_task=row.lead_verify_per_task,
             reproduce_per_lab=row.reproduce_per_lab,
             task_token_budget=row.task_token_budget,
+            task_time_budget_seconds=row.task_time_budget_seconds,
+            ai_node_timeout_seconds=row.ai_node_timeout_seconds,
             max_allowed=hard_cap,
             agent_runner_max_allowed=hard_cap,
             lead_verify_max_allowed=hard_cap,
@@ -250,12 +264,18 @@ class SettingsService:
             "lead_verify_per_task": row.lead_verify_per_task,
             "reproduce_per_lab": row.reproduce_per_lab,
             "task_token_budget": row.task_token_budget,
+            "task_time_budget_seconds": row.task_time_budget_seconds,
+            "ai_node_timeout_seconds": row.ai_node_timeout_seconds,
             **updates,
         }
         if merged["lead_verify_per_task"] > merged["max_concurrent_agent_runners"]:
             raise ValueError("单任务线索终认并发不能超过全局 AI 容器并发")
         if merged["reproduce_per_lab"] > merged["lead_verify_per_task"]:
             raise ValueError("同靶场复现并发不能超过单任务线索终认并发")
+        budget = merged["task_time_budget_seconds"]
+        node_timeout = merged["ai_node_timeout_seconds"]
+        if budget > 0 and node_timeout > budget:
+            raise ValueError("单节点超时不能大于任务总时长预算")
         for field_name, value in merged.items():
             setattr(row, field_name, value)
         await self.repo.session.flush()

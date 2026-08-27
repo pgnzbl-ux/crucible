@@ -1211,16 +1211,23 @@ def _build_options(
     if node_key and node_key in NODE_INPUT_SCHEMAS:
         from claude_agent_sdk import create_sdk_mcp_server
 
-        schema = NODE_INPUT_SCHEMAS[node_key]
+        # NODE_SCHEMA_KEY 允许同一 NODE_KEY 按技能模式切换提交契约
+        # （如 triage + triage_batch 子代理批量模式）；缺省回退 NODE_KEY
+        schema_key = (os.environ.get("NODE_SCHEMA_KEY") or "").strip() or node_key
+        schema = NODE_INPUT_SCHEMAS.get(schema_key) or NODE_INPUT_SCHEMAS[node_key]
         submit_tool = _make_submit_result_tool(schema)
         server = create_sdk_mcp_server(
             name="crucible", tools=[submit_tool, _make_read_slice_tool()]
         )
         common["mcp_servers"] = {"crucible": server}
-        common["allowed_tools"] = common["allowed_tools"] + [
+        allowed = list(common["allowed_tools"]) + [
             "mcp__crucible__submit_result",
             "mcp__crucible__read_slice",
         ]
+        if schema_key == "triage_batch":
+            # 批量模式：主会话用 Task 子代理并行审议家族
+            allowed.append("Task")
+        common["allowed_tools"] = allowed
 
     # SDK 版本已在镜像中固定。关键参数不再静默降级；构造失败由顶层统一
     # 输出 agent.failed，避免 MCP/effort 被悄悄移除后继续运行。

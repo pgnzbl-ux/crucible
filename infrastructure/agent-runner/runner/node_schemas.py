@@ -216,6 +216,40 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
         },
         "required": ["verdict", "confidence", "why"],
     },
+    "triage_batch": {
+        "type": "object",
+        "description": "批量子代理模式：主会话汇总全部家族判决后一次提交",
+        "properties": {
+            "verdicts": {
+                "type": "array",
+                "description": "每个家族代表一条判决；group_id 必须原样回传",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "group_id": {"type": "string", "description": "输入的 group_id 原样"},
+                        "verdict": {
+                            "type": "string",
+                            "enum": ["tp", "fp", "need_more_context"],
+                        },
+                        "confidence": {"type": "number", "description": "0–1"},
+                        "summary": {"type": "string"},
+                        "reasoning": {"type": "string"},
+                        "why": {"type": "array", "items": {"type": "string"}},
+                        "evidence": {"type": "array"},
+                        "need": {"type": "array", "items": {"type": "string"}},
+                        "attacker_controlled": {"type": "boolean"},
+                        "reaches_sink": {"type": "boolean"},
+                        "sanitizer": {
+                            "type": "string",
+                            "enum": ["none", "bypassable", "effective"],
+                        },
+                    },
+                    "required": ["group_id", "verdict", "confidence", "why", "summary", "reasoning"],
+                },
+            },
+        },
+        "required": ["verdicts"],
+    },
     "api_hunt": {
         "type": "object",
         "properties": {

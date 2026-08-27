@@ -412,6 +412,9 @@ export interface RuntimeSettings {
   max_concurrent_agent_runners: number
   lead_verify_per_task: number
   reproduce_per_lab: number
+  // 时长量纲（秒）；0=不限。生效总预算取本值与 Celery 软限较小者
+  task_time_budget_seconds: number
+  ai_node_timeout_seconds: number
   max_allowed: number
   agent_runner_max_allowed: number
   lead_verify_max_allowed: number
@@ -425,6 +428,8 @@ export type RuntimeSettingsInput = Pick<
   | 'max_concurrent_agent_runners'
   | 'lead_verify_per_task'
   | 'reproduce_per_lab'
+  | 'task_time_budget_seconds'
+  | 'ai_node_timeout_seconds'
 >
 
 export const api = {

@@ -109,6 +109,9 @@ class NodeContext:
     owner_id: str | None = None
     lab_id: str | None = None
     task_type: str = "verify"  # verify | discovery
+    # 任务总时长预算的绝对截止(monotonic 秒)；编排器注入，None=无预算。
+    # lead_verify 等 long-running 节点在认领新工作单元前自查，超限即软停转人工
+    budget_deadline: float | None = None
     # 节点执行中修正上游 handoff（如 reproduce 复活靶场后回写 env_ready）
     updated_handoffs: dict[str, dict] = field(default_factory=dict)
 

@@ -202,6 +202,9 @@ class RuntimeSettingsUpdateRequest(BaseModel):
     lead_verify_per_task: int | None = Field(None, ge=1)
     reproduce_per_lab: int | None = Field(None, ge=1)
     task_token_budget: int | None = Field(None, ge=0)
+    # 时长量纲(秒)：0=不限；上界 7 天防误填毫秒/纳秒
+    task_time_budget_seconds: int | None = Field(None, ge=0, le=7 * 24 * 60 * 60)
+    ai_node_timeout_seconds: int | None = Field(None, ge=0, le=7 * 24 * 60 * 60)
 
     @model_validator(mode="after")
     def _validate_runtime_budget(self) -> "RuntimeSettingsUpdateRequest":
@@ -235,6 +238,14 @@ class RuntimeSettingsUpdateRequest(BaseModel):
             and self.reproduce_per_lab > self.lead_verify_per_task
         ):
             raise ValueError("同靶场复现并发不能超过单任务线索终认并发")
+        for field_name in ("task_time_budget_seconds", "ai_node_timeout_seconds"):
+            value = values.get(field_name)
+            if value is not None and 0 < value < 60:
+                raise ValueError(f"{field_name} 小于 1 分钟没有意义，请设为 ≥60 或 0(不限)")
+        budget = values.get("task_time_budget_seconds", 0) or 0
+        node_timeout = values.get("ai_node_timeout_seconds", 0) or 0
+        if budget > 0 and node_timeout > budget:
+            raise ValueError("单节点超时不能大于任务总时长预算")
         return self
 
 
@@ -244,6 +255,8 @@ class RuntimeSettingsResponse(BaseModel):
     lead_verify_per_task: int
     reproduce_per_lab: int
     task_token_budget: int = 0
+    task_time_budget_seconds: int = 10800
+    ai_node_timeout_seconds: int = 3600
     max_allowed: int
     agent_runner_max_allowed: int
     lead_verify_max_allowed: int

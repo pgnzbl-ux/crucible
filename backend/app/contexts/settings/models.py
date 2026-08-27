@@ -139,6 +139,20 @@ class PlatformSetting(BaseModel):
         server_default="0",
         comment="单任务 token 预算(prompt+completion)；0=不限。软停：耗尽后不开新 agent 会话",
     )
+    task_time_budget_seconds: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=10800,
+        server_default="10800",
+        comment="单任务总时长预算(秒)；0=不限。生效值取本预算与 Celery 软限较小者",
+    )
+    ai_node_timeout_seconds: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=3600,
+        server_default="3600",
+        comment="单 AI 节点最长执行秒数(获槽后起计)；0=不限。超时杀容器，节点按失败收尾",
+    )
 
     def __repr__(self) -> str:
         return (

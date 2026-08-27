@@ -86,7 +86,12 @@ def test_alembic_chain_from_baseline():
     lead_nodes = (versions / "t3a0d2b19e58_lead_node_runs.py").read_text(encoding="utf-8")
     assert 'revision: str = "t3a0d2b19e58"' in lead_nodes
     assert 'down_revision: Union[str, None] = "s2f9c1a08e47"' in lead_nodes
-    assert _alembic_head() == "t3a0d2b19e58"
+    time_budget = (versions / "u4b1e7c30a91_task_time_budget_and_node_timeout.py").read_text(
+        encoding="utf-8",
+    )
+    assert 'revision: str = "u4b1e7c30a91"' in time_budget
+    assert 'down_revision: Union[str, None] = "t3a0d2b19e58"' in time_budget
+    assert _alembic_head() == "u4b1e7c30a91"
 
 
 @pytest.mark.asyncio
@@ -139,6 +144,8 @@ async def test_create_all_schema_matches_models():
                 "max_concurrent_agent_runners",
                 "lead_verify_per_task",
                 "reproduce_per_lab",
+                "task_time_budget_seconds",
+                "ai_node_timeout_seconds",
             } <= runtime_cols
             assert "agent_usage" in insp.get_table_names()
             usage_cols = {c["name"] for c in insp.get_columns("agent_usage")}

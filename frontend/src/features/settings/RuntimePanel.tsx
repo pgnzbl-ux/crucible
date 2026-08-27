@@ -35,6 +35,47 @@ function BudgetField({ name, label, description, max }: BudgetFieldProps) {
   )
 }
 
+type DurationFieldProps = {
+  name: keyof RuntimeSettingsInput
+  label: string
+  description: string
+  /** 表单字段实际以「分钟」为单位编辑，提交前换算回秒 */
+  form: ReturnType<typeof Form.useForm<RuntimeSettingsInput>>[0]
+}
+
+const MINUTES_MAX = 7 * 24 * 60 // 与后端上界 7 天一致
+
+function DurationField({ name, label, description, form }: DurationFieldProps) {
+  const seconds = Form.useWatch(name as string, form) as number | undefined
+  return (
+    <Col xs={24} md={12}>
+      <Card size="small" style={{ height: '100%' }}>
+        <Form.Item
+          name={name}
+          label={label}
+          rules={[
+            { required: true, message: `请设置${label}` },
+            { type: 'number', min: 0, max: MINUTES_MAX, message: `范围为 0–${MINUTES_MAX} 分钟` },
+          ]}
+          style={{ marginBottom: 8 }}
+        >
+          <InputNumber
+            min={0}
+            max={MINUTES_MAX}
+            precision={0}
+            style={{ width: '100%' }}
+            addonAfter="分钟"
+          />
+        </Form.Item>
+        <Text type="secondary">
+          {description}
+          {seconds === 0 ? '（当前：不限）' : ''}
+        </Text>
+      </Card>
+    </Col>
+  )
+}
+
 export function RuntimePanel() {
   const { message } = App.useApp()
   const qc = useQueryClient()
@@ -54,11 +95,19 @@ export function RuntimePanel() {
       max_concurrent_agent_runners: data.max_concurrent_agent_runners,
       lead_verify_per_task: data.lead_verify_per_task,
       reproduce_per_lab: data.reproduce_per_lab,
+      task_time_budget_seconds: Math.round(data.task_time_budget_seconds / 60),
+      ai_node_timeout_seconds: Math.round(data.ai_node_timeout_seconds / 60),
     })
   }, [data, form])
 
   const mutation = useMutation({
-    mutationFn: (values: RuntimeSettingsInput) => api.updateRuntimeSettings(values),
+    mutationFn: (values: RuntimeSettingsInput) =>
+      api.updateRuntimeSettings({
+        ...values,
+        // 表单以分钟编辑，提交换算回秒
+        task_time_budget_seconds: values.task_time_budget_seconds * 60,
+        ai_node_timeout_seconds: values.ai_node_timeout_seconds * 60,
+      }),
     onSuccess: (saved) => {
       message.success('并发与资源设置已生效')
       qc.setQueryData(['runtime-settings'], saved)
@@ -78,7 +127,19 @@ export function RuntimePanel() {
         按任务、线索终认、AI 容器、靶场复现分层控制并发。保存后对新调度与排队中的任务生效，不会中断已在运行的容器。
       </Paragraph>
 
-      <Form form={form} layout="vertical" onFinish={(values) => mutation.mutate(values)}>
+      <Form
+        form={form}
+        layout="vertical"
+        onFinish={(values) => {
+          const budgetMin = values.task_time_budget_seconds ?? 0
+          const nodeTimeoutMin = values.ai_node_timeout_seconds ?? 0
+          if (budgetMin > 0 && nodeTimeoutMin > budgetMin) {
+            message.error('单节点超时不能大于任务总时长预算')
+            return
+          }
+          mutation.mutate(values)
+        }}
+      >
         <Row gutter={[12, 12]}>
           <BudgetField
             name="max_concurrent_tasks"
@@ -103,6 +164,18 @@ export function RuntimePanel() {
             label="同靶场复现"
             max={Math.min(data?.reproduce_max_allowed ?? 4, leadCount)}
             description="同一靶场可同时进行的动态复现数。建议保持 1，避免相互干扰。"
+          />
+          <DurationField
+            name="task_time_budget_seconds"
+            label="任务总时长预算"
+            form={form}
+            description="单次运行的最长执行时间，超时未完成的运行将自动终止并保留已完成节点。设为 0 不限。注意：超过部署级 Celery 软限（默认 210 分钟）仍会被兜底拦截。"
+          />
+          <DurationField
+            name="ai_node_timeout_seconds"
+            label="单节点最长执行"
+            form={form}
+            description="单个 AI 节点从拿到容器起计的执行上限，超时会终止该容器并把节点记为失败；不能大于任务总时长预算。设为 0 不限。"
           />
         </Row>
 

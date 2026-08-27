@@ -463,23 +463,29 @@ Provider **没有独立启用/停用字段**。Agent 运行时只读取唯一的
 
 ### GET `/api/v1/settings/runtime`
 
-平台全局「同时 running 的验证任务数」。无行则插入默认 `max_concurrent_tasks=1`。RBAC 落地前任意已登录用户可读写。
+平台运行时设置：并发层级 + 时长预算 + token 预算。无行则按默认插入（并发 1/4/2/1，预算 10800s、节点超时 3600s、token 0=不限）。admin 权限。
 
 响应：
 
 ```json
 {
   "max_concurrent_tasks": 1,
+  "max_concurrent_agent_runners": 4,
+  "lead_verify_per_task": 2,
+  "reproduce_per_lab": 1,
+  "task_time_budget_seconds": 10800,
+  "ai_node_timeout_seconds": 3600,
+  "task_token_budget": 0,
   "max_allowed": 4,
   "worker_pool": "prefork"
 }
 ```
 
-`max_allowed` 来自 `AGENT_RUNNER_CONCURRENCY_LIMIT`（1–8，默认 4）。`worker_pool` 固定为 `prefork`（Celery worker 由 `run_worker.py` 启动）。
+`max_allowed` 来自 `AGENT_RUNNER_CONCURRENCY_LIMIT`（1–8，默认 4）。`task_time_budget_seconds` 为单任务总时长预算（秒，0=不限），**生效 deadline = min(本值, Celery 软限 3.5h)**；`ai_node_timeout_seconds` 为单 AI 容器获槽后最长执行（秒，0=不限）。
 
 ### PUT `/api/v1/settings/runtime`
 
-请求：`{ "max_concurrent_tasks": 2 }`（`extra=forbid`）。必须 `1 <= n <= max_allowed`，否则 422 `VALIDATION_FAILED`。改完立即作用于新抢槽；不取消已 running 的任务。Worker 先抢 Redis 槽 `crucible:running_run_ids` 再 claim；无槽保持 `queued` 并 `retry(countdown=15)`。
+请求（`extra=forbid`）：`{ "max_concurrent_tasks": 2 }`；时长字段以秒提交。校验失败 422 `VALIDATION_FAILED`：并发字段须 `1..max_allowed` 且 层级 reproduce≤lead≤runners；时长字段 `0..604800` 且 <60s 无意义报错；两时长均 >0 时 节点超时 ≤ 总预算。改完立即作用于新调度与新容器执行；不中断已 running 的任务。任务总预算在编排器每次调度循环检查。
 
 ### Credentials（任务级凭据，P1-6 已实现）
 

@@ -6,6 +6,11 @@ from app.contexts.agent.llm_errors import classify_llm_api_error
 # (子串匹配, 标题, 下一步) — 更具体的规则必须排在前面
 _RULES: list[tuple[str, str, str]] = [
     (
+        "单节点最长执行",
+        "AI 节点超过单节点最长执行时间",
+        "可在「设置 → 并发与资源」调大单节点超时（0=不限），或从本节点重试。",
+    ),
+    (
         "bubblewrap is required",
         "Agent 运行环境缺少进程隔离依赖",
         "请重建 Agent 运行镜像（需包含 bubblewrap）后重试。",

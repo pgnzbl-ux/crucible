@@ -130,7 +130,7 @@ def test_node_skills_exist_and_are_sliced():
     assert NODE_AI_KEYS == frozenset(
         {
             "canary", "profile", "env_ready", "api_hunt",
-            "audit", "reproduce", "report", "triage",
+            "audit", "reproduce", "report", "triage", "triage_batch",
         }
     )
     for key in NODE_AI_KEYS:

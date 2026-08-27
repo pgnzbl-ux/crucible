@@ -142,3 +142,76 @@ def test_runtime_put_returns_max_allowed():
     assert body["max_allowed"] == 4
     assert body["max_concurrent_agent_runners"] == 4
     assert body["worker_pool"] == "prefork"
+
+
+@pytest.mark.asyncio
+async def test_time_budget_fields_persist_and_clamp(session_factory):
+    from app.contexts.settings.repository import SettingsRepository
+    from app.contexts.settings.schemas import RuntimeSettingsUpdateRequest
+    from app.contexts.settings.service import SettingsService
+
+    async with session_factory() as session:
+        svc = SettingsService(SettingsRepository(session))
+        saved = await svc.update_runtime_settings(
+            RuntimeSettingsUpdateRequest(
+                task_time_budget_seconds=7200,
+                ai_node_timeout_seconds=1800,
+            )
+        )
+        assert saved.task_time_budget_seconds == 7200
+        assert saved.ai_node_timeout_seconds == 1800
+        again = await svc.get_runtime_settings()
+        assert again.task_time_budget_seconds == 7200
+
+        # 节点超时 > 新预算：PUT 显式拒绝（读路径另有静默收敛兜底）
+        from app.contexts.settings.schemas import RuntimeSettingsUpdateRequest as R
+
+        with pytest.raises(ValueError, match="单节点超时"):
+            await svc.update_runtime_settings(
+                R(task_time_budget_seconds=600)
+            )
+        clamped = await svc.get_runtime_settings()
+        assert clamped.task_time_budget_seconds == 7200
+
+        # 两者一起提交合法；读取收敛兜底覆盖旧数据/直改库场景
+        saved2 = await svc.update_runtime_settings(
+            R(task_time_budget_seconds=600, ai_node_timeout_seconds=600)
+        )
+        assert saved2.ai_node_timeout_seconds == 600
+        from sqlalchemy import select
+
+        from app.contexts.settings.models import PlatformSetting
+        row = (await session.execute(
+            select(PlatformSetting).where(PlatformSetting.singleton_key == "default")
+        )).scalar_one()
+        row.ai_node_timeout_seconds = 9999
+        converged = await svc.get_runtime_settings()
+        assert converged.ai_node_timeout_seconds == 600
+
+
+def test_update_request_rejects_duration_hierarchy():
+    from app.contexts.settings.schemas import RuntimeSettingsUpdateRequest
+
+    with pytest.raises(ValidationError, match="单节点超时"):
+        RuntimeSettingsUpdateRequest(
+            task_time_budget_seconds=600, ai_node_timeout_seconds=3600,
+        )
+
+
+def test_update_request_accepts_zero_as_unlimited():
+    from app.contexts.settings.schemas import RuntimeSettingsUpdateRequest
+
+    req = RuntimeSettingsUpdateRequest(
+        task_time_budget_seconds=0, ai_node_timeout_seconds=0,
+    )
+    assert req.task_time_budget_seconds == 0
+    assert req.ai_node_timeout_seconds == 0
+
+
+def test_update_request_rejects_sub_minute_and_overflow():
+    from app.contexts.settings.schemas import RuntimeSettingsUpdateRequest
+
+    with pytest.raises(ValidationError):
+        RuntimeSettingsUpdateRequest(task_time_budget_seconds=30)
+    with pytest.raises(ValidationError):
+        RuntimeSettingsUpdateRequest(ai_node_timeout_seconds=7 * 24 * 60 * 60 + 1)

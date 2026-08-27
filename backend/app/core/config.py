@@ -101,6 +101,9 @@ class Settings(BaseSettings):
     triage_fast_model_enabled: bool = True  # T2 快模型首审（llm_gateway screening 角色）
     triage_fast_confidence: float = 0.75  # 达到即定案，否则升级 agent
     triage_family_enabled: bool = True  # T3 同根因族代表审议 + 判决传播
+    # T3 子代理模式：整个二审一次容器，家族在容器内以 Task 子代理并行审议，
+    # 替代「每族一个 runner 容器」的资源开销；False 回退逐族容器路径
+    triage_subagent_mode: bool = True
     triage_propagate_min_confidence: float = 0.6  # 代表判决低于此值时成员转人工
     triage_propagate_confidence_factor: float = 0.85  # 传播判决置信度折扣(无验证数据时的默认)
     triage_concurrency: int = 4  # agent 审议并发（受 runner 并发上限约束）

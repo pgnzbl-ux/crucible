@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -44,6 +45,7 @@ from app.contexts.agent.errors import (
     humanize_agent_error,
     node_error_log_from_output,
 )
+from app.core.config import get_settings
 from app.contexts.task.models import NodeRun, Task, TaskRun
 
 from .nodes.api_hunt import ApiHuntNode
@@ -580,6 +582,27 @@ def compute_ready(pipeline, terminal: set[str]) -> list:
     ]
 
 
+async def _effective_time_budget_seconds(session: AsyncSession) -> float | None:
+    """单任务总时长预算（秒）：用户设置与部署级 Celery 软限取较小者。
+
+    读设置失败不阻断编排，退化为仅 Celery 软限兜底；均无限制返回 None
+    （当前 Celery 软限恒为正，实际不会走到）。
+    """
+    candidates = [float(get_settings().celery_task_soft_time_limit)]
+    try:
+        from app.contexts.settings.repository import SettingsRepository
+        from app.contexts.settings.service import SettingsService
+
+        runtime = await SettingsService(SettingsRepository(session)).get_runtime_settings()
+        if runtime.task_time_budget_seconds > 0:
+            candidates.append(float(runtime.task_time_budget_seconds))
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning(
+            "读取任务时长预算失败，退化为 Celery 软限兜底", exc_info=True
+        )
+    return min(candidates)
+
+
 def _require_data_missing(spec, store: HandoffStore, scalars: TaskScalars) -> bool:
     """数据前提(discovery-spec §4.2.2)：点分路径为空即缺失。
 
@@ -634,6 +657,7 @@ async def _execute_one(
     node_session: AsyncSession | None,
     session_factory=None,
     previous_outputs: dict | None = None,
+    budget_deadline: float | None = None,
 ) -> dict[str, Any]:
     """执行单个节点并落 NodeRun 终态。并发波用独立 session，顺序路径共享主 session。"""
     owns_session = node_session is None
@@ -660,6 +684,7 @@ async def _execute_one(
             owner_id=task_snap.owner_id,
             lab_id=task_snap.lab_id,
             task_type=task_snap.task_type,
+            budget_deadline=budget_deadline,
         )
         output = await node.execute(ctx, node_input)
         if await _is_cancelled_by_id(ns, task_snap.id, run_id):
@@ -745,6 +770,58 @@ async def run_orchestration(
     # 并发在飞：Task → (spec, node, nr_id, node_input, previous_outputs)
     inflight: dict[asyncio.Task, tuple] = {}
 
+    # 任务总时长预算：min(用户设置, Celery 软限)；超限即优雅失败收尾
+    budget_seconds = await _effective_time_budget_seconds(session)
+    budget_deadline: float | None = (
+        time.monotonic() + budget_seconds if budget_seconds is not None else None
+    )
+    budget_minutes = int(round(budget_seconds / 60)) if budget_seconds else 0
+
+    def _budget_remaining() -> float | None:
+        if budget_deadline is None:
+            return None
+        return max(0.0, budget_deadline - time.monotonic())
+
+    async def _abort_for_timeout() -> dict[str, Any]:
+        """预算耗尽收尾：已封口则保留权威结论只停后处理；否则整任务失败。"""
+        nonlocal analysis_sealed
+        await _cancel_inflight()
+        if analysis_sealed is not None:
+            # finalize 已固化任务终态，report 只是后处理文档：不推翻，仅停在未完成节点
+            await _mark_inflight_cancelled(session, run_id)
+            result = dict(analysis_sealed)
+            result["timeout_budget_exceeded"] = True
+            return result
+        detail = format_agent_error(
+            f"任务超过最大执行时长（预算 {budget_minutes} 分钟），已自动终止；"
+            "可从失败的 lead_verify/末节点重试以复用已完成节点",
+            node_key=None,
+        )
+        title, hint = humanize_agent_error(detail)
+        now = datetime.now(timezone.utc)
+        running_rows = await session.execute(
+            select(NodeRun).where(NodeRun.run_id == run_id, NodeRun.status == "running")
+        )
+        for nr in running_rows.scalars():
+            nr.status = "failed"
+            nr.error_message = clip_error_log(detail)
+            nr.finished_at = now
+        run.status = "failed"
+        run.error_message = clip_error_log(
+            f"任务超过最大执行时长（预算 {budget_minutes} 分钟）", limit=RUN_ERROR_LOG_MAX
+        )
+        run.finished_at = now
+        task.status = "failed"
+        await session.commit()
+        await _start_lab_ttl_after_task(session, task)
+        return {
+            "status": "failed",
+            "error": title,
+            "hint": hint,
+            "node": "task_time_budget",
+            "verdict": None,
+        }
+
     def _inflight_keys() -> set[str]:
         return {info[0].key for info in inflight.values()}
 
@@ -783,6 +860,7 @@ async def run_orchestration(
                 on_ai_event=on_ai_event, node_session=None,
                 session_factory=node_session_factory,
                 previous_outputs=prev,
+                budget_deadline=budget_deadline,
             ))
             inflight[t] = (spec, node, nr_id, node_input, prev)
 
@@ -791,6 +869,10 @@ async def run_orchestration(
             await _cancel_inflight()
             await _mark_inflight_cancelled(session, run_id)
             return _cancelled_result()
+
+        remaining = _budget_remaining()
+        if remaining is not None and remaining <= 0:
+            return await _abort_for_timeout()
 
         ready = [
             spec for spec in compute_ready(pipeline, terminal)
@@ -888,6 +970,7 @@ async def run_orchestration(
                 continue
             done, _ = await asyncio.wait(
                 inflight.keys(), return_when=asyncio.FIRST_COMPLETED,
+                timeout=_budget_remaining(),
             )
         else:
             # 串行准备(主 session)：写 input_json / running，并组装 Input
@@ -930,6 +1013,7 @@ async def run_orchestration(
                         source_path=source_path, runner_env=runner_env,
                         on_ai_event=on_ai_event, node_session=session,
                         previous_outputs=prev,
+                        budget_deadline=budget_deadline,
                     )
                     store.set(spec.key, success.output)
                     _apply_handoff_updates(store, success.handoff_updates)
@@ -954,6 +1038,7 @@ async def run_orchestration(
             await _spawn_prepared(prepared)
             done, _ = await asyncio.wait(
                 inflight.keys(), return_when=asyncio.FIRST_COMPLETED,
+                timeout=_budget_remaining(),
             )
 
         # 收尾已完成的在飞节点：先落成功，再处理取消/失败（与旧波次语义一致）

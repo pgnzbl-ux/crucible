@@ -59,6 +59,7 @@ class LeadVerifyNode:
             lab_id=ctx.lab_id,
             allow_reclaim=allow_reclaim,
             concurrency=runtime.lead_verify_per_task,
+            time_budget_deadline=ctx.budget_deadline,
         )
 
         # Lead 路径可能回写 env_ready；供后续 finalize/report 与其它线索可见

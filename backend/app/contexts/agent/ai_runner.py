@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -601,7 +602,21 @@ def validate_initial_creds(value: Any) -> tuple[bool, str | None]:
 
 
 def _validate_triage_output(output: dict) -> tuple[bool, str | None]:
-    """T3 二审形状：why + 叙事必填；可疑真洞还要证据与合格门字段（Agent 输出不可信）。"""
+    """T3 二审形状：why + 叙事必填；可疑真洞还要证据与合格门字段（Agent 输出不可信）。
+
+    批量子代理模式（triage_batch skill）提交 {"verdicts": [...]}：逐项走单组校验。
+    """
+    verdicts = output.get("verdicts")
+    if isinstance(verdicts, list):
+        if not verdicts:
+            return False, "批量判决 verdicts 不能为空"
+        for i, item in enumerate(verdicts):
+            if not isinstance(item, dict) or not str(item.get("group_id") or "").strip():
+                return False, f"verdicts[{i}] 缺少非空 group_id"
+            ok, err = _validate_triage_output(item)
+            if not ok:
+                return False, f"verdicts[{i}]: {err}"
+        return True, None
     verdict = output.get("verdict")
     if verdict not in ("tp", "fp", "need_more_context"):
         return False, "verdict 必须是 tp|fp|need_more_context"
@@ -713,9 +728,12 @@ def validate_output(
     schema = NODE_OUTPUT_SCHEMAS.get(node_key)
     if not schema:
         return True, None
-    for field_name in schema["required"]:
-        if field_name not in output:
-            return False, f"缺必需字段: {field_name}"
+    # triage 批量子代理形态（{"verdicts":[...]}）不适用单组必填清单，
+    # 由 _validate_triage_output 的批量分支逐项校验
+    if not (node_key == "triage" and isinstance(output.get("verdicts"), list)):
+        for field_name in schema["required"]:
+            if field_name not in output:
+                return False, f"缺必需字段: {field_name}"
     if node_key == "env_ready":
         return validate_initial_creds(output.get("initial_creds"))
     if node_key == "audit":
@@ -740,6 +758,8 @@ async def _run_one_container_unthrottled(
     on_event: Callable[[dict], None] | None,
     task_id: str | None,
     meta_out: dict[str, Any] | None = None,
+    # 挂载其他技能目录（如 triage 批量子代理模式）；NODE_KEY/tool 策略不变
+    skill_override: str | None = None,
 ) -> dict[str, Any]:
     """单轮容器执行：写 .node.json → 起容器 → 读 .node_output.json。
 
@@ -780,7 +800,7 @@ async def _run_one_container_unthrottled(
         encoding="utf-8",
     )
 
-    skill_dir = resolve_node_skill_dir(node_key)
+    skill_dir = resolve_node_skill_dir(skill_override or node_key)
 
     # 2. 构造 spec + 起容器(NODE_KEY env + skill 卷映射)
     spec = AgentRunnerSpec(
@@ -790,6 +810,8 @@ async def _run_one_container_unthrottled(
             "NODE_INPUT_PATH": f"/workspace/.runner/{execution_id}/node.json",
             "NODE_OUTPUT_PATH": f"/workspace/.runner/{execution_id}/node_output.json",
             "NODE_META_PATH": f"/workspace/.runner/{execution_id}/node_meta.json",
+            # 技能模式切换提交契约（如 triage → triage_batch）
+            **({"NODE_SCHEMA_KEY": skill_override} if skill_override and skill_override != node_key else {}),
         },
         host_workdir=host_workdir,
         skill_host_dir=str(skill_dir),
@@ -830,9 +852,29 @@ async def _run_one_container_unthrottled(
         if on_event:
             on_event(event)
 
-    exit_code, summary = await asyncio.to_thread(
-        agent_runner_manager.run_with_streaming, spec, _on_event
-    )
+    exit_code: int
+    summary: dict[str, Any] | None
+    node_timeout = await _ai_node_timeout_seconds()
+    if node_timeout > 0:
+        manager_before: set[str] = set(getattr(agent_runner_manager, "_active_ids", set()) or set())
+        try:
+            exit_code, summary = await asyncio.wait_for(
+                asyncio.to_thread(
+                    agent_runner_manager.run_with_streaming, spec, _on_event,
+                ),
+                timeout=node_timeout,
+            )
+        except asyncio.TimeoutError:
+            # 线程仍阻塞在 container.wait()：按 create 顺序差异找出本容器强杀，
+            # run_with_streaming 的 finally 随后正常收尾。
+            _kill_active_runner_containers(agent_runner_manager, manager_before)
+            raise AgentRunnerError(
+                f"AI 节点 {node_key} 超过单节点最长执行时间（{node_timeout}s），已终止容器"
+            ) from None
+    else:
+        exit_code, summary = await asyncio.to_thread(
+            agent_runner_manager.run_with_streaming, spec, _on_event
+        )
 
     # 3. 读 .node_output.json(submit_result 写的)
     output_path = node_output_path
@@ -954,6 +996,7 @@ async def _run_one_container(
     task_id: str | None,
     meta_out: dict[str, Any] | None = None,
     reproduce_scope: str | None = None,
+    skill_override: str | None = None,
 ) -> dict[str, Any]:
     """按运行时预算等待槽位；等待与容器执行均不设总时长超时。"""
     from app.core.config import get_settings
@@ -966,6 +1009,7 @@ async def _run_one_container(
         on_event=on_event,
         task_id=task_id,
         meta_out=meta_out,
+        skill_override=skill_override,
     )
     # Mock 不占 Docker/AI 资源，也不依赖 Redis。
     if not get_settings().claude_agent_sdk_enabled:
@@ -1013,6 +1057,57 @@ def _is_sdk_env_key(key: str) -> bool:
     return key.startswith(_SDK_ENV_PREFIXES) or key in _SDK_ENV_KEYS
 
 
+# 单 AI 节点超时（platform_settings.ai_node_timeout_seconds）进程内缓存，
+# 免去每次容器执行都开 DB 会话；设置页保存后最多 30s 生效。
+_NODE_TIMEOUT_TTL_SECONDS = 30.0
+_node_timeout_cache: dict[str, float] = {"value": -1.0, "at": 0.0}
+
+
+async def _ai_node_timeout_seconds() -> int:
+    """单节点最长执行秒数（获槽后起计）；0=不限。读失败退化为 0（不阻断执行）。"""
+    now = time.monotonic()
+    cached = _node_timeout_cache["value"]
+    if cached >= 0 and now - _node_timeout_cache["at"] < _NODE_TIMEOUT_TTL_SECONDS:
+        return int(cached)
+    value = 0
+    try:
+        from sqlalchemy import select
+
+        from app.contexts.settings.models import PlatformSetting
+        from app.core.database import async_session_factory
+
+        async with async_session_factory() as session:
+            row = (await session.execute(
+                select(PlatformSetting.ai_node_timeout_seconds).where(
+                    PlatformSetting.singleton_key == "default"
+                )
+            )).scalar()
+            if row is not None:
+                value = max(0, int(row))
+    except Exception:  # noqa: BLE001
+        logger.warning("读取 ai_node_timeout_seconds 失败，本进程内按不限处理", exc_info=True)
+    from app.core.config import get_settings
+
+    soft = get_settings().celery_task_soft_time_limit
+    if value > 0 and soft > 0:
+        value = min(value, soft)
+    _node_timeout_cache.update(value=float(value), at=now)
+    return value
+
+
+def _kill_active_runner_containers(manager: Any, before: set[str]) -> None:
+    """超时后强杀本次执行新起的容器（线程仍在 container.wait() 上阻塞）。"""
+    try:
+        for cid in list(getattr(manager, "_active_ids", set()) or set()):
+            if cid not in before:
+                try:
+                    manager.remove_by_id(cid)
+                except Exception:  # noqa: BLE001
+                    logger.warning("超时清理容器失败 id=%s", cid, exc_info=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 async def run_ai_node(
     *,
     node_key: str,
@@ -1024,6 +1119,7 @@ async def run_ai_node(
     validate: bool = True,
     meta_out: dict[str, Any] | None = None,
     reproduce_scope: str | None = None,
+    skill_override: str | None = None,
 ) -> dict[str, Any]:
     """起 agent-runner 容器跑一个 AI 节点,返回 output_json。
 
@@ -1045,6 +1141,7 @@ async def run_ai_node(
         task_id=task_id,
         meta_out=meta_out,
         reproduce_scope=reproduce_scope,
+        skill_override=skill_override,
     )
 
     # 4. schema 校验（validate=False 时跳过：调用方自带回喂环）
@@ -1071,6 +1168,7 @@ async def run_ai_node_with_shape_retry(
     task_id: str | None = None,
     meta_out: dict[str, Any] | None = None,
     reproduce_scope: str | None = None,
+    skill_override: str | None = None,
 ) -> dict[str, Any]:
     """AI 节点 + 形状回喂环（P0#1 修复）。
 
@@ -1111,6 +1209,7 @@ async def run_ai_node_with_shape_retry(
             task_id=task_id,
             meta_out=meta_out,
             reproduce_scope=reproduce_scope,
+            skill_override=skill_override,
         )
 
         ok, err = validate_output(node_key, output, host_workdir=host_workdir)
