@@ -812,6 +812,18 @@ async def run_orchestration(
         )
         run.finished_at = now
         task.status = "failed"
+        # 闭合残留线索（同 Celery 软超时兜底），防"已失败仍显示执行中"
+        from .lead_worker import terminalize_task_leads
+
+        try:
+            await terminalize_task_leads(
+                session, task_id=task_id,
+                reason=f"任务超过最大执行时长（预算 {budget_minutes} 分钟），剩余线索未终认",
+            )
+        except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).warning(
+                "预算中止清理残留线索失败 task=%s", task_id, exc_info=True
+            )
         await session.commit()
         await _start_lab_ttl_after_task(session, task)
         return {

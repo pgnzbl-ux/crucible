@@ -401,6 +401,17 @@ async def apply_analysis_failure(
         await session.refresh(task)
         if task.status not in _PROTECTED_TERMINAL_STATUSES:
             task.status = "failed"
+    if task is not None and run is not None and run.status == "failed":
+        # 失败收尾必须闭合残留线索，否则拓扑序列化把已失败任务显示成执行中
+        from app.contexts.agent.lead_worker import terminalize_task_leads
+
+        try:
+            await terminalize_task_leads(
+                session, task_id=task.id,
+                reason=f"任务失败收尾，线索未终认: {clip_error_log(error)[:120]}",
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("失败收尾清理残留线索失败 task=%s", task.id, exc_info=True)
     await session.flush()
     if task is not None:
         from app.contexts.lab.service import LabService

@@ -83,6 +83,7 @@ async def _serialize_lead_verify_run(
     run_id: str,
     dispatch_node: Any | None,
     usage: dict[str, int] | None,
+    run_status: str | None = None,
 ) -> dict[str, Any]:
     """把真实 LeadRun/LeadNodeRun 聚合为任务拓扑中的 lead_verify 节点。"""
     from collections import Counter, defaultdict
@@ -124,7 +125,9 @@ async def _serialize_lead_verify_run(
             else "pending"
         )
     elif any(lead.status in ("queued", "running") for lead in leads):
-        status = "running"
+        # 任务已终态时的 queued/running 是历史事故残留（如超时击杀未清队），
+        # 不得再渲染成"执行中"
+        status = "running" if run_status not in ("failed", "cancelled") else run_status
     elif all(lead.status == "skipped" for lead in leads):
         status = "skipped"
     else:
@@ -780,6 +783,7 @@ class TaskService:
             for nr in node_rows
         ]
         if (getattr(task, "task_type", None) or "verify") == "discovery":
+            run_row = await self.repo.session.get(TaskRun, run_id)
             dispatch = next((nr for nr in node_rows if nr.node_key == "dispatch"), None)
             lead_usage: dict[str, int] = {}
             for node_key in ("audit", "reproduce"):
@@ -791,15 +795,17 @@ class TaskService:
                 run_id=run_id,
                 dispatch_node=dispatch,
                 usage=lead_usage or None,
+                run_status=getattr(run_row, "status", None),
             )
             existing_idx = next(
                 (i for i, n in enumerate(nodes) if n["node_key"] == "lead_verify"),
                 None,
             )
             if existing_idx is not None:
-                # 编排器已落真实 NodeRun：用 LeadRun 聚合丰富状态/用量，保留 DB id/index
+                # 编排器已落真实 NodeRun：用 LeadRun 聚合丰富状态/用量，保留 DB id/index。
+                # 真实节点的终态优先——聚合推断（含历史残留线索）不得改写终态
                 base = nodes[existing_idx]
-                nodes[existing_idx] = {
+                merged = {
                     **serialized,
                     "id": base["id"],
                     "node_index": base["node_index"],
@@ -808,6 +814,10 @@ class TaskService:
                     "finished_at": base.get("finished_at") or serialized.get("finished_at"),
                     "usage": serialized.get("usage") or base.get("usage"),
                 }
+                if base["status"] in ("completed", "failed", "skipped", "cancelled"):
+                    merged["status"] = base["status"]
+                    merged["error_message"] = base.get("error_message")
+                nodes[existing_idx] = merged
             else:
                 nodes.append(serialized)
             nodes.sort(key=lambda node: float(node["node_index"]))

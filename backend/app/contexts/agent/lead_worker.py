@@ -510,6 +510,45 @@ async def drain_lead_queue(
     return done_ids
 
 
+async def terminalize_task_leads(
+    session: AsyncSession, *, task_id: str, reason: str
+) -> int:
+    """失败/中止收尾：把残留 queued/running 的线索收敛为 skipped + needs_review。
+
+    供 Celery 软超时兜底与编排器预算中止等「任务终态已定」的路径调用；
+    未审≠误报（spec §1.3），同时闭合仍在 running 的孤儿阶段行，
+    否则拓扑序列化层会把已失败的任务显示成"执行中"。
+    """
+    from datetime import datetime as _dt
+
+    rows = (await session.execute(
+        select(LeadRun).where(
+            LeadRun.task_id == task_id,
+            LeadRun.status.in_(("queued", "running")),
+        )
+    )).scalars().all()
+    if not rows:
+        return 0
+    now = _dt.now(timezone.utc)
+    for lead in rows:
+        lead.status = "skipped"
+        lead.error = reason[:8000]
+        await _reconcile_group(session, lead.alert_group_id, "needs_review")
+    lead_ids = [lead.id for lead in rows]
+    open_phases = (await session.execute(
+        select(LeadNodeRun).where(
+            LeadNodeRun.lead_run_id.in_(lead_ids),
+            LeadNodeRun.status == "running",
+        )
+    )).scalars().all()
+    for row in open_phases:
+        row.status = "failed"
+        row.error = reason[:2000]
+        row.finished_at = now
+    await session.flush()
+    return len(rows)
+
+
 def build_discovery_report_from_leads(
     leads: list[LeadRun],
     *,
