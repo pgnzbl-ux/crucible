@@ -3,6 +3,7 @@ export const DEFAULT_PAGE_SIZE = 20
 export interface TaskListQueryInput {
   status?: string
   priority?: string
+  taskType?: 'verify' | 'discovery'
   q?: string
   dateFrom?: string
   dateTo?: string
@@ -19,6 +20,7 @@ export function buildTaskListApiParams(params: TaskListQueryInput): Record<strin
   }
   if (params.status) api.status = params.status
   if (params.priority) api.priority = params.priority
+  if (params.taskType) api.task_type = params.taskType
   if (params.q) api.q = params.q
   if (params.dateFrom) api.date_from = params.dateFrom
   if (params.dateTo) api.date_to = params.dateTo

@@ -1,4 +1,5 @@
 """run_one.py：蒸馏 skill 作 system_prompt；user 只带本轮 JSON；不加载桌面插件。"""
+
 import json
 import os
 import sys
@@ -21,7 +22,6 @@ from runner.run_one import (  # noqa: E402
     NODE_AI_KEYS,
     NODE_INPUT_SCHEMAS,
     _build_node_prompt,
-    _build_options,
     _container_source_dir,
     _load_node_skill,
     _sdk_cwd,
@@ -29,6 +29,7 @@ from runner.run_one import (  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 NODE_SKILLS = ROOT / "infrastructure" / "agent-runner" / "node-skills"
+os.environ["NODE_SKILL_DIR"] = str(NODE_SKILLS)
 
 _ROLE_LEAKS = (
     "你是项目画像员",
@@ -66,12 +67,12 @@ def test_reproduce_prompt_includes_target_url_in_json():
     text = _build_node_prompt(
         "reproduce",
         {
-            "target_url": "http://host.docker.internal:8080",
+            "target_url": "http://10.0.0.8:8080",
             "initial_creds": {"username": "admin", "password": "admin123"},
             "audit": {"gate_verdict": "pass"},
         },
     )
-    assert "host.docker.internal:8080" in text
+    assert "10.0.0.8:8080" in text
     assert "admin123" in text
     dumped = json.dumps({"gate_verdict": "pass"})
     assert "gate_verdict" in text
@@ -127,13 +128,19 @@ def test_submit_schema_uses_only_anthropic_tool_subset():
 
 def test_node_skills_exist_and_are_sliced():
     assert NODE_AI_KEYS == frozenset(
-        {"profile", "env_ready", "audit", "reproduce", "report"}
+        {
+            "canary", "profile", "env_ready", "api_hunt",
+            "audit", "reproduce", "report", "triage", "triage_batch",
+        }
     )
     for key in NODE_AI_KEYS:
         path = NODE_SKILLS / key / "SKILL.md"
         assert path.is_file(), f"缺少 {path}"
         body = path.read_text(encoding="utf-8")
         assert "submit_result" in body
+        if key == "canary":
+            assert "Read" in body and "Bash" in body
+            assert "credential_visible" in body
         if key == "audit":
             assert "一次 HTTP 请求测" not in body
             assert "不发" in body or "禁止" in body
@@ -146,16 +153,26 @@ def test_node_skills_exist_and_are_sliced():
             assert "上一轮产物" in body
             assert "failed_stage" in body
         if key == "reproduce":
-            assert "host.docker.internal" in body
+            assert "原样使用" in body
+            assert "initial_creds" in body
+            assert "IP:port" in body or "target_url" in body
             assert "attempts" in body
             assert "`type`" in body
             assert "`detail`" in body
             assert "report_data" in body
             assert "禁止" in body
+            assert "host.docker.internal" in body  # 明确禁止该项
         if key == "report":
             assert "verification_record" in body
             assert "vulnerability_report" in body
             assert "expected_verdict" in body
+        if key == "triage":
+            assert "tp" in body and "fp" in body
+            assert "need_more_context" in body
+            assert "禁止" in body
+        if key == "api_hunt":
+            assert "submit_result" in body
+            assert "HTTP" in body or "http" in body
 
 
 def test_load_node_skill_reads_distilled_file():
@@ -215,6 +232,56 @@ def test_build_options_appends_skill_without_desktop_plugin():
     assert "画像" in (prompt.get("append") or "")
 
 
+def test_build_options_keeps_full_automation_and_isolates_repo_config():
+    captured: dict = {}
+
+    class CaptureOptions:
+        def __init__(self, **kwargs):
+            captured.clear()
+            captured.update(kwargs)
+
+    import runner.run_one as run_one
+
+    run_one.ClaudeAgentOptions = CaptureOptions
+    run_one._build_options(model="m", max_turns=8, node_key="audit", cwd="/workspace/x")
+
+    assert captured["permission_mode"] == "bypassPermissions"
+    assert captured["tools"] == {"type": "preset", "preset": "claude_code"}
+    assert captured["setting_sources"] == []
+    assert captured["strict_mcp_config"] is True
+    assert captured["sandbox"] == {"enabled": False}
+    pre_hooks = captured["hooks"]["PreToolUse"]
+    assert len(pre_hooks) == 3, "Bash 黑名单 + Read/Grep 压缩产物拦截"
+    assert not isinstance(pre_hooks[0], dict), "裸 dict 会被 SDK 静默丢掉 hooks"
+    stop_hooks = captured["hooks"]["Stop"]
+    assert len(stop_hooks) == 1
+    assert not isinstance(stop_hooks[0], dict)
+    assert "crucible" in captured["mcp_servers"]
+    assert "mcp__crucible__submit_result" in captured["allowed_tools"]
+    assert "mcp__crucible__read_slice" in captured["allowed_tools"]
+    assert "submit_result" not in captured["allowed_tools"]
+
+
+def test_build_options_sets_effort_from_env(monkeypatch):
+    captured: dict = {}
+
+    class CaptureOptions:
+        def __init__(self, **kwargs):
+            captured.clear()
+            captured.update(kwargs)
+
+    import runner.run_one as run_one
+
+    monkeypatch.setenv("CLAUDE_CODE_EFFORT_LEVEL", "high")
+    run_one.ClaudeAgentOptions = CaptureOptions
+    run_one._build_options(model="m", max_turns=8, node_key="audit", cwd="/workspace/x")
+    assert captured.get("effort") == "high"
+
+    monkeypatch.setenv("CLAUDE_CODE_EFFORT_LEVEL", "auto")
+    run_one._build_options(model="m", max_turns=8, node_key="audit", cwd="/workspace/x")
+    assert "effort" not in captured
+
+
 def test_build_options_extra_args_is_dict_when_present():
     """SDK 0.2.x _build_command 走 extra_args.items()，list 会炸。"""
     captured: dict = {}
@@ -272,6 +339,8 @@ def test_reproduce_skill_drops_attempt_cap_and_requires_first_shot():
     assert "判定即停" in text
     assert "poc" in text
     assert "python" in text.lower()
+    assert "禁止空转" in text
+    assert "不设验证次数上限" not in text
 
 
 def test_report_skill_poc_is_platform_owned():

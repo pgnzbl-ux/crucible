@@ -2,7 +2,7 @@
 
 # Crucible
 
-**AI 驱动的漏洞自动验证平台**
+**AI 辅助代码审计与漏洞挖掘平台**
 
 代码与漏洞投入烈火，真伪自现。
 
@@ -21,17 +21,17 @@
 
 ## 这是什么
 
-Crucible 是面向安全研究员的**漏洞自动验证平台**。
+Crucible 是面向安全研究员和研发团队的 **AI 辅助代码审计与漏洞挖掘平台**。
 
-你提交一个项目地址和一段漏洞描述，平台在隔离环境里自动完成：读源码、搭建靶场、白盒推演利用链、在靶场上确认危害、出具中文报告。
+主流程从项目资产发起代码审计；已有明确漏洞线索时，也可以进入定向验证：
 
-它验证的是「这个洞是不是真的、能不能打、证据是什么」，而不是再扫一遍代码找新洞。
+| | 代码审计（主入口） | 定向验证（次级入口） |
+| --- | --- | --- |
+| **你提供** | Git 仓库或源码包及确定版本 | 代码版本 + 已知漏洞描述（可附带 PoC / 分析过程） |
+| **平台做什么** | 多引擎扫描、聚类、AI 研判，多条合格线索并发终认 | 读源码、白盒推演，并在可用时进入隔离环境复现 |
+| **你得到** | 漏洞线索工作台与完整审计报告；零确认漏洞也出具覆盖报告 | 六档终认结论；确认漏洞可附复现证据 |
 
-| | |
-| --- | --- |
-| **你提供** | Git 仓库地址 + 漏洞描述（可附带已有 PoC / 分析过程） |
-| **你得到** | 结构化中文报告：结论、证据链、复现路径、修复建议；确认的漏洞附带可复现 PoC |
-| **判定** | 已确认 / 部分确认 / 代码可达 / CODE SMELL / 误报 / 未复现 |
+判定档位：已确认 / 部分确认 / 代码可达 / CODE SMELL / 误报 / 未复现。
 
 结论由**最强可观察证据**决定：诊断信号（HTTP 500、日志、sink 命中）只说明可达，不能当成「已确认」。
 
@@ -39,20 +39,24 @@ Crucible 是面向安全研究员的**漏洞自动验证平台**。
 
 扫描器（SAST / DAST）的输出通常是噪声大于信号：真实可利用漏洞、误报、代码异味混在一起。人工逐条复核贵，直接信扫描器又会漏掉真正能打的洞。
 
-安全研究员真正要的是**验证**，不是再「发现」一遍：
+安全研究员真正要的是可解释的**漏洞挖掘与终认**，以及把扫描噪声收成可行动的线索：
 
 1. 这个告警是不是误报？
 2. 攻击者能不能实际打出可观察危害？
 3. 复现路径和证据是什么？
 4. 该怎么修？
 
-Crucible 按研究员的方法论自动走完这条链路：
+终认工位按研究员的方法论自动走完这条链路：
 
 > **白盒优先** —— 先用源码走通调用链、读全每一层防御，把 payload 在纸上推演到「理论可通」，再用一次请求在靶场确认。推演不通即判误报，绝不在靶场上黑盒盲试。
 
+代码审计用确定性引擎做覆盖、用 AI 做封闭二审，再把多条合格线索分别交给同一套终认工位；边界线索进入人工复核。这不是开放式「让 AI 自己找洞」。
+
 ## 平台特色
 
-- **白盒优先的验证，而不是扫描** —— 源码是主战场，靶场只做最后确认
+- **审计优先** —— 项目资产、代码审计、漏洞线索、终认、审计报告形成一条主流程
+- **多引擎发现漏斗** —— Semgrep / Gitleaks / OSV 扫描、聚类、AI 研判；合格线索并发终认，边界项进入人工复核
+- **白盒优先的终认** —— 源码是主战场，运行环境只做最后确认
 - **自动搭靶场并复用** —— 为 Web 项目拉起隔离运行环境；同一项目可复用已就绪靶场
 - **Agent 在沙箱里跑** —— 分析过程在独立 Docker 容器中执行，与平台进程隔离
 - **进度看得见** —— 任务详情实时展示节点进度和 Agent 过程（思考、工具调用、结论）
@@ -64,17 +68,17 @@ Crucible 按研究员的方法论自动走完这条链路：
 
 ## 界面预览
 
-任务详情实时展示六节点进度：源码、画像、靶场、审计、复现、报告。
+审计详情先展示业务阶段与结果，节点 DAG 和 Agent 事件作为运行诊断信息。
 
 ![任务进度：源码 / 画像 / 靶场已完成，审计执行中](docs/assets/screenshot-task-progress.png)
 
 源码按 Git 地址接入，自动识别技术栈，并按 commit 缓存到对象存储。
 
-![源码管理：项目画像与已缓存源码包](docs/assets/screenshot-source-management.png)
+![项目资产：项目画像与已缓存源码包](docs/assets/screenshot-source-management.png)
 
 靶场按项目隔离，提供访问地址与停止 / 启动 / 重建 / 销毁。
 
-![靶场管理：隔离环境及其 compose 容器](docs/assets/screenshot-lab-management.png)
+![验证环境：隔离环境及其 compose 容器](docs/assets/screenshot-lab-management.png)
 
 ## 架构
 
@@ -90,16 +94,18 @@ FastAPI  API  ── PostgreSQL
     ▼
 Celery Worker
     ├─ 拉取 / 缓存源码
-    ├─ 按 6 个节点编排验证
+    ├─ 按节点编排：验证走白盒终认；仓库审计先扫描再终认
     ├─ 每个 AI 节点拉起一只 agent-runner 容器
     └─ 靶场用 Docker Compose 在隔离网络中启动
 ```
 
-一次任务按固定流水线推进（非 Web 项目会在画像后结束，不搭靶场、不下漏洞结论）：
+定向验证按这条链路推进（非 Web 项目跳过动态环境，但仍执行白盒审计）：
 
 ```
 拉取源码 → 项目画像 → 靶场就绪 → 白盒审计 → 靶场复现 → 生成报告
 ```
+
+代码审计在画像之后执行独立扫描、聚类、AI 研判与调度，再由多个终认工位分别处理合格线索；没有合格线索时跳过终认，但仍生成零漏洞审计报告。
 
 | 节点 | 做什么 |
 | --- | --- |
@@ -129,19 +135,22 @@ Celery Worker
 ### 前置
 
 - Linux 宿主（含 WSL）；不支持在 Windows 本机直接跑后端 / Worker
-- Docker 20+ 与 Docker Compose v2+
-- Python 3.11+
+- Docker 20+ 与 Docker Compose v2+（WSL 重启后先确认 Docker 已起来）
+- Python 3.11+（推荐 3.12）
 - Node.js 18+
 - 本机可访问 Docker（真实验证模式要拉容器）
 - 可选：Anthropic 兼容 LLM 凭据（如 [DeepSeek](https://platform.deepseek.com/)）。没有凭据也能先用 Mock 跑通界面
 
 ### 启动
 
+仓库根目录用 `.venv`。三个进程都要开：只开 API 时任务会停在队列里。
+
 ```bash
 git clone https://github.com/pgnzbl-ux/crucible.git Crucible && cd Crucible
+python3.12 -m venv .venv && source .venv/bin/activate
 
-# 1. PostgreSQL + Redis + MinIO
-cd infrastructure && docker compose up -d && cd ..
+# 1. PostgreSQL + Redis + MinIO（端口仅绑 127.0.0.1；口令见 infrastructure/.env）
+cd infrastructure && cp -n .env.example .env && docker compose up -d && cd ..
 
 # 2. 构建 Agent 镜像（首次，或改了 agent-runner / 节点 skill 之后）
 #    必须在仓库根目录构建，否则镜像里会缺节点 skill
@@ -151,9 +160,10 @@ docker build -f infrastructure/agent-runner/Dockerfile -t crucible-agent-runner:
 cd backend
 cp .env.example .env
 pip install -e ".[dev]"
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8010
+pip install -r requirements.txt          # semgrep 等扫描依赖
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload
 
-# 4. Celery Worker（终端 2）
+# 4. Celery Worker（终端 2；缺 gitleaks / osv-scanner / 本地 semgrep 规则树时会写入当前 .venv）
 python run_worker.py
 
 # 5. 前端（终端 3）
@@ -161,6 +171,8 @@ cd ../frontend
 npm install
 npm run dev
 ```
+
+WSL 或机器重启后：先开 Docker，再 `cd infrastructure && docker compose up -d`，然后三个终端分别 activate `.venv`、起 API、Worker、前端。数据卷、`.env`、镜像都还在，不必重装依赖、不必重建 Agent 镜像。
 
 ### 访问
 
@@ -218,9 +230,9 @@ CLAUDE_AGENT_SDK_ENABLED=true
 **Mock（默认）**：`CLAUDE_AGENT_SDK_ENABLED=false`。不调真实模型，用来确认「创建任务 → 进度 → 报告」整条链路能转。
 
 1. 打开控制台，按页面提示创建账号或登录
-2. 新建任务，填写 Git 地址和漏洞描述
-3. 打开任务详情看节点进度
-4. 结束后查看报告；需要时上传补充证据
+2. 在项目资产中选择版本并发起 **代码审计**
+3. 在审计详情查看覆盖、阶段进度和漏洞线索
+4. 在线索工作台人工复核边界项，必要时发起定向验证；完成后查看审计报告
 
 **真实验证**：打开 `CLAUDE_AGENT_SDK_ENABLED=true`，并在设置里配置**默认** LLM Provider。Worker 会按节点拉起隔离容器做白盒分析与靶场复现。
 
@@ -229,8 +241,10 @@ CLAUDE_AGENT_SDK_ENABLED=true
 **进程与端口**
 
 - 必须同时跑 **API + Worker + 前端**。只开 API 时任务会停在队列里
-- **同时运行几个任务**：控制台「设置」里可改（默认 1，硬顶见 `AGENT_RUNNER_CONCURRENCY_LIMIT`）。Worker 用 `python run_worker.py`（固定 prefork）
-- 端口刻意避开本机常见占用：API `8010`、前端 `5173`、Postgres `5433`、Redis `6380`、MinIO `9000/9001`
+- **并发与资源**：控制台「设置」可分别调整同时运行任务、全局 AI 容器、单任务线索终认和同靶场复现。超过全局槽位的 AI 会等待；单任务另有 Celery soft/hard wall-clock（默认 3.5h / 4h）防止永久占满 Worker
+- `AGENT_RUNNER_CONCURRENCY_LIMIT` 只作为部署硬顶和 Worker prefork 进程数；日常并发不再靠 `.env` 调整。Worker 用 `python run_worker.py`
+- 端口刻意避开本机常见占用：API `8010`、前端 `5173`、Postgres `5433`、Redis `6380`、MinIO `9000/9001`（基础设施默认仅监听 `127.0.0.1`）
+- Redis 启用 `requirepass`：`backend/.env` 中 `REDIS_URL` / Celery URL 须与 `infrastructure/.env` 的 `REDIS_PASSWORD` 一致（见 `.env.example`）
 - `python app/main.py` 默认不是 8010，请用快速开始里的 uvicorn 命令
 
 **数据库**
@@ -256,8 +270,8 @@ CLAUDE_AGENT_SDK_ENABLED=true
 
 **能力边界**
 
-- 验证对象是「给定描述的那一个漏洞」，不是全量扫描
-- 非 Web 项目不会搭靶场，也不会给出漏洞结论
+- 定向验证针对「给定描述的那一个漏洞」；代码审计覆盖引擎和 AI 能触达的点，**不保证**穷尽全库
+- 非 Web 项目不会搭动态验证环境，但仍可完成扫描、AI 研判、白盒终认和审计报告
 - 靶场起不来（多轮失败）时任务失败，可重试
 - Mock 模式的报告不能当作真实审计结果
 
@@ -281,7 +295,7 @@ npm test
 ```text
 Crucible/
 ├── backend/                 # FastAPI API + Celery Worker
-│   └── app/contexts/        # Bounded Contexts（task/agent/report/identity/settings/lab/project）
+│   └── app/contexts/        # Bounded Contexts（task/agent/report/identity/settings/lab/project/finding/discovery）
 ├── frontend/                # React 19 控制台
 ├── infrastructure/          # Docker Compose + Agent 镜像 + 部署模板
 │   ├── agent-runner/        # Agent 沙箱镜像（node-skills 蒸馏方法论）

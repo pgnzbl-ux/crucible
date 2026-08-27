@@ -1,5 +1,6 @@
 """任务失败时保留 host_workdir，方便对照源码与节点产物。"""
 import os
+from unittest.mock import patch
 
 from app.contexts.agent.tasks import (
     _purge_secrets_dir,
@@ -27,6 +28,22 @@ def test_reset_host_workdir_wipes_stub_project(tmp_path):
     assert tmp_path.is_dir()
     assert not stub.exists()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_reset_host_workdir_rotates_tree_when_inner_files_cannot_be_deleted(tmp_path):
+    """靶场改属主后即使旧树删不掉，新 run 仍必须得到干净工作区。"""
+    old = tmp_path / "repo" / "www"
+    old.mkdir(parents=True)
+    (old / ".htaccess").write_text("old", encoding="utf-8")
+
+    with patch("app.contexts.agent.tasks._cleanup_hostdir", return_value=False):
+        reset_host_workdir(str(tmp_path))
+
+    assert tmp_path.is_dir()
+    assert list(tmp_path.iterdir()) == []
+    stale = list(tmp_path.parent.glob(f"{tmp_path.name}.stale-*"))
+    assert len(stale) == 1
+    assert (stale[0] / "repo" / "www" / ".htaccess").read_text() == "old"
 
 
 def test_purge_secrets_dir_before_retain(tmp_path):

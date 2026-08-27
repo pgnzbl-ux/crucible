@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -111,9 +112,15 @@ def _local_head_sha(project_dir: str) -> str | None:
     return sha[:40] if len(sha) >= 40 else None
 
 
-def _rmtree(path: str) -> None:
-    if not os.path.isdir(path):
-        return
+def _rmtree(path: str) -> bool:
+    if not os.path.lexists(path):
+        return True
+    if os.path.islink(path) or not os.path.isdir(path):
+        try:
+            os.unlink(path)
+        except OSError:
+            return False
+        return not os.path.lexists(path)
 
     def _force_remove(func, p, _exc):  # noqa: ANN001
         try:
@@ -122,19 +129,53 @@ def _rmtree(path: str) -> None:
         except Exception:
             pass
 
-    shutil.rmtree(path, onerror=_force_remove)
+    try:
+        shutil.rmtree(path, onerror=_force_remove)
+    except OSError:
+        pass
+    return not os.path.lexists(path)
+
+
+def _clear_destination(path: str) -> str | None:
+    """确保正式源码目录可重新使用；删不掉时原子隔离旧目录。
+
+    rename 只需要任务工作区父目录的写权限，不依赖旧树内部 uid/gid，因此能
+    处理被靶场容器改成 nobody/root 的源码。返回未能立即删除的隔离目录。
+    """
+    if _rmtree(path):
+        return None
+    parent = os.path.dirname(path)
+    name = os.path.basename(path)
+    stale = os.path.join(parent, f".crucible-stale-{name}-{uuid.uuid4().hex[:8]}")
+    try:
+        os.replace(path, stale)
+    except OSError as exc:
+        raise PermissionError(
+            f"源码工作区准备失败: 无法清理或隔离 {path}: {exc}"
+        ) from exc
+    logger.warning("源码目录权限异常，已隔离旧目录: %s -> %s", path, stale)
+    if not _rmtree(stale):
+        logger.warning("隔离源码目录仍无法删除，留待工作区巡检清理: %s", stale)
+        return stale
+    return None
 
 
 def _restore_cached(cached: CachedSource, store, host_workdir: str) -> bool:
     dest = os.path.join(host_workdir, cached.repo_dirname)
-    _rmtree(dest)
+    staging = tempfile.mkdtemp(prefix=".source-restore-", dir=host_workdir)
     fd, archive = tempfile.mkstemp(suffix=".tar.gz")
     os.close(fd)
     try:
         store.download(cached.object_key, archive)
-        extract_source_archive(archive, host_workdir)
-        return _project_has_files(dest)
+        extract_source_archive(archive, staging)
+        staged_dest = os.path.join(staging, cached.repo_dirname)
+        if not _project_has_files(staged_dest):
+            return False
+        _clear_destination(dest)
+        os.replace(staged_dest, dest)
+        return True
     finally:
+        _rmtree(staging)
         try:
             os.remove(archive)
         except OSError:
@@ -208,7 +249,10 @@ def _ls_remote_branch_sha(git_url: str, ref_name: str) -> str | None:
 
 
 def _ls_remote_tag_sha(git_url: str, ref_name: str) -> str | None:
-    for spec in (f"refs/tags/{ref_name}", ref_name):
+    # annotated tag：只查 refs/tags/name 时 GitHub 只回 tag object SHA；
+    # 缓存键是 clone 后 HEAD commit，必须先要 peeled。
+    specs = (f"refs/tags/{ref_name}^{{}}", f"refs/tags/{ref_name}", ref_name)
+    for spec in specs:
         try:
             result = subprocess.run(
                 ["git", "ls-remote", git_url, spec],
@@ -378,7 +422,17 @@ def acquire_source(
 
     use_cache = False
     if cached is not None or cached_by_sha_fn is not None:
-        if ref_type in ("tag", "commit"):
+        if ref_type == "tag":
+            # 人指定 tag：按名字命中即复用（不变性）。annotated tag 的 ls-remote
+            # 常给出 tag object SHA，与落库的 commit SHA 不同，不能因此重 clone。
+            if cached is not None:
+                use_cache = True
+            elif cached_by_sha_fn is not None and remote_sha:
+                by_sha = cached_by_sha_fn(remote_sha)
+                if by_sha is not None:
+                    cached = by_sha
+                    use_cache = True
+        elif ref_type == "commit":
             if cached is not None and (
                 not remote_sha or _sha_matches(cached.commit_sha, remote_sha)
             ):
@@ -425,6 +479,21 @@ def acquire_source(
             logger.warning("MinIO 源码解开后目录为空，回退 clone: %s", dest)
         except Exception as e:  # noqa: BLE001
             logger.warning("MinIO 源码拉取失败，回退 clone: %s", e)
+
+    try:
+        _clear_destination(dest)
+    except PermissionError as e:
+        return SourceAcquireResult(
+            ok=False,
+            error=str(e),
+            git_url_original=stored_url,
+            git_url_normalized=stored_url,
+            project_key=parsed.project_key,
+            git_host=parsed.host,
+            repo_dirname=parsed.repo_dirname,
+            ref_type=ref_type,
+            ref_name=ref_name,
+        )
 
     ok, err = clone_fn(host_workdir, git_url, ref, parsed.repo_dirname)
     if not ok:

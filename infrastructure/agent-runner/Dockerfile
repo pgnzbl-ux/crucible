@@ -10,13 +10,15 @@
 #   （node -e、python -c），不 npm install、不起靶场。
 # - 不装 Chromium / JDK / Go / PHP / docker CLI（docker compose 由宿主机 worker 执行）
 # - claude-agent-sdk wheel 已自带 Claude Code CLI 二进制
-# - 内置每节点蒸馏 skill（/app/node-skills），不加载桌面 plugins/
+# - 节点 SKILL.md **不进镜像**：worker 起容器时 -v 只挂当前节点
+#   infrastructure/agent-runner/node-skills/<node> → /node-skill:ro
 # - 非 root（uid=1000）+ 只读 rootfs + tmpfs /tmp + cap_drop ALL（worker docker run 叠加）
 # - PYTHONUNBUFFERED=1 保证 JSONL 实时 flush
 # - HOME=/tmp（容器 tmpfs）供 SDK/CLI 写 cache；不得用 /workspace，避免节点间共享会话
 # - tini 作为 PID 1，回收 SDK fork 出的孤儿子进程
+# - bubblewrap(+socat)：CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 时 CLI 从 Bash 子进程剥凭据所需
 #
-# 构建（build context = 项目根，以便 COPY node-skills 与 runner/）：
+# 构建（build context = 项目根）：
 #   cd <repo-root>
 #   docker build -f infrastructure/agent-runner/Dockerfile -t crucible-agent-runner:base .
 
@@ -32,6 +34,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         tini \
         bash \
+        bubblewrap \
+        socat \
         procps \
         psmisc \
         iproute2 \
@@ -58,7 +62,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gawk \
         tar \
         gzip \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && command -v bwrap \
+    && command -v socat
 
 # Node 20.20.2 + npm（从官方 node 镜像拷二进制，不污染 Python 的 pip）
 COPY --from=nodejs /usr/local/bin/node /usr/local/bin/node
@@ -74,15 +80,16 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt \
 
 # 非 root 用户（与 worker 端 docker run --user 1000:1000 对齐）
 RUN useradd --create-home --uid 1000 --shell /bin/bash runner \
-    && mkdir -p /workspace /app && chown -R runner:runner /workspace /app
+    && install -d -o root -g root -m 0755 /home/runner/.local/bin \
+    && mkdir -p /workspace /app /node-skill && chown -R runner:runner /workspace /app
 
-# vuln-verify-expert 桌面插件不进镜像。节点 SOP 是蒸馏 skill。
-COPY infrastructure/agent-runner/node-skills /app/node-skills
+# vuln-verify-expert 桌面插件与节点 skill 均不进镜像。
+# skill 由 worker -v 挂到 /node-skill:ro。
 
 # runner 入口脚本必须在 /app（不可放 /workspace）：host_workdir bind mount
 # 到 /workspace 会盖掉镜像文件，python -m runner.run_one 变成 ModuleNotFoundError。
 COPY infrastructure/agent-runner/runner/ /app/runner/
-RUN chown -R runner:runner /app/runner /app/node-skills
+RUN chown -R runner:runner /app/runner
 
 WORKDIR /workspace
 USER runner
@@ -91,10 +98,10 @@ USER runner
 # PYTHONPATH=/app 让 python -m runner.run_one 找到 /app/runner（不依赖 cwd）
 ENV PYTHONUNBUFFERED=1 \
     HOME=/tmp \
+    BASH_ENV=/app/runner/bash_env.sh \
     PYTHONPATH=/app \
-    NODE_SKILL_DIR=/app/node-skills \
     PATH="/usr/local/bin:/home/runner/.local/bin:${PATH}"
 
 # tini → python -m runner.run_one
-#   run_one 读 /workspace/.node.json → 蒸馏 skill 作 system_prompt → JSONL 到 stdout
+#   run_one 读 /workspace/.node.json + /node-skill/SKILL.md → JSONL 到 stdout
 ENTRYPOINT ["tini", "--", "python", "-m", "runner.run_one"]

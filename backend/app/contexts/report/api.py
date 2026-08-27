@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
@@ -8,7 +8,14 @@ from app.shared.deps import CurrentUserId
 from app.shared.time import iso_utc
 
 from .repository import ReportRepository
-from .schemas import EvidenceResponse, ReportDetail, ReportListResponse
+from .schemas import (
+    AuditTaskListResponse,
+    AuditTaskSummary,
+    EvidenceResponse,
+    ReportDetail,
+    ReportListResponse,
+    VulnReportListResponse,
+)
 from .service import ReportService
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -29,6 +36,7 @@ async def list_reports(
     status: str | None = Query(None),
     verdict: str | None = Query(None, max_length=64),
     query: str | None = Query(None, alias="q", max_length=200),
+    task_type: str | None = Query(None, pattern="^(verify|discovery)$"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> ReportListResponse:
@@ -37,10 +45,74 @@ async def list_reports(
         status=status,
         verdict=verdict,
         query=query,
+        task_type=task_type,
         limit=limit,
         offset=offset,
     )
     return ReportListResponse(items=reports, total=total, limit=limit, offset=offset)
+
+
+@router.get("/audits", response_model=AuditTaskListResponse)
+async def list_audit_tasks(
+    svc: Annotated[ReportService, Depends(get_report_service)],
+    user_id: CurrentUserId,
+    query: str | None = Query(None, alias="q", max_length=200),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+) -> AuditTaskListResponse:
+    """审计报告 Tab：按 discovery 任务聚合（discovery-spec §9.3）。"""
+    items, total = await svc.list_audit_tasks(
+        user_id, query=query, limit=limit, offset=offset,
+    )
+    return AuditTaskListResponse(items=items, total=total, limit=limit, offset=offset)
+
+
+@router.get("/audits/{task_id}", response_model=AuditTaskSummary)
+async def get_audit_task(
+    task_id: str,
+    svc: Annotated[ReportService, Depends(get_report_service)],
+    user_id: CurrentUserId,
+) -> AuditTaskSummary:
+    item = await svc.get_audit_task(task_id, user_id)
+    if item is None:
+        raise HTTPException(404, "审计任务不存在")
+    return item
+
+
+@router.get("/audits/{task_id}/vulns", response_model=VulnReportListResponse)
+async def list_audit_vuln_reports(
+    task_id: str,
+    svc: Annotated[ReportService, Depends(get_report_service)],
+    user_id: CurrentUserId,
+) -> VulnReportListResponse:
+    items = await svc.list_vuln_reports_for_task(task_id, user_id)
+    if items is None:
+        raise HTTPException(404, "审计任务不存在")
+    return VulnReportListResponse(task_id=task_id, items=items, total=len(items))
+
+
+@router.get("/audits/{task_id}/vulns/{group_id}")
+async def get_audit_vuln_report(
+    task_id: str,
+    group_id: str,
+    svc: Annotated[ReportService, Depends(get_report_service)],
+    user_id: CurrentUserId,
+    format: str = Query("json", pattern="^(json|md)$"),
+):
+    payload = await svc.get_vuln_report(task_id, group_id, user_id)
+    if payload is None:
+        raise HTTPException(404, "漏洞报告不存在")
+    if format == "md":
+        from app.contexts.finding.vuln_report import vuln_report_to_markdown
+
+        return Response(
+            content=vuln_report_to_markdown(payload),
+            media_type="text/markdown; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="vuln-{group_id[:8]}.md"',
+            },
+        )
+    return payload
 
 
 @router.get("/task/{task_id}", response_model=ReportDetail)
@@ -93,12 +165,20 @@ async def upload_evidence(
     kind: Annotated[str, Form(description="artifact | log | screenshot | poc")] = "artifact",
 ) -> EvidenceResponse:
     """上传证据文件 → MinIO → 落 evidences 表。返回带预签名下载 URL 的记录。"""
-    data = await file.read()
+    # 流式读入并限制 50MB（防滥用；超大证据建议走对象存储直传，P1 再做）
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > 50 * 1024 * 1024:
+            raise HTTPException(413, "单文件超过 50MB 限制")
+        chunks.append(chunk)
+    data = b"".join(chunks)
     if not data:
         raise HTTPException(400, "文件为空")
-    # 大小限制 50MB（防滥用；超大证据建议走对象存储直传，P1 再做）
-    if len(data) > 50 * 1024 * 1024:
-        raise HTTPException(413, "单文件超过 50MB 限制")
     evidence, err = await svc.attach_evidence(
         report_id=report_id,
         owner_id=user_id,
@@ -112,6 +192,8 @@ async def upload_evidence(
             raise HTTPException(404, err)
         if "非法" in err:
             raise HTTPException(400, err)
+        if "已发布" in err:
+            raise HTTPException(409, err)
         raise HTTPException(503, err)
     return evidence
 

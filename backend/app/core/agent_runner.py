@@ -21,14 +21,12 @@ import logging
 import os
 import shutil
 import subprocess
-import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 
 import docker
-import requests
 from docker.errors import DockerException, ImageNotFound, NotFound
 from docker.types import LogConfig
 
@@ -40,7 +38,8 @@ logger = logging.getLogger(__name__)
 
 AGENT_RUNNER_NAME_PREFIX = "crucible-agent-runner"
 AGENT_RUNNER_NETWORK = "crucible-sandbox-net"
-AGENT_EXTRA_HOSTS = {"host.docker.internal": "host-gateway"}
+# 复现一律走宿主机 IP:port，不再注入 host.docker.internal。
+AGENT_EXTRA_HOSTS: dict[str, str] = {}
 # 自定义 bridge 在 Docker Desktop 上 127.0.0.11 经常解析不了公网；写死公共 DNS。
 AGENT_RUNNER_DNS = ["223.5.5.5", "8.8.8.8", "1.1.1.1"]
 
@@ -130,21 +129,28 @@ class LineBufferedJsonParser:
 
 @dataclass
 class AgentRunnerSpec:
-    """agent-runner 容器规格"""
+    """agent-runner 容器规格。
 
-    image: str = "crucible-agent-runner:base"
-    cpu_limit: float = 1.0
-    memory_limit: str = "1g"
-    network: str | None = AGENT_RUNNER_NETWORK
+    image / cpu / memory / network 默认 None：由 `_resolve_defaults` 从 Settings（.env）填入。
+    调用方只有在需要覆盖平台配置时才显式传入。
+    """
+
+    image: str | None = None
+    cpu_limit: float | None = None
+    memory_limit: str | None = None
+    network: str | None = None
     env: dict[str, str] = field(default_factory=dict)
     host_workdir: str = ""                  # bind mount 源（host 路径 → /workspace）
+    # 当前节点 skill 目录（host）→ /node-skill:ro；只挂本节点，不进镜像
+    skill_host_dir: str | None = None
     prompt_json_filename: str = ".prompt.json"
     workdir_container: str = "/workspace"
     user: str = "1000:1000"
     extra_labels: dict[str, str] = field(default_factory=dict)
     pids_limit: int = 256
     network_disabled: bool = False           # True = 完全断网（强隔离）
-    timeout_seconds: int = 1800
+    # 用空 tmpfs 遮蔽 /workspace 下的敏感子路径（如 .secrets/），轻工位节点用
+    hide_workspace_paths: tuple[str, ...] = ()
 
 
 # ─ ── Manager ─ ──
@@ -171,14 +177,12 @@ class AgentRunnerManager:
     def _client_or_connect(self):
         """惰性连接 Docker daemon；失败抛 AgentRunnerError（调用方转节点失败）。
 
-        read timeout 对齐 agent 超时预算 + 120s 余量：docker-py 默认 60s，
-        而 agent 静默思考/长工具调用超过 60s 属常态——logs(follow=True) 流
-        会中途抛 ReadTimeout 杀掉整个节点（2026-08-19 P0#5）。
+        Agent 允许无限运行，因此 Docker 流式读取也不能使用总时长 read timeout；
+        任务取消时由 remove_for_task / stop_and_remove 主动中断容器。
         """
         if self._client is None:
-            read_timeout = settings.agent_runner_timeout_seconds + 120
             try:
-                self._client = docker.from_env(timeout=read_timeout)
+                self._client = docker.from_env(timeout=None)
             except DockerException as e:
                 raise AgentRunnerError(f"无法连接 Docker daemon: {e}") from e
             self._ensure_network()
@@ -229,6 +233,12 @@ class AgentRunnerManager:
         # 资源限制
         nano_cpus = max(int(spec.cpu_limit * 1_000_000_000), 100_000_000)
 
+        volumes: dict[str, dict[str, str]] = {
+            spec.host_workdir: {"bind": spec.workdir_container, "mode": "rw"},
+        }
+        if spec.skill_host_dir:
+            volumes[spec.skill_host_dir] = {"bind": "/node-skill", "mode": "ro"}
+
         container_config: dict = {
             "image": spec.image,
             "name": name,
@@ -236,9 +246,7 @@ class AgentRunnerManager:
             "environment": {**spec.env, "PYTHONPATH": "/app"},
             "working_dir": spec.workdir_container,
             "user": spec.user,
-            "volumes": {
-                spec.host_workdir: {"bind": spec.workdir_container, "mode": "rw"},
-            },
+            "volumes": volumes,
             "labels": _runner_labels(name, spec),
             "nano_cpus": nano_cpus,
             "mem_limit": spec.memory_limit,
@@ -248,12 +256,15 @@ class AgentRunnerManager:
             # tmpfs：根只读下唯一可写区
             "tmpfs": {
                 "/tmp": "rw,size=256m,nosuid,nodev,uid=1000,gid=1000,mode=1777",
+                **{
+                    p: "rw,size=1m,nosuid,nodev,uid=1000,gid=1000,mode=700"
+                    for p in spec.hide_workspace_paths
+                },
             },
             "cap_drop": ["ALL"],
             "security_opt": ["no-new-privileges"],
             "network_disabled": spec.network_disabled,
             "network": None if spec.network_disabled else spec.network,
-            "extra_hosts": AGENT_EXTRA_HOSTS,
             "dns": None if spec.network_disabled else AGENT_RUNNER_DNS,
             "log_config": LogConfig(
                 type="json-file",
@@ -261,6 +272,8 @@ class AgentRunnerManager:
             ),
             "detach": True,
         }
+        if AGENT_EXTRA_HOSTS:
+            container_config["extra_hosts"] = AGENT_EXTRA_HOSTS
 
         try:
             client = self._client_or_connect()
@@ -289,7 +302,7 @@ class AgentRunnerManager:
                 raise AgentRunnerError(f"agent-runner 镜像拉取失败: {e}") from e
 
     def _resolve_defaults(self, spec: AgentRunnerSpec) -> AgentRunnerSpec:
-        """用 settings 兜底"""
+        """用 Settings（.env）填平台默认；调用方显式传入的非空值保留。"""
         if not spec.image:
             spec.image = settings.agent_runner_image
         if spec.cpu_limit is None or spec.cpu_limit <= 0:
@@ -298,8 +311,6 @@ class AgentRunnerManager:
             spec.memory_limit = settings.agent_runner_memory_limit
         if spec.network is None:
             spec.network = settings.agent_runner_network
-        if not spec.timeout_seconds:
-            spec.timeout_seconds = settings.agent_runner_timeout_seconds
         return spec
 
     # ── 一站式流式拉起 ──
@@ -322,44 +333,11 @@ class AgentRunnerManager:
         """
         runner: AgentRunner | None = None
         parser = LineBufferedJsonParser()
-        timed_out = False
-        timer: threading.Timer | None = None
         if not hasattr(self, "_active_ids"):
             self._active_ids = set()
         try:
             runner = self.create(spec)
             logger.info(f"agent-runner 容器启动: {runner.name} image={spec.image}")
-
-            timeout = spec.timeout_seconds or 0
-            stop_failed: list[str] = []
-
-            def _on_timeout() -> None:
-                nonlocal timed_out
-                timed_out = True
-                logger.warning(f"agent-runner 超时({timeout}s),停止容器: {runner.name if runner else '?'}")
-                # stop 失败必须留痕：容器不停 → logs 流永不 EOF → 消费线程
-                # 挂死在 docker read 上。降级 SIGKILL 强拆，再失败记进
-                # summary 供人工介入（2026-08-19 P0#5：曾 except: pass 静默
-                # 吞掉，超时后平台无限挂死无任何线索）。
-                if runner is None:
-                    return
-                try:
-                    runner.container.stop(timeout=10)
-                except Exception as e:  # noqa: BLE001
-                    stop_failed.append(f"stop 失败: {e}")
-                    try:
-                        runner.container.kill()
-                    except Exception as e2:  # noqa: BLE001
-                        stop_failed.append(f"kill 失败: {e2}")
-                        logger.error(
-                            "agent-runner 超时后 stop+kill 均失败，容器可能仍在运行: %s (%s / %s)",
-                            runner.name, e, e2,
-                        )
-
-            if timeout > 0:
-                timer = threading.Timer(timeout, _on_timeout)
-                timer.daemon = True
-                timer.start()
 
             # 边消费边回调（行缓冲）
             for chunk in runner.container.logs(
@@ -378,36 +356,9 @@ class AgentRunnerManager:
             for event in parser.flush():
                 on_event(event)
 
-            # 等待容器结束；超时后 stop/kill 都失败时容器可能永不停 →
-            # wait() 无界阻塞整个 worker 线程。设兜底宽限（stop timeout 10s +
-            # kill 生效余量），到点按超时处理（2026-08-19 P0#6）。
-            wait_grace = 30 if timed_out else None
-            try:
-                wait_result = runner.container.wait(timeout=wait_grace)
-            except requests.exceptions.ReadTimeout:
-                logger.error(
-                    "agent-runner wait() 兜底超时（stop/kill 均未生效）: %s", runner.name
-                )
-                wait_result = {"StatusCode": 137}
-            except Exception as e:  # noqa: BLE001
-                if timed_out:
-                    logger.warning("agent-runner wait() 异常（已超时，按 137 处理）: %s", e)
-                    wait_result = {"StatusCode": 137}
-                else:
-                    raise
+            # logs(follow=True) 结束后容器应已退出；不按运行时长强制 stop/kill。
+            wait_result = runner.container.wait(timeout=None)
             exit_code = int(wait_result.get("StatusCode", 1))
-            if timed_out:
-                # 超时场景 exit 统一 137 归因口径——但若 agent 已在超时瞬间
-                # 正常写完 output（exit 0），保留真实退出码：产物已落盘，
-                # 按超时丢弃会白跑一轮完整验证（P0#6 边界竞态）。归因由
-                # summary.timed_out 携带，不靠 exit_code 编码。
-                if exit_code == 0:
-                    logger.info(
-                        "agent-runner 超时瞬间正常完成（exit 0），保留产物不判失败: %s",
-                        runner.name,
-                    )
-                else:
-                    exit_code = 137
 
             # 检查 OOM
             runner.container.reload()
@@ -442,8 +393,8 @@ class AgentRunnerManager:
                 "exit_code": exit_code,
                 "oom_killed": oom_killed,
                 "stderr_tail": stderr_tail,
-                "timed_out": timed_out,
-                "stop_failed": "; ".join(stop_failed),
+                "timed_out": False,
+                "stop_failed": "",
             }
             return exit_code, summary
 
@@ -452,8 +403,6 @@ class AgentRunnerManager:
         except DockerException as e:
             raise AgentRunnerError(f"agent-runner 流式消费失败: {e}") from e
         finally:
-            if timer is not None:
-                timer.cancel()
             if runner is not None:
                 self._active_ids.discard(runner.id)
                 try:
@@ -677,6 +626,8 @@ def git_clone_to_workdir(
     """在 host 上 git clone 到 workdir/{dest_dirname}（仓库名，而非固定 project）。
 
     ref_type 可选 branch|tag|commit；省略则自动推断。clone_depth=0 时不加 --depth（全量 clone）。
+    commit 不能 ``git fetch origin <SHA>``：短 SHA 不是远端 ref（fatal: couldn't find remote ref）。
+    按 commit 检出时忽略浅克隆，全量 clone 后再 checkout（短/长 SHA 都能用）。
     返回 (ok, error_or_empty)。失败信息带「源码克隆失败」前缀，便于节点 0 展示。
     """
     from app.contexts.project.git_url import resolve_ref_type
@@ -704,13 +655,12 @@ def git_clone_to_workdir(
     rt, rn = resolve_ref_type(ref_type, project_ref)
     depth = 1 if clone_depth is None else clone_depth
     cmd = ["git", "clone"]
-    if depth > 0:
+    # commit SHA 不是 refs/heads|tags 上的名字；浅克隆后再 fetch origin <短SHA> 必失败
+    if depth > 0 and rt != "commit":
         cmd += ["--depth", str(depth)]
     if rn and rt != "commit" and rn.upper() != "HEAD":
         cmd += ["--branch", rn]
     cmd += [project_address, project_dir]
-
-    fetch_depth = depth if depth > 0 else 1
 
     try:
         result = subprocess.run(
@@ -724,21 +674,15 @@ def git_clone_to_workdir(
         if result.returncode != 0:
             return False, _classify_clone_error(result.stderr or result.stdout)
         if rt == "commit" and rn:
-            co = subprocess.run(
-                [
-                    "git", "-C", project_dir, "fetch",
-                    "--depth", str(fetch_depth), "origin", rn,
-                ],
-                capture_output=True, text=True, timeout=120, env=git_env,
-            )
-            if co.returncode != 0:
-                return False, _classify_clone_error(co.stderr or co.stdout or "无法获取指定 commit")
             ck = subprocess.run(
                 ["git", "-C", project_dir, "checkout", rn],
                 capture_output=True, text=True, timeout=60, env=git_env,
             )
             if ck.returncode != 0:
-                return False, f"源码克隆失败: 引用不存在或无法检出: {(ck.stderr or ck.stdout)[:300]}"
+                return False, (
+                    "源码克隆失败: 指定 commit 不存在或无法检出: "
+                    f"{(ck.stderr or ck.stdout)[:300]}"
+                )
         if not os.path.isdir(project_dir):
             return False, f"源码克隆失败: clone 返回 0 但目录不存在: {project_dir}"
         entries = [e for e in os.listdir(project_dir) if e != ".git"]
@@ -771,8 +715,8 @@ def _classify_clone_error(stderr: str) -> str:
         return f"源码克隆失败: 网络错误（无法解析主机）: {snippet}"
     if "timed out" in low or "timeout" in low or "failed to connect" in low or "connection refused" in low:
         return f"源码克隆失败: 网络错误: {snippet}"
-    if "remote branch" in low and "not found" in low:
-        return f"源码克隆失败: 分支/tag 不存在: {snippet}"
+    if "couldn't find remote ref" in low or ("remote branch" in low and "not found" in low):
+        return f"源码克隆失败: 找不到该远端引用: {snippet}"
     if "not found" in low or "authentication failed" in low or "permission denied" in low or "could not read username" in low:
         return f"源码克隆失败: 仓库不存在或无权访问: {snippet}"
     return f"源码克隆失败: {snippet or '未知 git 错误'}"

@@ -177,6 +177,14 @@ def test_sanitize_profile_keeps_facts_drops_essay():
         "port": 3001,
         "detected_services": ["sqlite"],
         "start_command": "npm start",
+        # WP0(discovery-spec §6.0)：sanitize 补齐派生字段
+        "languages": [{"id": "nodejs", "evidence_files": [], "source": "rules", "confidence": 1.0}],
+        "primary_language": "nodejs",
+        "frameworks": ["express"],
+        "package_managers": [],
+        "semgrep_configs": ["javascript", "typescript"],
+        "osv_manifests": [],
+        "profile_source": "cache",
     }
 
 
@@ -201,12 +209,16 @@ async def test_profile_node_sdk_off_uses_detector(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_profile_node_sdk_on_skips_ai_when_confident(tmp_path):
+async def test_profile_node_sdk_on_skips_ai_when_rules_sufficient(tmp_path):
+    """SDK 开启：强 Web 规则画像充分时跳过 AI，不阻塞下游。"""
     (tmp_path / "requirements.txt").write_text("fastapi\n")
+    (tmp_path / "main.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
+    events: list[dict] = []
     ctx = NodeContext(
         task_id="t1", run_id="r1", host_workdir=str(tmp_path),
         source_path=str(tmp_path), vulnerability_description="d",
         project_address="x", project_ref=None,
+        on_event=events.append,
         previous_outputs={
             "source": {
                 "project_path": str(tmp_path),
@@ -227,8 +239,54 @@ async def test_profile_node_sdk_on_skips_ai_when_confident(tmp_path):
         out = await ProfileNode().execute(ctx)
     mocked.assert_not_awaited()
     assert out["is_web"] is True
-    assert out["language"] == "python"
-    assert out["framework"] == "fastapi"
+    assert out["profile_source"] == "rules"
+    phase_msgs = [e["message"] for e in events if e.get("type") == "phase.updated"]
+    assert any("跳过 AI" in m for m in phase_msgs)
+
+
+@pytest.mark.asyncio
+async def test_profile_node_sdk_on_calls_ai_when_rules_ambiguous(tmp_path):
+    """SDK 开启且规则不足以判定时，仍走轻度 AI，hints 必须传入。"""
+    (tmp_path / "readme.md").write_text("a small utility script\n")
+    (tmp_path / "app.py").write_text("print('hi')\n")
+    events: list[dict] = []
+    ctx = NodeContext(
+        task_id="t1", run_id="r1", host_workdir=str(tmp_path),
+        source_path=str(tmp_path), vulnerability_description="d",
+        project_address="x", project_ref=None,
+        on_event=events.append,
+        previous_outputs={
+            "source": {
+                "project_path": str(tmp_path),
+                "repo_dirname": "demo",
+                "workspace_path": "/workspace/demo",
+                "commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            }
+        },
+    )
+    fake_settings = MagicMock(claude_agent_sdk_enabled=True)
+    ai_out = {"is_web": False, "language": "python", "non_web_reason": "cli"}
+    with (
+        patch("app.core.config.get_settings", return_value=fake_settings),
+        patch(
+            "app.contexts.agent.nodes.profile.profile_needs_ai",
+            return_value=True,
+        ),
+        patch(
+            "app.contexts.agent.ai_runner.run_ai_node",
+            new_callable=AsyncMock,
+            return_value=ai_out,
+        ) as mocked,
+    ):
+        out = await ProfileNode().execute(ctx)
+    mocked.assert_awaited_once()
+    call_kw = mocked.await_args.kwargs
+    assert "hints" in call_kw["input_json"]
+    assert out["profile_source"] == "rules+ai"
+    phase_msgs = [e["message"] for e in events if e.get("type") == "phase.updated"]
+    assert any("规则扫描完成" in m for m in phase_msgs)
+    assert any("启动轻度 AI 画像" in m for m in phase_msgs)
+    assert any("画像合并完成" in m for m in phase_msgs)
 
 
 @pytest.mark.asyncio
@@ -308,6 +366,7 @@ async def test_profile_node_reuses_cached_profile_for_sha(tmp_path):
     svc.find_cached_profile = AsyncMock(return_value=cached)
     svc.save_source_profile = AsyncMock()
     svc.update_profile = AsyncMock()
+    events: list[dict] = []
     ctx = NodeContext(
         task_id="t1", run_id="r1", host_workdir=str(tmp_path),
         source_path=str(tmp_path), vulnerability_description="d",
@@ -316,6 +375,7 @@ async def test_profile_node_reuses_cached_profile_for_sha(tmp_path):
         owner_id="u1",
         project_id="p1",
         db_session=object(),
+        on_event=events.append,
         previous_outputs={
             "source": {
                 "project_path": str(tmp_path),
@@ -338,9 +398,18 @@ async def test_profile_node_reuses_cached_profile_for_sha(tmp_path):
     ):
         out = await ProfileNode().execute(ctx)
     mocked.assert_not_awaited()
-    assert out == cached
+    # 缓存命中后按新契约补齐派生字段(languages/semgrep_configs)，不整份作废
+    assert out["is_web"] is True
+    assert out["language"] == "go"
+    assert out["framework"] == "gin"
+    assert out["port"] == 8080
+    assert [f["id"] for f in out["languages"]] == ["go"]
+    assert out["semgrep_configs"] == ["go"]
     svc.find_cached_profile.assert_awaited_once()
-
+    assert any(
+        e.get("type") == "phase.updated" and "复用同 SHA 画像缓存" in e.get("message", "")
+        for e in events
+    )
 
 def test_node_context_carries_previous_outputs():
     ctx = NodeContext(

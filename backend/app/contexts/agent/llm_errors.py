@@ -1,4 +1,5 @@
 """从 Agent 容器 JSONL / 异常文本中识别 LLM 网关/API 错误（优先于 no_submit 误报）。"""
+
 from __future__ import annotations
 
 import json
@@ -7,14 +8,24 @@ import re
 # 明确来自 LLM HTTP 响应或 SDK 流式错误的特征（避免误伤 Git clone / 平台预检文案）
 _LLM_SIGNAL_RE = re.compile(
     r"(http\s+[45]\d{2}\b|"
+    r"api\s+error:\s*[45]\d{2}\b|"
     r"余额不足|"
     r'"code"\s*:\s*"1004"|'
     r"model_not_found|"
     r"model not found|"
     r"rate\s*limit|"
+    r"context size has been exceeded|"
+    r"context window exceeded|"
+    r"maximum context length|"
+    r"prompt is too long|"
     r"error result:\s*success)",
     re.IGNORECASE,
 )
+
+
+def _has_http_status(text: str, status: int) -> bool:
+    """兼容 `HTTP 500` 与 Claude Code/Gateway 的 `API Error: 500`。"""
+    return re.search(rf"(?:http\s+|api\s+error:\s*){status}\b", text) is not None
 
 
 def _extract_json_message(text: str) -> str | None:
@@ -57,6 +68,38 @@ def is_llm_api_failure(text: str | None) -> bool:
     return _LLM_SIGNAL_RE.search(raw) is not None
 
 
+def is_fatal_llm_error(text: str | None) -> bool:
+    """LLM API 错误中不可恢复的一类（鉴权/余额/模型/上下文超限）。
+
+    重试不可能成功，须中止节点；返回 False 的 LLM 错误视为瞬时
+    （5xx/断连/限流/SDK 误报），由调用方退避重试或降级转人工。
+    """
+    raw = (text or "").strip()
+    if not raw or _is_platform_preflight(raw):
+        return False
+    low = raw.lower()
+    json_msg = _extract_json_message(raw)
+    if _has_http_status(low, 401) or _has_http_status(low, 403):
+        return True
+    if "余额不足" in raw or (json_msg is not None and "余额" in json_msg):
+        return True
+    if re.search(r'"code"\s*:\s*"1004"', raw):
+        return True
+    if "model_not_found" in low or "model not found" in low:
+        return True
+    if any(
+        marker in low
+        for marker in (
+            "context size has been exceeded",
+            "context window exceeded",
+            "maximum context length",
+            "prompt is too long",
+        )
+    ):
+        return True
+    return False
+
+
 def classify_llm_api_error(text: str | None) -> tuple[str, str] | None:
     """返回 (标题, 下一步)；非 LLM API 错误则 None。"""
     raw = (text or "").strip()
@@ -68,6 +111,21 @@ def classify_llm_api_error(text: str | None) -> tuple[str, str] | None:
     low = raw.lower()
     json_msg = _extract_json_message(raw)
 
+    if any(
+        marker in low
+        for marker in (
+            "context size has been exceeded",
+            "context window exceeded",
+            "maximum context length",
+            "prompt is too long",
+        )
+    ):
+        return (
+            "LLM 上下文窗口不足",
+            "Provider 的真实上下文窗口小于当前会话。将 max_context_tokens 改为网关实测值，"
+            "并检查超大工具输出和压缩是否正常后重试。",
+        )
+
     if "余额不足" in raw or (json_msg and "余额" in json_msg) or '"code":"1004"' in raw or '"code": "1004"' in raw:
         detail = json_msg or "余额不足"
         return (
@@ -75,7 +133,7 @@ def classify_llm_api_error(text: str | None) -> tuple[str, str] | None:
             f"LLM 服务商返回：{detail}。请到控制台充值或更换有余额的 API Key，再在「设置 → LLM Provider」更新后重试。",
         )
 
-    if "rate limit" in low or "http 429" in low:
+    if "rate limit" in low or _has_http_status(low, 429):
         return (
             "LLM 接口限流或配额用尽",
             "稍后重试，或更换 Provider / 提升配额。",
@@ -87,21 +145,21 @@ def classify_llm_api_error(text: str | None) -> tuple[str, str] | None:
             "核对「设置 → LLM Provider」中的模型名是否与服务商文档一致。",
         )
 
-    if "http 401" in low:
+    if _has_http_status(low, 401):
         detail = json_msg or "鉴权失败"
         return (
             "LLM 接口鉴权失败（401）",
             f"LLM 服务商返回：{detail}。检查 API Key、Base URL 与账户状态。",
         )
 
-    if "http 403" in low:
+    if _has_http_status(low, 403):
         detail = json_msg or "拒绝访问"
         return (
             "LLM 接口拒绝访问（403）",
             f"LLM 服务商返回：{detail}。检查 Key 权限与账户状态。",
         )
 
-    if re.search(r"http\s+5\d{2}\b", low):
+    if re.search(r"(?:http\s+|api\s+error:\s*)5\d{2}\b", low):
         return (
             "LLM 服务商暂时不可用",
             "稍后重试；若持续失败，检查 Base URL 与服务商状态页。",

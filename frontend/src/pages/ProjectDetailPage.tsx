@@ -1,25 +1,30 @@
 import { useState } from 'react'
-import { Button, Card, Descriptions, Result, Skeleton, Space, Table, Tag, Typography } from 'antd'
-import { ArrowLeftOutlined, BugOutlined } from '@ant-design/icons'
+import { App, Button, Card, Descriptions, Popconfirm, Result, Skeleton, Space, Table, Tag, Typography } from 'antd'
+import { ArrowLeftOutlined, BugOutlined, DeleteOutlined, EditOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 import { useLocation, useRoute } from 'wouter'
 
 import { api, type SourceArtifact } from '../shared/lib/api'
 import { PageHeader } from '../shared/components/PageHeader'
 import { PageContainer } from '../shared/components/PageContainer'
+import { EditProjectDrawer } from '../features/project/EditProjectDrawer'
 import { TaskCreateDrawer } from '../features/task/components/TaskCreateDrawer'
+import { formatFileSize } from '../shared/lib/tablePresentation'
 import { classifyProjectRef, projectDefaultRefLabel } from '../features/task/lib/projectSelectOptions'
 import { useErrorToast } from '../shared/hooks/useErrorToast'
 
 const { Text } = Typography
 
 export function ProjectDetailPage() {
+  const { message } = App.useApp()
+  const qc = useQueryClient()
   const [, params] = useRoute('/projects/:id')
   const [, navigate] = useLocation()
   const projectId = params?.id ?? ''
   const [createOpen, setCreateOpen] = useState(false)
+  const [editOpen, setEditOpen] = useState(false)
 
   const { data: project, isLoading, isError } = useQuery({
     queryKey: ['project', projectId],
@@ -34,6 +39,27 @@ export function ProjectDetailPage() {
   })
   useErrorToast(isArtifactsError, artifactsError, '制品列表加载失败')
 
+  const deleteArtifactMutation = useMutation({
+    mutationFn: (artifactId: string) => api.deleteProjectArtifact(projectId, artifactId),
+    onSuccess: () => {
+      message.success('源码包已删除')
+      void qc.invalidateQueries({ queryKey: ['project-artifacts', projectId] })
+      void qc.invalidateQueries({ queryKey: ['project', projectId] })
+      void qc.invalidateQueries({ queryKey: ['projects'] })
+    },
+    onError: (e: Error) => message.error(e.message),
+  })
+
+  const deleteProjectMutation = useMutation({
+    mutationFn: () => api.deleteProject(projectId),
+    onSuccess: () => {
+      message.success('项目已删除')
+      void qc.invalidateQueries({ queryKey: ['projects'] })
+      navigate('/projects')
+    },
+    onError: (e: Error) => message.error(e.message),
+  })
+
   const columns: ColumnsType<SourceArtifact> = [
     {
       title: '引用',
@@ -44,27 +70,48 @@ export function ProjectDetailPage() {
       ),
     },
     {
-              title: 'Commit / 指纹',
+      title: 'Commit / 指纹',
       dataIndex: 'commit_sha',
       width: 120,
       render: (v: string) => <Text code>{v.slice(0, 7)}</Text>,
     },
     {
-      title: '落地目录',
-      dataIndex: 'repo_dirname',
-      width: 140,
+      title: '源码包',
+      dataIndex: 'size_bytes',
+      width: 150,
+      render: (v: number | null, row) => (
+        <div>
+          <Tag color="green">已缓存</Tag>
+          <div><Text type="secondary" style={{ fontSize: 12 }}>{formatFileSize(v)} · {row.repo_dirname}</Text></div>
+        </div>
+      ),
     },
     {
-      title: 'MinIO',
-      dataIndex: 'object_url',
-      ellipsis: true,
-      render: (v: string) => <Text type="secondary">{v}</Text>,
-    },
-    {
-      title: '更新时间',
+      title: '源码更新时间',
       dataIndex: 'updated_at',
       width: 170,
       render: (v: string) => dayjs(v).format('YYYY-MM-DD HH:mm'),
+    },
+    {
+      title: '',
+      width: 72,
+      render: (_, row) => (
+        <Popconfirm
+          title="删除该源码包？"
+          description="只删缓存索引；若无其它引用共用同一对象，会同时删 MinIO。进行中的任务不受影响。"
+          okText="删除"
+          okButtonProps={{ danger: true }}
+          onConfirm={() => deleteArtifactMutation.mutate(row.id)}
+        >
+          <Button
+            size="small"
+            danger
+            icon={<DeleteOutlined />}
+            aria-label="删除源码版本"
+            loading={deleteArtifactMutation.isPending && deleteArtifactMutation.variables === row.id}
+          />
+        </Popconfirm>
+      ),
     },
   ]
 
@@ -79,14 +126,30 @@ export function ProjectDetailPage() {
               返回列表
             </Button>
             {project && (
+              <Button icon={<EditOutlined />} onClick={() => setEditOpen(true)} aria-label="编辑项目资产">
+                编辑项目
+              </Button>
+            )}
+            {project && (
+              <Popconfirm
+                title="删除该项目？"
+                description="将删除登记信息与本仓库缓存包。进行中的任务工作目录不受影响。"
+                okText="删除"
+                okButtonProps={{ danger: true }}
+                onConfirm={() => deleteProjectMutation.mutate()}
+              >
+                <Button danger icon={<DeleteOutlined />} loading={deleteProjectMutation.isPending} aria-label="删除项目资产">
+                  删除项目
+                </Button>
+              </Popconfirm>
+            )}
+            {project && (
               <Button
                 type="primary"
                 icon={<BugOutlined />}
-                disabled={project.is_web === false}
-                title={project.is_web === false ? '非 Web 项目不能开漏洞验证' : undefined}
                 onClick={() => setCreateOpen(true)}
               >
-                新建验证任务
+                发起代码审计
               </Button>
             )}
           </Space>
@@ -108,6 +171,12 @@ export function ProjectDetailPage() {
                   label: project.source_type === 'local_upload' ? '源码标识' : 'Git 地址',
                   span: 2,
                   children: <Text code>{project.git_url}</Text>,
+                },
+                {
+                  key: 'description',
+                  label: '备注',
+                  span: 2,
+                  children: project.description?.trim() ? project.description : <Text type="secondary">未填写</Text>,
                 },
                 {
                   key: 'source',
@@ -168,7 +237,7 @@ export function ProjectDetailPage() {
                   emptyText: isArtifactsError
                     ? '制品列表加载失败'
                     : project.source_type === 'local_upload'
-                      ? '尚未入库原始包。请从源码管理重新上传。'
+                      ? '尚未入库原始包。请从项目资产重新上传。'
                       : '还没有缓存。跑过一次源码节点后会出现在这里。',
                 }}
               />
@@ -186,6 +255,7 @@ export function ProjectDetailPage() {
           />
         )}
       </PageContainer>
+      <EditProjectDrawer open={editOpen} project={project ?? null} onClose={() => setEditOpen(false)} />
       <TaskCreateDrawer
         open={createOpen}
         onClose={() => setCreateOpen(false)}

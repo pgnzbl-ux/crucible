@@ -30,3 +30,16 @@ def test_project_required_fields():
     assert p.name == "x"
     assert p.git_url == "https://github.com/a/b.git"
     assert p.is_web is None
+
+
+def test_project_owner_name_unique():
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.contexts.identity.models import User  # noqa: F401
+    from app.contexts.project.models import Project  # noqa: F401
+    from app.shared.base import Base
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    uniques = {tuple(u["column_names"]) for u in sa_inspect(engine).get_unique_constraints("projects")}
+    assert ("owner_id", "name") in uniques

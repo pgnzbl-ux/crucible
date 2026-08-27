@@ -1,4 +1,4 @@
-"""靶场地址：对外不用 localhost，容器内改 host.docker.internal。"""
+"""靶场地址：对外与复现一律 IP:port，禁止 host.docker.internal。"""
 from unittest.mock import patch
 
 from app.contexts.agent.target_url import (
@@ -25,12 +25,27 @@ def test_publish_target_url_uses_advertise_ip():
     assert publish_target_url(3001, advertise_ip="192.168.1.8") == "http://192.168.1.8:3001"
 
 
-def test_rewrite_for_agent_rewrites_lan_ip_too():
+def test_rewrite_for_agent_uses_advertise_ip_not_docker_internal():
     assert (
         rewrite_url_for_agent_container("http://192.168.1.8:3001", advertise_ip="192.168.1.8")
-        == "http://host.docker.internal:3001"
+        == "http://192.168.1.8:3001"
     )
-    assert rewrite_url_for_agent_container("http://localhost:8080") == "http://host.docker.internal:8080"
+    assert (
+        rewrite_url_for_agent_container("http://localhost:8080", advertise_ip="10.0.0.8")
+        == "http://10.0.0.8:8080"
+    )
+    assert (
+        rewrite_url_for_agent_container("http://127.0.0.1:5000/login", advertise_ip="10.0.0.8")
+        == "http://10.0.0.8:5000/login"
+    )
+    assert (
+        rewrite_url_for_agent_container(
+            "http://host.docker.internal:3001/x", advertise_ip="10.0.0.8"
+        )
+        == "http://10.0.0.8:3001/x"
+    )
+    assert rewrite_url_for_agent_container("http://example.com") == "http://example.com"
+    assert rewrite_url_for_agent_container(None) is None
 
 
 def test_host_advertise_ip_skips_loopback():

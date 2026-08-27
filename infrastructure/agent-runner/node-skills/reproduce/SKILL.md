@@ -11,12 +11,12 @@ description: Crucible 节点 reproduce。对注入的 target_url 发 HTTP，只�
 
 ## 本轮输入（平台已裁剪）
 
-原料只在 user message 的 JSON 里。平台交接契约见 `docs/agent-node-contracts.md`：`audit` **不是审计节点全量 output**，只含下游复现所需子集。
+原料只在 user message 的 JSON 里。`audit` **不是审计节点全量 output**，只含下游复现所需子集（平台投影契约见 `docs/discovery-spec.md` §4.4，代码 SSOT 为 `contracts/outputs.py::AuditForReproduce`）。
 
 | 字段 | 用途 |
 |---|---|
 | `source_path` | 容器内源码根 |
-| `target_url` / `initial_creds` / `transport_shape` | **必须原样使用**；不要猜地址或账号。`target_url` 中的 `host.docker.internal` 指向宿主机靶场，不要改成 localhost |
+| `target_url` / `initial_creds` / `transport_shape` | **必须原样使用**平台注入值。`target_url` 是靶场就绪已验证的 `IP:port` 地址，直接拼 path / 带 `initial_creds` 发请求；禁止改成 `localhost`，禁止使用或猜测 `host.docker.internal` |
 | `compose_path` / `started_containers` | 只读参考；禁止 docker / compose |
 | `vulnerability_description` | 题面上下文 |
 | `audit.gate_verdict` / `gate_reason` | 门禁结论与理由（本节点仅在 pass 后执行） |
@@ -33,21 +33,23 @@ description: Crucible 节点 reproduce。对注入的 target_url 发 HTTP，只�
 
 - 禁止 docker / compose。靶场已由平台拉起。
 - 无真实浏览器：XSS/DOM 若只有 curl，不得 `confirmed`（用 `code_reachable` 或 `partial`）。
-- 不设验证次数上限。能诚实判定 6 档之一就 submit_result（判定即停）。不要等平台重开一轮。
+- 判定即停。能诚实归入 6 档之一就立刻 `submit_result`，不要再试变体、不要等平台重开一轮。
+- 最后一步必须是 `submit_result`。禁止用长文本或报告代替工具调用。同一 `core_claim` 连续十余次 HTTP 仍无判定时，按已有 `attempts` 提交 `not_reproduced` / `code_reachable` / `false_positive`，禁止空转到会话自然结束。
 - 截图若有，必须是工作区内真实图片（`.png` / `.jpg` / `.jpeg` / `.webp` / `.gif`）。禁止把 `.txt` 或日志当作截图。
 
 ## 工作流
 
 ### Phase 3 — 靶场确认
 
-1. 截图放到 `{source_path}/VULN-<NNN>-<title>/img/`，且必须是真实图片文件。
-2. 第一枪强制执行 `audit.payloads[0]`：`url = target_url.rstrip('/') + path`，带上 `initial_creds`。禁止第一枪另选端点。其余 payloads 是后续候选。
-3. 必须仍测 `audit.core_claim`，禁止换题、禁止黑盒扫。
-4. 若 `audit.runtime_dependent === true`，先按 `unresolved_facts` / `gate_reason` 补运行时事实再发攻击请求。
-5. 未打出危害：允许重读源码、修正同一主张的利用链/编码/鉴权，然后继续 HTTP。判定即停。
-6. 诊断证据不能作为已确认；确认证据必须是 HTTP 可观察危害。
-7. SSRF 必须 preflight 验证回调通道可达。
-8. `confirmed` / `partial` 必须交完整 `poc`（Python 脚本优先，bash 次之，其它须 `language_reason`）。`code` 必须是已打通请求的完整可运行源码，不是 demo。其余 verdict 不得交 poc。
+1. 用 JSON 里的 `target_url` + `initial_creds` 访问靶场（登录 / 鉴权 / 首枪），不要另猜 host。
+2. 截图放到 `{source_path}/VULN-<NNN>-<title>/img/`，且必须是真实图片文件。
+3. 第一枪强制执行 `audit.payloads[0]`：`url = target_url.rstrip('/') + path`，带上 `initial_creds`。禁止第一枪另选端点。其余 payloads 是后续候选。
+4. 必须仍测 `audit.core_claim`，禁止换题、禁止黑盒扫。
+5. 若 `audit.runtime_dependent === true`，先按 `unresolved_facts` / `gate_reason` 补运行时事实再发攻击请求。
+6. 未打出危害：允许重读源码、修正同一主张的利用链/编码/鉴权，然后继续 HTTP。判定即停。
+7. 诊断证据不能作为已确认；确认证据必须是 HTTP 可观察危害。
+8. SSRF 必须 preflight 验证回调通道可达。
+9. `confirmed` / `partial` 必须交完整 `poc`（Python 脚本优先，bash 次之，其它须 `language_reason`）。`code` 必须是已打通请求的完整可运行源码，不是 demo。其余 verdict 不得交 poc。
 
 每次 HTTP（含失败探测、环境探测、CLI 缺失）都写入 `attempts[]`，字段：
 
@@ -86,4 +88,4 @@ description: Crucible 节点 reproduce。对注入的 target_url 发 HTTP，只�
 
 ## 完成
 
-必须调用 `submit_result`。字段以工具 schema 为准。不要提交 `report_data`。
+必须调用 `submit_result`。字段以工具 schema 为准。不要提交 `report_data`。在调用该工具之前禁止结束会话。

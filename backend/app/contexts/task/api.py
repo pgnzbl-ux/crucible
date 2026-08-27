@@ -4,8 +4,10 @@ from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.database import get_db_session
-from app.shared.deps import CurrentUserId
+from app.core.security import create_sse_ticket
+from app.shared.deps import CurrentUserId, get_sse_user_id
 from app.shared.object_store import ObjectStoreError
 from app.shared.sse import stream_task_events
 
@@ -34,7 +36,7 @@ async def create_task(
     svc: Annotated[TaskService, Depends(get_task_service)],
     user_id: CurrentUserId,
 ) -> TaskDetail:
-    """创建漏洞验证任务"""
+    """创建代码审计或定向验证任务。"""
     try:
         return await svc.create_task(request, user_id)
     except TaskDispatchError as e:
@@ -50,13 +52,16 @@ async def list_tasks(
     q: str | None = Query(None, description="项目地址关键词"),
     date_from: str | None = Query(None, description="创建日起 YYYY-MM-DD"),
     date_to: str | None = Query(None, description="创建日止 YYYY-MM-DD"),
+    task_type: str | None = Query(None, description="verify | discovery(discovery-spec §9.1)"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> TaskListResponse:
     """获取任务列表"""
-    return await svc.list_tasks(
+    items = await svc.list_tasks(
         user_id, status, priority, limit, offset, q=q, date_from=date_from, date_to=date_to,
+        task_type=task_type,
     )
+    return items
 
 
 @router.get("/stats", response_model=TaskStatsResponse)
@@ -76,13 +81,14 @@ async def create_task_from_upload(
     svc: Annotated[TaskService, Depends(get_task_service)],
     user_id: CurrentUserId,
     file: UploadFile = File(..., description="源码包 zip / tar / tar.gz，≤200MB"),
-    vulnerability_description: Annotated[str, Form(min_length=10)] = ...,
+    vulnerability_description: Annotated[str | None, Form()] = None,
+    task_type: Annotated[str, Form(pattern=r"^(verify|discovery)$")] = "verify",
     name: Annotated[str | None, Form()] = None,
     priority: Annotated[str, Form()] = "medium",
     vulnerability_reasoning: Annotated[str | None, Form()] = None,
     credential_refs: Annotated[str | None, Form(description="JSON 数组，凭据 id 列表")] = None,
 ) -> TaskDetail:
-    """上传本地源码包并创建验证任务。节点 0 从 MinIO 解开，不再 git clone。"""
+    """上传本地源码包并创建代码审计或定向验证。"""
     import json as _json
 
     chunks: list[bytes] = []
@@ -115,6 +121,7 @@ async def create_task_from_upload(
             filename=file.filename or "source.zip",
             data=data,
             vulnerability_description=vulnerability_description,
+            task_type=task_type,
             name=name,
             priority=priority,
             vulnerability_reasoning=vulnerability_reasoning,
@@ -153,21 +160,36 @@ async def get_task_events(
     return events
 
 
+@router.post("/{task_id}/events/ticket")
+async def issue_sse_ticket(
+    task_id: str,
+    svc: Annotated[TaskService, Depends(get_task_service)],
+    user_id: CurrentUserId,
+) -> dict:
+    """领取短命 SSE ticket（EventSource 用 ?ticket=，避免把 access JWT 放进 URL）。"""
+    if await svc.get_task(task_id, user_id) is None:
+        raise HTTPException(404, "任务不存在")
+    ttl = get_settings().sse_ticket_expire_seconds
+    ticket = create_sse_ticket(user_id, task_id, expires_seconds=ttl)
+    return {"ticket": ticket, "expires_in": ttl}
+
+
 @router.get("/{task_id}/events/stream")
 async def stream_task_events_endpoint(
     task_id: str,
     request: Request,
-    user_id: CurrentUserId,
     svc: Annotated[TaskService, Depends(get_task_service)],
+    user_id: Annotated[str, Depends(get_sse_user_id)],
 ) -> StreamingResponse:
-    """SSE 实时事件推送（P0-1）
+    """SSE 实时事件推送。
 
-    - 鉴权：?token=<jwt>（EventSource 不能注入 header，见 shared/deps.py）
-    - 启动时回放历史（DB）
-    - 订阅 Redis 频道 task.{id}.events 转发
-    - 15s 心跳防代理超时
-    - 客户端断开立即清理 Redis 订阅（防连接泄漏）
+    - 鉴权：优先 Bearer；EventSource 用 ?ticket=（POST .../events/ticket）
+    - 开发环境仍兼容 ?token=<access jwt>；生产拒绝
+    - 启动时回放历史（DB）+ Redis 订阅；15s 心跳
     """
+    ticket_tid = getattr(request.state, "sse_ticket_task_id", None)
+    if ticket_tid is not None and ticket_tid != task_id:
+        raise HTTPException(401, "SSE ticket 与任务不匹配")
     if await svc.get_task(task_id, user_id) is None:
         raise HTTPException(404, "任务不存在")
     return StreamingResponse(
@@ -176,7 +198,7 @@ async def stream_task_events_endpoint(
         headers={
             "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # nginx: 关闭代理缓冲，SSE 实时
+            "X-Accel-Buffering": "no",
         },
     )
 
@@ -206,7 +228,8 @@ async def retry_task(
 ) -> dict:
     """重试任务。
 
-    默认从节点 0 整条重跑；带 from_node=env_ready|audit|reproduce|report 时，
+    默认从节点 0 整条重跑；带 from_node=（除 source/profile 外的当前子图节点，
+    如 triage|cluster|dispatch|scan_*|api_*|env_ready|lead_verify|finalize|audit|reproduce|report）时，
     复用上一 run 该节点之前的产出，只重跑该节点及之后（不重跑 clone/画像）。
     """
     try:

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ── 请求 ──
@@ -21,10 +21,23 @@ class TaskCreateRequest(BaseModel):
         description="浅克隆深度；0=全量 clone",
     )
     source_type: str = Field("git", pattern=r"^(git|local_upload)$")
-    vulnerability_description: str = Field(..., min_length=10, description="漏洞描述")
+    # discovery-spec §4.2.3：创建二选一，显式传入，禁止「没填描述就算审计」
+    task_type: str = Field("verify", pattern=r"^(verify|discovery)$", description="verify(漏洞验证) | discovery(仓库审计)")
+    vulnerability_description: str | None = Field(
+        None, min_length=10, description="漏洞描述；task_type=verify 必填，discovery 必空",
+    )
     vulnerability_reasoning: str | None = Field(None, description="漏洞推理过程")
     priority: str = Field("medium", pattern=r"^(low|medium|high|critical)$")
     credential_refs: list[str] = Field(default_factory=list, description="关联凭据 id 列表（P1-6）")
+
+    @model_validator(mode="after")
+    def _validate_task_type(self) -> "TaskCreateRequest":
+        desc = (self.vulnerability_description or "").strip()
+        if self.task_type == "verify" and len(desc) < 10:
+            raise ValueError("漏洞验证任务必须提供至少 10 字的漏洞描述")
+        if self.task_type == "discovery" and desc:
+            raise ValueError("仓库审计任务禁止填写漏洞描述（人工线索请创建验证任务）")
+        return self
 
 
 class TaskUpdateRequest(BaseModel):
@@ -45,10 +58,18 @@ class TaskSummary(BaseModel):
     id: str
     project_address: str
     project_id: str | None = None
+    project_ref: str | None = None
+    project_ref_type: str | None = None
     status: str
     verdict: str | None = None
     priority: str
     source_type: str
+    task_type: str = "verify"
+    source_alert_group_id: str | None = None
+    finding_count: int = 0
+    pending_review_count: int = 0
+    confirmed_count: int = 0
+    report_status: str | None = None
     owner_id: str
     created_at: datetime
     updated_at: datetime
@@ -88,6 +109,8 @@ class TaskDetail(TaskSummary):
     vulnerability_reasoning: str | None = None
     credential_refs: list[str] = []
     runs: list[RunSummary] = []
+    # token 消耗台账汇总（含 cache_* / total_tokens / sessions）；无记录时为 None
+    usage: dict[str, int] | None = None
 
 
 class TaskListResponse(BaseModel):

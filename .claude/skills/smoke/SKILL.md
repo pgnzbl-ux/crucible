@@ -24,7 +24,7 @@ description: 全链路端到端冒烟（创建任务 → 沙箱 → Agent → �
      -d '{"username":"smoke","password":"Smoke123!"}' | jq -r .access_token)
    ```
 
-4. **创建任务**（`CLAUDE_AGENT_SDK_ENABLED=false` 时仍走 6 节点编排，不拉真实 LLM）
+4. **创建任务**（`CLAUDE_AGENT_SDK_ENABLED=false` 时仍走模式化子图编排，不拉真实 LLM）
 
    ```bash
    TASK_ID=$(curl -sX POST http://localhost:8010/api/v1/tasks \

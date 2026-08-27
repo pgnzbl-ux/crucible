@@ -1,0 +1,63 @@
+rules:
+  - id: codeigniter-db-query
+    languages:
+      - php
+    severity: ERROR
+    mode: taint
+    message: >-
+      CodeIgniter request input flows into $this->db->query / order_by or
+      $db->query. Prefer query bindings / Query Builder placeholders instead of
+      concatenating user input into SQL.
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp:
+        - A01:2017 - Injection
+        - A03:2021 - Injection
+      category: security
+      technology:
+        - php
+        - codeigniter
+      subcategory:
+        - vuln
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      crucible-overlay: true
+    pattern-sources:
+      - pattern-either:
+          - pattern: $THIS->input->get(...)
+          - pattern: $THIS->input->post(...)
+          - pattern: $THIS->request->getGet(...)
+          - pattern: $THIS->request->getPost(...)
+    pattern-propagators:
+      - pattern: $TO = $FROM . $X
+        from: $FROM
+        to: $TO
+      - pattern: $TO = $X . $FROM
+        from: $FROM
+        to: $TO
+      - pattern: $TO .= $FROM
+        from: $FROM
+        to: $TO
+      - pattern: $TO = sprintf(..., $FROM, ...)
+        from: $FROM
+        to: $TO
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: (int) $X
+          - pattern: (int)(...)
+          - pattern: intval(...)
+          - pattern: $THIS->db->escape(...)
+          - pattern: $DB->escape(...)
+    pattern-sinks:
+      - pattern-either:
+          - patterns:
+              - pattern: $THIS->db->query($SINK, ...)
+              - focus-metavariable: $SINK
+          - patterns:
+              - pattern: $THIS->db->order_by($SINK, ...)
+              - focus-metavariable: $SINK
+          - patterns:
+              - pattern: $DB->query($SINK, ...)
+              - focus-metavariable: $SINK

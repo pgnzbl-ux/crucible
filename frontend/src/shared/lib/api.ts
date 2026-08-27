@@ -107,10 +107,18 @@ export interface TaskSummary {
   id: string
   project_address: string
   project_id: string | null
+  project_ref: string | null
+  project_ref_type: 'branch' | 'tag' | 'commit' | null
   status: string
   verdict: string | null
   priority: string
   source_type: string
+  task_type?: 'verify' | 'discovery'
+  source_alert_group_id?: string | null
+  finding_count: number
+  pending_review_count: number
+  confirmed_count: number
+  report_status: string | null
   owner_id: string
   created_at: string
   updated_at: string
@@ -136,17 +144,27 @@ export interface TaskDetail extends TaskSummary {
   runs: RunSummary[]
 }
 
-// 节点状态(6 节点步骤条数据源)
+// 节点状态（模式化子图步骤条数据源）
+export interface NodeUsage {
+  prompt_tokens: number
+  completion_tokens: number
+  cache_read_input_tokens: number
+  cache_creation_input_tokens: number
+  total_tokens: number
+}
+
 export interface NodeRun {
   id: string
   node_index: number
-  node_key: 'source' | 'profile' | 'env_ready' | 'audit' | 'reproduce' | 'report'
+  node_key: string  // 拓扑节点(discovery-spec §4.2.4)
   status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'cancelled'
   attempt: number
   error_message: string | null
   started_at: string | null
   finished_at: string | null
   output?: Record<string, unknown>
+  /** 本 run 该节点台账聚合；无消耗时省略 */
+  usage?: NodeUsage
 }
 
 // 6 档判定(对齐后端 verdict)
@@ -207,12 +225,17 @@ export interface ReportDetail {
 export interface ReportSummary {
   id: string
   task_id: string
+  project_address: string | null
+  project_ref: string | null
+  task_type: 'verify' | 'discovery' | null
+  document_kind: string | null
   status: string
   conclusion: string
   title: string
   summary: string | null
   verdict: string | null
   severity: string | null
+  published_at: string | null
   created_at: string
   updated_at: string
 }
@@ -297,11 +320,15 @@ export interface LlmProvider {
   id: string
   name: string
   provider_type: string
+  auth_mode: 'api_key' | 'bearer'
   base_url: string
   api_key_masked: string
   has_api_key: boolean
   model: string
   timeout_ms: number
+  temperature: number
+  max_context_tokens: number
+  effort: string
   is_default: boolean
   created_at: string
   updated_at: string
@@ -315,10 +342,14 @@ export interface LlmProviderListResponse {
 export interface LlmProviderInput {
   name: string
   provider_type: string
+  auth_mode?: 'api_key' | 'bearer'
   base_url: string
   api_key?: string
   model: string
   timeout_ms?: number
+  temperature?: number
+  max_context_tokens?: number
+  effort?: string
   is_default?: boolean
 }
 
@@ -329,7 +360,31 @@ export interface LlmProviderTestResult {
   model: string | null
 }
 
-// ── Credential（任务级凭据，P1-6） ──
+export interface LlmAgentCanaryChecks {
+  read_tool: boolean
+  bash_tool: boolean
+  mcp_submit: boolean
+  multi_turn: boolean
+  credential_isolation: boolean
+  single_terminal: boolean
+}
+
+export interface LlmProviderAgentTestResult {
+  ok: boolean
+  message: string
+  checks: LlmAgentCanaryChecks
+  provider_id: string
+  model: string
+  duration_ms: number | null
+  num_turns: number | null
+  usage: Record<string, number>
+  /** 瞬时类失败自动重试后的总尝试次数 */
+  attempts?: number
+  /** 失败证据摘要（工具序列/结束态/模型末回复），按尝试次序累积 */
+  evidence?: string[]
+}
+
+// ── Credential（任务级凭据） ──
 
 export interface Credential {
   id: string
@@ -358,9 +413,28 @@ export interface CredentialInput {
 
 export interface RuntimeSettings {
   max_concurrent_tasks: number
+  max_concurrent_agent_runners: number
+  lead_verify_per_task: number
+  reproduce_per_lab: number
+  // 时长量纲（秒）；0=不限。生效总预算取本值与 Celery 软限较小者
+  task_time_budget_seconds: number
+  ai_node_timeout_seconds: number
   max_allowed: number
+  agent_runner_max_allowed: number
+  lead_verify_max_allowed: number
+  reproduce_max_allowed: number
   worker_pool: 'prefork'
 }
+
+export type RuntimeSettingsInput = Pick<
+  RuntimeSettings,
+  | 'max_concurrent_tasks'
+  | 'max_concurrent_agent_runners'
+  | 'lead_verify_per_task'
+  | 'reproduce_per_lab'
+  | 'task_time_budget_seconds'
+  | 'ai_node_timeout_seconds'
+>
 
 export const api = {
   // Auth
@@ -384,7 +458,8 @@ export const api = {
 
   createTask: (data: {
     project_address: string
-    vulnerability_description: string
+    task_type?: 'verify' | 'discovery'
+    vulnerability_description?: string
     priority?: string
     project_ref?: string
     project_ref_type?: 'branch' | 'tag' | 'commit'
@@ -396,7 +471,8 @@ export const api = {
 
   createTaskFromUpload: (data: {
     file: File
-    vulnerability_description: string
+    task_type: 'verify' | 'discovery'
+    vulnerability_description?: string
     name?: string
     priority?: string
     vulnerability_reasoning?: string
@@ -404,7 +480,8 @@ export const api = {
   }) => {
     const form = new FormData()
     form.append('file', data.file)
-    form.append('vulnerability_description', data.vulnerability_description)
+    form.append('task_type', data.task_type)
+    if (data.vulnerability_description) form.append('vulnerability_description', data.vulnerability_description)
     if (data.name) form.append('name', data.name)
     if (data.priority) form.append('priority', data.priority)
     if (data.vulnerability_reasoning) form.append('vulnerability_reasoning', data.vulnerability_reasoning)
@@ -430,12 +507,33 @@ export const api = {
   cancelTask: (id: string) => request<TaskDetail>(`/tasks/${id}/cancel`, { method: 'POST' }),
 
   getTaskEvents: (id: string) => request<AgentEvent[]>(`/tasks/${id}/events?limit=1000`),
+  issueSseTicket: (id: string) =>
+    request<{ ticket: string; expires_in: number }>(`/tasks/${id}/events/ticket`, {
+      method: 'POST',
+    }),
 
   // Reports
   listReports: (params?: Record<string, string>) => {
     const qs = params ? '?' + new URLSearchParams(params).toString() : ''
     return request<{ items: ReportSummary[]; total: number; limit: number; offset: number }>(`/reports/${qs}`)
   },
+
+  listAuditTasks: (params?: Record<string, string>) => {
+    const qs = params ? '?' + new URLSearchParams(params).toString() : ''
+    return request<{ items: AuditTaskSummary[]; total: number; limit: number; offset: number }>(
+      `/reports/audits${qs}`,
+    )
+  },
+
+  getAuditTask: (taskId: string) => request<AuditTaskSummary>(`/reports/audits/${taskId}`),
+
+  listAuditVulnReports: (taskId: string) =>
+    request<{ task_id: string; items: VulnReportSummary[]; total: number }>(
+      `/reports/audits/${taskId}/vulns`,
+    ),
+
+  getAuditVulnReport: (taskId: string, groupId: string) =>
+    request<Record<string, unknown>>(`/reports/audits/${taskId}/vulns/${groupId}`),
 
   getReport: (reportId: string) => request<ReportDetail>(`/reports/${reportId}`),
 
@@ -486,10 +584,21 @@ export const api = {
   testLlmProvider: (id: string) =>
     request<LlmProviderTestResult>(`/settings/llm/providers/${id}/test`, { method: 'POST' }),
 
-  testLlmConnection: (data: { base_url: string; api_key?: string; model: string }) =>
+  testLlmProviderAgent: (id: string) =>
+    request<LlmProviderAgentTestResult>(`/settings/llm/providers/${id}/agent-test`, { method: 'POST' }),
+
+  testLlmConnection: (data: {
+    base_url: string
+    provider_type?: string
+    auth_mode?: 'api_key' | 'bearer'
+    api_key?: string
+    model: string
+    temperature?: number
+    effort?: string
+  }) =>
     request<LlmProviderTestResult>('/settings/llm/test', { method: 'POST', body: JSON.stringify(data) }),
 
-  // Credentials（P1-6）
+  // Credentials
   listCredentials: () => request<CredentialListResponse>('/settings/credentials'),
 
   createCredential: (data: CredentialInput) =>
@@ -503,7 +612,7 @@ export const api = {
 
   getRuntimeSettings: () => request<RuntimeSettings>('/settings/runtime'),
 
-  updateRuntimeSettings: (data: { max_concurrent_tasks: number }) =>
+  updateRuntimeSettings: (data: RuntimeSettingsInput) =>
     request<RuntimeSettings>('/settings/runtime', { method: 'PUT', body: JSON.stringify(data) }),
 
   // Tasks — 阶段 1 新增(retry / delete / nodes)
@@ -525,6 +634,12 @@ export const api = {
   // Reports — 导出（带鉴权，避免 window.open 丢 token）
   exportReportUrl: (reportId: string, format: 'json' | 'md' = 'json') =>
     `${API_BASE}/reports/${reportId}/export?format=${format}`,
+
+  exportAuditVulnUrl: (taskId: string, groupId: string, format: 'json' | 'md' = 'json') =>
+    `${API_BASE}/reports/audits/${taskId}/vulns/${groupId}?format=${format}`,
+
+  exportFindingVulnUrl: (groupId: string, format: 'json' | 'md' = 'json') =>
+    `${API_BASE}/findings/groups/${groupId}/report/export?format=${format}`,
 
   // Projects — 阶段 1 新增
   listProjects: (params?: Record<string, string>) => {
@@ -571,6 +686,52 @@ export const api = {
   deleteProject: (id: string) => request<void>(`/projects/${id}`, { method: 'DELETE' }),
   listProjectArtifacts: (id: string) =>
     request<{ items: SourceArtifact[]; total: number }>(`/projects/${id}/artifacts`),
+  deleteProjectArtifact: (projectId: string, artifactId: string) =>
+    request<void>(`/projects/${projectId}/artifacts/${artifactId}`, { method: 'DELETE' }),
+
+  // Findings(复核台, discovery-spec §9.1)
+  getFindingStats: () => request<FindingStats>('/findings/stats'),
+  listAlertGroups: (params?: Record<string, string | number | undefined>) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(params ?? {})) {
+      if (v !== undefined && v !== '' && v !== null) qs.set(k, String(v))
+    }
+    const suffix = qs.toString() ? `?${qs}` : ''
+    return request<AlertGroupListResponse>(`/findings/groups${suffix}`)
+  },
+  listAlertGroupIds: (params?: Record<string, string | number | undefined>) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(params ?? {})) {
+      if (v !== undefined && v !== '' && v !== null) qs.set(k, String(v))
+    }
+    const suffix = qs.toString() ? `?${qs}` : ''
+    return request<{ total: number; ids: string[] }>(`/findings/groups/ids${suffix}`)
+  },
+  getAlertGroup: (id: string) => request<AlertGroupDetail>(`/findings/groups/${id}`),
+  deleteAlertGroup: (id: string) =>
+    request<void>(`/findings/groups/${id}`, { method: 'DELETE' }),
+  batchDeleteAlertGroups: (ids: string[]) =>
+    request<{ deleted: string[]; skipped: { id: string; reason: string }[] }>(
+      '/findings/groups/batch-delete',
+      { method: 'POST', body: JSON.stringify({ ids }) },
+    ),
+  reviewAlertGroup: (
+    id: string,
+    data: {
+      action: 'confirm' | 'reject' | 'revise_cwe' | 'adjust_confidence'
+      reason_tags?: string[]
+      reason_text?: string | null
+      cwe?: string | null
+      confidence?: number | null
+    },
+  ) => request<AlertGroupSummary>(`/findings/groups/${id}/review`, { method: 'POST', body: JSON.stringify(data) }),
+  reviveAlertGroup: (id: string) =>
+    request<{ id: string; status: string }>(`/findings/groups/${id}/revive`, { method: 'POST' }),
+  dispatchAlertGroup: (id: string, include_engine_conclusion = false) =>
+    request<{ group_id: string; verification_task_id: string }>(
+      `/findings/groups/${id}/dispatch`,
+      { method: 'POST', body: JSON.stringify({ include_engine_conclusion }) },
+    ),
 
   // Labs
   listLabs: () => request<{ items: LabGroup[] }>('/labs'),
@@ -587,4 +748,182 @@ export const api = {
     request<{ status: string }>(`/labs/${id}/containers/${encodeURIComponent(name)}`, {
       method: 'DELETE',
     }),
+}
+
+// ── 发现侧·复核台(discovery-spec §9) ──
+
+export interface FindingEvidenceRaw {
+  confidence?: string
+  category?: string | null
+  has_dataflow?: boolean
+  rule_class?: string
+  entropy?: number
+  description?: string
+  commit?: string
+  author?: string
+  date?: string
+  called?: boolean | null
+  unimportant?: boolean
+  dependency_name?: string
+  version?: string
+  ecosystem?: string
+  cve?: string
+  aliases?: string[]
+  cvss?: string | number | null
+  cvss_score?: number | null
+  severity_label?: string
+  summary?: string
+  details?: string
+  fixed_versions?: string[]
+  osv_url?: string
+  [key: string]: unknown
+}
+
+export interface FindingSummary {
+  id: string
+  engine: string
+  rule_id: string
+  cwe: string | null
+  severity: string | null
+  file_path: string
+  line_start: number | null
+  line_end: number | null
+  message: string
+  source_to_sink?: unknown[] | null
+  code_snippet?: string | null
+  /** 降噪/二审证据元数据；gitleaks 命中原文、osv 可读摘要也走这里 */
+  raw?: FindingEvidenceRaw | null
+}
+
+export interface AlertGroupSummary {
+  id: string
+  task_id: string
+  project_id: string | null
+  project_address: string | null
+  project_ref: string | null
+  audit_created_at: string | null
+  cwe: string | null
+  cwe_source: string
+  vulnerability_title: string
+  representative_rule_id: string | null
+  representative_message: string | null
+  severity: string | null
+  primary_engine: string | null
+  screening_status: string
+  screening_summary: string
+  screening_reasons: string[]
+  file_path: string
+  function_symbol: string | null
+  line_span: string | null
+  member_count: number
+  engine_set: string[]
+  status: string
+  clue_grade: string | null
+  ai_verdict: string | null
+  ai_confidence: number | null
+  priority: string | null
+  resolution: string | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface AlertGroupListResponse {
+  total: number
+  items: AlertGroupSummary[]
+}
+
+export interface FindingStats {
+  total: number
+  by_status: Record<string, number>
+  by_resolution: Record<string, number>
+  by_queue: Record<string, number>
+}
+
+export interface AdjudicationDetail {
+  id: string
+  attempt: number
+  verdict: string
+  confidence: number | null
+  why: string[]
+  evidence: { file?: string; lines?: string }[]
+  need: string[]
+  summary: string | null
+  reasoning: string | null
+  prompt_text: string
+  response_text: string
+  usage: Record<string, number>
+  created_at: string | null
+}
+
+export interface ReviewActionDetail {
+  id: string
+  action: string
+  reason_tags: string[]
+  reason_text: string | null
+  user_id: string
+  created_at: string | null
+}
+
+export interface LeadRunSummary {
+  id: string
+  status: string
+  verdict: string | null
+  gate_verdict: string | null
+  verification_basis: string | null
+  error: string | null
+  created_at: string | null
+  updated_at: string | null
+  node_runs: LeadNodeRunSummary[]
+}
+
+export interface LeadNodeRunSummary {
+  id: string
+  node_key: 'audit' | 'reproduce' | string
+  status: string
+  attempt: number
+  input_json: Record<string, unknown>
+  output_json: Record<string, unknown> | null
+  error: string | null
+  started_at: string | null
+  finished_at: string | null
+}
+
+export interface AlertGroupDetail extends AlertGroupSummary {
+  members: FindingSummary[]
+  representative: FindingSummary | null
+  adjudications: AdjudicationDetail[]
+  reviews: ReviewActionDetail[]
+  lead_runs: LeadRunSummary[]
+  verification_task_id: string | null
+  verification_verdict: string | null
+  verification_basis: string | null
+  vuln_report: Record<string, unknown> | null
+}
+
+export interface AuditTaskSummary {
+  task_id: string
+  project_id: string | null
+  project_address: string | null
+  project_ref: string | null
+  task_status: string
+  report_id: string | null
+  report_status: string | null
+  confirmed_count: number
+  code_reachable_count: number
+  vuln_report_count: number
+  created_at: string | null
+  updated_at: string | null
+  published_at: string | null
+}
+
+export interface VulnReportSummary {
+  alert_group_id: string
+  task_id: string
+  summary: string
+  final_verdict: string | null
+  verification_basis: string | null
+  primary_engine: string | null
+  cwe: string | null
+  file_path: string | null
+  generated_at: string | null
 }

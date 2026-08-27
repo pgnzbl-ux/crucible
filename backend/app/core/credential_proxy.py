@@ -20,11 +20,12 @@ import os
 from typing import Any
 
 from app.contexts.settings.models import Credential
+from app.core.crypto import reveal_secret
 
 logger = logging.getLogger(__name__)
 
 # 平台注入 / 容器运行时保留名，任务凭据不得覆盖
-RESERVED_ENV_NAMES = frozenset({"HOME", "PATH", "NODE_KEY"})
+RESERVED_ENV_NAMES = frozenset({"HOME", "PATH", "BASH_ENV", "NODE_KEY"})
 RESERVED_ENV_PREFIXES = ("ANTHROPIC_",)
 
 
@@ -62,7 +63,7 @@ def inject_credentials(
     secret_dir = os.path.join(host_workdir, SECRET_DIR_NAME)
 
     for cred in credentials:
-        plain = cred.secret_encrypted
+        plain = reveal_secret(cred.secret_encrypted)
         if not plain:
             # 空值跳过,不阻断任务
             continue

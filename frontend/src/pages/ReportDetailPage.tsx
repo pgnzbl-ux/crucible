@@ -62,14 +62,14 @@ export function ReportDetailPage() {
     <>
       <PageHeader
         title={report?.title ?? '报告详情'}
-        subtitle={report ? `任务 ${report.task_id.slice(0, 8)}` : undefined}
+        subtitle={report ? `审计运行 ${report.task_id.slice(0, 8)}` : undefined}
         extra={
           <Space>
             <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/reports')}>
               返回列表
             </Button>
             {report && (
-              <Button onClick={() => navigate(`/tasks/${report.task_id}?tab=progress`)}>查看任务</Button>
+              <Button onClick={() => navigate(`/tasks/${report.task_id}?tab=progress`)}>查看审计过程</Button>
             )}
           </Space>
         }
@@ -138,7 +138,7 @@ export function ReportDetailPage() {
                 {
                   key: 'evidence',
                   label: '证据',
-                  children: <EvidenceList reportId={report.id} />,
+                  children: <EvidenceList reportId={report.id} readOnly={report.status === 'published'} />,
                 },
               ]}
             />

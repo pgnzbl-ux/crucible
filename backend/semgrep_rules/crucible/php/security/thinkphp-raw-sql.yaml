@@ -1,0 +1,77 @@
+rules:
+  - id: thinkphp-raw-sql
+    languages:
+      - php
+    severity: ERROR
+    mode: taint
+    message: >-
+      User input reaches a ThinkPHP raw SQL API (Db::query/execute/raw,
+      whereRaw, order, field). Prefer parameterized queries / expression
+      builders instead of interpolating request data.
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp:
+        - A01:2017 - Injection
+        - A03:2021 - Injection
+      category: security
+      technology:
+        - php
+        - thinkphp
+      subcategory:
+        - vuln
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      crucible-overlay: true
+    pattern-sources:
+      - pattern-either:
+          - pattern: $_GET
+          - pattern: $_POST
+          - pattern: $_REQUEST
+          - pattern: $REQ->param(...)
+          - pattern: input(...)
+    pattern-propagators:
+      - pattern: $TO = $FROM . $X
+        from: $FROM
+        to: $TO
+      - pattern: $TO = $X . $FROM
+        from: $FROM
+        to: $TO
+      - pattern: $TO .= $FROM
+        from: $FROM
+        to: $TO
+      - pattern: $TO = sprintf(..., $FROM, ...)
+        from: $FROM
+        to: $TO
+      - pattern: $TO = $ARR[$FROM]
+        from: $ARR
+        to: $TO
+      - pattern: $TO = $ARR[...]
+        from: $ARR
+        to: $TO
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: (int) $X
+          - pattern: (int)(...)
+          - pattern: intval(...)
+    pattern-sinks:
+      - pattern-either:
+          - patterns:
+              - pattern: Db::query($SINK, ...)
+              - focus-metavariable: $SINK
+          - patterns:
+              - pattern: Db::execute($SINK, ...)
+              - focus-metavariable: $SINK
+          - patterns:
+              - pattern: Db::raw($SINK, ...)
+              - focus-metavariable: $SINK
+          - patterns:
+              - pattern: $M->whereRaw($SINK, ...)
+              - focus-metavariable: $SINK
+          - patterns:
+              - pattern: $M->order($SINK, ...)
+              - focus-metavariable: $SINK
+          - patterns:
+              - pattern: $M->field($SINK, ...)
+              - focus-metavariable: $SINK

@@ -19,6 +19,8 @@ from app.shared.exception_handlers import register_exception_handlers
 async def session_factory():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
+        from app.contexts.discovery.models import ScanRun  # noqa: F401
+        from app.contexts.finding.models import AlertGroup, RawFinding  # noqa: F401
         from app.contexts.identity.models import User  # noqa: F401
         from app.contexts.lab.models import Lab  # noqa: F401
         from app.contexts.project.models import Project  # noqa: F401
@@ -52,12 +54,21 @@ async def test_get_runtime_inserts_default_one(session_factory):
 @pytest.mark.asyncio
 async def test_update_runtime_persists(session_factory):
     from app.contexts.settings.repository import SettingsRepository
+    from app.contexts.settings.schemas import RuntimeSettingsUpdateRequest
     from app.contexts.settings.service import SettingsService
 
     async with session_factory() as session:
         svc = SettingsService(SettingsRepository(session))
-        updated = await svc.update_runtime_settings(2)
+        updated = await svc.update_runtime_settings(RuntimeSettingsUpdateRequest(
+            max_concurrent_tasks=2,
+            max_concurrent_agent_runners=3,
+            lead_verify_per_task=2,
+            reproduce_per_lab=1,
+        ))
         assert updated.max_concurrent_tasks == 2
+        assert updated.max_concurrent_agent_runners == 3
+        assert updated.lead_verify_per_task == 2
+        assert updated.reproduce_per_lab == 1
         got = await svc.get_runtime_settings()
         assert got.max_concurrent_tasks == 2
         assert got.max_allowed >= 2
@@ -78,6 +89,16 @@ def test_update_request_forbids_extra_fields():
         RuntimeSettingsUpdateRequest(max_concurrent_tasks=1, other=True)
 
 
+def test_update_request_rejects_invalid_budget_hierarchy():
+    from app.contexts.settings.schemas import RuntimeSettingsUpdateRequest
+
+    with pytest.raises(ValidationError, match="线索终认并发"):
+        RuntimeSettingsUpdateRequest(
+            max_concurrent_agent_runners=2,
+            lead_verify_per_task=3,
+        )
+
+
 def test_runtime_get_requires_authentication(monkeypatch):
     from app.contexts.settings.api import router
     from app.core.config import get_settings
@@ -93,13 +114,19 @@ def test_runtime_get_requires_authentication(monkeypatch):
 def test_runtime_put_returns_max_allowed():
     from app.contexts.settings.api import get_settings_service, router
     from app.contexts.settings.schemas import RuntimeSettingsResponse
-    from app.shared.deps import get_current_user_id
+    from app.shared.deps import get_current_admin_id
 
     class _Fake:
-        async def update_runtime_settings(self, n: int) -> RuntimeSettingsResponse:
+        async def update_runtime_settings(self, request) -> RuntimeSettingsResponse:
             return RuntimeSettingsResponse(
-                max_concurrent_tasks=n,
+                max_concurrent_tasks=request.max_concurrent_tasks,
+                max_concurrent_agent_runners=4,
+                lead_verify_per_task=2,
+                reproduce_per_lab=1,
                 max_allowed=4,
+                agent_runner_max_allowed=4,
+                lead_verify_max_allowed=4,
+                reproduce_max_allowed=4,
                 worker_pool="prefork",
             )
 
@@ -107,10 +134,84 @@ def test_runtime_put_returns_max_allowed():
     register_exception_handlers(app)
     app.include_router(router, prefix="/api/v1")
     app.dependency_overrides[get_settings_service] = lambda: _Fake()
-    app.dependency_overrides[get_current_user_id] = lambda: "u1"
+    app.dependency_overrides[get_current_admin_id] = lambda: "u1"
     response = TestClient(app).put("/api/v1/settings/runtime", json={"max_concurrent_tasks": 2})
     assert response.status_code == 200
     body = response.json()
     assert body["max_concurrent_tasks"] == 2
     assert body["max_allowed"] == 4
+    assert body["max_concurrent_agent_runners"] == 4
     assert body["worker_pool"] == "prefork"
+
+
+@pytest.mark.asyncio
+async def test_time_budget_fields_persist_and_clamp(session_factory):
+    from app.contexts.settings.repository import SettingsRepository
+    from app.contexts.settings.schemas import RuntimeSettingsUpdateRequest
+    from app.contexts.settings.service import SettingsService
+
+    async with session_factory() as session:
+        svc = SettingsService(SettingsRepository(session))
+        saved = await svc.update_runtime_settings(
+            RuntimeSettingsUpdateRequest(
+                task_time_budget_seconds=7200,
+                ai_node_timeout_seconds=1800,
+            )
+        )
+        assert saved.task_time_budget_seconds == 7200
+        assert saved.ai_node_timeout_seconds == 1800
+        again = await svc.get_runtime_settings()
+        assert again.task_time_budget_seconds == 7200
+
+        # 节点超时 > 新预算：PUT 显式拒绝（读路径另有静默收敛兜底）
+        from app.contexts.settings.schemas import RuntimeSettingsUpdateRequest as R
+
+        with pytest.raises(ValueError, match="单节点超时"):
+            await svc.update_runtime_settings(
+                R(task_time_budget_seconds=600)
+            )
+        clamped = await svc.get_runtime_settings()
+        assert clamped.task_time_budget_seconds == 7200
+
+        # 两者一起提交合法；读取收敛兜底覆盖旧数据/直改库场景
+        saved2 = await svc.update_runtime_settings(
+            R(task_time_budget_seconds=600, ai_node_timeout_seconds=600)
+        )
+        assert saved2.ai_node_timeout_seconds == 600
+        from sqlalchemy import select
+
+        from app.contexts.settings.models import PlatformSetting
+        row = (await session.execute(
+            select(PlatformSetting).where(PlatformSetting.singleton_key == "default")
+        )).scalar_one()
+        row.ai_node_timeout_seconds = 9999
+        converged = await svc.get_runtime_settings()
+        assert converged.ai_node_timeout_seconds == 600
+
+
+def test_update_request_rejects_duration_hierarchy():
+    from app.contexts.settings.schemas import RuntimeSettingsUpdateRequest
+
+    with pytest.raises(ValidationError, match="单节点超时"):
+        RuntimeSettingsUpdateRequest(
+            task_time_budget_seconds=600, ai_node_timeout_seconds=3600,
+        )
+
+
+def test_update_request_accepts_zero_as_unlimited():
+    from app.contexts.settings.schemas import RuntimeSettingsUpdateRequest
+
+    req = RuntimeSettingsUpdateRequest(
+        task_time_budget_seconds=0, ai_node_timeout_seconds=0,
+    )
+    assert req.task_time_budget_seconds == 0
+    assert req.ai_node_timeout_seconds == 0
+
+
+def test_update_request_rejects_sub_minute_and_overflow():
+    from app.contexts.settings.schemas import RuntimeSettingsUpdateRequest
+
+    with pytest.raises(ValidationError):
+        RuntimeSettingsUpdateRequest(task_time_budget_seconds=30)
+    with pytest.raises(ValidationError):
+        RuntimeSettingsUpdateRequest(ai_node_timeout_seconds=7 * 24 * 60 * 60 + 1)

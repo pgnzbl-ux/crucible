@@ -26,4 +26,27 @@ def worker_argv() -> list[str]:
 
 
 if __name__ == "__main__":
+    from app.core.config import get_settings
+    from app.core.scanners import ScannerInstallError, ensure_installed
+    from app.core.semgrep_rules import ensure_rules
+
+    settings = get_settings()
+    try:
+        ensure_installed()
+        ensure_rules(
+            explicit=settings.scanner_semgrep_rules_dir,
+            auto_install=settings.scanner_auto_install,
+        )
+    except ScannerInstallError as exc:
+        print(f"扫描器安装失败: {exc}", file=sys.stderr)
+        sys.exit(1)
+    from pathlib import Path
+
+    semgrep = Path(sys.prefix) / "bin" / "semgrep"
+    if not semgrep.is_file():
+        print(
+            "警告: 未找到 semgrep，scan_semgrep 将失败隔离。"
+            "请 pip install -r requirements.txt",
+            file=sys.stderr,
+        )
     celery_app.worker_main(worker_argv())

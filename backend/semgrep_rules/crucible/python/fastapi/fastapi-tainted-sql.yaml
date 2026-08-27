@@ -1,0 +1,104 @@
+rules:
+  - id: fastapi-tainted-sql
+    languages:
+      - python
+    severity: ERROR
+    mode: taint
+    message: >-
+      FastAPI request input (Query/Path/Body/Request) flows into a SQL execution
+      or manually constructed SQL string. Use bound parameters / SQLAlchemy
+      expressions instead of interpolating user input.
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp:
+        - A01:2017 - Injection
+        - A03:2021 - Injection
+      category: security
+      technology:
+        - fastapi
+        - python
+      subcategory:
+        - vuln
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      crucible-overlay: true
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - patterns:
+                  - pattern-inside: |
+                      def $F(..., $P: $T = Query(...), ...):
+                          ...
+                  - pattern: $P
+              - patterns:
+                  - pattern-inside: |
+                      async def $F(..., $P: $T = Query(...), ...):
+                          ...
+                  - pattern: $P
+              - patterns:
+                  - pattern-inside: |
+                      def $F(..., $P: $T = Path(...), ...):
+                          ...
+                  - pattern: $P
+              - patterns:
+                  - pattern-inside: |
+                      async def $F(..., $P: $T = Path(...), ...):
+                          ...
+                  - pattern: $P
+              - patterns:
+                  - pattern-inside: |
+                      def $F(..., $P: $T = Body(...), ...):
+                          ...
+                  - pattern: $P
+              - patterns:
+                  - pattern-inside: |
+                      async def $F(..., $P: $T = Body(...), ...):
+                          ...
+                  - pattern: $P
+              - patterns:
+                  - pattern-inside: |
+                      def $F(..., $P: Request, ...):
+                          ...
+                  - pattern: $P
+              - patterns:
+                  - pattern-inside: |
+                      async def $F(..., $P: Request, ...):
+                          ...
+                  - pattern: $P
+              - pattern: $REQ.query_params
+              - pattern: $REQ.path_params
+              - pattern: $REQ.url
+    pattern-sinks:
+      - pattern-either:
+          - patterns:
+              - pattern: $CUR.execute($SQL, ...)
+              - focus-metavariable: $SQL
+          - patterns:
+              - pattern: $SESS.execute($SQL, ...)
+              - focus-metavariable: $SQL
+          - patterns:
+              - pattern: $CONN.execute($SQL, ...)
+              - focus-metavariable: $SQL
+          - patterns:
+              - pattern: text($SQL)
+              - focus-metavariable: $SQL
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      f"$SQLSTR{...}..."
+                  - pattern: |
+                      "$SQLSTR" + ...
+                  - pattern: |
+                      "$SQLSTR" % ...
+                  - pattern: |
+                      "$SQLSTR".format(...)
+              - metavariable-regex:
+                  metavariable: $SQLSTR
+                  regex: \s*(?i)(select|delete|insert|create|update|alter|drop)\b.*
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: int(...)
+          - pattern: float(...)
+          - pattern: bool(...)

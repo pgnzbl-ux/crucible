@@ -57,6 +57,8 @@ def _escape(comment: str) -> str:
 
 
 def upgrade() -> None:
+    if op.get_bind().dialect.name != "postgresql":
+        return
     for table, column, new_comment, _old in _COMMENTS:
         op.execute(
             f"COMMENT ON COLUMN {table}.{column} IS '{_escape(new_comment)}'"
@@ -64,6 +66,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if op.get_bind().dialect.name != "postgresql":
+        return
     for table, column, _new, old in _COMMENTS:
         if old is None:
             op.execute(f"COMMENT ON COLUMN {table}.{column} IS NULL")

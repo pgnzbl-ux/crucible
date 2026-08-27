@@ -169,6 +169,49 @@ describe('eventsForNode', () => {
     expect(eventsForNode(events, 'env_ready').map((e) => e.id)).toEqual(['env-run', 'think'])
     expect(eventsForNode(events, 'profile').map((e) => e.id)).toEqual(['profile-done'])
   })
+
+  it('keeps discovery node logs when they interleave with another node in the same wave', () => {
+    const events = [
+      ev({
+        id: 'g-run',
+        run_id: 'r',
+        sequence: 1,
+        event_type: 'node.updated',
+        payload: { node_key: 'scan_gitleaks', status: 'running' },
+      }),
+      ev({
+        id: 'p-run',
+        run_id: 'r',
+        sequence: 2,
+        event_type: 'node.updated',
+        payload: { node_key: 'profile', status: 'running' },
+      }),
+      ev({
+        id: 'g-log',
+        run_id: 'r',
+        sequence: 3,
+        event_type: 'phase.updated',
+        payload: { node_key: 'scan_gitleaks', phase: 'scan_gitleaks', message: '启动 gitleaks' },
+      }),
+      ev({
+        id: 'think',
+        run_id: 'r',
+        sequence: 4,
+        event_type: 'agent.thinking',
+        payload: { node_key: 'profile', text: '判断语言' },
+      }),
+      ev({
+        id: 'triage',
+        run_id: 'r',
+        sequence: 5,
+        event_type: 'triage.progress',
+        payload: { node_key: 'triage', adjudicated: 10, pending: 2, reason: 'budget' },
+      }),
+    ]
+    expect(eventsForNode(events, 'scan_gitleaks').map((e) => e.id)).toEqual(['g-run', 'g-log'])
+    expect(eventsForNode(events, 'profile').map((e) => e.id)).toEqual(['p-run', 'think'])
+    expect(eventsForNode(events, 'triage').map((e) => e.id)).toEqual(['triage'])
+  })
 })
 
 describe('mergeTaskEvents', () => {

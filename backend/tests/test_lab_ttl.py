@@ -39,6 +39,15 @@ def test_ttl_remaining_ready_without_last_seen_is_zero():
     assert ttl_remaining_seconds("ready", None, 3600, now) == 0
 
 
+def test_ttl_remaining_full_while_live_tasks_hold_lab():
+    """有 live 任务时倒计时未开始，对外显示满额 TTL。"""
+    now = datetime(2026, 8, 19, 6, 0, tzinfo=timezone.utc)
+    last_seen = now - timedelta(hours=2)
+    assert (
+        ttl_remaining_seconds("ready", last_seen, 3600, now, live_task_count=1) == 3600
+    )
+
+
 @pytest_asyncio.fixture
 async def session():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -155,6 +164,68 @@ async def test_ttl_skips_lab_with_running_task(session):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["completed", "failed", "cancelled", "needs_review"])
+async def test_ttl_clock_starts_when_task_ends(session, terminal):
+    """长任务结束后才重置 last_seen，避免中间 AI 超时后靶场被立刻清掉。"""
+    from app.contexts.lab.models import Lab
+    from app.contexts.task.models import Task
+
+    svc, result = await ready_lab(session, task_status="running")
+    now = datetime(2026, 8, 14, 4, 0, tzinfo=timezone.utc)
+    lab = await session.get(Lab, result.lab_id)
+    lab.last_seen_at = now - timedelta(hours=2)
+    await session.commit()
+
+    (await session.get(Task, "t1")).status = terminal
+    await session.commit()
+    started = await svc.start_ttl_when_idle(result.lab_id, now=now)
+    assert started is True
+    await session.refresh(lab)
+    from app.shared.time import as_utc
+
+    assert as_utc(lab.last_seen_at) == now
+
+    with patch(
+        "app.contexts.lab.docker_ops.compose_down", new_callable=AsyncMock
+    ) as down:
+        expired = await svc.expire_silent_labs(now=now)
+    assert expired == []
+    down.assert_not_awaited()
+
+    later = now + timedelta(seconds=3600)
+    with patch(
+        "app.contexts.lab.docker_ops.compose_down", new_callable=AsyncMock
+    ) as down:
+        expired = await svc.expire_silent_labs(now=later)
+    assert expired == [result.lab_id]
+    down.assert_awaited_once_with(result.compose_project)
+
+
+@pytest.mark.asyncio
+async def test_start_ttl_when_idle_skips_if_other_live_task(session):
+    from app.contexts.lab.models import Lab
+    from app.contexts.task.models import Task
+
+    svc, result = await ready_lab(session, task_status="running")
+    await seed(session, task_id="t2", status="running")
+    task2 = await session.get(Task, "t2")
+    task2.lab_id = result.lab_id
+    lab = await session.get(Lab, result.lab_id)
+    old = datetime(2026, 8, 14, 1, 0, tzinfo=timezone.utc)
+    lab.last_seen_at = old
+    await session.commit()
+
+    (await session.get(Task, "t1")).status = "failed"
+    await session.commit()
+    now = datetime(2026, 8, 14, 4, 0, tzinfo=timezone.utc)
+    assert await svc.start_ttl_when_idle(result.lab_id, now=now) is False
+    await session.refresh(lab)
+    from app.shared.time import as_utc
+
+    assert as_utc(lab.last_seen_at) == old
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["ready", "stopped"])
 async def test_missing_last_seen_is_immediately_expired(session, status):
     from app.contexts.lab.models import Lab
@@ -227,7 +298,7 @@ async def test_failed_lab_runtime_is_cleaned_by_sweeper(session):
 
 
 @pytest.mark.asyncio
-async def test_cleanup_promotes_expired_lab_with_running_containers(session):
+async def test_cleanup_does_not_promote_expired_without_http_probe(session):
     from app.contexts.lab.models import Lab
 
     svc, result = await ready_lab(session)
@@ -245,10 +316,10 @@ async def test_cleanup_promotes_expired_lab_with_running_containers(session):
     ) as down:
         cleaned = await svc.cleanup_terminal_runtimes()
 
-    assert cleaned == []
-    down.assert_not_awaited()
+    assert cleaned == [result.lab_id]
+    down.assert_awaited_once_with(result.compose_project)
     await session.refresh(lab)
-    assert lab.status == "ready"
+    assert lab.status == "expired"
 
 
 @pytest.mark.asyncio
@@ -301,7 +372,7 @@ async def test_ttl_restores_ready_when_task_appears_after_claim(session):
         svc,
         "live_task_ids",
         new_callable=AsyncMock,
-        side_effect=[[], ["new-live-task"]],
+        side_effect=[[], ["t1"]],
     ), patch(
         "app.contexts.lab.docker_ops.compose_down", new_callable=AsyncMock
     ) as down:
@@ -330,7 +401,7 @@ async def test_creating_restores_claim_when_task_appears_after_claim(session):
         svc,
         "live_task_ids",
         new_callable=AsyncMock,
-        side_effect=[[], ["new-live-task"]],
+        side_effect=[[], ["t1"]],
     ), patch(
         "app.contexts.lab.docker_ops.compose_down", new_callable=AsyncMock
     ) as down:
@@ -339,6 +410,35 @@ async def test_creating_restores_claim_when_task_appears_after_claim(session):
     assert failed == []
     down.assert_not_awaited()
     assert (await session.get(Lab, result.lab_id)).status == "creating"
+
+
+@pytest.mark.asyncio
+async def test_creating_waiter_does_not_keep_dead_creator_lease_alive(session):
+    from app.contexts.lab.models import Lab
+    from app.contexts.lab.service import LabService
+    from app.contexts.task.models import Task
+
+    await seed(session)
+    svc = LabService(session)
+    result = await svc.acquire(
+        owner_id="u1", project_id="p1", commit_sha=SHA, task_id="t1"
+    )
+    (await session.get(Task, "t1")).status = "cancelled"
+    await session.commit()
+
+    with patch.object(
+        svc,
+        "live_task_ids",
+        new_callable=AsyncMock,
+        side_effect=[["waiter-task"], ["waiter-task"]],
+    ), patch(
+        "app.contexts.lab.docker_ops.compose_down", new_callable=AsyncMock
+    ) as down:
+        failed = await svc.fail_stale_creating()
+
+    assert failed == [result.lab_id]
+    down.assert_awaited_once_with(result.compose_project)
+    assert (await session.get(Lab, result.lab_id)).status == "failed"
 
 
 @pytest.mark.asyncio

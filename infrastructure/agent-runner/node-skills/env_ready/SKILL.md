@@ -20,7 +20,7 @@ agent-runner 内没有 Docker CLI，这是平台设计，不是环境异常。�
 ## 本轮你要做的
 
 - `attempt = 1`：先 recon 再写文件。没有 `.vuln-env` 是正常的。可用 `node -e` / 读文件做只读探测，不要 `npm install` / `pip install`。
-- `attempt > 1`：现有 `.vuln-env` 是上一轮产物。先读取它，再结合 `failed_stage` 和 `previous_error` 对症，**一次只改一处**。不要因为构建网络抖动而改启动拓扑。
+- `attempt > 1`：现有 `.vuln-env` 是上一轮产物。先读取它，再结合 `failed_stage` 和 `previous_error` 对症，**一次只改一处**。不要因为构建网络抖动而改启动拓扑。阶段含义：`ai_submit`=上一轮未调用 submit_result（常因工具格式异常，本轮从 recon/写配方重来），`compose_build`=镜像构建，`container_start`=进程启动，`container_healthcheck`=Dockerfile/compose healthcheck，`health_check`=平台 HTTP 正文探活，`compose_policy`=安全策略，`compose_timeout`=Compose 执行超时。
 
 ### recon（写配方前必须能回答）
 

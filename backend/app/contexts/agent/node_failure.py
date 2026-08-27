@@ -21,6 +21,7 @@ ERROR_CLASSES = (
     "compose_up.build",
     "compose_up.runtime",
     "compose_up.policy",
+    "container_healthcheck",
     "health_check",
     "runner.killed",
     "runner.llm_error",
@@ -60,10 +61,26 @@ def classify_node_error(*, failed_stage: str | None, error_text: str) -> str:
 
     if stage == "recipe_validation":
         return "recipe_validation"
+    if stage == "ai_submit":
+        return "runner.no_submit"
     if stage == "port_conflict":
         return "port_conflict"
     if stage == "health_check":
         return "health_check"
+    if stage == "container_healthcheck":
+        return "container_healthcheck"
+    if stage == "docker_unavailable":
+        return "docker.unavailable"
+    if stage == "compose_policy":
+        return "compose_up.policy"
+    if stage in {"container_start", "compose_timeout"}:
+        return "compose_up.runtime"
+    if stage == "compose_build":
+        if "Could not transfer" in text:
+            return "compose_up.transfer"
+        if "COPY" in text or "unable to find file" in low:
+            return "compose_up.copy"
+        return "compose_up.build"
     if stage == "compose_up" or stage.startswith("compose_up"):
         if "Could not transfer" in text:
             return "compose_up.transfer"
@@ -76,7 +93,7 @@ def classify_node_error(*, failed_stage: str | None, error_text: str) -> str:
         return "compose_up.runtime"
 
     # 137（SIGKILL）必须先于 no_submit：强杀时不会有 .node_output.json，
-    # 但成因是平台超时/巡检/OOM，不是模型没调 submit_result
+    # 但成因是任务取消、外部强杀或 OOM，不是模型没调 submit_result
     if "sigkill" in low or ("exit=137" in low) or ("exit code 137" in low):
         return "runner.killed"
     if "llm 调用失败" in low or "余额不足" in text or "http 401" in low:

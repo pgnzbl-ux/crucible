@@ -91,8 +91,21 @@ class ReportService:
         )
 
     @staticmethod
-    def _to_summary(report: Report) -> ReportSummary:
-        return ReportSummary.model_validate(report)
+    def _to_summary(report: Report, task_context: dict[str, Any] | None = None) -> ReportSummary:
+        document_kind: str | None = None
+        try:
+            payload = json.loads(report.report_data or "{}")
+            if isinstance(payload, dict) and isinstance(payload.get("document_kind"), str):
+                document_kind = payload["document_kind"]
+        except (json.JSONDecodeError, TypeError):
+            pass
+        context = task_context or {}
+        return ReportSummary.model_validate(report).model_copy(update={
+            "project_address": context.get("project_address"),
+            "project_ref": context.get("project_ref"),
+            "task_type": context.get("task_type"),
+            "document_kind": document_kind,
+        })
 
     @staticmethod
     def _to_evidence_detail(ev: Evidence, *, with_url: bool = False) -> EvidenceResponse:
@@ -136,7 +149,7 @@ class ReportService:
             run_id=run_id,
             owner_id=owner_id,
             conclusion=conclusion if conclusion in CONCLUSION_LABELS else "unconfirmed",
-            title=f"漏洞验证报告 — {task_id[:8]}",
+            title=f"安全分析报告 — {task_id[:8]}",
             summary=CONCLUSION_LABELS.get(conclusion, conclusion),
             reasoning=reasoning[:50000] or None,
             evidence_summary=json.dumps(
@@ -193,11 +206,218 @@ class ReportService:
         status: str | None = None,
         verdict: str | None = None,
         query: str | None = None,
+        task_type: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[ReportSummary], int]:
-        rows, total = await self.repo.list_by_owner(owner_id, status, verdict, query, limit, offset)
-        return [self._to_summary(r) for r in rows], total
+        rows, total = await self.repo.list_by_owner(
+            owner_id, status, verdict, query, task_type=task_type, limit=limit, offset=offset,
+        )
+        contexts: dict[str, dict[str, Any]] = {}
+        if rows:
+            from sqlalchemy import select
+
+            from app.contexts.task.models import Task
+
+            result = await self.repo.session.execute(
+                select(Task.id, Task.project_address, Task.project_ref, Task.task_type).where(
+                    Task.id.in_([row.task_id for row in rows]),
+                    Task.owner_id == owner_id,
+                )
+            )
+            contexts = {
+                task_id: {
+                    "project_address": project_address,
+                    "project_ref": project_ref,
+                    "task_type": task_type_val,
+                }
+                for task_id, project_address, project_ref, task_type_val in result.all()
+            }
+        return [self._to_summary(r, contexts.get(r.task_id)) for r in rows], total
+
+    async def list_audit_tasks(
+        self,
+        owner_id: str,
+        *,
+        query: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list, int]:
+        from sqlalchemy import case, func, or_, select
+
+        from app.contexts.finding.models import AlertGroup
+        from app.contexts.report.schemas import AuditTaskSummary
+        from app.contexts.task.models import Task
+        from app.contexts.report.models import Report
+
+        session = self.repo.session
+        confirmed_expr = func.coalesce(func.sum(case(
+            (AlertGroup.resolution == "confirmed", 1), else_=0,
+        )), 0)
+        reachable_expr = func.coalesce(func.sum(case(
+            (AlertGroup.resolution == "code_reachable", 1), else_=0,
+        )), 0)
+        vuln_expr = func.coalesce(func.sum(case(
+            (AlertGroup.vuln_report.is_not(None), 1), else_=0,
+        )), 0)
+        latest_report_id = (
+            select(Report.id)
+            .where(Report.task_id == Task.id)
+            .order_by(Report.created_at.desc(), Report.id.desc())
+            .limit(1)
+            .correlate(Task)
+            .scalar_subquery()
+        )
+
+        base = (
+            select(
+                Task.id.label("task_id"),
+                Task.project_id,
+                Task.project_address,
+                Task.project_ref,
+                Task.status.label("task_status"),
+                Task.created_at,
+                Task.updated_at,
+                Report.id.label("report_id"),
+                Report.status.label("report_status"),
+                Report.published_at,
+                confirmed_expr.label("confirmed_count"),
+                reachable_expr.label("code_reachable_count"),
+                vuln_expr.label("vuln_report_count"),
+            )
+            .outerjoin(Report, Report.id == latest_report_id)
+            .outerjoin(AlertGroup, AlertGroup.task_id == Task.id)
+            .where(Task.owner_id == owner_id, Task.task_type == "discovery")
+            .group_by(
+                Task.id, Task.project_id, Task.project_address, Task.project_ref,
+                Task.status, Task.created_at, Task.updated_at,
+                Report.id, Report.status, Report.published_at,
+            )
+        )
+        if query:
+            pattern = f"%{query.strip()}%"
+            base = base.where(or_(
+                Task.project_address.ilike(pattern),
+                Task.project_ref.ilike(pattern),
+                Task.id.ilike(pattern),
+            ))
+        # 有任务级 Report 或至少一份单漏洞报告才出现在列表
+        having = or_(Report.id.is_not(None), vuln_expr > 0)
+        base = base.having(having)
+        count_stmt = select(func.count()).select_from(base.subquery())
+        total = (await session.execute(count_stmt)).scalar() or 0
+        rows = (
+            await session.execute(
+                base.order_by(Task.created_at.desc()).limit(limit).offset(offset)
+            )
+        ).all()
+        items = [
+            AuditTaskSummary(
+                task_id=r.task_id,
+                project_id=r.project_id,
+                project_address=r.project_address,
+                project_ref=r.project_ref,
+                task_status=r.task_status,
+                report_id=r.report_id,
+                report_status=r.report_status,
+                confirmed_count=int(r.confirmed_count or 0),
+                code_reachable_count=int(r.code_reachable_count or 0),
+                vuln_report_count=int(r.vuln_report_count or 0),
+                created_at=r.created_at,
+                updated_at=r.updated_at,
+                published_at=r.published_at,
+            )
+            for r in rows
+        ]
+        return items, total
+
+    async def get_audit_task(self, task_id: str, owner_id: str):
+        items, _ = await self.list_audit_tasks(owner_id, query=None, limit=200, offset=0)
+        for item in items:
+            if item.task_id == task_id:
+                return item
+        # 无 Report/vuln 时仍允许按 owner 查任务本身（详情页眉）
+        from sqlalchemy import select
+
+        from app.contexts.finding.models import AlertGroup
+        from app.contexts.report.schemas import AuditTaskSummary
+        from app.contexts.task.models import Task
+
+        task = await self.repo.session.scalar(
+            select(Task).where(Task.id == task_id, Task.owner_id == owner_id, Task.task_type == "discovery")
+        )
+        if task is None:
+            return None
+        groups = list((await self.repo.session.execute(
+            select(AlertGroup).where(AlertGroup.task_id == task_id)
+        )).scalars().all())
+        report = await self.repo.get_by_task(task_id, owner_id)
+        return AuditTaskSummary(
+            task_id=task.id,
+            project_id=task.project_id,
+            project_address=task.project_address,
+            project_ref=task.project_ref,
+            task_status=task.status,
+            report_id=report.id if report else None,
+            report_status=report.status if report else None,
+            confirmed_count=sum(1 for g in groups if g.resolution == "confirmed"),
+            code_reachable_count=sum(1 for g in groups if g.resolution == "code_reachable"),
+            vuln_report_count=sum(1 for g in groups if isinstance(g.vuln_report, dict)),
+            created_at=task.created_at,
+            updated_at=task.updated_at,
+            published_at=report.published_at if report else None,
+        )
+
+    async def list_vuln_reports_for_task(self, task_id: str, owner_id: str):
+        from sqlalchemy import select
+
+        from app.contexts.finding.models import AlertGroup
+        from app.contexts.report.schemas import VulnReportSummary
+        from app.contexts.task.models import Task
+
+        task = await self.repo.session.scalar(
+            select(Task).where(Task.id == task_id, Task.owner_id == owner_id, Task.task_type == "discovery")
+        )
+        if task is None:
+            return None
+        groups = list((await self.repo.session.execute(
+            select(AlertGroup)
+            .where(AlertGroup.task_id == task_id, AlertGroup.vuln_report.is_not(None))
+            .order_by(AlertGroup.updated_at.desc())
+        )).scalars().all())
+        items: list[VulnReportSummary] = []
+        for g in groups:
+            report = g.vuln_report if isinstance(g.vuln_report, dict) else {}
+            items.append(VulnReportSummary(
+                alert_group_id=g.id,
+                task_id=task_id,
+                summary=str(report.get("summary") or g.file_path or "漏洞报告"),
+                final_verdict=report.get("final_verdict") or g.resolution,
+                verification_basis=report.get("verification_basis") or g.verification_basis,
+                primary_engine=report.get("primary_engine") or ((g.engine_set or [None])[0]),
+                cwe=g.cwe,
+                file_path=g.file_path,
+                generated_at=report.get("generated_at"),
+            ))
+        return items
+
+    async def get_vuln_report(self, task_id: str, group_id: str, owner_id: str) -> dict[str, Any] | None:
+        from sqlalchemy import select
+
+        from app.contexts.finding.models import AlertGroup
+        from app.contexts.task.models import Task
+
+        task = await self.repo.session.scalar(
+            select(Task).where(Task.id == task_id, Task.owner_id == owner_id, Task.task_type == "discovery")
+        )
+        if task is None:
+            return None
+        group = await self.repo.session.scalar(
+            select(AlertGroup).where(AlertGroup.id == group_id, AlertGroup.task_id == task_id)
+        )
+        if group is None or not isinstance(group.vuln_report, dict):
+            return None
+        return group.vuln_report
 
     # ── 发布 ──
 
@@ -238,6 +458,8 @@ class ReportService:
             return None, "报告不存在"
         if not report:
             return None, "报告不存在"
+        if report.status == "published":
+            return None, "报告已发布，不能追加证据"
         # kind 白名单（防任意值落库）
         if kind not in ("artifact", "log", "screenshot", "poc"):
             return None, "非法证据类型"

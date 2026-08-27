@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -16,12 +17,9 @@ from app.shared.base import Base
 async def session():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
-        from app.contexts.identity.models import User  # noqa: F401
-        from app.contexts.lab.models import Lab  # noqa: F401
-        from app.contexts.project.models import Project  # noqa: F401
-        from app.contexts.report.models import Report  # noqa: F401
-        from app.contexts.settings.models import LlmProvider  # noqa: F401
-        from app.contexts.task.models import AgentEvent, NodeRun, Task, TaskRun  # noqa: F401
+        from app.shared.models import register_models
+
+        register_models()
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as s:
@@ -60,6 +58,46 @@ async def test_list_reports_includes_verdict(session):
     assert row.severity == "High"
     assert row.title == "SQL 注入验证"
     assert row.task_id == "t1"
+    assert row.project_address is None
+
+
+@pytest.mark.asyncio
+async def test_list_reports_includes_project_and_document_context(session):
+    from app.contexts.report.models import Report
+    from app.contexts.report.repository import ReportRepository
+    from app.contexts.report.service import ReportService
+    from app.contexts.task.models import Task
+
+    session.add(
+        Task(
+            id="t-context",
+            project_address="https://github.com/acme/shop.git",
+            project_ref="release/1.2",
+            project_ref_type="branch",
+            task_type="discovery",
+            owner_id="u1",
+        )
+    )
+    session.add(
+        Report(
+            task_id="t-context",
+            run_id="r-context",
+            owner_id="u1",
+            status="published",
+            published_at=datetime.now(timezone.utc),
+            title="代码审计报告",
+            report_data=json.dumps({"document_kind": "code_audit_report"}),
+        )
+    )
+    await session.flush()
+
+    items, _ = await ReportService(ReportRepository(session)).list_reports("u1")
+    row = items[0]
+    assert row.project_address == "https://github.com/acme/shop.git"
+    assert row.project_ref == "release/1.2"
+    assert row.task_type == "discovery"
+    assert row.document_kind == "code_audit_report"
+    assert row.published_at is not None
 
 
 @pytest.mark.asyncio
@@ -193,6 +231,27 @@ async def test_attach_evidence_reuses_loaded_report(session):
     assert err1 is None and err2 is None
     assert first is not None and second is not None
     assert calls["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_published_report_rejects_new_evidence(session):
+    from app.contexts.report.models import Report
+    from app.contexts.report.repository import ReportRepository
+    from app.contexts.report.service import ReportService
+
+    report = Report(
+        task_id="t-published", run_id="r-published", owner_id="u1",
+        status="published", title="已发布审计报告",
+    )
+    session.add(report)
+    await session.flush()
+
+    evidence, err = await ReportService(ReportRepository(session)).attach_evidence(
+        report_id=report.id, owner_id="u1", file_name="late.log",
+        content_type="text/plain", data=b"late", kind="log",
+    )
+    assert evidence is None
+    assert err == "报告已发布，不能追加证据"
 
 
 @pytest.mark.asyncio

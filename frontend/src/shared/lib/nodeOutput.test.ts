@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { summarizeNodeOutput, applyNodeOverlay, displayNodeStatus, compactNodeCaption, isNodeListLoading, overlayFromSseEvents, parseInitialCreds, nodeStepsPollMs } from './nodeOutput'
+import { summarizeNodeOutput, applyNodeOverlay, displayNodeStatus, compactNodeCaption, isNodeListLoading, overlayFromSseEvents, parseInitialCreds, nodeStepsPollMs, formatDuration, nodeMetrics, skipReasonLabel } from './nodeOutput'
 
 describe('summarizeNodeOutput', () => {
   it('source: MinIO 命中时写出仓库与 commit', () => {
@@ -123,9 +123,9 @@ describe('summarizeNodeOutput', () => {
     expect(displayNodeStatus('running', 'running')).toBe('running')
   })
 
-  it('failed task coerces in-flight nodes', () => {
+  it('failed task only coerces the active node; downstream pending nodes stay unexecuted', () => {
     expect(displayNodeStatus('running', 'failed')).toBe('failed')
-    expect(displayNodeStatus('pending', 'failed')).toBe('failed')
+    expect(displayNodeStatus('pending', 'failed')).toBe('pending')
     expect(displayNodeStatus('completed', 'failed')).toBe('completed')
   })
 
@@ -238,8 +238,12 @@ describe('compactNodeCaption', () => {
 describe('nodeStepsPollMs', () => {
   const sixDone = Array.from({ length: 6 }, () => ({ status: 'completed' }))
 
-  it('stops when all six nodes are terminal', () => {
-    expect(nodeStepsPollMs({ nodes: sixDone })).toBe(false)
+  it('stops when task and all instantiated nodes are terminal', () => {
+    expect(nodeStepsPollMs({ taskStatus: 'completed', nodes: sixDone })).toBe(false)
+  })
+
+  it('keeps polling a live task even if its current partial node list is terminal', () => {
+    expect(nodeStepsPollMs({ taskStatus: 'running', nodes: sixDone })).toBe(3000)
   })
 
   it('stops while SSE is live', () => {
@@ -270,5 +274,308 @@ describe('overlayFromSseEvents', () => {
       output: { progress: 'Building web' },
     })
   })
+
+  it('paints profile running caption from phase.updated', () => {
+    const map = overlayFromSseEvents([
+      { type: 'node.updated', event: { node_key: 'profile', status: 'running' } },
+      { type: 'phase.updated', event: { phase: 'profile', message: '规则扫描完成（python/fastapi · 1 语言）' } },
+      { type: 'phase.updated', event: { phase: 'profile', message: '启动轻度 AI 画像' } },
+    ])
+    expect(map.get('profile')).toEqual({
+      status: 'running',
+      output: { progress: '启动轻度 AI 画像' },
+    })
+  })
+
+  it('paints scan_semgrep running caption from phase.updated', () => {
+    const map = overlayFromSseEvents([
+      { type: 'node.updated', event: { node_key: 'scan_semgrep', status: 'running' } },
+      { type: 'phase.updated', event: { phase: 'scan_semgrep', message: '规则包 python · 超时上限 1200s' } },
+      { type: 'phase.updated', event: { phase: 'scan_semgrep', message: '扫描进行中…已 45s / 上限 1200s' } },
+    ])
+    expect(map.get('scan_semgrep')).toEqual({
+      status: 'running',
+      output: { progress: '扫描进行中…已 45s / 上限 1200s' },
+    })
+  })
+
+  it('paints cluster running caption from phase.updated', () => {
+    const map = overlayFromSseEvents([
+      { type: 'node.updated', event: { node_key: 'cluster', status: 'running' } },
+      { type: 'phase.updated', event: { phase: 'cluster', message: '构建函数索引（语言 python）' } },
+      { type: 'phase.updated', event: { phase: 'cluster', message: '分组完成：3 组（A=1 B=1 F=0 bypass=1）' } },
+    ])
+    expect(map.get('cluster')).toEqual({
+      status: 'running',
+      output: { progress: '分组完成：3 组（A=1 B=1 F=0 bypass=1）' },
+    })
+  })
+
+  it('paints triage running caption from phase.updated', () => {
+    const map = overlayFromSseEvents([
+      { type: 'node.updated', event: { node_key: 'triage', status: 'running' } },
+      { type: 'phase.updated', event: { phase: 'triage', message: '待审 12 组（跳过 LLM 3）' } },
+      { type: 'phase.updated', event: { phase: 'triage', message: '二审 2/12：CWE-89 app/db.py' } },
+    ])
+    expect(map.get('triage')).toEqual({
+      status: 'running',
+      output: { progress: '二审 2/12：CWE-89 app/db.py' },
+    })
+  })
+
+  it('ignores concurrent triage start phases and prefers triage.progress caption', () => {
+    const map = overlayFromSseEvents([
+      { type: 'node.updated', event: { node_key: 'triage', status: 'running' } },
+      {
+        type: 'phase.updated',
+        event: { phase: 'triage', message: '开始审议：? www/static/js/a.js（族内 5 组）' },
+      },
+      {
+        type: 'triage.progress',
+        event: {
+          node_key: 'triage',
+          done: 3,
+          total: 12,
+          label: 'CWE-89 app/db.py',
+          family_size: 2,
+          adjudicated: 3,
+          pending: 9,
+          message: '二审 3/12：CWE-89 app/db.py（族内 2 组）',
+        },
+      },
+    ])
+    expect(map.get('triage')).toEqual({
+      status: 'running',
+      output: { progress: '二审 3/12：CWE-89 app/db.py（族内 2 组）' },
+    })
+  })
+
+  it('does not paint screen fast-review triage.progress onto AI triage', () => {
+    const map = overlayFromSseEvents([
+      { type: 'node.updated', event: { node_key: 'triage', status: 'running' } },
+      {
+        type: 'triage.progress',
+        event: {
+          node_key: 'screen',
+          stage: 'fast_screen',
+          adjudicated: 10,
+          pending: 3,
+          message: '快审不应出现在二审',
+        },
+      },
+    ])
+    expect(map.get('triage')).toEqual({ status: 'running' })
+  })
+
+  it('summarizes completed triage from output counts', () => {
+    expect(
+      summarizeNodeOutput(
+        'triage',
+        { adjudicated_count: 40, family_count: 12 },
+        'completed',
+      ),
+    ).toBe('已审 40 · 12 族')
+  })
+
+  it('api_inventory 按画像 parser 摘要，不说 FastAPI', () => {
+    expect(
+      summarizeNodeOutput(
+        'api_inventory',
+        {
+          endpoint_count: 3,
+          parsers: ['openapi', 'express', 'nextjs'],
+          parser: 'openapi,express,nextjs',
+          unsupported_languages: [],
+        },
+        'completed',
+      ),
+    ).toBe('3 端点 · openapi/express/nextjs')
+    expect(
+      summarizeNodeOutput(
+        'api_inventory',
+        { endpoint_count: 0, parsers: ['openapi'], unsupported_languages: ['rust'] },
+        'completed',
+      ),
+    ).toBe('0 端点 · openapi · rust 无 parser')
+    expect(
+      summarizeNodeOutput(
+        'api_inventory',
+        { endpoint_count: 0, parsers: ['openapi'], parser: 'openapi', unsupported_languages: ['nodejs'] },
+        'completed',
+      ),
+    ).not.toContain('FastAPI')
+  })
+
+  it('api_inventory phase.updated 写入进度句', () => {
+    const map = overlayFromSseEvents([
+      {
+        type: 'phase.updated',
+        event: { phase: 'api_inventory', message: '按画像 nodejs 解析 openapi/express/nextjs/nestjs' },
+      },
+    ])
+    expect(map.get('api_inventory')?.output?.progress).toBe(
+      '按画像 nodejs 解析 openapi/express/nextjs/nestjs',
+    )
+  })
+
+  it('stacks usage.updated cumulative onto the node', () => {
+    const map = overlayFromSseEvents([
+      {
+        type: 'usage.updated',
+        event: {
+          node_key: 'triage',
+          usage: {
+            prompt_tokens: 10,
+            completion_tokens: 2,
+            cache_read_input_tokens: 100,
+            cache_creation_input_tokens: 0,
+            total_tokens: 112,
+          },
+          cumulative: {
+            prompt_tokens: 30,
+            completion_tokens: 6,
+            cache_read_input_tokens: 500,
+            cache_creation_input_tokens: 0,
+            total_tokens: 536,
+          },
+        },
+      },
+    ])
+    expect(map.get('triage')?.usage).toEqual({
+      prompt_tokens: 30,
+      completion_tokens: 6,
+      cache_read_input_tokens: 500,
+      cache_creation_input_tokens: 0,
+      total_tokens: 536,
+    })
+  })
 })
 
+describe('formatDuration', () => {
+  it('完成节点：秒 / 分秒 / 时分三档', () => {
+    expect(formatDuration('2026-08-26T10:00:00Z', '2026-08-26T10:00:45Z')).toBe('45s')
+    expect(formatDuration('2026-08-26T10:00:00Z', '2026-08-26T10:03:24Z')).toBe('3m24s')
+    expect(formatDuration('2026-08-26T10:00:00Z', '2026-08-26T11:05:00Z')).toBe('1h05m')
+  })
+
+  it('运行中用 now 计算已进行时长', () => {
+    expect(formatDuration('2026-08-26T10:00:00Z', null, Date.parse('2026-08-26T10:02:30Z'))).toBe('2m30s')
+  })
+
+  it('缺开始时间或坏时间返回空串', () => {
+    expect(formatDuration(null, '2026-08-26T10:00:00Z')).toBe('')
+    expect(formatDuration('not-a-date', '2026-08-26T10:00:00Z')).toBe('')
+  })
+})
+
+describe('nodeMetrics', () => {
+  it('非完成态与专用面板节点不产出指标', () => {
+    expect(nodeMetrics({ node_key: 'cluster', status: 'running', output: { group_count: 3 } })).toEqual([])
+    expect(nodeMetrics({ node_key: 'audit', status: 'completed', output: { gate_verdict: 'pass' } })).toEqual([])
+    expect(nodeMetrics({ node_key: 'env_ready', status: 'completed', output: { target_url: 'http://x' } })).toEqual([])
+    expect(nodeMetrics({ node_key: 'lead_verify', status: 'completed', output: { lead_count: 1 } })).toEqual([])
+  })
+
+  it('cluster: 组数 / 引擎分布 / 符号索引', () => {
+    expect(
+      nodeMetrics({
+        node_key: 'cluster',
+        status: 'completed',
+        output: {
+          group_count: 12,
+          groups_by_engine: { semgrep: 10, api_hunt: 2 },
+          index_symbol_count: 340,
+          dropped_c_count: 0,
+        },
+      }),
+    ).toEqual([
+      { label: '组数', value: '12' },
+      { label: '引擎分布', value: 'semgrep 10 · api_hunt 2' },
+      { label: '符号索引', value: '340' },
+    ])
+  })
+
+  it('scan_*: 发现数与降级状态', () => {
+    expect(
+      nodeMetrics({ node_key: 'scan_semgrep', status: 'completed', output: { finding_count: 7, outcome: 'degraded' } }),
+    ).toEqual([
+      { label: '发现', value: '7' },
+      { label: '引擎状态', value: '降级' },
+    ])
+  })
+
+  it('finalize: 权威结论与线索计数', () => {
+    expect(
+      nodeMetrics({
+        node_key: 'finalize',
+        status: 'completed',
+        output: {
+          analysis_verdict: 'confirmed',
+          analysis_status: 'completed',
+          lead_count: 3,
+          confirmed_count: 2,
+          needs_review_count: 1,
+        },
+      }),
+    ).toEqual([
+      { label: '权威结论', value: '已确认' },
+      { label: '状态', value: '已定论' },
+      { label: '线索', value: '3' },
+      { label: '已确认', value: '2' },
+      { label: '待复核线索', value: '1' },
+    ])
+  })
+
+  it('dispatch / api_hunt / screen 关键计数', () => {
+    expect(
+      nodeMetrics({ node_key: 'dispatch', status: 'completed', output: { queued_count: 2, has_lead: true } }),
+    ).toEqual([
+      { label: '入队线索', value: '2' },
+      { label: '合格线索', value: '有' },
+    ])
+    expect(
+      nodeMetrics({
+        node_key: 'api_hunt',
+        status: 'completed',
+        output: { candidate_count: 5, candidate_state_counts: { suspect: 4, confirmed: 1 } },
+      }),
+    ).toEqual([
+      { label: '候选', value: '5' },
+      { label: '状态分布', value: 'suspect 4 · confirmed 1' },
+    ])
+    expect(
+      nodeMetrics({
+        node_key: 'screen',
+        status: 'completed',
+        output: { escalated_count: 6, tp_count: 2, fp_count: 3, need_more_count: 1 },
+      }).map((m) => m.label),
+    ).toEqual(['升级送审', '真阳', '误报', '待定'])
+  })
+})
+
+describe('skipReasonLabel', () => {
+  it('verify 模式扫描链节点给出验证模式原因', () => {
+    expect(skipReasonLabel({ node_key: 'scan_semgrep', status: 'skipped', output: {} }, 'verify')).toBe('验证模式不执行')
+    expect(skipReasonLabel({ node_key: 'lead_verify', status: 'skipped', output: {} }, 'verify')).toBe('验证模式不执行')
+  })
+
+  it('discovery 分支出口的原因', () => {
+    expect(skipReasonLabel({ node_key: 'env_ready', status: 'skipped', output: {} }, 'discovery')).toBe('非 Web 或无合格线索')
+    expect(skipReasonLabel({ node_key: 'lead_verify', status: 'skipped', output: {} }, 'discovery')).toBe('无合格线索')
+    expect(skipReasonLabel({ node_key: 'scan_semgrep', status: 'skipped', output: {} }, 'discovery')).toBe('无适用语言扫描配置')
+  })
+
+  it('verify 的 reproduce 跳过指向 Gate / 非 Web', () => {
+    expect(skipReasonLabel({ node_key: 'reproduce', status: 'skipped', output: {} }, 'verify')).toBe('Gate 未通过 / 非 Web')
+  })
+
+  it('后端写入 skip_reason 时优先透传', () => {
+    expect(
+      skipReasonLabel({ node_key: 'env_ready', status: 'skipped', output: { skip_reason: 'profile.is_web=false' } }, 'discovery'),
+    ).toBe('profile.is_web=false')
+  })
+
+  it('非 skipped 节点不产出原因', () => {
+    expect(skipReasonLabel({ node_key: 'env_ready', status: 'completed', output: {} }, 'discovery')).toBe('')
+  })
+})

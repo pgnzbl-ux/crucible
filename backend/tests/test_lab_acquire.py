@@ -1,7 +1,7 @@
 """Lab acquire、状态更新与 live 占用查询。"""
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -102,6 +102,116 @@ async def test_second_task_waits_while_creating(session):
     assert b.role == "wait" and b.reused is False
     t2 = await session.get(Task, "t2")
     assert t2.lab_id == a.lab_id
+
+
+@pytest.mark.asyncio
+async def test_waiter_takes_over_when_original_creator_is_terminal(session):
+    from app.contexts.lab.models import Lab
+    from app.contexts.lab.service import LabService
+    from app.contexts.task.models import Task
+
+    await seed(session, task_id="t1")
+    await seed(session, task_id="t2")
+    svc = LabService(session)
+    first = await svc.acquire(
+        owner_id="u1", project_id="p1", commit_sha=SHA, task_id="t1"
+    )
+    (await session.get(Task, "t1")).status = "failed"
+    await session.commit()
+
+    second = await svc.acquire(
+        owner_id="u1", project_id="p1", commit_sha=SHA, task_id="t2"
+    )
+
+    lab = await session.get(Lab, first.lab_id)
+    assert second.role == "create"
+    assert lab.creator_task_id == "t2"
+
+
+@pytest.mark.asyncio
+async def test_waiter_takes_over_expired_creation_lease(session):
+    from app.contexts.lab.models import Lab
+    from app.contexts.lab.service import CREATING_LEASE_SECONDS, LabService
+
+    await seed(session, task_id="t1")
+    await seed(session, task_id="t2")
+    svc = LabService(session)
+    first = await svc.acquire(
+        owner_id="u1", project_id="p1", commit_sha=SHA, task_id="t1"
+    )
+    lab = await session.get(Lab, first.lab_id)
+    lab.last_seen_at = datetime.now(timezone.utc) - timedelta(
+        seconds=CREATING_LEASE_SECONDS + 1
+    )
+    await session.commit()
+
+    second = await svc.acquire(
+        owner_id="u1", project_id="p1", commit_sha=SHA, task_id="t2"
+    )
+
+    assert second.role == "create"
+    assert lab.creator_task_id == "t2"
+
+
+@pytest.mark.asyncio
+async def test_old_creator_cannot_mark_ready_after_takeover(session):
+    from app.contexts.lab.service import LabService
+    from app.contexts.task.models import Task
+
+    await seed(session, task_id="t1")
+    await seed(session, task_id="t2")
+    svc = LabService(session)
+    first = await svc.acquire(
+        owner_id="u1", project_id="p1", commit_sha=SHA, task_id="t1"
+    )
+    (await session.get(Task, "t1")).status = "failed"
+    await session.commit()
+    await svc.acquire(
+        owner_id="u1", project_id="p1", commit_sha=SHA, task_id="t2"
+    )
+
+    marked = await svc.mark_ready(
+        first.lab_id,
+        target_url="http://10.0.0.8:3001",
+        compose_path=".vuln-env/docker-compose.yml",
+        transport_shape={"protocol": "http"},
+        initial_creds={},
+        expected_statuses={"creating"},
+        expected_creator_task_id="t1",
+    )
+
+    assert marked is False
+
+
+@pytest.mark.asyncio
+async def test_probe_updates_target_scheme_to_actual_protocol(session):
+    from app.contexts.lab.models import Lab
+    from app.contexts.lab.service import LabService
+
+    await seed(session, task_id="t1")
+    svc = LabService(session)
+    result = await svc.acquire(
+        owner_id="u1", project_id="p1", commit_sha=SHA, task_id="t1"
+    )
+    await svc.mark_ready(
+        result.lab_id,
+        target_url="http://10.0.0.8:8443/login",
+        compose_path=".vuln-env/docker-compose.yml",
+        transport_shape={"protocol": "http"},
+        initial_creds={},
+    )
+    lab = await session.get(Lab, result.lab_id)
+
+    with patch(
+        "app.contexts.agent.nodes.env_ready.health.health_check",
+        new_callable=AsyncMock,
+        return_value=(True, 8443, "https"),
+    ):
+        ready, detail = await svc._probe_lab_ready(lab, retries=1, settle_seconds=0)
+
+    assert ready is True and detail == ""
+    assert lab.target_url == "https://10.0.0.8:8443/login"
+    assert svc._load_dict(lab.transport_shape)["protocol"] == "https"
 
 
 @pytest.mark.asyncio

@@ -31,6 +31,7 @@ import logging
 import os
 import shutil
 import signal
+import uuid
 from datetime import datetime, timezone
 
 from celery.exceptions import Retry
@@ -45,10 +46,20 @@ from app.contexts.project.models import Project, SourceArtifact  # noqa: F401 �
 from app.contexts.report.models import Report, Evidence  # noqa: F401 — 注册 reports/evidences 表
 from app.contexts.report.repository import ReportRepository
 from app.contexts.report.service import ReportService
-from app.contexts.agent.task_slots import release_slot, try_acquire_slot
+from app.contexts.agent.task_slots import (
+    release_orch_lock,
+    release_slot,
+    try_acquire_orch_lock,
+    try_acquire_slot,
+)
 from app.contexts.settings.models import LlmProvider, PlatformSetting  # noqa: F401 — 注册 llm_providers / platform_settings
 from app.contexts.task.models import AgentEvent, Task, TaskRun, NodeRun  # noqa: F401 — NodeRun 注册(阶段 1)
-from app.contexts.agent.errors import format_agent_error, humanize_agent_error
+from app.contexts.agent.errors import (
+    RUN_ERROR_LOG_MAX,
+    clip_error_log,
+    format_agent_error,
+    humanize_agent_error,
+)
 from app.core.agent_runner import AgentRunnerError, agent_runner_manager
 from app.core.celery_app import celery_app
 from app.core.config import get_settings
@@ -69,6 +80,7 @@ def report_columns_from_orch_result(orch_result: dict) -> dict:
     cvss = orch_result.get("cvss") or {}
     poc = orch_result.get("poc") if isinstance(orch_result.get("poc"), dict) else {}
     intro = rd.get("product_intro") if isinstance(rd, dict) else ""
+    document_kind = rd.get("document_kind") if isinstance(rd, dict) else None
     verdict = orch_result.get("verdict")
     confirmed = verdict in _CONFIRMED_VERDICTS
     score = cvss.get("base_score") if isinstance(cvss, dict) and confirmed else None
@@ -78,7 +90,10 @@ def report_columns_from_orch_result(orch_result: dict) -> dict:
         "severity": (cvss.get("severity") if isinstance(cvss, dict) and confirmed else None),
         "vulnerable_file": orch_result.get("vulnerable_file") or None,
         "summary": str(intro or "")[:500],
-        "title": "漏洞验证报告" if confirmed else "漏洞验证记录",
+        "title": (
+            "代码审计报告" if document_kind == "code_audit_report"
+            else "漏洞验证报告" if confirmed else "漏洞验证记录"
+        ),
         "poc_language": (str(poc["language"]) if confirmed and poc.get("language") else None),
         "poc_filename": (str(poc["filename"]) if confirmed and poc.get("filename") else None),
         "poc_code": (str(poc["code"]) if confirmed and poc.get("code") else None),
@@ -207,11 +222,20 @@ async def admit_task_run(
         return task, run, f"任务已是 {task.status}，拒绝启动", False
 
     runtime = await SettingsService(SettingsRepository(session)).get_runtime_settings()
+    from app.contexts.agent.runner_slots import set_runtime_limits
+
+    await set_runtime_limits(
+        agent_runners=runtime.max_concurrent_agent_runners,
+        reproduce_per_lab=runtime.reproduce_per_lab,
+    )
     if not await try_acquire_slot(run_id, runtime.max_concurrent_tasks):
         raise celery_task.retry(countdown=15)  # type: ignore[attr-defined]
+    if not await try_acquire_orch_lock(run_id):
+        raise celery_task.retry(countdown=10)  # type: ignore[attr-defined]
 
     claimed_task, claimed_run, err = await claim_task_run(session, task_id, run_id)
     if err:
+        await release_orch_lock(run_id)
         await release_slot(run_id)
         return claimed_task, claimed_run, err, False
     return claimed_task, claimed_run, None, True
@@ -252,31 +276,43 @@ async def _resolve_node_run_id(session: AsyncSession, run: TaskRun, event: dict)
 
 
 async def _append_events(session: AsyncSession, run: TaskRun, events: list[dict]) -> None:
-    """将执行器事件流持久化为 AgentEvent 行，sequence 从运行内已有事件后递增"""
-    base = 0
-    result = await session.execute(
-        select(AgentEvent.sequence).where(AgentEvent.run_id == run.id).order_by(AgentEvent.sequence.desc()).limit(1)
-    )
-    latest = result.scalar_one_or_none()
-    if latest is not None:
-        base = latest
+    """将执行器事件流持久化为 AgentEvent 行，sequence 从运行内已有事件后递增。
 
-    for i, ev in enumerate(events, start=base + 1):
-        if not should_persist_agent_event(ev):
-            continue
-        ev = ensure_event_timestamp(ev)
-        session.add(
-            AgentEvent(
-                run_id=run.id,
-                task_id=run.task_id,
-                node_run_id=await _resolve_node_run_id(session, run, ev),
-                sequence=i,
-                event_type=ev.get("type", "phase.updated"),
-                payload=json.dumps(ev, ensure_ascii=False, default=str),
-                source="claude-agent-sdk",
-            )
+    同 run 并发写事件(重投续跑/lead worker)撞 idx_agent_events_run_seq 时，
+    重算 base 重试(与 _persist_single_event 同模式)。
+    """
+    for _attempt in range(8):
+        result = await session.execute(
+            select(AgentEvent.sequence).where(AgentEvent.run_id == run.id).order_by(AgentEvent.sequence.desc()).limit(1)
         )
-    await session.flush()
+        base = result.scalar_one_or_none() or 0
+        rows: list[AgentEvent] = []
+        for i, ev in enumerate(events, start=base + 1):
+            if not should_persist_agent_event(ev):
+                continue
+            ev = ensure_event_timestamp(ev)
+            rows.append(
+                AgentEvent(
+                    run_id=run.id,
+                    task_id=run.task_id,
+                    node_run_id=await _resolve_node_run_id(session, run, ev),
+                    sequence=i,
+                    event_type=ev.get("type", "phase.updated"),
+                    payload=json.dumps(ev, ensure_ascii=False, default=str),
+                    source="claude-agent-sdk",
+                )
+            )
+        if not rows:
+            return
+        try:
+            async with session.begin_nested():
+                session.add_all(rows)
+                await session.flush()
+            return
+        except IntegrityError:
+            # savepoint 回滚会把本批插入自动逐出 session，直接带新 base 重试
+            continue
+    logger.warning("AgentEvent 批量写入 sequence 冲突重试耗尽 run=%s", run.id)
 
 
 async def _persist_single_event(session: AsyncSession, run: TaskRun, event: dict) -> None:
@@ -352,50 +388,55 @@ async def apply_analysis_failure(
     if run is not None:
         await session.refresh(run)
         if run.status not in _PROTECTED_TERMINAL_STATUSES:
-            await _update_run(session, run, "failed", error[:1000])
+            await _update_run(session, run, "failed", clip_error_log(error, limit=RUN_ERROR_LOG_MAX))
             result = await session.execute(
                 select(NodeRun).where(NodeRun.run_id == run.id, NodeRun.status == "running")
             )
             now = datetime.now(timezone.utc)
             for nr in result.scalars():
                 nr.status = "failed"
-                nr.error_message = (nr.error_message or error)[:1000]
+                nr.error_message = clip_error_log(nr.error_message or error)
                 nr.finished_at = now
     if task is not None:
         await session.refresh(task)
         if task.status not in _PROTECTED_TERMINAL_STATUSES:
             task.status = "failed"
+    if task is not None and run is not None and run.status == "failed":
+        # 失败收尾必须闭合残留线索，否则拓扑序列化把已失败任务显示成执行中
+        from app.contexts.agent.lead_worker import terminalize_task_leads
+
+        try:
+            await terminalize_task_leads(
+                session, task_id=task.id,
+                reason=f"任务失败收尾，线索未终认: {clip_error_log(error)[:120]}",
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("失败收尾清理残留线索失败 task=%s", task.id, exc_info=True)
     await session.flush()
+    if task is not None:
+        from app.contexts.lab.service import LabService
+
+        await LabService(session).start_ttl_when_idle(getattr(task, "lab_id", None))
 
 
 # ── 取消信号钩子（保险 A）──
 
-_known_container_ids: set[str] = set()
-
-
-def _register_container(container_id: str | None) -> None:
-    if container_id:
-        _known_container_ids.add(container_id)
-
-
-def _unregister_container(container_id: str | None) -> None:
-    if container_id:
-        _known_container_ids.discard(container_id)
-
 
 def _on_sigterm(_signum, _frame):  # noqa: ANN001
-    """Celery revoke(terminate=True) 发 SIGTERM → 先强杀 agent-runner 容器，再退出"""
-    logger.warning("收到 SIGTERM，清理 agent-runner 容器")
+    """Celery revoke(SIGTERM)：杀掉本地扫描器进程组后立即按默认语义退出。
+
+    这里绝不做 Docker 网络 IO——信号处理器在主线程执行，与正持有同一
+    urllib3 连接池的 container.logs 迭代线程互斥，嵌套调用可能死锁整个
+    进程。容器清理由三条既有路径兜底：取消 API 的
+    schedule_teardown_task_runtime、重派认领时的 teardown、5 分钟巡检。
+    """
+    logger.warning("收到 SIGTERM，清理扫描器进程组后退出")
     try:
-        agent_runner_manager.stop_all_active()
+        from app.contexts.agent.nodes.scan.base import kill_all_active_scanner_processes
+
+        kill_all_active_scanner_processes()
     except Exception:  # noqa: BLE001
         pass
-    for cid in list(_known_container_ids):
-        try:
-            agent_runner_manager.remove_by_id(cid)
-        except Exception:  # noqa: BLE001
-            pass
-    _known_container_ids.clear()
     # 恢复默认 SIGTERM 行为（让 Celery 走正常清理）
     try:
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
@@ -429,8 +470,8 @@ def _on_worker_ready(**_kwargs: object) -> None:
 async def _platform_preflight_minimal(session: AsyncSession) -> tuple[bool, str | None]:
     """最小预检：与创建/重试同一套平台准入（LLM + agent-runner 镜像）。
 
-    不实现 agent-workflow.md §2.2 S0 的完整检查（MinIO / python-docx 等）——
-    留作阶段化 backlog。本任务只保证 SDK 跑得起来。
+    不实现完整预检（MinIO / 扫描器二进制等）——留作阶段化 backlog。
+    本任务只保证 SDK 跑得起来。
     """
     from app.contexts.agent.preflight import require_platform_ready
 
@@ -447,14 +488,68 @@ async def _platform_preflight_minimal(session: AsyncSession) -> tuple[bool, str 
 @celery_app.task(bind=True, name="agent.run_analysis", max_retries=None)
 def run_analysis(self, task_id: str, run_id: str) -> dict:
     """漏洞分析主任务"""
-    return asyncio.run(_run_analysis(task_id, run_id, celery_task=self))
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    try:
+        return asyncio.run(_run_analysis(task_id, run_id, celery_task=self))
+    except SoftTimeLimitExceeded:
+        logger.error(
+            "任务超过 Celery soft time limit，强制失败收尾 task_id=%s run_id=%s",
+            task_id,
+            run_id,
+        )
+        try:
+            return asyncio.run(_fail_on_wall_clock_timeout(task_id, run_id))
+        except Exception:  # noqa: BLE001
+            logger.exception("soft time limit 收尾失败 task_id=%s", task_id)
+            return {
+                "task_id": task_id,
+                "run_id": run_id,
+                "status": "failed",
+                "error": "task time limit exceeded",
+            }
+
+
+async def _fail_on_wall_clock_timeout(task_id: str, run_id: str) -> dict:
+    """soft time limit：标失败、拆容器、释放槽（asyncio.run 被信号打断时的兜底）。"""
+    engine = _worker_engine()
+    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            run = await session.get(TaskRun, run_id)
+            task = await session.get(Task, task_id)
+            msg = "任务超过最大执行时长，已自动终止"
+            if run or task:
+                await apply_analysis_failure(session, task, run, format_agent_error(msg))
+                await session.commit()
+        try:
+            await release_slot(run_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("timeout 收尾释放槽失败 run=%s", run_id, exc_info=True)
+        try:
+            await release_orch_lock(run_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("timeout 收尾释放编排锁失败 run=%s", run_id, exc_info=True)
+        try:
+            from app.contexts.agent.runtime_cleanup import teardown_task_runtime
+
+            await teardown_task_runtime(task_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("timeout 收尾拆容器失败", exc_info=True)
+    finally:
+        await engine.dispose()
+    return {
+        "task_id": task_id,
+        "run_id": run_id,
+        "status": "failed",
+        "error": "task time limit exceeded",
+    }
 
 
 async def _run_analysis(task_id: str, run_id: str, *, celery_task: object) -> dict:
     engine = _worker_engine()
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     host_workdir = ""
-    container_id: str | None = None
     summary: dict = {"task_id": task_id, "run_id": run_id}
     acquired = False
 
@@ -473,7 +568,7 @@ async def _run_analysis(task_id: str, run_id: str, *, celery_task: object) -> di
             if not ok:
                 title, hint = humanize_agent_error(preflight_err)
                 detail = format_agent_error(preflight_err)
-                await _update_run(session, run, "failed", detail[:1000])
+                await _update_run(session, run, "failed", clip_error_log(detail, limit=RUN_ERROR_LOG_MAX))
                 task.status = "failed"
                 await _persist_single_event(
                     session,
@@ -486,12 +581,20 @@ async def _run_analysis(task_id: str, run_id: str, *, celery_task: object) -> di
                     },
                 )
                 await session.commit()
+                from app.contexts.lab.service import LabService
+
+                await LabService(session).start_ttl_when_idle(getattr(task, "lab_id", None))
                 summary.update(status="failed", error=title)
                 return summary
 
             # 2. host 临时目录（源码由节点 0 获取，按真实仓库名落地）
             host_workdir = agent_runner_manager.host_workdir_path(task_id)
             if await _run_has_completed_nodes(session, run.id):
+                # 重派/断点续跑：先拆上一执行遗留的 agent-runner 容器
+                # （SIGKILL 后进程内注册表已丢，不拆会一直烧到自然结束）
+                from app.contexts.agent.runtime_cleanup import teardown_task_runtime
+
+                await teardown_task_runtime(task_id)
                 os.makedirs(host_workdir, exist_ok=True)
             else:
                 reset_host_workdir(host_workdir)
@@ -531,7 +634,7 @@ async def _run_analysis(task_id: str, run_id: str, *, celery_task: object) -> di
             except Exception as e:  # noqa: BLE001 — 凭据注入失败不阻断（任务可无凭据继续）
                 logger.warning(f"凭据注入失败（任务继续）: {e}")
 
-            # 4. 6 节点编排(替代旧的单次 executor.run)
+            # 4. 模式化子图编排（discovery=DEFAULT_PIPELINE；verify=VERIFY_PIPELINE）
             from app.contexts.agent.orchestrator import run_orchestration
 
             captured: dict = {}
@@ -596,6 +699,7 @@ async def _run_analysis(task_id: str, run_id: str, *, celery_task: object) -> di
                     runner_env=runner_env,
                     on_node_event=_on_node_event,
                     on_ai_event=_on_ai_event,
+                    node_session_factory=session_factory,
                 )
                 captured["result"] = orch_result
             except Exception as e:  # noqa: BLE001
@@ -658,6 +762,46 @@ async def _run_analysis(task_id: str, run_id: str, *, celery_task: object) -> di
 
             await session.commit()
 
+            # 5.5 判决回流(discovery-spec §4.4)：溯源组按 Task 终态回写。
+            # 进程内同步调用最可靠；Redis 事件仍发布供观测(pub/sub at-most-once，
+            # 丢事件兜底 = 读组详情惰性对账 + finding.reconcile_stale_groups sweeper)。
+            if getattr(task, "source_alert_group_id", None) and task.status in (
+                "completed", "needs_review"
+            ):
+                try:
+                    from app.contexts.finding.service import FindingService
+
+                    reconciled = await FindingService(session).reconcile_from_task(task)
+                    if reconciled is not None:
+                        await session.commit()
+                        await event_bus.publish_domain_event(
+                            Event(
+                                event_type="task.verification_finished",
+                                aggregate_id=task.id,
+                                aggregate_type="task",
+                                payload={
+                                    "task_id": task.id,
+                                    "source_alert_group_id": task.source_alert_group_id,
+                                    "verdict": task.verdict,
+                                    "group_status": reconciled.status,
+                                    "group_resolution": reconciled.resolution,
+                                },
+                            )
+                        )
+                except Exception as e:  # noqa: BLE001 — 回流失败不改变任务终态
+                    logger.warning(f"判决回流失败(不阻断): {e}")
+
+            # 5.6 stale 组兜底对账：dispatched 但 LeadRun 已全部终态的组转人工。
+            # drain 侧孤儿回收已覆盖未完成线索；这里收敛组状态机的残留终态。
+            if task.status in ("completed", "needs_review", "failed"):
+                try:
+                    await FindingService(session).reconcile_stale_groups(
+                        owner_id=getattr(task, "owner_id", None),
+                    )
+                    await session.commit()
+                except Exception as e:  # noqa: BLE001 — 对账失败不改变任务终态
+                    logger.warning(f"stale 组对账失败(不阻断): {e}")
+
             # 6. 发布 domain 事件
             try:
                 await event_bus.publish_domain_event(
@@ -712,6 +856,10 @@ async def _run_analysis(task_id: str, run_id: str, *, celery_task: object) -> di
                 await release_slot(run_id)
             except Exception:  # noqa: BLE001
                 logger.warning("释放运行槽失败 run=%s", run_id, exc_info=True)
+            try:
+                await release_orch_lock(run_id)
+            except Exception:  # noqa: BLE001
+                logger.warning("释放编排锁失败 run=%s", run_id, exc_info=True)
         # 9. 清理容器与 host_workdir（成功/失败都拆容器；失败才留目录排查）
         try:
             from app.contexts.agent.runtime_cleanup import teardown_task_runtime
@@ -719,8 +867,6 @@ async def _run_analysis(task_id: str, run_id: str, *, celery_task: object) -> di
             await teardown_task_runtime(task_id)
         except Exception:  # noqa: BLE001
             logger.warning("任务结束拆容器失败(best-effort)", exc_info=True)
-        if container_id:
-            _unregister_container(container_id)
         if should_retain_hostdir(summary.get("status")):
             # 排查价值在源码与节点产物，密钥永远不留（与凭据零落盘承诺一致）
             _purge_secrets_dir(host_workdir)
@@ -750,22 +896,37 @@ def _purge_secrets_dir(host_workdir: str) -> None:
         _shutil.rmtree(secret_dir, ignore_errors=True)
 
 
-def _cleanup_hostdir(path: str) -> None:
+def _cleanup_hostdir(path: str) -> bool:
     """删除 host 临时目录（best-effort）"""
     if not path:
-        return
+        return True
     try:
-        if os.path.isdir(path):
-            shutil.rmtree(path, ignore_errors=True)
+        if os.path.lexists(path):
+            shutil.rmtree(path)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"清理 host_workdir 失败 {path}: {e}")
+    return not os.path.lexists(path)
 
 
 def reset_host_workdir(path: str) -> None:
-    """清空并重建工作区，避免重试吃到上一轮残留的桩目录。"""
-    _cleanup_hostdir(path)
-    if path:
-        os.makedirs(path, exist_ok=True)
+    """原子轮换并重建工作区，内部文件改属主也不能污染下一次运行。"""
+    if not path:
+        return
+    stale = ""
+    if os.path.lexists(path):
+        # 明文凭据不能跟随排查目录被隔离；清不掉就拒绝继续。
+        _purge_secrets_dir(path)
+        secret_dir = os.path.join(path, ".secrets")
+        if os.path.lexists(secret_dir):
+            raise RuntimeError(f"旧工作区凭据目录无法清理: {secret_dir}")
+        stale = f"{path}.stale-{uuid.uuid4().hex[:8]}"
+        try:
+            os.replace(path, stale)
+        except OSError as exc:
+            raise RuntimeError(f"旧工作区无法隔离: {path}: {exc}") from exc
+    os.makedirs(path, exist_ok=False)
+    if stale and not _cleanup_hostdir(stale):
+        logger.warning("旧工作区含异主文件，已隔离等待后续清理: %s", stale)
 
 
 async def _run_has_completed_nodes(session: AsyncSession, run_id: str) -> bool:

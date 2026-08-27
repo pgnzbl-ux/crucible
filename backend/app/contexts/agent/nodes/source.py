@@ -10,11 +10,10 @@ from typing import Any
 
 from app.contexts.agent.contracts import SourceInput
 
-from .base import NodeContext, workspace_repo_path
+from .base import NodeContext, emit_phase, workspace_repo_path
 
 
 class SourceNode:
-    node_index = 0
     node_key = "source"
 
     @property
@@ -69,7 +68,25 @@ class SourceNode:
             if ctx.project_id:
                 await svc.touch_cloned(ctx.project_id)
 
+        # 压缩产物盘点（可见性统计；切片保护与容器内 Read 拦截共用判定阈值）：
+        # 只读扫描，失败只降级为告警，不得影响已成功的源码获取
+        try:
+            from app.contexts.project.source_minified import scan_minified_files
+
+            minified_stats = await asyncio.to_thread(scan_minified_files, result.project_path)
+        except Exception as exc:  # noqa: BLE001 — 盘点失败不阻断节点
+            minified_stats = {"count": 0, "total_bytes": 0, "top": [], "error": str(exc)}
+        if minified_stats.get("count"):
+            emit_phase(
+                ctx,
+                f"检测到 {minified_stats['count']} 个压缩产物文件"
+                f"（{minified_stats['total_bytes'] / 1_000_000:.1f}MB），"
+                "已禁止 AI 直接整读（Read/Grep 拦截 + read_slice 有界读取）",
+                phase=self.node_key,
+            )
+
         out = asdict(result)
+        out["minified_stats"] = minified_stats
         out["source_path"] = result.project_path
         out["workspace_path"] = workspace_repo_path(result.repo_dirname)
         out["project_address"] = ctx.project_address

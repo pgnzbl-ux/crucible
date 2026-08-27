@@ -1,26 +1,28 @@
-/** 与 backend `app/contexts/agent/errors.py` + `llm_errors.py` 对齐。 */
+/** 与 backend `app/contexts/agent/errors.py` 对齐：标题 + 可操作下一步。 */
 const RULES: [needle: string, title: string, hint: string][] = [
-  ['余额不足', 'LLM 账户余额不足', '到 LLM 服务商控制台充值或更换有余额的 API Key，再在「设置 → LLM Provider」更新后重试。'],
-  ['"code":"1004"', 'LLM 账户余额不足', '到 LLM 服务商控制台充值或更换有余额的 API Key。'],
+  ['余额不足', 'LLM 账户余额不足', '到服务商控制台充值，或更换可用的 API Key，再在「设置 → LLM Provider」更新后重试。'],
+  ['"code":"1004"', 'LLM 账户余额不足', '到服务商控制台充值，或在「设置 → LLM Provider」更换可用的 API Key。'],
   ['LLM 调用失败', 'LLM 调用失败', '核对「设置 → LLM Provider」的 API Key、Base URL、模型名与账户余额。'],
-  ['error result: success', 'LLM 会话异常结束', '多为 LLM API 报错（余额不足、模型不存在），但被 SDK 误报。查看较早的 agent.failed。'],
-  ['HTTP 401', 'LLM 接口鉴权失败（401）', '检查 API Key、Base URL 与账户余额；401 也可能是余额不足。'],
-  ['未产出 .node_output.json', 'Agent 没有提交节点结果就结束了', '模型未调用 submit_result。检查该节点 prompt、MCP 工具是否注入成功，或重建 agent-runner 镜像。'],
-  ['未调用 submit_result', 'Agent 没有提交节点结果就结束了', '模型未调用 submit_result。检查该节点 prompt、MCP 工具是否注入成功，或重建 agent-runner 镜像。'],
-  ['output 校验失败', 'Agent 回传 JSON 缺必填字段', '对照该节点 schema（env_ready 要 target_url+compose_path，audit 要 gate_verdict，report 要 report_data+final_verdict）。'],
-  ['output JSON 解析失败', '节点结果不是合法 JSON', 'submit_result 写出的内容损坏。看容器 stderr 或重跑该节点。'],
-  ['超时', '节点执行超时被停止', '模型卡住或靶场过慢。可加大 AGENT_RUNNER_TIMEOUT_SECONDS，或检查 compose/健康检查。'],
-  ['源码解包失败', '上传源码解开失败', '核对源码包是否为 zip / tar.gz，以及任务是否仍能找到已上传的缓存。'],
-  ['源码克隆失败', 'Git 克隆源码失败', '核对仓库地址、分支/tag，以及任务凭据是否有权限。'],
-  ['agent-runner 镜像不存在', '缺少 agent-runner 镜像', '在项目根执行: docker build -f infrastructure/agent-runner/Dockerfile -t crucible-agent-runner:base .'],
-  ['缺少 LLM 凭据', '没有可用的 LLM API Key', '到「设置」配置并激活默认 LLM Provider。'],
-  ['靶场搭建 5 轮全失败', '靶场 5 轮排障仍未就绪', '看最后一轮 compose/健康检查日志；配方可能端口冲突或依赖装不上。'],
-  ['compose up', '靶场 docker compose 启动失败', '看错误后的 logs：端口占用、Dockerfile 语法、或 compose 是否写在 project/.vuln-env/。'],
-  ['健康检查不过', '靶场容器起来了但端口探活失败', '确认 compose 端口映射、应用是否监听 0.0.0.0，以及 profile.port 是否正确。'],
-  ['Authentication', 'LLM 鉴权失败', '检查 API Key 是否有效、Base URL 是否指向 Anthropic 兼容端点。'],
-  ['claude_agent_sdk 导入失败', '容器内缺少 Claude Agent SDK', 'agent-runner 镜像不完整，请重新构建镜像。'],
-  ['NameError', '容器入口代码异常', 'run_one.py 有语法/缺失符号。更新代码后必须重建 agent-runner 镜像。'],
-  ['既无 .node.json', '容器没拿到任务输入', '检查 host_workdir 是否正确 bind mount 到 /workspace。'],
+  ['error result: success', 'LLM 会话异常结束', '多为上游接口报错（余额不足、模型不可用等）。请查看本节点更早的失败事件，并核对 Provider 配置。'],
+  ['HTTP 401', 'LLM 接口鉴权失败（401）', '检查 API Key、Base URL 与账户状态；部分网关在余额不足时也会返回 401。'],
+  ['未产出 .node_output.json', 'Agent 没有提交节点结果', '本轮分析未完成结构化回传。可从本节点重试；若反复出现，请检查 Provider 是否通过 Agent 测试。'],
+  ['未调用 submit_result', 'Agent 没有提交节点结果', '本轮分析未完成结构化回传。可从本节点重试；若反复出现，请检查 Provider 是否通过 Agent 测试。'],
+  ['output 校验失败', 'Agent 回传结果不完整', '缺少必填字段。请从本节点重试；持续失败时核对模型是否支持工具调用。'],
+  ['output JSON 解析失败', '节点结果格式异常', '回传内容无法解析。请从本节点重试。'],
+  ['超时', '节点曾超时结束', '可从本节点重试。若反复超时，请检查模型响应速度与 Provider 超时设置。'],
+  ['源码解包失败', '上传源码解开失败', '确认源码包为 zip / tar.gz，且任务仍能访问已上传的文件。'],
+  ['源码工作区准备失败', '源码工作目录权限异常', '目录可能被靶场进程改过属主。请先停止占用该任务目录的容器，再从「源码获取」节点重试。'],
+  ['already exists and is not an empty directory', '源码工作目录没有清空', '工作区残留导致无法重新拉取。请停止相关容器后，从「源码获取」节点重试。'],
+  ['源码克隆失败', 'Git 克隆源码失败', '核对仓库地址、分支/标签，以及任务凭据是否有访问权限。'],
+  ['agent-runner 镜像不存在', '缺少 agent-runner 镜像', '请由管理员构建并加载 crucible-agent-runner:base 镜像后重试。'],
+  ['缺少 LLM 凭据', '没有可用的 LLM API Key', '到「设置」配置并设为默认 LLM Provider。'],
+  ['靶场搭建 5 轮全失败', '靶场 5 轮排障仍未就绪', '查看最后一轮启动与健康检查日志；常见原因是端口冲突或依赖安装失败。'],
+  ['compose up', '靶场启动失败', '查看启动日志：端口占用、Dockerfile 语法，或配方是否放在仓库 .vuln-env 目录。'],
+  ['健康检查不过', '靶场已启动但探活失败', '确认端口映射正确，应用监听 0.0.0.0，且画像中的端口配置无误。'],
+  ['Authentication', 'LLM 鉴权失败', '检查 API Key 是否有效，Base URL 是否为 Anthropic 兼容端点。'],
+  ['claude_agent_sdk 导入失败', 'Agent 运行环境不完整', '请重建 Agent 运行镜像后重试。'],
+  ['NameError', 'Agent 运行入口异常', '请更新代码并重建 Agent 运行镜像后重试。'],
+  ['既无 .node.json', '容器未收到任务输入', '请从本节点重试；持续失败时检查任务工作目录挂载是否正常。'],
 ]
 
 export function humanizeAgentError(raw: string | null | undefined): { title: string; hint: string } {
@@ -31,6 +33,6 @@ export function humanizeAgentError(raw: string | null | undefined): { title: str
   }
   return {
     title: text.slice(0, 240),
-    hint: '查看该节点的事件流（错误/工具输出）与容器 stderr，定位具体失败步骤。',
+    hint: '查看本节点事件流中的错误与工具输出，定位失败步骤后重试。',
   }
 }

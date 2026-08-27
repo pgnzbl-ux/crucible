@@ -68,3 +68,20 @@ export function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   return value.filter((item): item is string => typeof item === 'string')
 }
+
+/** 审计报告降噪漏斗一行文案；无有效数字时返回 null。 */
+export function formatDenoiseFunnel(rd: Record<string, unknown> | null | undefined): string | null {
+  const summary = asRecord(rd?.audit_summary)
+  const funnel = asRecord(summary.denoise_funnel)
+  if (!Object.keys(funnel).length) return null
+  const finding = typeof funnel.finding_count === 'number' ? funnel.finding_count : null
+  const dropped = typeof funnel.dropped_c_count === 'number' ? funnel.dropped_c_count : null
+  const groups = typeof funnel.group_count === 'number' ? funnel.group_count : null
+  const bypass = typeof funnel.bypass_count === 'number' ? funnel.bypass_count : null
+  const parts: string[] = []
+  if (finding != null) parts.push(`原始 ${finding}`)
+  if (dropped != null) parts.push(`C档 ${dropped}`)
+  if (groups != null) parts.push(`复核组 ${groups}`)
+  if (bypass != null) parts.push(`依赖情报 ${bypass}`)
+  return parts.length ? parts.join(' → ') : null
+}

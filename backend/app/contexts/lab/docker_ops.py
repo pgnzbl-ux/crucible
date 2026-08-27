@@ -2,20 +2,29 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import subprocess
 
 logger = logging.getLogger(__name__)
 
 
-async def _run(cmd: list[str], *, cwd: str | None = None) -> subprocess.CompletedProcess:
-    kwargs = {
+async def _run(
+    cmd: list[str],
+    *,
+    cwd: str | None = None,
+    timeout: int = 120,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    kwargs: dict = {
         "capture_output": True,
         "text": True,
-        "timeout": 120,
+        "timeout": timeout,
     }
     if cwd is not None:
         kwargs["cwd"] = cwd
+    if env is not None:
+        kwargs["env"] = env
     result = await asyncio.to_thread(
         subprocess.run,
         cmd,
@@ -102,8 +111,12 @@ async def compose_stop(project: str) -> None:
 
 
 async def compose_up_build(project: str, compose_file: str, workdir: str) -> None:
+    """重建路径与创建路径共用：先策略校验，再以白名单 env 执行 compose。"""
     if not (project or "").strip():
         raise ValueError("compose project 不能为空")
+    from .compose_policy import compose_subprocess_env, validate_compose_file
+
+    validate_compose_file(compose_file, workdir)
     await _run(
         [
             "docker",
@@ -115,8 +128,13 @@ async def compose_up_build(project: str, compose_file: str, workdir: str) -> Non
             "up",
             "-d",
             "--build",
+            "--wait",
+            "--wait-timeout",
+            "300",
         ],
         cwd=workdir,
+        timeout=600,
+        env=compose_subprocess_env(),
     )
 
 
@@ -131,18 +149,85 @@ async def list_containers(project: str) -> list[dict[str, str]]:
             "--filter",
             f"label=com.docker.compose.project={project}",
             "--format",
-            "{{.Names}}\t{{.Status}}\t{{.Ports}}\t{{.Image}}",
+            "{{.Names}}\t{{.State}}\t{{.Status}}\t{{.Ports}}\t{{.Image}}",
         ]
     )
     containers = []
     for line in result.stdout.splitlines():
         if not line.strip():
             continue
-        name, status, ports, image = (line.split("\t") + ["", "", "", ""])[:4]
+        name, state, status, ports, image = (
+            line.split("\t") + ["", "", "", "", ""]
+        )[:5]
         containers.append(
-            {"name": name, "status": status, "ports": ports, "image": image}
+            {
+                "name": name,
+                "state": state,
+                "status": status,
+                "ports": ports,
+                "image": image,
+            }
         )
     return containers
+
+
+async def list_published_ports(project: str) -> list[dict[str, str | int]]:
+    """读取运行中 Compose 容器的实际端口绑定。
+
+    不从 compose.yml 猜宿主端口：裸容器端口、变量、范围最终都以
+    Docker NetworkSettings.Ports 为准。
+    """
+    if not (project or "").strip():
+        raise ValueError("compose project 不能为空")
+    listed = await _run(
+        [
+            "docker",
+            "ps",
+            "--filter",
+            f"label=com.docker.compose.project={project}",
+            "--format",
+            "{{.ID}}",
+        ]
+    )
+    ids = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
+    if not ids:
+        return []
+    inspected = await _run(
+        [
+            "docker",
+            "inspect",
+            "--format",
+            "{{json .NetworkSettings.Ports}}",
+            *ids,
+        ]
+    )
+    result: list[dict[str, str | int]] = []
+    for raw in inspected.stdout.splitlines():
+        try:
+            mappings = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(mappings, dict):
+            continue
+        for container_key, host_bindings in mappings.items():
+            port_text, sep, protocol = str(container_key).partition("/")
+            if not sep or not port_text.isdigit() or not isinstance(host_bindings, list):
+                continue
+            for binding in host_bindings:
+                if not isinstance(binding, dict):
+                    continue
+                host_port = str(binding.get("HostPort") or "")
+                if not host_port.isdigit():
+                    continue
+                result.append(
+                    {
+                        "host_ip": str(binding.get("HostIp") or "0.0.0.0"),
+                        "host_port": int(host_port),
+                        "container_port": int(port_text),
+                        "protocol": (protocol or "tcp").lower(),
+                    }
+                )
+    return result
 
 
 async def assert_container_in_project(name: str, project: str) -> None:

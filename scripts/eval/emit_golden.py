@@ -1,0 +1,197 @@
+"""一次性写出 golden/*/case.yaml。源数据仅此文件，改完再跑本模块。"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import yaml
+
+ROOT = Path(__file__).resolve().parent / "golden"
+
+CASES: list[dict] = [
+    # —— Python / Django ——
+    dict(id="CVE-2022-28346", language="python", git_url="https://github.com/django/django.git", ref="4.0.3",
+         notes="Django QuerySet.alias/annotate SQL 注入；修于 4.0.4 / 3.2.13。",
+         expected=[dict(cwe="CWE-89", file_contains="django/db/models/query.py", description="QuerySet.alias SQL injection")]),
+    dict(id="CVE-2022-34265", language="python", git_url="https://github.com/django/django.git", ref="4.0.5",
+         notes="Trunc/Extract SQL 注入；修于 4.0.6 / 3.2.14。",
+         expected=[dict(cwe="CWE-89", file_contains="django/db/models/functions", description="datetime Trunc/Extract SQL injection")]),
+    dict(id="CVE-2021-35042", language="python", git_url="https://github.com/django/django.git", ref="3.2.4",
+         notes="QuerySet.order_by SQL 注入；修于 3.2.5。",
+         expected=[dict(cwe="CWE-89", file_contains="django/db/models/sql", description="order_by SQL injection")]),
+    dict(id="CVE-2020-7472", language="python", git_url="https://github.com/django/django.git", ref="3.0.2",
+         notes="contrib.postgres StringAgg delimiter SQL 注入；修于 3.0.3。",
+         expected=[dict(cwe="CWE-89", file_contains="django/contrib/postgres", description="StringAgg SQL injection")]),
+    dict(id="CVE-2019-14234", language="python", git_url="https://github.com/django/django.git", ref="2.2.3",
+         notes="JSONField/HStore key SQL 注入；修于 2.2.4。",
+         expected=[dict(cwe="CWE-89", file_contains="django/contrib/postgres", description="JSONField key SQL injection")]),
+    dict(id="CVE-2021-31542", language="python", git_url="https://github.com/django/django.git", ref="3.2.3",
+         notes="FileField/ImageField 目录穿越；修于 3.2.4。",
+         expected=[dict(cwe="CWE-22", file_contains="django/core/files", description="uploaded file path traversal")]),
+    dict(id="CVE-2021-33203", language="python", git_url="https://github.com/django/django.git", ref="3.2.3",
+         notes="admindocs 路径穿越读本地文件；修于 3.2.4。",
+         expected=[dict(cwe="CWE-22", file_contains="django/contrib/admindocs", description="admindocs path traversal")]),
+    dict(id="CVE-2022-22818", language="python", git_url="https://github.com/django/django.git", ref="4.0.1",
+         notes="{% debug %} 模板 XSS；修于 4.0.2。",
+         expected=[dict(cwe="CWE-79", file_contains="django/template", description="debug template XSS")]),
+    dict(id="CVE-2024-24680", language="python", git_url="https://github.com/django/django.git", ref="5.0.1",
+         notes="intcomma 对恶意字符串的 XSS/DoS；修于 5.0.2。",
+         expected=[dict(cwe="CWE-79", file_contains="django/contrib/humanize", description="intcomma XSS")]),
+    dict(id="CVE-2019-19844", language="python", git_url="https://github.com/django/django.git", ref="2.2.7",
+         notes="密码重置按 email 大小写碰撞接管账号；修于 2.2.8。",
+         expected=[dict(cwe="CWE-640", file_contains="django/contrib/auth", description="password reset account takeover")]),
+    dict(id="CVE-2018-14574", language="python", git_url="https://github.com/django/django.git", ref="2.1",
+         notes="CommonMiddleware APPEND_SLASH 开放重定向；修于 2.1.2。",
+         expected=[dict(cwe="CWE-601", file_contains="django/middleware/common.py", description="APPEND_SLASH open redirect")]),
+    dict(id="CVE-2017-12794", language="python", git_url="https://github.com/django/django.git", ref="1.11.4",
+         notes="技术 500 页 XSS；修于 1.11.5。",
+         expected=[dict(cwe="CWE-79", file_contains="django/views/debug.py", description="debug 500 page XSS")]),
+    dict(id="CVE-2023-31047", language="python", git_url="https://github.com/django/django.git", ref="4.2",
+         notes="FileField 上传文件名未充分消毒；修于 4.2.1。",
+         expected=[dict(cwe="CWE-434", file_contains="django/forms", description="FileField unsanitized upload")]),
+    dict(id="CVE-2021-44420", language="python", git_url="https://github.com/django/django.git", ref="3.2.9",
+         notes="URLResolver 额外斜杠导致部分路由绕过；修于 3.2.10。",
+         expected=[dict(cwe="CWE-863", file_contains="django/urls", description="URL trailing-slash auth bypass")]),
+    dict(id="CVE-2022-23833", language="python", git_url="https://github.com/django/django.git", ref="4.0.1",
+         notes="MultiPartParser 恶意 Content-Type 导致无限循环；修于 4.0.2。",
+         expected=[dict(cwe="CWE-400", file_contains="django/http/multipartparser.py", description="multipart parser DoS")]),
+    # —— Flask / Jinja ——
+    dict(id="CVE-2023-30861", language="python", git_url="https://github.com/pallets/flask.git", ref="2.2.4",
+         notes="Flask 在某些代理后未设 SESSION_COOKIE_SECURE；修于 2.2.5 / 2.3.2。",
+         expected=[dict(cwe="CWE-614", file_contains="src/flask/sessions.py", description="insecure session cookie")]),
+    dict(id="CVE-2019-10906", language="python", git_url="https://github.com/pallets/jinja.git", ref="2.10",
+         notes="沙箱 str.format 可逃逸读环境；修于 2.10.1。",
+         expected=[dict(cwe="CWE-94", file_contains="jinja2/sandbox.py", description="sandbox format escape")]),
+    dict(id="CVE-2024-22195", language="python", git_url="https://github.com/pallets/jinja.git", ref="3.1.2",
+         notes="xmlattr 过滤器未转义键导致 XSS；修于 3.1.3。",
+         expected=[dict(cwe="CWE-79", file_contains="src/jinja2/filters.py", description="xmlattr XSS")]),
+    dict(id="CVE-2024-34064", language="python", git_url="https://github.com/pallets/jinja.git", ref="3.1.3",
+         notes="xmlattr 对空格等字符的 XSS；修于 3.1.4。",
+         expected=[dict(cwe="CWE-79", file_contains="src/jinja2/filters.py", description="xmlattr whitespace XSS")]),
+    dict(id="CVE-2024-56326", language="python", git_url="https://github.com/pallets/jinja.git", ref="3.1.4",
+         notes="沙箱环境下的间接属性检测绕过；修于 3.1.5。",
+         expected=[dict(cwe="CWE-1336", file_contains="src/jinja2", description="sandbox bypass")]),
+    # —— Airflow / Superset ——
+    dict(id="CVE-2020-11978", language="python", git_url="https://github.com/apache/airflow.git", ref="1.10.10",
+         notes="example DAG 命令注入，实验 API 默认可达。",
+         expected=[dict(cwe="CWE-78", file_contains="example_dags", description="example DAG command injection")]),
+    dict(id="CVE-2020-13927", language="python", git_url="https://github.com/apache/airflow.git", ref="1.10.10",
+         notes="Experimental REST API 默认未鉴权。",
+         expected=[dict(cwe="CWE-306", file_contains="airflow/www", description="experimental API no auth")]),
+    dict(id="CVE-2022-24288", language="python", git_url="https://github.com/apache/airflow.git", ref="2.2.3",
+         notes="部分示例/OS 命令拼接；修于 2.2.4。",
+         expected=[dict(cwe="CWE-78", file_contains="airflow", description="OS command injection")]),
+    dict(id="CVE-2021-45229", language="python", git_url="https://github.com/apache/airflow.git", ref="2.2.2",
+         notes="Trigger DAG 页 XSS。",
+         expected=[dict(cwe="CWE-79", file_contains="airflow/www", description="DAG trigger XSS")]),
+    dict(id="CVE-2023-27524", language="python", git_url="https://github.com/apache/superset.git", ref="2.0.1",
+         notes="默认 SECRET_KEY 导致会话伪造；修于 2.1.0。",
+         expected=[dict(cwe="CWE-1188", file_contains="superset", description="default SECRET_KEY session forgery")]),
+    dict(id="CVE-2023-37941", language="python", git_url="https://github.com/apache/superset.git", ref="2.1.0",
+         notes="元数据库 pickle 反序列化。",
+         expected=[dict(cwe="CWE-502", file_contains="superset", description="pickle deserialization")]),
+    dict(id="CVE-2021-28125", language="python", git_url="https://github.com/apache/superset.git", ref="1.0.1",
+         notes="SQL Lab 查询拼接/鉴权缺口。",
+         expected=[dict(cwe="CWE-89", file_contains="superset", description="SQL Lab injection")]),
+    dict(id="CVE-2023-43701", language="python", git_url="https://github.com/apache/superset.git", ref="2.1.1",
+         notes="存储型 XSS。",
+         expected=[dict(cwe="CWE-79", file_contains="superset", description="stored XSS")]),
+    dict(id="CVE-2020-13952", language="python", git_url="https://github.com/apache/superset.git", ref="0.37.0",
+         notes="SQL 查询权限校验不足。",
+         expected=[dict(cwe="CWE-89", file_contains="superset", description="SQL authorization bypass")]),
+    # —— Spring ——
+    dict(id="CVE-2022-22965", language="java", git_url="https://github.com/spring-projects/spring-framework.git", ref="v5.3.17",
+         notes="Spring4Shell DataBinder 类加载 RCE；修于 5.3.18 / 5.2.20。",
+         expected=[dict(cwe="CWE-94", file_contains="springframework/beans", description="DataBinder class loader RCE")]),
+    dict(id="CVE-2022-22963", language="java", git_url="https://github.com/spring-cloud/spring-cloud-function.git", ref="v3.2.2",
+         notes="RoutingFunction SpEL 注入；修于 3.2.3 / 3.1.7。",
+         expected=[dict(cwe="CWE-94", file_contains="function", description="SpEL injection via routing-expression")]),
+    dict(id="CVE-2022-22978", language="java", git_url="https://github.com/spring-projects/spring-security.git", ref="5.6.3",
+         notes="RegexRequestMatcher 在部分 JDK 上可绕过；修于 5.6.4。",
+         expected=[dict(cwe="CWE-863", file_contains="web/util/matcher", description="RegexRequestMatcher auth bypass")]),
+    dict(id="CVE-2018-1270", language="java", git_url="https://github.com/spring-projects/spring-framework.git", ref="v5.0.4.RELEASE",
+         notes="STOMP 消息 SpEL 注入；修于 5.0.5。",
+         expected=[dict(cwe="CWE-94", file_contains="messaging", description="STOMP SpEL RCE")]),
+    dict(id="CVE-2024-38816", language="java", git_url="https://github.com/spring-projects/spring-framework.git", ref="v6.1.12",
+         notes="WebFlux 静态资源路径穿越；修于 6.1.13。",
+         expected=[dict(cwe="CWE-22", file_contains="webflux", description="static resource path traversal")]),
+    dict(id="CVE-2024-22243", language="java", git_url="https://github.com/spring-projects/spring-framework.git", ref="v6.1.3",
+         notes="UriComponentsBuilder 对用户 URL 的开放重定向/SSRF 面。",
+         expected=[dict(cwe="CWE-601", file_contains="web/util/UriComponentsBuilder.java", description="URL parsing open redirect")]),
+    dict(id="CVE-2016-1000027", language="java", git_url="https://github.com/spring-projects/spring-framework.git", ref="v4.3.29.RELEASE",
+         notes="HttpInvokerServiceExporter Java 反序列化。",
+         expected=[dict(cwe="CWE-502", file_contains="remoting/httpinvoker", description="HttpInvoker deserialization")]),
+    dict(id="CVE-2022-22950", language="java", git_url="https://github.com/spring-projects/spring-framework.git", ref="v5.3.16",
+         notes="SpEL 编译 DoS；修于 5.3.17。",
+         expected=[dict(cwe="CWE-400", file_contains="expression", description="SpEL compilation DoS")]),
+    # —— Struts / Shiro / Jackson ——
+    dict(id="CVE-2017-5638", language="java", git_url="https://github.com/apache/struts.git", ref="STRUTS_2_3_31",
+         notes="Jakarta multipart Content-Type OGNL RCE。",
+         expected=[dict(cwe="CWE-94", file_contains="multipart", description="Jakarta parser OGNL RCE")]),
+    dict(id="CVE-2018-11776", language="java", git_url="https://github.com/apache/struts.git", ref="STRUTS_2_3_34",
+         notes="namespace 未设时 OGNL 求值。",
+         expected=[dict(cwe="CWE-94", file_contains="DefaultActionMapper", description="namespace OGNL RCE")]),
+    dict(id="CVE-2023-50164", language="java", git_url="https://github.com/apache/struts.git", ref="STRUTS_6_3_0_1",
+         notes="文件上传目录穿越导致 RCE。",
+         expected=[dict(cwe="CWE-22", file_contains="dispatcher/multipart", description="upload path traversal")]),
+    dict(id="CVE-2013-2251", language="java", git_url="https://github.com/apache/struts.git", ref="STRUTS_2_3_14",
+         notes="action: / redirect: 前缀 OGNL。",
+         expected=[dict(cwe="CWE-94", file_contains="DefaultActionMapper", description="redirect prefix OGNL")]),
+    dict(id="CVE-2016-4437", language="java", git_url="https://github.com/apache/shiro.git", ref="shiro-root-1.2.4",
+         notes="RememberMe AES 硬编码密钥反序列化 RCE。",
+         expected=[dict(cwe="CWE-502", file_contains="CookieRememberMeManager", description="rememberMe deserialization")]),
+    dict(id="CVE-2020-1957", language="java", git_url="https://github.com/apache/shiro.git", ref="shiro-root-1.5.1",
+         notes="路径匹配规范化导致鉴权绕过。",
+         expected=[dict(cwe="CWE-863", file_contains="PathMatchingFilter", description="path matching auth bypass")]),
+    dict(id="CVE-2017-7525", language="java", git_url="https://github.com/FasterXML/jackson-databind.git", ref="jackson-databind-2.8.8",
+         notes="enableDefaultTyping 多态反序列化。",
+         expected=[dict(cwe="CWE-502", file_contains="databind", description="default typing gadget")]),
+    dict(id="CVE-2019-12384", language="java", git_url="https://github.com/FasterXML/jackson-databind.git", ref="jackson-databind-2.9.8",
+         notes="Polymorphic 反序列化 gadget；修于 2.9.9.1。",
+         expected=[dict(cwe="CWE-502", file_contains="databind", description="polymorphic deserialization")]),
+    # —— Log4j / Tomcat ——
+    dict(id="CVE-2021-44228", language="java", git_url="https://github.com/apache/logging-log4j2.git", ref="rel/2.14.1",
+         notes="Log4Shell JNDI lookup RCE。",
+         expected=[dict(cwe="CWE-917", file_contains="JndiLookup", description="JNDI lookup RCE")]),
+    dict(id="CVE-2021-45046", language="java", git_url="https://github.com/apache/logging-log4j2.git", ref="rel/2.15.0",
+         notes="2.15 不完整修复的 Thread Context 绕过。",
+         expected=[dict(cwe="CWE-917", file_contains="lookup", description="incomplete JNDI fix")]),
+    dict(id="CVE-2020-9484", language="java", git_url="https://github.com/apache/tomcat.git", ref="9.0.34",
+         notes="PersistentManager 会话文件反序列化。",
+         expected=[dict(cwe="CWE-502", file_contains="session", description="session persistence deserialization")]),
+    dict(id="CVE-2019-0232", language="java", git_url="https://github.com/apache/tomcat.git", ref="9.0.17",
+         notes="Windows CGI 参数命令注入。",
+         expected=[dict(cwe="CWE-78", file_contains="cgi", description="CGI argument command injection")]),
+    dict(id="CVE-2017-12615", language="java", git_url="https://github.com/apache/tomcat.git", ref="8.5.19",
+         notes="readonly=false 时 PUT JSP。",
+         expected=[dict(cwe="CWE-434", file_contains="DefaultServlet", description="PUT JSP upload")]),
+    dict(id="CVE-2016-8735", language="java", git_url="https://github.com/apache/tomcat.git", ref="8.5.6",
+         notes="JmxRemoteLifecycleListener 反序列化。",
+         expected=[dict(cwe="CWE-502", file_contains="JmxRemoteLifecycleListener", description="JMX listener deserialization")]),
+]
+
+
+def emit() -> int:
+    ROOT.mkdir(parents=True, exist_ok=True)
+    for raw in CASES:
+        case = dict(raw)
+        expected = case["expected"]
+        case.setdefault("labels", {
+            "tp_samples": [{"cwe": e["cwe"], "file_contains": e["file_contains"]} for e in expected],
+            "fp_samples": [],
+        })
+        dest = ROOT / case["id"]
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "case.yaml").write_text(
+            yaml.safe_dump(case, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        (dest / "README.md").write_text(
+            f"# {case['id']}\n\n{case['notes']}\n\n- repo: `{case['git_url']}`\n- vulnerable ref: `{case['ref']}`\n",
+            encoding="utf-8",
+        )
+    return len(CASES)
+
+
+if __name__ == "__main__":
+    n = emit()
+    print(f"wrote {n} cases under {ROOT}")

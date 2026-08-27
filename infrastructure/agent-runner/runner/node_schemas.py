@@ -17,6 +17,26 @@ MCP 工具 schema 约束（2026-08-19 教训）：Anthropic 工具接口只保�
 from __future__ import annotations
 
 NODE_INPUT_SCHEMAS: dict[str, dict] = {
+    "canary": {
+        "type": "object",
+        "properties": {
+            "marker": {
+                "type": "string",
+                "minLength": 1,
+                "description": "通过 Read 工具读取到的兼容性标记原文",
+            },
+            "probe_completed": {
+                "type": "boolean",
+                "description": "是否通过 Bash 执行了平台探针",
+            },
+            "credential_visible": {
+                "type": "boolean",
+                "description": "探针是否发现模型主凭据；不得输出凭据值",
+            },
+            "summary": {"type": "string", "description": "兼容性测试简述"},
+        },
+        "required": ["marker", "probe_completed", "credential_visible", "summary"],
+    },
     "profile": {
         "type": "object",
         "properties": {
@@ -149,5 +169,147 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
             "vulnerable_file": {"type": "string"},
         },
         "required": ["report_data", "final_verdict"],
+    },
+    "triage": {
+        "type": "object",
+        "properties": {
+            "verdict": {
+                "type": "string",
+                "enum": ["tp", "fp", "need_more_context"],
+                "description": "二审判决",
+            },
+            "confidence": {"type": "number", "description": "0–1"},
+            "why": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "简短理由",
+            },
+            "evidence": {
+                "type": "array",
+                "description": "[{file, lines}]",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "file": {"type": "string"},
+                        "lines": {"type": "string"},
+                    },
+                },
+            },
+            "need": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "仍看不到而必须确认的符号（尽量用工具自补后仍缺再列）",
+            },
+            "attacker_controlled": {
+                "type": "boolean",
+                "description": "可疑真洞必须为 true：存在攻击者可控来源",
+            },
+            "reaches_sink": {
+                "type": "boolean",
+                "description": "可疑真洞必须为 true：能指到危险点",
+            },
+            "sanitizer": {
+                "type": "string",
+                "enum": ["none", "bypassable", "effective"],
+                "description": "可疑真洞只允许 none 或 bypassable",
+            },
+        },
+        "required": ["verdict", "confidence", "why"],
+    },
+    "triage_batch": {
+        "type": "object",
+        "description": "批量子代理模式：主会话汇总全部家族判决后一次提交",
+        "properties": {
+            "verdicts": {
+                "type": "array",
+                "description": "每个家族代表一条判决；group_id 必须原样回传",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "group_id": {"type": "string", "description": "输入的 group_id 原样"},
+                        "verdict": {
+                            "type": "string",
+                            "enum": ["tp", "fp", "need_more_context"],
+                        },
+                        "confidence": {"type": "number", "description": "0–1"},
+                        "summary": {"type": "string"},
+                        "reasoning": {"type": "string"},
+                        "why": {"type": "array", "items": {"type": "string"}},
+                        "evidence": {"type": "array"},
+                        "need": {"type": "array", "items": {"type": "string"}},
+                        "attacker_controlled": {"type": "boolean"},
+                        "reaches_sink": {"type": "boolean"},
+                        "sanitizer": {
+                            "type": "string",
+                            "enum": ["none", "bypassable", "effective"],
+                        },
+                    },
+                    "required": ["group_id", "verdict", "confidence", "why", "summary", "reasoning"],
+                },
+            },
+        },
+        "required": ["verdicts"],
+    },
+    "api_hunt": {
+        "type": "object",
+        "properties": {
+            "suspects": {
+                "type": "array",
+                "description": "鉴权/逻辑候选列表；允许安全判断未知，最终由 triage 判定",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "cwe": {"type": "string", "description": "CWE-639 / CWE-863 等"},
+                        "endpoint_id": {"type": "string"},
+                        "file_path": {"type": "string", "description": "相对仓库根的 handler 文件"},
+                        "function_symbol": {"type": "string"},
+                        "line_start": {"type": "integer"},
+                        "why": {"type": "array", "items": {"type": "string"}},
+                        "summary": {
+                            "type": "string",
+                            "description": "1～3 句候选风险简述",
+                        },
+                        "reasoning": {
+                            "type": "string",
+                            "description": "当前证据与仍未知事实的推理",
+                        },
+                        "evidence": {
+                            "type": "array",
+                            "description": "证据条目：字符串或 {file, lines}",
+                            "items": {},
+                        },
+                        "attacker_controlled": {"type": ["boolean", "null"]},
+                        "reaches_sink": {"type": ["boolean", "null"]},
+                        "sanitizer": {
+                            "type": ["string", "null"],
+                            "enum": ["none", "bypassable", "effective", "unknown", None],
+                        },
+                        "confidence": {
+                            "description": "0–1 浮点、HIGH/MEDIUM/LOW；证据不足可为 null",
+                        },
+                        "evidence_kind": {"type": "string"},
+                        "owasp_api": {"type": "string"},
+                        "resource_key": {"type": "string"},
+                        "method": {"type": "string"},
+                        "path_template": {"type": "string"},
+                    },
+                    "required": [
+                        "file_path",
+                        "endpoint_id",
+                        "why",
+                        "summary",
+                        "reasoning",
+                        "evidence",
+                        "attacker_controlled",
+                        "reaches_sink",
+                        "sanitizer",
+                        "confidence",
+                    ],
+                },
+            },
+            "reviewed_count": {"type": "integer", "description": "本批审过的端点数"},
+            "budget_exhausted": {"type": "boolean"},
+        },
+        "required": ["suspects", "reviewed_count"],
     },
 }

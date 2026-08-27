@@ -107,6 +107,21 @@ async def list_project_artifacts(
     return SourceArtifactListResponse(items=items, total=len(items))
 
 
+@router.delete("/{project_id}/artifacts/{artifact_id}", status_code=204)
+async def delete_project_artifact(
+    project_id: str,
+    artifact_id: str,
+    svc: Annotated[ProjectService, Depends(get_project_service)],
+    user_id: CurrentUserId,
+) -> None:
+    try:
+        deleted = await svc.delete_artifact(project_id, artifact_id, user_id)
+    except ObjectStoreError as e:
+        raise HTTPException(503, f"源码包删除失败: {e}") from e
+    if not deleted:
+        raise HTTPException(404, "源码包不存在")
+
+
 @router.put("/{project_id}", response_model=ProjectResponse)
 async def update_project(
     project_id: str,
@@ -126,6 +141,9 @@ async def delete_project(
     svc: Annotated[ProjectService, Depends(get_project_service)],
     user_id: CurrentUserId,
 ) -> None:
-    deleted = await svc.delete_project(project_id, user_id)
+    try:
+        deleted = await svc.delete_project(project_id, user_id)
+    except ObjectStoreError as e:
+        raise HTTPException(503, f"源码包删除失败: {e}") from e
     if not deleted:
         raise HTTPException(404, "项目不存在")

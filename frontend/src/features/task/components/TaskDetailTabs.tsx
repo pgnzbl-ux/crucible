@@ -94,11 +94,12 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
   }, [restEvents, sseEvents, task?.runs])
 
   const [selectedNode, setSelectedNode] = useState<string | null>(null)
+  const [dagExpanded, setDagExpanded] = useState(false)
   const nodeEvents = useMemo(() => eventsForNode(events, selectedNode), [events, selectedNode])
 
   const selectNode = (nodeKey: string) => {
-    setSelectedNode((prev) => (prev === nodeKey ? null : nodeKey))
-    onTabChange('events')
+    setSelectedNode(nodeKey)
+    if (activeTab !== 'progress') onTabChange('progress')
   }
 
   const { data: report, isError: isReportError, error: reportError } = useQuery({
@@ -165,42 +166,53 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
   const tabItems = [
     {
       key: 'overview',
-      label: '概览',
+      label: '审计概览',
       children: <OverviewTab task={task} statusColor={st.color ?? 'default'} statusLabel={st.label} />,
     },
     {
       key: 'progress',
-      label: '进度',
+      label: '审计过程',
       children: (
-        <NodeSteps
-          taskId={task.id}
-          runId={task.runs[0]?.id}
-          taskStatus={task.status}
-          sseEvents={sseEvents as unknown as SSEEvent[]}
-          sseStatus={sseStatus}
-          selectedNode={selectedNode}
-          onRetryFromNode={canRetry(task.status) ? confirmRetryFromNode : undefined}
-        />
-      ),
-    },
-    {
-      key: 'events',
-      label: '事件流',
-      children: (
-        <TaskEventTimeline
-          events={nodeEvents}
-          running={running}
-          sseEnabled={sseEnabled}
-          sseStatus={sseStatus}
-          sseError={sseError}
-          nodeLabel={selectedNode ? (NODE_LABELS[selectedNode] ?? selectedNode) : null}
-          onClearNode={() => setSelectedNode(null)}
-        />
+        <div className="crucible-audit-workbench">
+          <section className="crucible-audit-workbench__pane is-progress" aria-label="审计进度">
+            <header className="crucible-audit-workbench__head">
+              <div>
+                <strong>审计进度</strong>
+                <small>选择节点，在右侧查看对应运行日志</small>
+              </div>
+              {selectedNode ? <Tag color="blue">已选：{NODE_LABELS[selectedNode] ?? selectedNode}</Tag> : null}
+            </header>
+            <div className="crucible-audit-workbench__progress-scroll">
+              <NodeSteps
+                taskId={task.id}
+                runId={task.runs[0]?.id}
+                taskStatus={task.status}
+                taskType={task.task_type === 'discovery' ? 'discovery' : 'verify'}
+                sseEvents={sseEvents as unknown as SSEEvent[]}
+                sseStatus={sseStatus}
+                selectedNode={selectedNode}
+                onSelectNode={selectNode}
+                onRetryFromNode={canRetry(task.status) ? confirmRetryFromNode : undefined}
+              />
+            </div>
+          </section>
+          <section className="crucible-audit-workbench__pane is-events" aria-label="运行日志">
+            <TaskEventTimeline
+              events={nodeEvents}
+              running={running}
+              sseEnabled={sseEnabled}
+              sseStatus={sseStatus}
+              sseError={sseError}
+              nodeLabel={selectedNode ? (NODE_LABELS[selectedNode] ?? selectedNode) : null}
+              onClearNode={() => setSelectedNode(null)}
+            />
+          </section>
+        </div>
       ),
     },
     {
       key: 'report',
-      label: '报告',
+      label: '审计报告',
       children: visibleReport ? (
         <Card variant="borderless">
           <Descriptions
@@ -249,7 +261,7 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
               发布报告
             </Button>
           )}
-          <EvidenceList reportId={visibleReport.id} />
+          <EvidenceList reportId={visibleReport.id} readOnly={visibleReport.status === 'published'} />
         </Card>
       ) : isReportError ? null : (
         <Alert type="info" title="暂无报告，任务完成后将自动生成" />
@@ -260,14 +272,17 @@ export function TaskDetailTabs({ taskId, activeTab, onTabChange }: TaskDetailTab
   return (
     <div className="crucible-detail-body">
       {showPinnedNodes && (
-        <div className="crucible-detail-nodes-pin">
+        <div className={`crucible-detail-nodes-pin${dagExpanded ? ' is-expanded' : ''}`}>
           <NodeSteps
             taskId={task.id}
             runId={task.runs[0]?.id}
             taskStatus={task.status}
+            taskType={task.task_type === 'discovery' ? 'discovery' : 'verify'}
             sseEvents={sseEvents as unknown as SSEEvent[]}
-          sseStatus={sseStatus}
+            sseStatus={sseStatus}
             compact
+            expanded={dagExpanded}
+            onToggleExpand={() => setDagExpanded((value) => !value)}
             selectedNode={selectedNode}
             onSelectNode={selectNode}
           />
@@ -315,8 +330,17 @@ function OverviewTab({
         bordered
         items={[
           {
+            key: 'type',
+            label: '分析方式',
+            children: (
+              <Tag color={task.task_type === 'discovery' ? 'blue' : 'purple'}>
+                {task.task_type === 'discovery' ? '代码审计' : '定向验证'}
+              </Tag>
+            ),
+          },
+          {
             key: 'addr',
-            label: '项目地址',
+            label: '项目',
             span: 2,
             children: <Text code>{task.project_address}</Text>,
           },
@@ -326,8 +350,8 @@ function OverviewTab({
             children: [
               task.project_ref ?? '默认分支',
               task.project_ref_type ? ` (${task.project_ref_type})` : '',
-              task.clone_depth != null && task.clone_depth !== 1
-                ? ` · depth=${task.clone_depth}`
+                task.clone_depth != null && task.clone_depth !== 1
+                ? ` · 克隆深度 ${task.clone_depth === 0 ? '全量' : task.clone_depth}`
                 : '',
             ].join(''),
           },
@@ -358,16 +382,18 @@ function OverviewTab({
             span: 2,
             children: dayjs(task.created_at).format('YYYY-MM-DD HH:mm:ss'),
           },
-          {
-            key: 'desc',
-            label: '漏洞描述',
-            span: 2,
-            children: (
-              <Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}>
-                {task.vulnerability_description}
-              </Paragraph>
-            ),
-          },
+          ...(task.task_type === 'verify'
+            ? [{
+                key: 'desc',
+                label: '已知漏洞线索',
+                span: 2,
+                children: (
+                  <Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}>
+                    {task.vulnerability_description}
+                  </Paragraph>
+                ),
+              }]
+            : []),
         ]}
       />
       {task.vulnerability_reasoning && (

@@ -20,16 +20,34 @@ class SourceHandoff(_HandoffBase):
     source_path: str | None = None  # 兼容旧落库 / 单测
 
 
+class LanguageFact(BaseModel):
+    """语言证据事实(discovery-spec §6.0)：文件证据 > 规则引擎 > AI 补全。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    evidence_files: list[str] = Field(default_factory=list)  # 相对仓库根
+    source: str = "rules"  # rules | ai；ai 项不进 semgrep_configs
+    confidence: float = 1.0
+
+
 class ProfileHandoff(_HandoffBase):
     is_web: bool | None = None
-    language: str | None = None
-    framework: str | None = None
+    languages: list[LanguageFact] = Field(default_factory=list)
+    primary_language: str | None = None  # 由 languages 按证据权重派生
+    language: str | None = None  # = primary_language，兼容 env_ready 旧 Input
+    frameworks: list[str] = Field(default_factory=list)
+    framework: str | None = None  # = frameworks[0]，兼容旧字段
+    package_managers: list[str] = Field(default_factory=list)
+    semgrep_configs: list[str] = Field(default_factory=list)  # 纯函数派生，禁止 AI 写
+    osv_manifests: list[str] = Field(default_factory=list)  # scan_osv 加速用
     port: int | None = None
     has_dockerfile: bool | None = None
     has_compose: bool | None = None
     detected_services: list[Any] | None = None
     start_command: str | None = None
     non_web_reason: str | None = None
+    profile_source: str | None = None  # rules | rules+ai | cache
 
 
 class EnvReadyHandoff(_HandoffBase):
@@ -38,6 +56,10 @@ class EnvReadyHandoff(_HandoffBase):
     transport_shape: dict[str, Any] = Field(default_factory=dict)
     initial_creds: dict[str, Any] = Field(default_factory=dict)
     started_containers: list[Any] = Field(default_factory=list)
+    ok: bool | None = None
+    error: str | None = None
+    outcome: str | None = None  # success | degraded
+    coverage: dict[str, Any] | None = None
 
 
 class AuditHandoff(_HandoffBase):
@@ -72,15 +94,150 @@ class ReproduceHandoff(_HandoffBase):
     cvss: Any = None
     vulnerable_file: str | None = None
     poc: dict[str, Any] | None = None
+    degraded_reason: str | None = None
 
 
 class ReportHandoff(_HandoffBase):
     report_data: Any = None
     final_verdict: str | None = None
+    # 文档层回显；权威结论以 FinalizeHandoff.analysis_verdict 为准
+    analysis_verdict: str | None = None
+    analysis_status: str | None = None  # completed | needs_review
     cvss: Any = None
     vulnerable_file: str | None = None
     poc: Any = None
     authored_by: str | None = None
+
+
+class FinalizeHandoff(_HandoffBase):
+    """分析层权威结论；报告节点只消费、不得改写任务终态。"""
+
+    analysis_verdict: str | None = None
+    analysis_status: str | None = None  # completed | needs_review
+    final_verdict: str | None = None
+    lead_count: int | None = None
+    confirmed_count: int | None = None
+    needs_review_count: int | None = None
+    authored_by: str | None = None
+
+
+class LeadVerifyHandoff(_HandoffBase):
+    """discovery 多线索终认摘要（编排器显式节点产出）。"""
+
+    lead_count: int = 0
+    completed_count: int = 0
+    failed_count: int = 0
+    skipped_count: int = 0
+    queued_count: int = 0
+    lead_status_counts: dict[str, int] = Field(default_factory=dict)
+    verdict_counts: dict[str, int] = Field(default_factory=dict)
+    ok: bool = True
+    status: str | None = None
+
+
+class EngineScanHandoff(_HandoffBase):
+    """扫描节点统一产出(discovery-spec §6.1)：一引擎一节点一 ScanRun。"""
+
+    engine: str = ""
+    scan_run_id: str | None = None
+    status: str | None = None  # completed | failed | skipped
+    finding_count: int = 0
+    outcome: str | None = None  # success | degraded | skipped
+    coverage: dict[str, Any] | None = None
+    error: str | None = None
+
+
+class ClusterHandoff(_HandoffBase):
+    group_count: int = 0
+    groups_by_cwe: dict[str, int] = Field(default_factory=dict)
+    groups_by_engine: dict[str, int] = Field(default_factory=dict)
+    groups_by_grade: dict[str, int] = Field(default_factory=dict)
+    index_built: bool = False
+    index_languages: list[str] = Field(default_factory=list)
+    index_symbol_count: int = 0
+    finding_count: int = 0
+    findings_without_function: int = 0
+    bypass_count: int = 0
+    downgraded_count: int = 0
+    dropped_c_count: int = 0  # 确定性降噪 C 档（未建 AlertGroup）
+    dropped_c_by_engine: dict[str, int] = Field(default_factory=dict)
+
+
+class ScreenHandoff(_HandoffBase):
+    """轻量二审：T0 携带 + T1 规则 + T2 快审；无 Docker。"""
+
+    skipped_llm_count: int = 0
+    carried_count: int = 0
+    rule_count: int = 0
+    fast_model_count: int = 0
+    escalated_count: int = 0
+    tp_count: int = 0
+    fp_count: int = 0
+    need_more_count: int = 0
+    budget_exhausted: bool = False
+
+
+class TriageHandoff(_HandoffBase):
+    adjudicated_count: int = 0
+    skipped_llm_count: int = 0
+    skipped_unaudited_count: int = 0  # 兜底残留 clustered（正常应为 0）
+    tp_count: int = 0
+    fp_count: int = 0
+    need_more_count: int = 0
+    # 级联收敛分级计数（展示/排障用；screen 段计数由 ScreenHandoff 持有）
+    carried_count: int = 0
+    rule_count: int = 0
+    fast_model_count: int = 0
+    propagated_count: int = 0
+    propagated_review_count: int = 0
+    family_count: int = 0
+    escalated_count: int = 0
+    budget_exhausted: bool = False
+
+
+class DispatchHandoff(_HandoffBase):
+    """dispatch 产出：合格线索入队计数(discovery-spec §6.4 / v1.2)。"""
+
+    has_lead: bool = False
+    queued_count: int = 0
+    queued_group_ids: list[str] = []
+    # 兼容旧字段：代表组（排序第一）与其描述摘要
+    lead_group_id: str | None = None
+    lead_description: str | None = None
+    review_count: int = 0
+    archived_count: int = 0
+    skipped_unaudited_count: int = 0
+
+
+class ApiInventoryHandoff(_HandoffBase):
+    """确定性 API 清单摘要(discovery-spec §6.2.1)。"""
+
+    ok: bool = True
+    parser: str = ""  # 汇合主键，如 fastapi,flask,openapi
+    parsers: list[str] = Field(default_factory=list)
+    acquisition_kinds: list[str] = Field(default_factory=list)
+    endpoint_count: int = 0
+    pve_count: int = 0
+    bom_path: str | None = None  # 相对 host_workdir
+    unsupported_languages: list[str] = Field(default_factory=list)
+    stack_ids: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
+class ApiHuntHandoff(_HandoffBase):
+    """API 逻辑/鉴权猎洞摘要(discovery-spec §6.2.1)。"""
+
+    engine: str = "api_hunt"
+    scan_run_id: str | None = None
+    status: str | None = None  # completed | failed | skipped
+    ok: bool = True
+    reviewed_count: int = 0
+    suspect_count: int = 0
+    finding_count: int = 0
+    candidate_count: int = 0  # 已归一落库、等待统一聚类/二审的候选数
+    candidate_state_counts: dict[str, int] = Field(default_factory=dict)
+    budget_exhausted: bool = False
+    error: str | None = None
 
 
 HANDOFF_BY_KEY: dict[str, type[_HandoffBase]] = {
@@ -89,7 +246,18 @@ HANDOFF_BY_KEY: dict[str, type[_HandoffBase]] = {
     "env_ready": EnvReadyHandoff,
     "audit": AuditHandoff,
     "reproduce": ReproduceHandoff,
+    "finalize": FinalizeHandoff,
     "report": ReportHandoff,
+    "lead_verify": LeadVerifyHandoff,
+    "scan_gitleaks": EngineScanHandoff,
+    "scan_osv": EngineScanHandoff,
+    "scan_semgrep": EngineScanHandoff,
+    "api_inventory": ApiInventoryHandoff,
+    "cluster": ClusterHandoff,
+    "api_hunt": ApiHuntHandoff,
+    "screen": ScreenHandoff,
+    "triage": TriageHandoff,
+    "dispatch": DispatchHandoff,
 }
 
 

@@ -70,9 +70,9 @@ export function LoginPage() {
           <CrucibleLogo size={64} className="crucible-login-hero-mark" />
           <div className="crucible-login-hero-title">Crucible</div>
           <Paragraph className="crucible-login-hero-desc">
-            坩埚 · AI 驱动的漏洞自动验证平台
+            坩埚 · AI 辅助代码审计与漏洞挖掘平台
             <br />
-            在隔离沙箱中自动分析源码、复现漏洞、生成报告
+            自动扫描代码、复核漏洞线索、完成终认并生成审计报告
           </Paragraph>
         </div>
       </div>

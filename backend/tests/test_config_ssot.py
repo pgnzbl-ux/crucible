@@ -1,6 +1,7 @@
 """配置真相源：连接串只进 .env；产品版本只进 pyproject.toml；LLM 只走后台 Provider；MinIO bucket 写死。"""
-import sys
+
 import os
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,7 +10,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 from app.core.config import Settings
-
 
 _LLM_ENV_FIELDS = (
     "llm_base_url",
@@ -25,6 +25,28 @@ def test_settings_has_no_llm_env_fields():
         assert name not in Settings.model_fields, f"{name} 不应再从 .env 注入"
 
 
+def test_default_env_file_is_backend_local():
+    """配置文件位置不应随 API/Celery 的启动目录变化。"""
+    from pathlib import Path
+
+    backend_root = Path(__file__).resolve().parents[1]
+    assert Path(Settings.model_config["env_file"]).resolve() == backend_root / ".env"
+
+
+def test_env_example_only_contains_supported_settings():
+    """模板中的陈旧变量会被 Pydantic 静默忽略，必须在测试阶段直接报出。"""
+    from pathlib import Path
+
+    env_example = Path(__file__).resolve().parents[1] / ".env.example"
+    declared = {
+        line.split("=", 1)[0].strip()
+        for line in env_example.read_text(encoding="utf-8").splitlines()
+        if line and not line.lstrip().startswith("#") and "=" in line
+    }
+    supported = {name.upper() for name in Settings.model_fields}
+    assert declared <= supported, f".env.example 存在无效配置: {sorted(declared - supported)}"
+
+
 def test_infra_connection_fields_have_no_code_defaults():
     """连接串只进 .env，禁止在 Settings 里再抄一份 URL。"""
     for name in (
@@ -32,6 +54,7 @@ def test_infra_connection_fields_have_no_code_defaults():
         "redis_url",
         "celery_broker_url",
         "celery_result_backend",
+        "redis_clue_url",
         "s3_endpoint",
         "s3_access_key",
         "s3_secret_key",
@@ -62,7 +85,7 @@ def test_app_version_has_single_source():
     declared = pyproject["project"]["version"]
 
     config_src = (backend_root / "app" / "core" / "config.py").read_text(encoding="utf-8")
-    assert 'app_version: str =' not in config_src
+    assert "app_version: str =" not in config_src
     assert declared not in config_src
 
     assert "app_version" not in Settings.model_fields
@@ -80,6 +103,7 @@ def test_settings_require_env_for_infra_urls(monkeypatch, tmp_path):
         "REDIS_URL",
         "CELERY_BROKER_URL",
         "CELERY_RESULT_BACKEND",
+        "REDIS_CLUE_URL",
         "S3_ENDPOINT",
         "S3_ACCESS_KEY",
         "S3_SECRET_KEY",
@@ -96,6 +120,7 @@ _INFRA_ENV = {
     "REDIS_URL": "redis://localhost:6380/0",
     "CELERY_BROKER_URL": "redis://localhost:6380/1",
     "CELERY_RESULT_BACKEND": "redis://localhost:6380/2",
+    "REDIS_CLUE_URL": "redis://localhost:6380/3",
     "S3_ENDPOINT": "http://localhost:9000",
     "S3_ACCESS_KEY": "minioadmin",
     "S3_SECRET_KEY": "minioadmin",
@@ -140,6 +165,7 @@ def test_build_runner_env_ignores_settings_llm(monkeypatch):
     assert "ANTHROPIC_AUTH_TOKEN" not in env
     assert "ANTHROPIC_BASE_URL" not in env
     assert env["CLAUDE_SDK_MAX_TURNS"] == "9"
+    assert env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "0"
     assert env["HOME"] != "/workspace"
     assert env["HOME"].startswith("/tmp")
 
@@ -157,11 +183,19 @@ def test_build_runner_env_uses_provider_env(monkeypatch):
         "ANTHROPIC_API_KEY": "sk-from-db",
         "ANTHROPIC_MODEL": "deepseek-v4-flash",
         "API_TIMEOUT_MS": "600000",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "128000",
+        "CLAUDE_CODE_EFFORT_LEVEL": "medium",
+        "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT": "1",
     }
     env = ClaudeSdkAdapter().build_runner_env(provider_env)
-    assert env["ANTHROPIC_API_KEY"] == "sk-from-db"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-from-db"
+    assert "ANTHROPIC_API_KEY" not in env
     assert env["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
     assert env["ANTHROPIC_MODEL"] == "deepseek-v4-flash"
+    assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "128000"
+    assert env["CLAUDE_CODE_EFFORT_LEVEL"] == "medium"
+    assert env["CLAUDE_CODE_ALWAYS_ENABLE_EFFORT"] == "1"
+    assert env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "0"
 
 
 def test_no_env_llm_seed_module():

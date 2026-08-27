@@ -2,10 +2,12 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
+
 from app.shared.exceptions import ConflictError
 
 from .git_url import classify_ref, parse_git_url
-from .models import FRAMEWORK_SNAPSHOT_MAX, LANGUAGE_SNAPSHOT_MAX, Project
+from .models import FRAMEWORK_SNAPSHOT_MAX, LANGUAGE_SNAPSHOT_MAX, Project, SourceArtifact
 from .repository import ProjectRepository
 from .schemas import (
     ProjectCreateRequest,
@@ -198,6 +200,8 @@ class ProjectService:
         return ProjectListResponse(
             items=await self._responses_with_artifact_refs(items),
             total=total,
+            limit=limit,
+            offset=offset,
         )
 
     async def update_project(
@@ -215,12 +219,65 @@ class ProjectService:
         await self.repo.session.flush()
         return (await self._responses_with_artifact_refs([p]))[0]
 
-    async def delete_project(self, project_id: str, owner_id: str) -> bool:
+    async def delete_project(self, project_id: str, owner_id: str, store=None) -> bool:
         p = await self.repo.get_by_id(project_id)
         if not p or p.owner_id != owner_id:
             return False
-        await self.repo.delete(p)
+        rows = await self._artifacts_for_project(p)
+        object_keys = list({row.object_key for row in rows if row.object_key})
+        for row in rows:
+            await self.repo.delete_source_artifact(row)
+        try:
+            await self.repo.delete(p)
+        except IntegrityError as exc:
+            raise ConflictError(
+                "项目仍被任务或靶场引用，无法删除",
+                code="PROJECT_IN_USE",
+            ) from exc
+        object_store = store or MinioSourceStore()
+        for key in object_keys:
+            await self._delete_object_if_unreferenced(key, object_store)
         return True
+
+    async def delete_artifact(
+        self,
+        project_id: str,
+        artifact_id: str,
+        owner_id: str,
+        store=None,
+    ) -> bool:
+        p = await self.repo.get_by_id(project_id)
+        if not p or p.owner_id != owner_id:
+            return False
+        row = await self.repo.get_source_artifact(artifact_id)
+        if not row or row.owner_id != owner_id:
+            return False
+        try:
+            parsed = parse_source_locator(p.git_url, getattr(p, "source_type", None))
+        except ValueError:
+            return False
+        if row.project_key != parsed.project_key or row.git_host != parsed.host:
+            return False
+        object_key = row.object_key
+        await self.repo.delete_source_artifact(row)
+        await self._delete_object_if_unreferenced(object_key, store or MinioSourceStore())
+        return True
+
+    async def _artifacts_for_project(self, project: Project) -> list[SourceArtifact]:
+        try:
+            key = parse_source_locator(
+                project.git_url, getattr(project, "source_type", None)
+            ).project_key
+        except ValueError:
+            return []
+        return await self.repo.list_source_artifacts(key, project.owner_id)
+
+    async def _delete_object_if_unreferenced(self, object_key: str, store) -> None:
+        if not object_key:
+            return
+        remaining = await self.repo.count_source_artifacts_by_object_key(object_key)
+        if remaining == 0:
+            store.delete(object_key)
 
     async def update_profile(
         self,

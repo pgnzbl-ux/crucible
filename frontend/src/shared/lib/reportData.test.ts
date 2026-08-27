@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { asMarkdownSection, asRecord, asRecordArray, asStringArray, documentKindOf, pocToMarkdown, RECORD_SECTIONS, REPORT_SECTIONS, sectionsFor } from './reportData'
+import { asMarkdownSection, asRecord, asRecordArray, asStringArray, documentKindOf, formatDenoiseFunnel, pocToMarkdown, RECORD_SECTIONS, REPORT_SECTIONS, sectionsFor } from './reportData'
 
 describe('reportData guards', () => {
   it('accepts plain records and rejects arrays and primitives', () => {
@@ -54,5 +54,19 @@ describe('reportData guards', () => {
 
   it('returns null when poc code is empty', () => {
     expect(pocToMarkdown('python', '  ', 'x')).toBeNull()
+  })
+
+  it('formats denoise funnel from audit_summary', () => {
+    expect(formatDenoiseFunnel({
+      audit_summary: {
+        denoise_funnel: {
+          finding_count: 40,
+          dropped_c_count: 12,
+          group_count: 8,
+          bypass_count: 3,
+        },
+      },
+    })).toBe('原始 40 → C档 12 → 复核组 8 → 依赖情报 3')
+    expect(formatDenoiseFunnel({})).toBeNull()
   })
 })

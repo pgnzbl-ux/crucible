@@ -1,4 +1,5 @@
 """LLM Provider 只以 is_default 表示启用，无独立 enabled。"""
+
 import os
 import sys
 
@@ -57,6 +58,7 @@ def test_provider_schemas_have_no_enabled_field():
     assert "enabled" not in LlmProviderUpdateRequest.model_fields
     assert "enabled" not in LlmProviderResponse.model_fields
     assert "is_default" in LlmProviderResponse.model_fields
+    assert "auth_mode" in LlmProviderResponse.model_fields
 
 
 def test_to_response_omits_enabled():
@@ -79,6 +81,7 @@ def test_to_response_omits_enabled():
     dumped = to_response(provider).model_dump()
     assert "enabled" not in dumped
     assert dumped["is_default"] is True
+    assert dumped["auth_mode"] == "bearer"
 
 
 def test_normalize_provider_type_maps_legacy_openai_compat():
@@ -100,6 +103,7 @@ def test_normalize_provider_type_maps_legacy_openai_compat():
     )
     assert normalize_provider_type("openai_compat") == "custom"
     assert to_response(provider).provider_type == "custom"
+    assert to_response(provider).auth_mode == "bearer"
 
 
 def test_create_rejects_openai_compat_provider_type():

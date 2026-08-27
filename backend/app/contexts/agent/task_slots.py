@@ -55,6 +55,24 @@ async def _redis() -> AsyncIterator[Any]:
             await close()
 
 
+ORCH_LOCK_PREFIX = "crucible:orch_lock:"
+ORCH_LOCK_TTL_SECONDS = 4 * 60 * 60 + 5 * 60  # 对齐 Celery hard limit + 余量
+
+
+async def try_acquire_orch_lock(run_id: str) -> bool:
+    """acks_late 双 worker：同一 run 只允许一个编排器执行。"""
+    async with _redis() as r:
+        ok = await r.set(
+            f"{ORCH_LOCK_PREFIX}{run_id}", "1", nx=True, ex=ORCH_LOCK_TTL_SECONDS,
+        )
+        return bool(ok)
+
+
+async def release_orch_lock(run_id: str) -> None:
+    async with _redis() as r:
+        await r.delete(f"{ORCH_LOCK_PREFIX}{run_id}")
+
+
 async def try_acquire_slot(run_id: str, max_slots: int) -> bool:
     async with _redis() as r:
         capped = max(1, int(max_slots))

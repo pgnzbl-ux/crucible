@@ -7,7 +7,7 @@ from app.shared.base import BaseModel
 
 
 class Report(BaseModel):
-    """漏洞验证报告 — 由 Agent 分析结果生成"""
+    """代码审计或定向验证报告 — 由 Agent 分析结果生成。"""
     __tablename__ = "reports"
 
     task_id: Mapped[str] = mapped_column(String(36), ForeignKey("tasks.id"), index=True)
@@ -22,7 +22,7 @@ class Report(BaseModel):
         String(20), default="unconfirmed",
         comment="exists | not_exists | unconfirmed"
     )
-    title: Mapped[str] = mapped_column(String(255), default="漏洞验证报告")
+    title: Mapped[str] = mapped_column(String(255), default="安全分析报告")
     summary: Mapped[str | None] = mapped_column(Text, comment="结论摘要")
     reasoning: Mapped[str | None] = mapped_column(Text, comment="完整分析推理")
     evidence_summary: Mapped[str | None] = mapped_column(Text, comment="证据摘要(JSON,deprecated)")

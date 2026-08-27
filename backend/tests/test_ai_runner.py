@@ -24,6 +24,7 @@ from app.contexts.agent.ai_runner import (
     _mock_output,
     _summarize_submit,
     apply_poc_to_report_output,
+    apply_stream_usage_fallback,
     authoritative_verdict,
     render_poc_markdown,
     rewrite_url_for_agent_container,
@@ -259,7 +260,7 @@ def _record_sections(**over):
 def _attempt(**over):
     base = {
         "purpose": "确认核心危害",
-        "request": "curl -sS -i http://host.docker.internal:3002/login --data-raw 'q=1'",
+        "request": "curl -sS -i http://10.0.0.8:3002/login --data-raw 'q=1'",
         "response_status": 200,
         "response_excerpt": "marker in body",
         "observation": "响应回显 marker",
@@ -281,7 +282,7 @@ def _poc_ok(**over):
             "print(args.url)\n"
             "raise SystemExit(0)\n"
         ),
-        "usage": "python poc.py --url http://host.docker.internal:8080",
+        "usage": "python poc.py --url http://10.0.0.8:8080",
     }
     base.update(over)
     return base
@@ -291,7 +292,7 @@ def test_render_poc_markdown_python_fence():
     md = render_poc_markdown(_poc_ok())
     assert md.startswith("```python\n")
     assert "argparse" in md
-    assert "用法：`python poc.py --url http://host.docker.internal:8080`" in md
+    assert "用法：`python poc.py --url http://10.0.0.8:8080`" in md
 
 
 def test_apply_poc_overwrites_model_poc_commands():
@@ -555,7 +556,7 @@ def test_authoritative_verdict_uncertain_is_needs_review():
     # gate fail 仍是误报；有 reproduce verdict 时以 reproduce 为准
     assert authoritative_verdict({}, {"gate_verdict": "fail"}) == "false_positive"
     assert authoritative_verdict({"verdict": "confirmed"}, {"gate_verdict": "uncertain"}) == "confirmed"
-    assert authoritative_verdict({}, {"gate_verdict": "pass"}) is None
+    assert authoritative_verdict({}, {"gate_verdict": "pass"}) == "code_reachable"
 
 
 def test_validate_report_accepts_needs_review_verification_record():
@@ -597,6 +598,105 @@ def test_mock_report_needs_review_for_uncertain_audit():
     assert ok, err
 
 
+def test_validate_triage_rejects_fake_tp():
+    ok, err = validate_output("triage", {
+        "verdict": "tp", "confidence": 0.9, "why": ["x"],
+        "summary": "简述", "reasoning": "推理",
+        "evidence": [{"file": "a.py", "lines": "1-1"}],
+        "attacker_controlled": True, "reaches_sink": True, "sanitizer": "effective",
+    })
+    assert not ok
+    assert "sanitizer" in (err or "")
+
+    ok2, _ = validate_output("triage", {
+        "verdict": "tp", "confidence": 0.9, "why": ["x"],
+        "summary": "简述", "reasoning": "推理",
+        "evidence": [{"file": "a.py", "lines": "1-1"}],
+        "attacker_controlled": True, "reaches_sink": True, "sanitizer": "none",
+    })
+    assert ok2
+
+    ok3, err3 = validate_output("triage", {
+        "verdict": "tp", "confidence": 0.9, "why": ["x"],
+        "summary": "简述", "reasoning": "推理",
+        "evidence": [],
+        "attacker_controlled": True, "reaches_sink": True, "sanitizer": "none",
+    })
+    assert not ok3
+
+    ok4, _ = validate_output("triage", {
+        "verdict": "fp", "confidence": 0.9, "why": ["不是漏洞"],
+        "summary": "误报简述", "reasoning": "路径不可达",
+    })
+    assert ok4
+
+    ok5, err5 = validate_output("triage", {
+        "verdict": "tp", "confidence": 0.9, "why": ["x"],
+        "evidence": [{"file": "a.py", "lines": "1-1"}],
+        "attacker_controlled": True, "reaches_sink": True, "sanitizer": "none",
+    })
+    assert not ok5
+    assert "summary" in (err5 or "")
+
+
+def test_validate_api_hunt_accepts_explicit_uncertainty_but_requires_evidence():
+    base = {
+        "file_path": "app/api.py",
+        "endpoint_id": "GET:/items/{id}",
+        "why": ["无 ownership 校验"],
+        "summary": "对象级越权：可改 id 读他人资源",
+        "reasoning": "path 参数可控且 handler 无租户校验即读库",
+        "evidence": [{"file": "app/api.py", "lines": "10-20"}],
+        "attacker_controlled": True,
+        "reaches_sink": True,
+        "sanitizer": "none",
+        "confidence": 0.9,
+    }
+    ok, _ = validate_output("api_hunt", {"suspects": [base], "reviewed_count": 1})
+    assert ok
+
+    ok_high, _ = validate_output(
+        "api_hunt",
+        {"suspects": [{**base, "confidence": "HIGH"}], "reviewed_count": 1},
+    )
+    assert ok_high
+
+    bad = {**base}
+    del bad["evidence"]
+    ok2, err2 = validate_output("api_hunt", {"suspects": [bad], "reviewed_count": 1})
+    assert not ok2
+    assert "evidence" in (err2 or "")
+
+    ok3, err3 = validate_output(
+        "api_hunt",
+        {"suspects": [{**base, "sanitizer": "effective"}], "reviewed_count": 1},
+    )
+    assert ok3, err3
+
+    uncertain = {
+        **base,
+        "attacker_controlled": None,
+        "reaches_sink": None,
+        "sanitizer": "unknown",
+        "confidence": None,
+    }
+    ok_uncertain, err_uncertain = validate_output(
+        "api_hunt", {"suspects": [uncertain], "reviewed_count": 1},
+    )
+    assert ok_uncertain, err_uncertain
+
+    ok4, _ = validate_output("api_hunt", {"suspects": [], "reviewed_count": 0})
+    assert ok4
+
+    missing_narrative = {**base}
+    del missing_narrative["summary"]
+    ok5, err5 = validate_output(
+        "api_hunt", {"suspects": [missing_narrative], "reviewed_count": 1},
+    )
+    assert not ok5
+    assert "summary" in (err5 or "")
+
+
 def test_validate_profile_requires_is_web():
     ok, err = validate_output("profile", {"language": "python"})
     assert not ok
@@ -615,9 +715,23 @@ def test_input_schemas_defined_for_all_ai_nodes():
         assert "required" in NODE_INPUT_SCHEMAS[key]
 
 
-def test_rewrite_localhost_to_host_docker_internal():
-    assert rewrite_url_for_agent_container("http://localhost:8080") == "http://host.docker.internal:8080"
-    assert rewrite_url_for_agent_container("http://127.0.0.1:5000/login") == "http://host.docker.internal:5000/login"
+def test_rewrite_loopback_to_advertise_ip():
+    from unittest.mock import patch
+
+    with patch(
+        "app.contexts.agent.target_url.host_advertise_ip",
+        return_value="10.0.0.8",
+    ):
+        assert rewrite_url_for_agent_container("http://localhost:8080") == "http://10.0.0.8:8080"
+        assert (
+            rewrite_url_for_agent_container("http://127.0.0.1:5000/login")
+            == "http://10.0.0.8:5000/login"
+        )
+        assert (
+            rewrite_url_for_agent_container("http://host.docker.internal:3001")
+            == "http://10.0.0.8:3001"
+        )
+    assert rewrite_url_for_agent_container("http://10.0.0.8:3001") == "http://10.0.0.8:3001"
     assert rewrite_url_for_agent_container("http://example.com") == "http://example.com"
     assert rewrite_url_for_agent_container(None) is None
 
@@ -660,6 +774,85 @@ async def test_missing_output_includes_failed_event(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_missing_output_prefers_failed_event_over_usage_jsonl(tmp_path, monkeypatch):
+    """长会话 stdout 截尾是 usage JSON 时，错误必须露出 no_submit，不能只剩 token 数字。"""
+    from unittest.mock import MagicMock, patch
+
+    from app.contexts.agent import ai_runner
+    from app.core.agent_runner import AgentRunnerError
+
+    settings = MagicMock()
+    settings.claude_agent_sdk_enabled = True
+    usage_tail = (
+        '": {"inputTokens": 119514, "outputTokens": 150247, '
+        '"cacheReadInputTokens": 13592576, "is_error": false}'
+    )
+
+    def _fake_run(spec, on_event):
+        on_event({
+            "type": "agent.completed",
+            "usage": {"inputTokens": 119514},
+            "is_error": False,
+        })
+        on_event({
+            "type": "agent.failed",
+            "error": "节点 reproduce 未调用 submit_result(无 .node_output.json)",
+        })
+        return 1, {"stderr_tail": usage_tail, "timed_out": False}
+
+    monkeypatch.setattr("app.core.config.get_settings", lambda: settings)
+    with patch("app.contexts.agent.ai_runner.agent_runner_manager") as mgr:
+        mgr.run_with_streaming.side_effect = _fake_run
+        with pytest.raises(AgentRunnerError) as ei:
+            await ai_runner.run_ai_node(
+                node_key="reproduce",
+                input_json={"target_url": "http://x"},
+                host_workdir=str(tmp_path),
+                runner_env={},
+            )
+    msg = str(ei.value)
+    assert "未调用 submit_result" in msg
+    assert "119514" not in msg
+
+
+@pytest.mark.asyncio
+async def test_missing_output_annotates_dsml_tool_leak(tmp_path, monkeypatch):
+    """DeepSeek 把 DSML tool 泄成纯文本时，错误须点名 DSML，便于 humanize / 回喂。"""
+    from unittest.mock import MagicMock, patch
+
+    from app.contexts.agent import ai_runner
+    from app.core.agent_runner import AgentRunnerError
+
+    settings = MagicMock()
+    settings.claude_agent_sdk_enabled = True
+
+    def _fake_run(spec, on_event):
+        on_event({
+            "type": "agent.message",
+            "text": "]\n</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
+        })
+        on_event({
+            "type": "agent.failed",
+            "error": "节点 env_ready 未调用 submit_result(无 .node_output.json)",
+        })
+        return 1, {"stderr_tail": "", "timed_out": False}
+
+    monkeypatch.setattr("app.core.config.get_settings", lambda: settings)
+    with patch("app.contexts.agent.ai_runner.agent_runner_manager") as mgr:
+        mgr.run_with_streaming.side_effect = _fake_run
+        with pytest.raises(AgentRunnerError) as ei:
+            await ai_runner.run_ai_node(
+                node_key="env_ready",
+                input_json={"attempt": 1},
+                host_workdir=str(tmp_path),
+                runner_env={},
+            )
+    msg = str(ei.value)
+    assert "DSML" in msg
+    assert "未产出 .node_output.json" in msg
+
+
+@pytest.mark.asyncio
 async def test_missing_output_includes_stderr_runner_import_error(tmp_path, monkeypatch):
     """python -m runner.run_one 找不到模块时，错误必须带上 stderr。"""
     from unittest.mock import MagicMock, patch
@@ -698,11 +891,13 @@ class _MgrStub:
         self.calls: list[dict] = []
 
     def run_with_streaming(self, spec, on_event):  # noqa: ANN001
-        self.calls.append(json.loads(Path(spec.host_workdir, ".node.json").read_text("utf-8")))
+        input_path = Path(spec.host_workdir) / Path(spec.env["NODE_INPUT_PATH"]).relative_to("/workspace")
+        output_path = Path(spec.host_workdir) / Path(spec.env["NODE_OUTPUT_PATH"]).relative_to("/workspace")
+        self.calls.append(json.loads(input_path.read_text("utf-8")))
         item = self.script.pop(0)
         if isinstance(item, Exception):
             raise item
-        Path(spec.host_workdir, ".node_output.json").write_text(
+        output_path.write_text(
             json.dumps(item, ensure_ascii=False), encoding="utf-8"
         )
         return 0, {"timed_out": False, "stderr_tail": ""}
@@ -813,3 +1008,55 @@ def test_summarize_submit_truncates_and_tags():
     assert data["evidence"].startswith("<list:")
     assert data["cvss"].startswith("<dict:")
     assert len(data["weird"]) <= 100
+
+
+def test_light_workstation_env_filter():
+    """轻工位（triage/profile/api_hunt）凭据最小化：runner_env 只保留 SDK 必需键（spec §7.4）。"""
+    from app.contexts.agent.ai_runner import (
+        _LIGHT_WORKSTATION_NODES,
+        _is_sdk_env_key,
+    )
+
+    assert _LIGHT_WORKSTATION_NODES == frozenset({"triage", "profile", "api_hunt"})
+    assert _is_sdk_env_key("ANTHROPIC_API_KEY")
+    assert _is_sdk_env_key("ANTHROPIC_BASE_URL")
+    assert _is_sdk_env_key("CLAUDE_SDK_MAX_TURNS")
+    assert _is_sdk_env_key("API_TIMEOUT_MS")
+    assert not _is_sdk_env_key("DB_PASSWORD")  # 任务级凭据必须被剥离
+    assert not _is_sdk_env_key("GITHUB_TOKEN")
+
+
+def test_agent_runner_spec_hide_workspace_paths():
+    """容器规格支持用空 tmpfs 遮蔽 /workspace 敏感子路径。"""
+    from app.core.agent_runner import AgentRunnerSpec
+
+    spec = AgentRunnerSpec(host_workdir="/tmp/x", hide_workspace_paths=("/workspace/.secrets",))
+    assert spec.hide_workspace_paths == ("/workspace/.secrets",)
+    assert AgentRunnerSpec(host_workdir="/tmp/x").hide_workspace_paths == ()
+
+
+def test_apply_stream_usage_fallback_fills_missing_dict():
+    """sidecar 缺 usage dict（写失败或被 default=str）时用 stdout agent.completed 兜底。"""
+    meta: dict = {"node_key": "profile", "prompt": "x"}
+    apply_stream_usage_fallback(
+        meta,
+        {"usage": {"input_tokens": 15, "output_tokens": 2}, "model_usage": {"m": {"inputTokens": 15}}},
+    )
+    assert meta["usage"]["input_tokens"] == 15
+    assert meta["model_usage"]["m"]["inputTokens"] == 15
+
+
+def test_apply_stream_usage_fallback_does_not_double_count_sidecar():
+    """同一轮 sidecar 已有 dict 时禁止再叠 stdout，否则回喂累加会把本轮算两遍。"""
+    meta = {"usage": {"prompt_tokens": 10, "completion_tokens": 1}}
+    apply_stream_usage_fallback(
+        meta,
+        {"usage": {"prompt_tokens": 10, "completion_tokens": 1}},
+    )
+    assert meta["usage"]["prompt_tokens"] == 10
+
+
+def test_apply_stream_usage_fallback_replaces_stringified_usage():
+    meta = {"usage": "{'input_tokens': 9}"}
+    apply_stream_usage_fallback(meta, {"usage": {"input_tokens": 9, "output_tokens": 1}})
+    assert meta["usage"] == {"input_tokens": 9, "output_tokens": 1}

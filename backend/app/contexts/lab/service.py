@@ -8,8 +8,9 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 RECLAIMABLE_LAB_STATUSES = frozenset({"failed", "expired", "destroyed"})
 _ALIGN_FROZEN_STATUSES = frozenset({"creating", "rebuilding", "destroyed", "failed"})
 _MANUAL_REBUILD_STALE_SECONDS = 1800
-_ALIGN_TO_READY = frozenset({"expired", "stopped"})
+CREATING_LEASE_SECONDS = 1800
 TTL_ACTIVE_STATUSES = frozenset({"ready", "stopped"})
 
 
@@ -35,10 +36,18 @@ def ttl_remaining_seconds(
     last_seen_at: datetime | None,
     ttl_seconds: int,
     now: datetime,
+    *,
+    live_task_count: int = 0,
 ) -> int | None:
-    """仅 ready/stopped 倒计时；创建中等非就绪状态返回 None。"""
+    """仅 ready/stopped 倒计时；创建中等非就绪状态返回 None。
+
+    live 任务占用时 TTL 尚未起算，对外显示满额（不因 env_ready 时刻倒计时）。
+    倒计时锚点 last_seen_at 在任务终态且无其它 live 占用时由 start_ttl_when_idle 重置。
+    """
     if status not in TTL_ACTIVE_STATUSES:
         return None
+    if live_task_count > 0:
+        return int(ttl_seconds)
     if last_seen_at is None:
         return 0
     elapsed = (as_utc(now) - as_utc(last_seen_at)).total_seconds()
@@ -46,23 +55,41 @@ def ttl_remaining_seconds(
 
 
 def container_runtime_kind(containers: list[dict[str, str]]) -> str:
-    """把 docker ps 摘要收成 none / running / exited。"""
+    """把 Docker 状态收成 none / running / partial / exited。
+
+    只有所有长期服务都正常运行（或一次性任务成功退出）才是 running；
+    Restarting、unhealthy、health: starting、非零退出都属于 partial。
+    """
     if not containers:
         return "none"
-    if any(
-        _container_is_running(item.get("status", ""), state=item.get("state", ""))
-        for item in containers
-    ):
-        return "running"
-    return "exited"
+    running = 0
+    for item in containers:
+        status = item.get("status", "")
+        state = item.get("state", "")
+        if _container_is_running(status, state=state):
+            running += 1
+            continue
+        text = (status or "").strip().lower()
+        if text.startswith("exited (0)"):
+            continue
+        if (state or "").strip().lower() == "exited" and "(0)" in text:
+            continue
+        return "partial"
+    return "running" if running > 0 else "exited"
 
 
 def _container_is_running(status: str, *, state: str = "") -> bool:
     text = (status or "").strip().lower()
     state_text = (state or "").strip().lower()
-    if state_text == "running":
-        return True
-    return text.startswith("up") or text.startswith("restarting") or text == "running"
+    if (
+        text.startswith("restarting")
+        or "(unhealthy)" in text
+        or "(health: starting)" in text
+    ):
+        return False
+    if state_text and state_text != "running":
+        return False
+    return state_text == "running" or text.startswith("up") or text == "running"
 
 
 def next_aligned_lab_status(
@@ -71,17 +98,15 @@ def next_aligned_lab_status(
     """按容器实际状态校正 labs.status；无需改动则返回 None。
 
     creating / rebuilding / failed / destroyed 不校正（进行中或用户终态）。
-    容器已在跑而库仍是 expired/stopped → ready（复现拉起后管理页不再卡 expired）。
-    无 live 任务时才降级，避免 env_ready 重建窗口被误标过期。
+    容器状态只能否定 ready，不能证明应用 ready；提升必须经过 HTTP 探活。
+    无 live 任务时才对完全消失的运行时标 expired。
     """
     if db_status in _ALIGN_FROZEN_STATUSES:
         return None
-    if runtime == "running" and db_status in _ALIGN_TO_READY:
-        return "ready"
+    if runtime in {"exited", "partial"} and db_status == "ready":
+        return "stopped"
     if live_task_count > 0:
         return None
-    if runtime == "exited" and db_status == "ready":
-        return "stopped"
     if runtime == "none" and db_status in {"ready", "stopped"}:
         return "expired"
     if runtime == "exited" and db_status == "expired":
@@ -292,6 +317,25 @@ class LabService:
             if lab.creator_task_id == task_id:
                 lab.last_seen_at = self._now()
                 return "create"
+            creator_id = lab.creator_task_id
+            live_ids = set(await self.live_task_ids(lab.id))
+            stale_before = self._now() - timedelta(seconds=CREATING_LEASE_SECONDS)
+            stale = (
+                lab.last_seen_at is None
+                or self._as_utc(lab.last_seen_at) <= stale_before
+            )
+            creator_live = bool(creator_id and creator_id in live_ids)
+            if not creator_live or stale:
+                taken = await self.repository.cas_takeover_creating(
+                    lab.id,
+                    previous_creator_task_id=creator_id,
+                    creator_task_id=task_id,
+                    stale_before=stale_before if creator_live else None,
+                )
+                if taken:
+                    await self.session.refresh(lab)
+                    return "create"
+                await self.session.refresh(lab)
             return "wait"
         if lab.status in {"ready", "stopped"}:
             if not await self._compose_project_present(lab.compose_project):
@@ -330,6 +374,42 @@ class LabService:
         lab.last_seen_at = self._now()
         await self.session.commit()
 
+    async def start_ttl_when_idle(
+        self,
+        lab_id: str | None,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """任务终态后若无其它 live 占用，重置 last_seen 起算 TTL。
+
+        覆盖完成 / 失败 / 取消 / needs_review：长流水线中间 AI 超时不得用
+        env_ready 时刻把靶场立刻清掉，否则后续动态复现无法访问。
+        """
+        if not lab_id:
+            return False
+        if await self.live_task_ids(lab_id):
+            return False
+        lab = await self.repository.get(lab_id)
+        if lab is None or lab.status not in TTL_ACTIVE_STATUSES:
+            return False
+        lab.last_seen_at = self._as_utc(now or self._now())
+        await self.session.commit()
+        return True
+
+    async def heartbeat_creation(self, lab_id: str, task_id: str) -> bool:
+        """仅当前 creating owner 可续租，防止旧创建者覆盖接管者。"""
+        result = await self.session.execute(
+            update(Lab)
+            .where(
+                Lab.id == lab_id,
+                Lab.status == "creating",
+                Lab.creator_task_id == task_id,
+            )
+            .values(last_seen_at=self._now())
+        )
+        await self.session.commit()
+        return result.rowcount == 1
+
     async def align_runtime_status(self, lab_id: str) -> str:
         """按 compose 实际容器回写 labs.status。复现拉起后管理页不再卡 expired。"""
         from . import docker_ops
@@ -365,6 +445,84 @@ class LabService:
             lab.last_seen_at = self._now()
         return True
 
+    async def _probe_lab_ready(
+        self,
+        lab: Lab,
+        *,
+        retries: int = 30,
+        settle_seconds: float = 1,
+    ) -> tuple[bool, str]:
+        """用与 env_ready 相同的 Compose + HTTP gate 判定应用就绪。"""
+        from app.contexts.agent.nodes.env_ready import health
+
+        raw = str(lab.target_url or "")
+        if not raw:
+            return False, "缺少 target_url"
+        parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        host = parsed.hostname or "127.0.0.1"
+        path = parsed.path or "/"
+        if parsed.query:
+            path += f"?{parsed.query}"
+        health_result = await health.health_check(
+            [port],
+            host_ips=[host],
+            preferred_scheme=parsed.scheme or None,
+            probe_path=path,
+            compose_project=lab.compose_project,
+            retries=retries,
+            settle_seconds=settle_seconds,
+        )
+        ok, _, scheme = health_result
+        if ok and scheme in {"http", "https"}:
+            lab.target_url = parsed._replace(scheme=scheme).geturl()
+            shape = self._load_dict(lab.transport_shape)
+            shape["protocol"] = scheme
+            lab.transport_shape = json.dumps(shape)
+        return ok, "" if ok else health.failure_reason(health_result)
+
+    async def _refresh_target_url_from_runtime(self, lab: Lab) -> tuple[bool, str]:
+        """重建后按 Docker 实际绑定刷新 target_url（兼容动态宿主端口）。"""
+        from app.contexts.agent import target_url as target_url_mod
+        from app.contexts.agent.nodes.env_ready import ports
+
+        try:
+            bindings = await ports.load_runtime_web_bindings(lab.compose_project)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"读取 Docker 实际发布端口失败: {exc}"
+        usable = ports.publishable_runtime_bindings(
+            bindings,
+            target_url_mod.host_advertise_ip(),
+        )
+        if not usable:
+            return False, "无可供复现容器访问的 TCP Web 绑定"
+        raw = str(lab.target_url or "")
+        parsed = urlparse(raw if "://" in raw else f"http://{raw}") if raw else None
+        previous_port = parsed.port if parsed else None
+        binding = next(
+            (
+                item
+                for item in usable
+                if previous_port is not None
+                and int(item["host_port"]) == previous_port
+            ),
+            usable[0],
+        )
+        scheme = parsed.scheme if parsed and parsed.scheme in {"http", "https"} else "http"
+        refreshed = target_url_mod.publish_target_url(
+            int(binding["host_port"]),
+            str(binding["public_host"]),
+            scheme=scheme,
+        )
+        if parsed:
+            suffix = parsed.path or ""
+            if parsed.query:
+                suffix += f"?{parsed.query}"
+            if suffix and suffix != "/":
+                refreshed = f"{refreshed.rstrip('/')}{suffix}"
+        lab.target_url = refreshed
+        return True, ""
+
     async def mark_ready(
         self,
         lab_id: str,
@@ -373,22 +531,57 @@ class LabService:
         compose_path: str,
         transport_shape: dict,
         initial_creds: dict,
-    ) -> None:
+        expected_statuses: set[str] | None = None,
+        expected_creator_task_id: str | None = None,
+    ) -> bool:
+        values = {
+            "target_url": target_url,
+            "compose_path": compose_path,
+            "transport_shape": json.dumps(transport_shape),
+            "initial_creds": json.dumps(initial_creds),
+            "last_seen_at": self._now(),
+            "error_message": None,
+        }
+        if expected_statuses is not None or expected_creator_task_id is not None:
+            transitioned = await self.repository.cas_transition(
+                lab_id,
+                from_statuses=expected_statuses or {"creating"},
+                to_status="ready",
+                creator_task_id=expected_creator_task_id,
+                values=values,
+            )
+            await self.session.commit()
+            return transitioned
         lab = await self._require_lab(lab_id)
         lab.status = "ready"
-        lab.target_url = target_url
-        lab.compose_path = compose_path
-        lab.transport_shape = json.dumps(transport_shape)
-        lab.initial_creds = json.dumps(initial_creds)
-        lab.last_seen_at = self._now()
-        lab.error_message = None
+        for field, value in values.items():
+            setattr(lab, field, value)
         await self.session.commit()
+        return True
 
-    async def mark_failed(self, lab_id: str, error: str) -> None:
+    async def mark_failed(
+        self,
+        lab_id: str,
+        error: str,
+        *,
+        expected_statuses: set[str] | None = None,
+        expected_creator_task_id: str | None = None,
+    ) -> bool:
+        if expected_statuses is not None or expected_creator_task_id is not None:
+            transitioned = await self.repository.cas_transition(
+                lab_id,
+                from_statuses=expected_statuses or {"creating"},
+                to_status="failed",
+                creator_task_id=expected_creator_task_id,
+                values={"error_message": error},
+            )
+            await self.session.commit()
+            return transitioned
         lab = await self._require_lab(lab_id)
         lab.status = "failed"
         lab.error_message = error
         await self.session.commit()
+        return True
 
     async def mark_creator_cancelled(self, task_id: str) -> None:
         result = await self.session.execute(
@@ -464,7 +657,8 @@ class LabService:
         aligned = self._apply_aligned_status(
             lab, containers, live_task_count=len(live_ids)
         )
-        if lab.status in TTL_ACTIVE_STATUSES:
+        # 仅空闲 ready/stopped 浏览续期；live 占用中 TTL 未起算，不刷新锚点。
+        if lab.status in TTL_ACTIVE_STATUSES and not live_ids:
             lab.last_seen_at = self._now()
             await self.session.commit()
         elif aligned:
@@ -494,12 +688,6 @@ class LabService:
         self._require_status(lab, {"stopped", "expired"}, "start")
         await self._confirm_not_busy(lab.id)
         containers = await docker_ops.list_containers(lab.compose_project)
-        if containers:
-            runtime = container_runtime_kind(containers)
-            if runtime == "running" and lab.status in {"expired", "stopped"}:
-                lab.status = "ready"
-                await self._touch_and_commit(lab)
-                return lab.status
         if not containers:
             if lab.status == "stopped":
                 claimed = await self.repository.cas_status(lab.id, {"stopped"}, "expired")
@@ -507,9 +695,21 @@ class LabService:
                     lab.status = "expired"
                     await self._touch_and_commit(lab)
             raise ValueError("靶场容器已不存在，请重建")
-        if not await docker_ops.compose_start(lab.compose_project):
-            raise RuntimeError("靶场 compose start 失败")
+        if container_runtime_kind(containers) != "running":
+            if not await docker_ops.compose_start(lab.compose_project):
+                raise RuntimeError("靶场 compose start 失败")
+        ready, detail = await self._probe_lab_ready(lab)
+        if not ready:
+            try:
+                await docker_ops.compose_stop(lab.compose_project)
+            except Exception:  # noqa: BLE001
+                logger.warning("启动探活失败后停止 Lab 失败 lab=%s", lab.id, exc_info=True)
+            lab.status = "stopped"
+            lab.error_message = f"启动后探活失败: {detail}"[:500]
+            await self._touch_and_commit(lab)
+            raise RuntimeError(lab.error_message)
         lab.status = "ready"
+        lab.error_message = None
         await self._touch_and_commit(lab)
         return lab.status
 
@@ -559,10 +759,34 @@ class LabService:
                 lab.compose_project, compose_file, workdir_root
             )
         except Exception as exc:
+            from .compose_policy import ComposePolicyError
+
             lab.status = "failed"
-            lab.error_message = str(exc)
+            if isinstance(exc, ComposePolicyError):
+                lab.error_message = f"安全策略拒绝: {exc}"[:500]
+                # 隔离被拒现场文件，避免再次 rebuild 命中同款旁路
+                try:
+                    rejected = Path(compose_file)
+                    if rejected.is_file():
+                        rejected.rename(rejected.with_suffix(rejected.suffix + ".rejected"))
+                except OSError:
+                    logger.warning("隔离被拒 compose 失败 path=%s", compose_file, exc_info=True)
+            else:
+                lab.error_message = str(exc)[:500]
             await self.session.commit()
             raise
+        mapped, mapping_error = await self._refresh_target_url_from_runtime(lab)
+        if not mapped:
+            lab.status = "failed"
+            lab.error_message = f"重建后端口解析失败: {mapping_error}"[:500]
+            await self.session.commit()
+            raise RuntimeError(lab.error_message)
+        ready, detail = await self._probe_lab_ready(lab, retries=5, settle_seconds=0)
+        if not ready:
+            lab.status = "failed"
+            lab.error_message = f"重建后探活失败: {detail}"[:500]
+            await self.session.commit()
+            raise RuntimeError(lab.error_message)
         lab.status = "ready"
         lab.error_message = None
         await self._touch_and_commit(lab)
@@ -722,6 +946,7 @@ class LabService:
         else:
             await self._confirm_not_busy(lab.id)
         await docker_ops.compose_down(lab.compose_project)
+        await self._task_service().unbind_lab(lab.id)
         lab.status = "destroyed"
         await self._touch_and_commit(lab)
         return lab.status
@@ -751,6 +976,18 @@ class LabService:
         await operation(name, lab.compose_project)
         containers = await docker_ops.list_containers(lab.compose_project)
         self._apply_aligned_status(lab, containers, live_task_count=0)
+        if action in {"stop", "rm"}:
+            # 显式停掉/删除任一 Compose 服务后，不得因“剩余容器都在跑”继续显示 ready。
+            lab.status = "expired" if not containers else "stopped"
+        if action in {"start", "restart"}:
+            ready, detail = await self._probe_lab_ready(lab, retries=10)
+            if not ready:
+                lab.status = "stopped"
+                lab.error_message = f"容器操作后探活失败: {detail}"[:500]
+                await self._touch_and_commit(lab)
+                raise RuntimeError(lab.error_message)
+            lab.status = "ready"
+            lab.error_message = None
         await self._touch_and_commit(lab)
         return lab.status
 
@@ -845,19 +1082,37 @@ class LabService:
         return failed
 
     async def fail_stale_creating(self) -> list[str]:
-        """标记无 live 任务的 creating Lab 失败，并 best-effort 清理 compose。"""
+        """标记创建者已终态或租约过期的 creating Lab，并清理 compose。
+
+        等待复用的任务也绑定在 Lab 上，不能用“任意 live task”阻止回收。
+        """
         from . import docker_ops
 
         result = await self.session.execute(select(Lab).where(Lab.status == "creating"))
         failed: list[str] = []
+        stale_before = self._now() - timedelta(seconds=CREATING_LEASE_SECONDS)
         for lab in result.scalars().all():
-            if await self.live_task_ids(lab.id):
+            live_ids = set(await self.live_task_ids(lab.id))
+            creator_live = bool(
+                lab.creator_task_id and lab.creator_task_id in live_ids
+            )
+            stale = (
+                lab.last_seen_at is None
+                or self._as_utc(lab.last_seen_at) <= stale_before
+            )
+            if creator_live and not stale:
                 continue
             claimed = await self.repository.cas_status(lab.id, {"creating"}, "failed")
             if not claimed:
                 continue
             await self.session.commit()
-            if await self.live_task_ids(lab.id):
+            # 仅“原创建者重新活跃且租约并未过期”才能撤销本次回收；等待者不算。
+            live_after = set(await self.live_task_ids(lab.id))
+            if (
+                not stale
+                and lab.creator_task_id
+                and lab.creator_task_id in live_after
+            ):
                 await self.repository.cas_status(lab.id, {"failed"}, "creating")
                 await self.session.commit()
                 continue
@@ -953,8 +1208,18 @@ class LabService:
     ) -> dict:
         ttl_seconds = lab.ttl_seconds if lab.ttl_seconds is not None else 3600
         ttl_remaining = ttl_remaining_seconds(
-            lab.status, lab.last_seen_at, ttl_seconds, now
+            lab.status,
+            lab.last_seen_at,
+            ttl_seconds,
+            now,
+            live_task_count=live_task_count,
         )
+        # list_containers 的 dict 带内部字段 state（供 _container_is_running 用），
+        # 响应模型按契约只暴露 4 个字段且 extra=forbid，组装时必须剥掉。
+        contract_containers = [
+            {key: container.get(key, "") for key in ("name", "status", "ports", "image")}
+            for container in containers
+        ]
         return {
             "id": lab.id,
             "project_id": lab.project_id,
@@ -962,7 +1227,7 @@ class LabService:
             "status": lab.status,
             "target_url": lab.target_url,
             "ttl_remaining_seconds": ttl_remaining,
-            "containers": containers,
+            "containers": contract_containers,
             "live_task_count": live_task_count,
             "error_message": lab.error_message,
         }

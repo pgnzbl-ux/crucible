@@ -6,6 +6,7 @@ import { DEFAULT_PAGE_SIZE } from '../../../shared/lib/taskListQuery'
 export interface TaskListParams {
   status?: string
   priority?: string
+  taskType?: 'verify' | 'discovery'
   q?: string
   dateFrom?: string
   dateTo?: string
@@ -23,6 +24,7 @@ function parseParams(search: string): TaskListParams {
   return {
     status: sp.get('status') ?? undefined,
     priority: sp.get('priority') ?? undefined,
+    taskType: (sp.get('taskType') as TaskListParams['taskType']) ?? undefined,
     q: sp.get('q') ?? undefined,
     dateFrom: sp.get('dateFrom') ?? undefined,
     dateTo: sp.get('dateTo') ?? undefined,
@@ -36,6 +38,7 @@ function buildSearch(params: TaskListParams): string {
   const sp = new URLSearchParams()
   if (params.status) sp.set('status', params.status)
   if (params.priority) sp.set('priority', params.priority)
+  if (params.taskType) sp.set('taskType', params.taskType)
   if (params.q) sp.set('q', params.q)
   if (params.dateFrom) sp.set('dateFrom', params.dateFrom)
   if (params.dateTo) sp.set('dateTo', params.dateTo)
@@ -46,7 +49,7 @@ function buildSearch(params: TaskListParams): string {
   return s ? `?${s}` : ''
 }
 
-const FILTER_KEYS: (keyof TaskListParams)[] = ['status', 'priority', 'q', 'dateFrom', 'dateTo']
+const FILTER_KEYS: (keyof TaskListParams)[] = ['status', 'priority', 'taskType', 'q', 'dateFrom', 'dateTo']
 
 export function useTaskListParams() {
   const [, navigate] = useLocation()

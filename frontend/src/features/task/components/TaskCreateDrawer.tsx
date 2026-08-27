@@ -26,7 +26,7 @@ import type { SourceArtifact } from '../../../shared/lib/api'
 
 const ARCHIVE_ACCEPT = '.zip,.tar,.tar.gz,.tgz,application/zip,application/gzip,application/x-tar'
 
-/** 从源码管理详情页进入：锁定项目，版本只能从下拉选 */
+/** 从项目资产详情页进入：锁定项目，版本只能从下拉选 */
 export type BoundProjectSource = ProjectSelectSource & {
   source_type?: 'git' | 'local_upload' | string
   artifacts?: SourceArtifact[]
@@ -52,7 +52,8 @@ type CreateFormValues = {
   project_ref?: string
   project_ref_type?: GitRefType
   clone_depth?: number
-  vulnerability_description: string
+  task_type?: 'verify' | 'discovery'
+  vulnerability_description?: string
   priority: string
   credential_refs?: string[]
   existing_upload_url?: string
@@ -154,6 +155,7 @@ export function TaskCreateDrawer({
   const createMutation = useMutation({
     mutationFn: async (values: CreateFormValues) => {
       const source_type = values.source_type === 'local_upload' ? 'local_upload' : 'git'
+      const taskType: 'verify' | 'discovery' = values.task_type === 'verify' ? 'verify' : 'discovery'
       const description = values.vulnerability_description
       const priority = values.priority
       const credential_refs = values.credential_refs
@@ -163,7 +165,8 @@ export function TaskCreateDrawer({
           return api.createTask({
             project_address: existing,
             source_type: 'local_upload',
-            vulnerability_description: description,
+            task_type: taskType,
+            vulnerability_description: taskType === 'verify' ? description : undefined,
             priority,
             credential_refs,
           })
@@ -177,7 +180,8 @@ export function TaskCreateDrawer({
           return api.createTaskFromUpload({
             file,
             name: uploadName,
-            vulnerability_description: description,
+            task_type: taskType,
+            vulnerability_description: taskType === 'verify' ? description : undefined,
             priority,
             credential_refs,
           })
@@ -186,10 +190,11 @@ export function TaskCreateDrawer({
       }
       const payload = {
         project_address: values.project_address || '',
+        task_type: taskType,
         project_ref: values.project_ref,
         project_ref_type: values.project_ref_type,
         clone_depth: values.clone_depth,
-        vulnerability_description: description,
+        vulnerability_description: taskType === 'discovery' ? undefined : description,
         priority,
         credential_refs,
       }
@@ -215,7 +220,7 @@ export function TaskCreateDrawer({
       open={open}
       onClose={onClose}
       size={560}
-      title={boundProject ? `新建验证任务 · ${boundProject.name}` : '新建漏洞验证任务'}
+      title={boundProject ? `发起代码审计 · ${boundProject.name}` : '发起代码审计'}
     >
       <Form
         form={form}
@@ -265,7 +270,7 @@ export function TaskCreateDrawer({
             name="project_address"
             label="项目地址 (Git URL)"
             rules={[{ required: true, message: '请输入项目 Git 地址' }]}
-            extra="可直接粘贴，或从已登记仓库里选。选项格式：项目名称：tag/commit/branch  <Git 地址>。"
+            extra="可粘贴 Git 地址，或从已登记仓库中选择。"
             getValueFromEvent={(value) => {
               const hit = projectOptions.find((o) => o.value === value)
               return hit?.git_url ?? value
@@ -295,7 +300,7 @@ export function TaskCreateDrawer({
                 name="project_version_key"
                 label="源码版本"
                 rules={[{ required: true, message: '请选择源码版本' }]}
-                extra="仅可从该项目已登记或已缓存的版本中选择，不可手改引用。"
+                extra="请从该项目已有版本中选择。"
               >
                 <Select
                   options={boundVersionOptions}
@@ -313,7 +318,7 @@ export function TaskCreateDrawer({
               <Form.Item
                 name="clone_depth"
                 label="克隆深度"
-                extra="浅克隆可减少流量；深度 0 为全量 clone（历史完整，流量更大）。"
+                extra="浅克隆更省流量；选择「全量」可保留完整提交历史。"
               >
                 <Select
                   options={[
@@ -321,7 +326,7 @@ export function TaskCreateDrawer({
                     { value: 5, label: '5' },
                     { value: 10, label: '10' },
                     { value: 50, label: '50' },
-                    { value: 0, label: '0 — 全量 clone' },
+                    { value: 0, label: '全量' },
                   ]}
                 />
               </Form.Item>
@@ -332,7 +337,7 @@ export function TaskCreateDrawer({
                 name="project_ref_type"
                 label="引用类型"
                 rules={[{ required: true, message: '请选择引用类型' }]}
-                extra="点选分支 / 标签 / 提交，避免平台自动推断误判（如禅道发行 tag）。"
+                extra="请明确选择分支、标签或提交，避免自动推断出错。"
               >
                 <GitRefTypeBanners />
               </Form.Item>
@@ -342,7 +347,7 @@ export function TaskCreateDrawer({
               <Form.Item
                 name="clone_depth"
                 label="克隆深度"
-                extra="浅克隆可减少流量；深度 0 为全量 clone（历史完整，流量更大）。"
+                extra="浅克隆更省流量；选择「全量」可保留完整提交历史。"
               >
                 <Select
                   options={[
@@ -350,7 +355,7 @@ export function TaskCreateDrawer({
                     { value: 5, label: '5' },
                     { value: 10, label: '10' },
                     { value: 50, label: '50' },
-                    { value: 0, label: '0 — 全量 clone' },
+                    { value: 0, label: '全量' },
                   ]}
                 />
               </Form.Item>
@@ -362,7 +367,7 @@ export function TaskCreateDrawer({
               <Form.Item
                 name="upload_project_name"
                 label="项目名称"
-                extra="同一账号下名称不能重复；与源码管理登记规则一致。"
+                extra="同一账号下项目名称不可重复。"
                 rules={[{ required: true, message: '请填写项目名称' }]}
               >
                 <Input placeholder="例如 demo-app" />
@@ -376,7 +381,7 @@ export function TaskCreateDrawer({
               extra={
                 existingUpload
                   ? '已选择下方入库项目，无需再上传文件。'
-                  : '支持 zip / tar / tar.gz，不超过 200MB。同名项目会拒绝；建议先在源码管理登记。'
+                  : '支持 zip / tar / tar.gz，不超过 200MB。也可在「项目资产」中先登记再选用。'
               }
               rules={[
                 {
@@ -406,7 +411,7 @@ export function TaskCreateDrawer({
               <Form.Item
                 name="existing_upload_url"
                 label="或选择已上传项目"
-                extra="选择已登记的上传项目。同名不能重复登记，请换名称。"
+                extra="选择已登记的上传项目；若要新建，请换用不重复的名称。"
               >
                 <Select
                   allowClear
@@ -421,6 +426,21 @@ export function TaskCreateDrawer({
           </>
         ) : null}
 
+        <Form.Item
+          name="task_type"
+          label="分析方式"
+          initialValue="discovery"
+          extra="代码审计自动挖掘漏洞；定向验证用于核实你已掌握的具体线索。"
+        >
+          <Radio.Group
+            optionType="button"
+            buttonStyle="solid"
+            options={[
+              { value: 'discovery', label: '代码审计' },
+              { value: 'verify', label: '定向验证' },
+            ]}
+          />
+        </Form.Item>
         <Form.Item name="priority" label="优先级">
           <Select
             options={[
@@ -431,17 +451,41 @@ export function TaskCreateDrawer({
             ]}
           />
         </Form.Item>
-        <Form.Item
-          name="vulnerability_description"
-          label="漏洞描述"
-          rules={[{ required: true, min: 10, message: '请至少输入 10 个字符的漏洞描述' }]}
-        >
-          <Input.TextArea rows={5} placeholder="描述待验证的漏洞类型、疑似位置、触发条件等" />
+        <Form.Item noStyle shouldUpdate={(a, b) => a.task_type !== b.task_type}>
+          {({ getFieldValue }) => {
+            const taskType = getFieldValue('task_type') ?? 'discovery'
+            return (
+              <Form.Item
+                name="vulnerability_description"
+                label="已知漏洞线索"
+                rules={
+                  taskType === 'verify'
+                    ? [{ required: true, min: 10, message: '请至少输入 10 个字符的漏洞描述' }]
+                    : []
+                }
+                extra={
+                  taskType === 'discovery'
+                    ? '代码审计将自动扫描并复核漏洞线索'
+                    : undefined
+                }
+              >
+                <Input.TextArea
+                  rows={5}
+                  disabled={taskType === 'discovery'}
+                  placeholder={
+                    taskType === 'discovery'
+                      ? '无需填写；系统将自动分析整个代码版本'
+                      : '描述待验证的漏洞类型、疑似位置、触发条件等'
+                  }
+                />
+              </Form.Item>
+            )
+          }}
         </Form.Item>
         <Form.Item
           name="credential_refs"
           label="关联凭据"
-          extra="任务运行时注入 agent 容器。在「设置 → 任务凭据」新建。"
+          extra="运行时注入分析环境。可在「设置 → 审计凭据」中新建。"
         >
           <Select
             mode="multiple"
@@ -456,7 +500,7 @@ export function TaskCreateDrawer({
         </Form.Item>
         <Space>
           <Button type="primary" htmlType="submit" loading={createMutation.isPending}>
-            提交分析
+            开始分析
           </Button>
           <Button onClick={onClose}>取消</Button>
         </Space>

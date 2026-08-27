@@ -22,7 +22,7 @@ Group=crucible
 SupplementaryGroups=docker
 WorkingDirectory=/opt/crucible/backend
 EnvironmentFile=/opt/crucible/backend/.env
-ExecStart=/opt/crucible/backend/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8010 --workers 2
+ExecStart=/opt/crucible/backend/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8010 --workers 2 --proxy-headers --forwarded-allow-ips=127.0.0.1
 Restart=on-failure
 RestartSec=5
 

@@ -1,31 +1,60 @@
 """AI 节点容器编排 — 每节点起一个 agent-runner 容器调 SDK。
 
 流程:
-  1. 写 .node.json(node_key + input_json)到 host_workdir
-  2. 起 agent-runner 容器(bind mount host_workdir + 注入 ANTHROPIC_* env + NODE_KEY)
-  3. 容器内 run_one.py 按 NODE_KEY 选 agent,跑完调 submit_result(MCP 工具)
-  4. submit_result 把 input 写到 /workspace/.node_output.json
-  5. worker 读 .node_output.json → schema 校验 → 返回 output_json
-
-submit_result 注入机制(SDK 0.2.134 PoC 确认):
-  create_sdk_mcp_server + @tool,容器内 run_one.py 构造。
+  1. 写本次执行专属的 node.json(node_key + input_json)到 host_workdir/.runner/<id>
+  2. 起 agent-runner 容器：
+     - bind host_workdir → /workspace
+     - bind node-skills/<node> → /node-skill:ro（仅当前节点 skill）
+     - 注入 ANTHROPIC_* env + NODE_KEY
+  3. 容器内 run_one.py 读 /node-skill/SKILL.md 作 system_prompt，跑完 submit_result
+  4. submit_result 把 input 写到本次执行专属的 node_output.json
+  5. worker 读 node_output.json → schema 校验 → 返回 output_json
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
+from app.contexts.agent.llm_errors import classify_llm_api_error, is_llm_api_failure
 from app.core.agent_runner import (
     AgentRunnerError,
     AgentRunnerSpec,
     agent_runner_manager,
 )
-from app.contexts.agent.llm_errors import classify_llm_api_error, is_llm_api_failure
 
 logger = logging.getLogger(__name__)
+
+# 仓库根：backend/app/contexts/agent/ai_runner.py → parents[4] = Crucible/
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+_NODE_SKILLS_ROOT = _REPO_ROOT / "infrastructure" / "agent-runner" / "node-skills"
+
+
+def resolve_node_skill_dir(node_key: str) -> Path:
+    """当前节点 skill 目录（host）；缺 SKILL.md 则 Fail-Fast。"""
+    skill_dir = _NODE_SKILLS_ROOT / node_key
+    skill_file = skill_dir / "SKILL.md"
+    if not skill_file.is_file():
+        raise AgentRunnerError(f"节点 skill 不存在: {skill_file}")
+    return skill_dir
+
+
+def apply_stream_usage_fallback(meta_out: dict[str, Any] | None, stream: dict[str, Any]) -> None:
+    """sidecar 未给出 usage dict 时，用 stdout 的 agent.completed 回填。
+
+    同一轮 sidecar 已是 dict 则不动——形状回喂累加依赖 prev/fresh 两份 sidecar，
+    再叠本轮 stdout 会把这一轮算两遍。
+    """
+    if meta_out is None or not isinstance(stream, dict):
+        return
+    if not isinstance(meta_out.get("usage"), dict) and isinstance(stream.get("usage"), dict):
+        meta_out["usage"] = stream["usage"]
+    if meta_out.get("model_usage") is None and stream.get("model_usage") is not None:
+        meta_out["model_usage"] = stream["model_usage"]
 
 REPORT_SECTION_KEYS = (
     "product_intro", "vulnerability", "impact", "details",
@@ -48,8 +77,12 @@ _ATTEMPT_KEYS = (
 )
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
-# 各 AI 节点的 output schema(校验最小必需字段,见 docs/agent-node-contracts.md)
+# 各 AI 节点的 output schema(校验最小必需字段,见 docs/discovery-spec.md §4.3/§6)
 NODE_OUTPUT_SCHEMAS: dict[str, dict] = {
+    "canary": {
+        "required": ["marker", "probe_completed", "credential_visible", "summary"],
+        "optional": [],
+    },
     "profile": {
         "required": ["is_web"],
         "optional": [
@@ -73,16 +106,33 @@ NODE_OUTPUT_SCHEMAS: dict[str, dict] = {
         "required": ["report_data", "final_verdict"],
         "optional": ["cvss", "vulnerable_file"],
     },
+    "triage": {
+        "required": ["verdict", "confidence", "why", "summary", "reasoning"],
+        "optional": [
+            "evidence", "need", "attacker_controlled", "reaches_sink", "sanitizer",
+        ],
+    },
+    "api_hunt": {
+        "required": ["suspects", "reviewed_count"],
+        "optional": ["budget_exhausted"],
+    },
 }
 
 def rewrite_url_for_agent_container(url: str | None) -> str | None:
-    """把宿主机靶标改写成 agent-runner 容器可达的 host.docker.internal。"""
+    """回环/遗留 host.docker.internal 改成宿主机 IP:port；已发布地址原样保留。"""
     from app.contexts.agent.target_url import rewrite_url_for_agent_container as _rewrite
     return _rewrite(url)
 
 
 def _mock_output(node_key: str, input_json: dict[str, Any]) -> dict[str, Any]:
     """Mock 模式:SDK 未启用时返回模拟 output(通过 schema 校验),供编排链路联调。"""
+    if node_key == "canary":
+        return {
+            "marker": "",
+            "probe_completed": False,
+            "credential_visible": True,
+            "summary": "[Mock] 未运行真实 Agent canary",
+        }
     if node_key == "profile":
         hints = input_json.get("hints") or {}
         return {
@@ -162,6 +212,25 @@ def _mock_output(node_key: str, input_json: dict[str, Any]) -> dict[str, Any]:
                 "severity": "Critical",
             }
         return output
+    if node_key == "triage":
+        return {
+            "verdict": "tp",
+            "confidence": 0.85,
+            "why": ["[Mock] llm_gateway 已退役；SDK 未启用时的固定二审"],
+            "summary": "[Mock] 可疑真洞：模拟入口可达危险点。",
+            "reasoning": "[Mock] 攻击者可控输入经未消毒路径到达 sink。",
+            "evidence": [{"file": "app.py", "lines": "1-1"}],
+            "need": [],
+            "attacker_controlled": True,
+            "reaches_sink": True,
+            "sanitizer": "none",
+        }
+    if node_key == "api_hunt":
+        return {
+            "suspects": [],
+            "reviewed_count": len(input_json.get("endpoints") or []),
+            "budget_exhausted": False,
+        }
     return {}
 
 
@@ -242,6 +311,9 @@ def authoritative_verdict(repro: dict[str, Any] | None, audit: dict[str, Any] | 
         return "false_positive"
     if gate == "uncertain":
         return "needs_review"
+    # reproduce 已跳过/无动态结果时，gate=pass 以白盒 code_reachable 收口
+    if gate == "pass":
+        return "code_reachable"
     return None
 
 
@@ -529,6 +601,123 @@ def validate_initial_creds(value: Any) -> tuple[bool, str | None]:
     return False, "initial_creds 必须明确提供账密、auth_required=false 或非空 note"
 
 
+def _validate_triage_output(output: dict) -> tuple[bool, str | None]:
+    """T3 二审形状：why + 叙事必填；可疑真洞还要证据与合格门字段（Agent 输出不可信）。
+
+    批量子代理模式（triage_batch skill）提交 {"verdicts": [...]}：逐项走单组校验。
+    """
+    verdicts = output.get("verdicts")
+    if isinstance(verdicts, list):
+        if not verdicts:
+            return False, "批量判决 verdicts 不能为空"
+        for i, item in enumerate(verdicts):
+            if not isinstance(item, dict) or not str(item.get("group_id") or "").strip():
+                return False, f"verdicts[{i}] 缺少非空 group_id"
+            ok, err = _validate_triage_output(item)
+            if not ok:
+                return False, f"verdicts[{i}]: {err}"
+        return True, None
+    verdict = output.get("verdict")
+    if verdict not in ("tp", "fp", "need_more_context"):
+        return False, "verdict 必须是 tp|fp|need_more_context"
+    why = output.get("why")
+    if not isinstance(why, list) or not any(isinstance(x, str) and x.strip() for x in why):
+        return False, "why 必须为非空字符串数组"
+    summary = output.get("summary")
+    if not (isinstance(summary, str) and summary.strip()):
+        return False, "summary 必须为非空字符串（§2.3.1）"
+    reasoning = output.get("reasoning")
+    if not (isinstance(reasoning, str) and reasoning.strip()):
+        return False, "reasoning 必须为非空字符串（§2.3.1）"
+    if verdict != "tp":
+        return True, None
+    evidence = output.get("evidence")
+    if not isinstance(evidence, list) or len(evidence) < 1:
+        return False, "可疑真洞必须提供非空 evidence"
+    if output.get("attacker_controlled") is not True:
+        return False, "可疑真洞必须 attacker_controlled=true"
+    if output.get("reaches_sink") is not True:
+        return False, "可疑真洞必须 reaches_sink=true"
+    if output.get("sanitizer") not in ("none", "bypassable"):
+        return False, "可疑真洞的 sanitizer 必须是 none 或 bypassable"
+    return True, None
+
+
+def _normalize_hunt_confidence(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        conf = float(value)
+        return conf if 0.0 <= conf <= 1.0 else None
+    if isinstance(value, str):
+        raw = value.strip().upper()
+        if raw == "HIGH":
+            return 0.9
+        if raw == "MEDIUM":
+            return 0.75
+        if raw == "LOW":
+            return 0.4
+        try:
+            conf = float(raw)
+        except ValueError:
+            return None
+        return conf if 0.0 <= conf <= 1.0 else None
+    return None
+
+
+def _validate_api_hunt_output(output: dict) -> tuple[bool, str | None]:
+    """API Hunt 只校验候选形状，不在发现阶段执行 TP 合格门。
+
+    三个安全判断必须显式给出，但允许未知或反证；最终真假由 triage 决定。
+    """
+    suspects = output.get("suspects")
+    if not isinstance(suspects, list):
+        return False, "suspects 必须为数组"
+    reviewed = output.get("reviewed_count")
+    if not isinstance(reviewed, int) or reviewed < 0:
+        return False, "reviewed_count 必须为非负整数"
+    for i, s in enumerate(suspects):
+        if not isinstance(s, dict):
+            return False, f"suspects[{i}] 必须为对象"
+        if not (isinstance(s.get("file_path"), str) and s["file_path"].strip()):
+            return False, f"suspects[{i}] 必须有非空 file_path（locus）"
+        if not (isinstance(s.get("endpoint_id"), str) and s["endpoint_id"].strip()):
+            return False, f"suspects[{i}] 必须有非空 endpoint_id"
+        why = s.get("why")
+        if (
+            not isinstance(why, list)
+            or not any(isinstance(x, str) and x.strip() for x in why)
+        ):
+            return False, f"suspects[{i}].why 必须为非空字符串数组"
+        evidence = s.get("evidence")
+        if not isinstance(evidence, list) or len(evidence) < 1:
+            return False, f"suspects[{i}] 必须提供非空 evidence"
+        for field in ("attacker_controlled", "reaches_sink"):
+            if field not in s:
+                return False, f"suspects[{i}].{field} 必须显式给出 true|false|null"
+            if s.get(field) is not None and not isinstance(s.get(field), bool):
+                return False, f"suspects[{i}].{field} 必须是 true|false|null"
+        if "sanitizer" not in s:
+            return False, f"suspects[{i}].sanitizer 必须显式给出"
+        if s.get("sanitizer") not in (None, "none", "bypassable", "effective", "unknown"):
+            return False, (
+                f"suspects[{i}].sanitizer 必须是 "
+                "none|bypassable|effective|unknown|null"
+            )
+        if "confidence" in s and s.get("confidence") is not None:
+            if _normalize_hunt_confidence(s.get("confidence")) is None:
+                return False, (
+                    f"suspects[{i}].confidence 必须是 0–1、HIGH/MEDIUM/LOW 或 null"
+                )
+        summary = s.get("summary")
+        if not (isinstance(summary, str) and summary.strip()):
+            return False, f"suspects[{i}].summary 必须为非空字符串（§2.3.1）"
+        reasoning = s.get("reasoning")
+        if not (isinstance(reasoning, str) and reasoning.strip()):
+            return False, f"suspects[{i}].reasoning 必须为非空字符串（§2.3.1）"
+    return True, None
+
+
 def validate_output(
     node_key: str,
     output: dict,
@@ -539,9 +728,12 @@ def validate_output(
     schema = NODE_OUTPUT_SCHEMAS.get(node_key)
     if not schema:
         return True, None
-    for field_name in schema["required"]:
-        if field_name not in output:
-            return False, f"缺必需字段: {field_name}"
+    # triage 批量子代理形态（{"verdicts":[...]}）不适用单组必填清单，
+    # 由 _validate_triage_output 的批量分支逐项校验
+    if not (node_key == "triage" and isinstance(output.get("verdicts"), list)):
+        for field_name in schema["required"]:
+            if field_name not in output:
+                return False, f"缺必需字段: {field_name}"
     if node_key == "env_ready":
         return validate_initial_creds(output.get("initial_creds"))
     if node_key == "audit":
@@ -550,23 +742,38 @@ def validate_output(
         return _validate_reproduce_output(output, host_workdir=host_workdir)
     if node_key == "report":
         return _validate_report_output(output)
+    if node_key == "triage":
+        return _validate_triage_output(output)
+    if node_key == "api_hunt":
+        return _validate_api_hunt_output(output)
     return True, None
 
 
-async def _run_one_container(
+async def _run_one_container_unthrottled(
     *,
     node_key: str,
     input_json: dict[str, Any],
     host_workdir: str,
     runner_env: dict[str, str],
     on_event: Callable[[dict], None] | None,
-    timeout_seconds: int,
     task_id: str | None,
+    meta_out: dict[str, Any] | None = None,
+    # 挂载其他技能目录（如 triage 批量子代理模式）；NODE_KEY/tool 策略不变
+    skill_override: str | None = None,
 ) -> dict[str, Any]:
     """单轮容器执行：写 .node.json → 起容器 → 读 .node_output.json。
 
     不做 schema 校验（调用方决定）；容器/输出层失败抛 AgentRunnerError。
+    meta_out 非空时回填容器侧真实 prompt/usage（审计链，spec §4.2）。
     """
+    # 轻工位（triage/profile）凭据最小化（spec §7.4）：
+    # 任务级凭据 env 一律剥离，只保留 SDK 必需变量；.secrets/ 用空 tmpfs 遮蔽
+    env = dict(runner_env or {})
+    hide_paths: tuple[str, ...] = ()
+    if node_key in _LIGHT_WORKSTATION_NODES:
+        env = {k: v for k, v in env.items() if _is_sdk_env_key(k)}
+        hide_paths = ("/workspace/.secrets",)
+
     # Mock 模式:SDK 未启用时直接返回模拟 output(不起容器)
     from app.core.config import get_settings
     if not get_settings().claude_agent_sdk_enabled:
@@ -576,36 +783,62 @@ async def _run_one_container(
             on_event({"type": "phase.updated", "phase": node_key, "message": f"[Mock] {node_key} 完成"})
         return output
 
-    # 1. 写 .node.json(容器内 run_one.py 读)
+    # 1. 每次容器执行使用独立控制目录。终认线索会共享源码工作区，固定的
+    #    .node*.json 会互相覆盖，造成输入/输出串线。
     #    先清旧的 .node_output.json:回喂重跑每轮重调本函数,
     #    若上轮 agent 没调 submit_result,容器会读到上轮遗留的旧 output(run_one
-    #    退出码 0 → 本函数读到旧数据,静默用错)。
-    node_input_path = Path(host_workdir) / ".node.json"
-    node_output_path = Path(host_workdir) / ".node_output.json"
-    if node_output_path.exists():
-        try:
-            node_output_path.unlink()
-        except OSError:
-            pass
+    #    退出码 0 → 本函数读到旧数据,静默用错)。.node_meta.json 同理。
+    execution_id = uuid4().hex
+    control_dir = Path(host_workdir) / ".runner" / execution_id
+    control_dir.mkdir(parents=True, mode=0o777, exist_ok=False)
+    control_dir.chmod(0o777)
+    node_input_path = control_dir / "node.json"
+    node_output_path = control_dir / "node_output.json"
+    node_meta_path = control_dir / "node_meta.json"
     node_input_path.write_text(
         json.dumps({"node_key": node_key, "input_json": input_json}, ensure_ascii=False),
         encoding="utf-8",
     )
 
-    # 2. 构造 spec + 起容器(NODE_KEY env 让 run_one.py 选 agent)
+    skill_dir = resolve_node_skill_dir(skill_override or node_key)
+
+    # 2. 构造 spec + 起容器(NODE_KEY env + skill 卷映射)
     spec = AgentRunnerSpec(
-        env={**runner_env, "NODE_KEY": node_key},
+        env={
+            **env,
+            "NODE_KEY": node_key,
+            "NODE_INPUT_PATH": f"/workspace/.runner/{execution_id}/node.json",
+            "NODE_OUTPUT_PATH": f"/workspace/.runner/{execution_id}/node_output.json",
+            "NODE_META_PATH": f"/workspace/.runner/{execution_id}/node_meta.json",
+            # 技能模式切换提交契约（如 triage → triage_batch）
+            **({"NODE_SCHEMA_KEY": skill_override} if skill_override and skill_override != node_key else {}),
+        },
         host_workdir=host_workdir,
-        timeout_seconds=timeout_seconds,
+        skill_host_dir=str(skill_dir),
         extra_labels={"crucible.task_id": task_id, "task_id": task_id} if task_id else {},
+        hide_workspace_paths=hide_paths,
     )
 
     last_fail = ""
     llm_fail = ""
+    dsml_leak = False
+    stream_usage: dict[str, Any] = {}
 
     def _on_event(event: dict) -> None:
-        nonlocal last_fail, llm_fail
+        nonlocal last_fail, llm_fail, dsml_leak
         et = event.get("type")
+        if et == "agent.completed":
+            for k in ("usage", "model_usage"):
+                if event.get(k) is not None:
+                    stream_usage[k] = event[k]
+        if et in ("agent.message", "agent.thinking", "agent.completed"):
+            blob = " ".join(
+                str(event.get(k) or "")
+                for k in ("text", "reasoning", "content", "message")
+            )
+            # DeepSeek 偶发把 tool_use 泄成 DSML 纯文本，CLI 无法执行工具
+            if "DSML" in blob or "｜DSML｜" in blob:
+                dsml_leak = True
         if et in ("agent.failed", "raw"):
             err = (
                 event.get("error")
@@ -619,26 +852,49 @@ async def _run_one_container(
         if on_event:
             on_event(event)
 
-    exit_code, summary = await asyncio.to_thread(
-        agent_runner_manager.run_with_streaming, spec, _on_event
-    )
-
-    if summary.get("timed_out"):
-        raise AgentRunnerError(f"AI 节点 {node_key} 超时({timeout_seconds}s)")
+    exit_code: int
+    summary: dict[str, Any] | None
+    node_timeout = await _ai_node_timeout_seconds()
+    if node_timeout > 0:
+        manager_before: set[str] = set(getattr(agent_runner_manager, "_active_ids", set()) or set())
+        try:
+            exit_code, summary = await asyncio.wait_for(
+                asyncio.to_thread(
+                    agent_runner_manager.run_with_streaming, spec, _on_event,
+                ),
+                timeout=node_timeout,
+            )
+        except asyncio.TimeoutError:
+            # 线程仍阻塞在 container.wait()：按 create 顺序差异找出本容器强杀，
+            # run_with_streaming 的 finally 随后正常收尾。
+            _kill_active_runner_containers(agent_runner_manager, manager_before)
+            raise AgentRunnerError(
+                f"AI 节点 {node_key} 超过单节点最长执行时间（{node_timeout}s），已终止容器"
+            ) from None
+    else:
+        exit_code, summary = await asyncio.to_thread(
+            agent_runner_manager.run_with_streaming, spec, _on_event
+        )
 
     # 3. 读 .node_output.json(submit_result 写的)
-    output_path = Path(host_workdir) / ".node_output.json"
+    output_path = node_output_path
     if not output_path.exists():
         stderr_tail = summary.get("stderr_tail", "") if summary else ""
-        combined = (stderr_tail or last_fail or "").strip()
+        # 结构化 agent.failed 优先于 stdout JSONL 截尾：长会话的
+        # agent.completed 用量字段会把真正的 no_submit 埋进截断噪声。
+        combined = (last_fail or stderr_tail or "").strip()
         # LLM 网关错误（如 401 余额不足）常出现在较早的 agent.failed；
         # 末尾可能是 SDK 误报或「未调用 submit_result」次生事件，须优先保留 llm_fail。
         primary = (llm_fail or combined).strip()
+        if dsml_leak and "DSML" not in primary:
+            primary = (
+                "模型输出含 DSML 工具标记（未形成有效 tool_use）；" + primary
+            ).strip("；")
         detail = primary[-600:]
         if exit_code == 137:
             raise AgentRunnerError(
                 f"AI 节点 {node_key} 容器被 SIGKILL 终止(exit=137，"
-                f"多为平台超时/巡检强杀或 OOM): {detail}"
+                f"多为任务取消、外部强杀或 OOM): {detail}"
             )
         if llm_fail or classify_llm_api_error(detail):
             raise AgentRunnerError(f"AI 节点 {node_key} LLM 调用失败: {detail}")
@@ -650,7 +906,206 @@ async def _run_one_container(
         output = json.loads(output_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         raise AgentRunnerError(f"AI 节点 {node_key} output JSON 解析失败: {e}") from e
+
+    # 4.5 容器侧真实 prompt/usage（审计链，spec §4.2）；读后即清，读失败不阻断
+    if node_meta_path.exists():
+        try:
+            if meta_out is not None:
+                fresh_meta = json.loads(node_meta_path.read_text(encoding="utf-8"))
+                prev_usage = meta_out.get("usage")
+                prev_mu = meta_out.get("model_usage")
+                meta_out.clear()
+                meta_out.update(fresh_meta)
+                if (
+                    isinstance(prev_usage, dict)
+                    and isinstance(fresh_meta.get("usage"), dict)
+                ):
+                    # 形状回喂重试时 meta 每轮整体覆盖：usage 必须跨轮累加，
+                    # 否则台账只记最后一轮、预算会系统性晚停。
+                    # cache_* 同为 SDK/API 回传字段，禁止自算，只做各轮相加。
+                    def _u(d: dict, *keys: str) -> int:
+                        for k in keys:
+                            v = d.get(k)
+                            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                                return int(v)
+                        return 0
+
+                    meta_out["usage"] = {
+                        "prompt_tokens": _u(
+                            prev_usage, "prompt_tokens", "input_tokens", "inputTokens",
+                        )
+                        + _u(
+                            fresh_meta["usage"], "prompt_tokens", "input_tokens", "inputTokens",
+                        ),
+                        "completion_tokens": _u(
+                            prev_usage, "completion_tokens", "output_tokens", "outputTokens",
+                        )
+                        + _u(
+                            fresh_meta["usage"],
+                            "completion_tokens", "output_tokens", "outputTokens",
+                        ),
+                        "cache_read_input_tokens": _u(
+                            prev_usage, "cache_read_input_tokens", "cacheReadInputTokens",
+                        )
+                        + _u(
+                            fresh_meta["usage"],
+                            "cache_read_input_tokens", "cacheReadInputTokens",
+                        ),
+                        "cache_creation_input_tokens": _u(
+                            prev_usage,
+                            "cache_creation_input_tokens", "cacheCreationInputTokens",
+                        )
+                        + _u(
+                            fresh_meta["usage"],
+                            "cache_creation_input_tokens", "cacheCreationInputTokens",
+                        ),
+                    }
+                fresh_mu = fresh_meta.get("model_usage")
+                if prev_mu is not None and fresh_mu is not None:
+                    # 多轮各保留一份；台账侧 normalize 时对整份求和。
+                    merged: list = []
+                    if isinstance(prev_mu, list):
+                        merged.extend(prev_mu)
+                    else:
+                        merged.append(prev_mu)
+                    if isinstance(fresh_mu, list):
+                        merged.extend(fresh_mu)
+                    else:
+                        merged.append(fresh_mu)
+                    meta_out["model_usage"] = merged
+        except (json.JSONDecodeError, OSError):
+            pass
+        try:
+            node_meta_path.unlink()
+        except OSError:
+            pass
+
+    if meta_out is not None:
+        apply_stream_usage_fallback(meta_out, stream_usage)
+
     return output
+
+
+async def _run_one_container(
+    *,
+    node_key: str,
+    input_json: dict[str, Any],
+    host_workdir: str,
+    runner_env: dict[str, str],
+    on_event: Callable[[dict], None] | None,
+    task_id: str | None,
+    meta_out: dict[str, Any] | None = None,
+    reproduce_scope: str | None = None,
+    skill_override: str | None = None,
+) -> dict[str, Any]:
+    """按运行时预算等待槽位；等待与容器执行均不设总时长超时。"""
+    from app.core.config import get_settings
+
+    call = dict(
+        node_key=node_key,
+        input_json=input_json,
+        host_workdir=host_workdir,
+        runner_env=runner_env,
+        on_event=on_event,
+        task_id=task_id,
+        meta_out=meta_out,
+        skill_override=skill_override,
+    )
+    # Mock 不占 Docker/AI 资源，也不依赖 Redis。
+    if not get_settings().claude_agent_sdk_enabled:
+        return await _run_one_container_unthrottled(**call)
+
+    from app.contexts.agent.runner_slots import agent_runner_slot, reproduce_slot
+
+    def _report_wait(message: str) -> Callable[[], None]:
+        def _emit_wait() -> None:
+            if on_event:
+                on_event({"type": "phase.updated", "phase": node_key, "message": message})
+
+        return _emit_wait
+
+    if reproduce_scope:
+        # 先占靶场作用域，再占真正稀缺的 AI 容器，避免等待靶场时空耗全局槽。
+        async with reproduce_slot(
+            reproduce_scope,
+            on_wait=_report_wait("同一靶场正在复现，等待靶场槽位"),
+        ):
+            async with agent_runner_slot(
+                task_id=task_id,
+                node_key=node_key,
+                on_wait=_report_wait("全局 AI 容器已满，等待资源槽位"),
+            ):
+                return await _run_one_container_unthrottled(**call)
+    async with agent_runner_slot(
+        task_id=task_id,
+        node_key=node_key,
+        on_wait=_report_wait("全局 AI 容器已满，等待资源槽位"),
+    ):
+        return await _run_one_container_unthrottled(**call)
+
+
+# 轻工位节点（spec §7.4：不注入任务凭据；工具仅 Read/Grep/Glob）
+_LIGHT_WORKSTATION_NODES = frozenset({"triage", "profile", "api_hunt"})
+# SDK 运行必需的 env 前缀/白名单；凭据最小化时 runner_env 只保留这些
+_SDK_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_")
+_SDK_ENV_KEYS = frozenset({
+    "API_TIMEOUT_MS", "PYTHONUNBUFFERED", "HOME", "NODE_KEY", "PYTHONPATH",
+})
+
+
+def _is_sdk_env_key(key: str) -> bool:
+    return key.startswith(_SDK_ENV_PREFIXES) or key in _SDK_ENV_KEYS
+
+
+# 单 AI 节点超时（platform_settings.ai_node_timeout_seconds）进程内缓存，
+# 免去每次容器执行都开 DB 会话；设置页保存后最多 30s 生效。
+_NODE_TIMEOUT_TTL_SECONDS = 30.0
+_node_timeout_cache: dict[str, float] = {"value": -1.0, "at": 0.0}
+
+
+async def _ai_node_timeout_seconds() -> int:
+    """单节点最长执行秒数（获槽后起计）；0=不限。读失败退化为 0（不阻断执行）。"""
+    now = time.monotonic()
+    cached = _node_timeout_cache["value"]
+    if cached >= 0 and now - _node_timeout_cache["at"] < _NODE_TIMEOUT_TTL_SECONDS:
+        return int(cached)
+    value = 0
+    try:
+        from sqlalchemy import select
+
+        from app.contexts.settings.models import PlatformSetting
+        from app.core.database import async_session_factory
+
+        async with async_session_factory() as session:
+            row = (await session.execute(
+                select(PlatformSetting.ai_node_timeout_seconds).where(
+                    PlatformSetting.singleton_key == "default"
+                )
+            )).scalar()
+            if row is not None:
+                value = max(0, int(row))
+    except Exception:  # noqa: BLE001
+        logger.warning("读取 ai_node_timeout_seconds 失败，本进程内按不限处理", exc_info=True)
+    from app.core.config import get_settings
+
+    soft = get_settings().celery_task_soft_time_limit
+    if value > 0 and soft > 0:
+        value = min(value, soft)
+    _node_timeout_cache.update(value=float(value), at=now)
+    return value
+
+
+def _kill_active_runner_containers(manager: Any, before: set[str]) -> None:
+    """超时后强杀本次执行新起的容器（线程仍在 container.wait() 上阻塞）。"""
+    try:
+        for cid in list(getattr(manager, "_active_ids", set()) or set()):
+            if cid not in before:
+                try:
+                    manager.remove_by_id(cid)
+                except Exception:  # noqa: BLE001
+                    logger.warning("超时清理容器失败 id=%s", cid, exc_info=True)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 async def run_ai_node(
@@ -660,9 +1115,11 @@ async def run_ai_node(
     host_workdir: str,
     runner_env: dict[str, str],
     on_event: Callable[[dict], None] | None = None,
-    timeout_seconds: int = 1800,
     task_id: str | None = None,
     validate: bool = True,
+    meta_out: dict[str, Any] | None = None,
+    reproduce_scope: str | None = None,
+    skill_override: str | None = None,
 ) -> dict[str, Any]:
     """起 agent-runner 容器跑一个 AI 节点,返回 output_json。
 
@@ -672,6 +1129,8 @@ async def run_ai_node(
     validate=False 供自带回喂环的调用方（env_ready 排障循环）使用：平台层
     不再对 output 先斩后奏，形状校验交给调用方的逐项检查 + 回喂重试语义
     （2026-08-19 修复：否则 env_ready 的 initial_creds 回喂分支永不可达）。
+
+    meta_out 非空时回填容器侧真实 prompt/usage（Adjudication 审计链）。
     """
     output = await _run_one_container(
         node_key=node_key,
@@ -679,8 +1138,10 @@ async def run_ai_node(
         host_workdir=host_workdir,
         runner_env=runner_env,
         on_event=on_event,
-        timeout_seconds=timeout_seconds,
         task_id=task_id,
+        meta_out=meta_out,
+        reproduce_scope=reproduce_scope,
+        skill_override=skill_override,
     )
 
     # 4. schema 校验（validate=False 时跳过：调用方自带回喂环）
@@ -704,8 +1165,10 @@ async def run_ai_node_with_shape_retry(
     host_workdir: str,
     runner_env: dict[str, str],
     on_event: Callable[[dict], None] | None = None,
-    timeout_seconds: int = 1800,
     task_id: str | None = None,
+    meta_out: dict[str, Any] | None = None,
+    reproduce_scope: str | None = None,
+    skill_override: str | None = None,
 ) -> dict[str, Any]:
     """AI 节点 + 形状回喂环（P0#1 修复）。
 
@@ -716,6 +1179,8 @@ async def run_ai_node_with_shape_retry(
 
     与 env_ready 的节点级排障环（多轮、含 compose/探活等平台动作）不同，
     这里只救「模型差一两个字段」这一种失败模式。
+
+    meta_out 非空时回填最后一轮容器侧真实 prompt/usage（Adjudication 审计链）。
     """
     from app.contexts.agent.node_failure import snapshot_attempt
 
@@ -741,8 +1206,10 @@ async def run_ai_node_with_shape_retry(
             host_workdir=host_workdir,
             runner_env=runner_env,
             on_event=on_event,
-            timeout_seconds=timeout_seconds,
             task_id=task_id,
+            meta_out=meta_out,
+            reproduce_scope=reproduce_scope,
+            skill_override=skill_override,
         )
 
         ok, err = validate_output(node_key, output, host_workdir=host_workdir)

@@ -1,0 +1,66 @@
+rules:
+  - id: flask-sql-fragment
+    languages:
+      - python
+    severity: ERROR
+    mode: taint
+    message: >-
+      Flask request input flows into a SQL fragment (WHERE / ORDER BY / LIMIT)
+      or a cursor.execute call without requiring a leading SELECT keyword.
+      Prefer bound parameters; do not concatenate request data into SQL fragments.
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp:
+        - A01:2017 - Injection
+        - A03:2021 - Injection
+      category: security
+      technology:
+        - flask
+        - python
+      subcategory:
+        - vuln
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      crucible-overlay: true
+    pattern-sources:
+      - pattern-either:
+          - pattern: flask.request.$W
+          - pattern: request.args
+          - pattern: request.form
+          - pattern: request.values
+          - pattern: request.json
+    pattern-sinks:
+      - pattern-either:
+          - patterns:
+              - pattern-either:
+                  - pattern: '" where " + $X'
+                  - pattern: '" WHERE " + $X'
+                  - pattern: '" and " + $X'
+                  - pattern: '" AND " + $X'
+                  - pattern: '" or " + $X'
+                  - pattern: '" OR " + $X'
+                  - pattern: '" order by " + $X'
+                  - pattern: '" ORDER BY " + $X'
+                  - pattern: '" limit " + $X'
+                  - pattern: '" LIMIT " + $X'
+                  - pattern: '" offset " + $X'
+                  - pattern: '" OFFSET " + $X'
+                  - pattern: f" where {$X}"
+                  - pattern: f" WHERE {$X}"
+                  - pattern: f" order by {$X}"
+                  - pattern: f" ORDER BY {$X}"
+                  - pattern: f" limit {$X}"
+                  - pattern: f" LIMIT {$X}"
+              - focus-metavariable: $X
+          - patterns:
+              - pattern: $CUR.execute($SQL, ...)
+              - focus-metavariable: $SQL
+          - patterns:
+              - pattern: $CUR.executemany($SQL, ...)
+              - focus-metavariable: $SQL
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: int(...)
+          - pattern: float(...)

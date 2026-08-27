@@ -16,15 +16,17 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "projects",
-        sa.Column(
-            "default_ref_type",
-            sa.String(length=16),
-            nullable=True,
-            comment="branch|tag|commit",
-        ),
-    )
+    project_cols = {c["name"] for c in sa.inspect(op.get_bind()).get_columns("projects")}
+    if "default_ref_type" not in project_cols:
+        op.add_column(
+            "projects",
+            sa.Column(
+                "default_ref_type",
+                sa.String(length=16),
+                nullable=True,
+                comment="branch|tag|commit",
+            ),
+        )
 
 
 def downgrade() -> None:

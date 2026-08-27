@@ -18,23 +18,22 @@ def test_lab_project_name_is_stable_and_prefixed():
 
 
 @pytest.mark.parametrize(
-    "status,age,timeout,keep",
+    "status,keep",
     [
-        ("running", 10, 1800, True),
-        ("queued", 100, 1800, True),
-        ("pending", 0, 1800, True),
-        ("completed", 10, 1800, False),
-        ("failed", 10, 1800, False),
-        ("cancelled", 10, 1800, False),
-        ("archived", 10, 1800, False),
-        ("running", 1801, 1800, False),
-        (None, 10, 1800, False),
+        ("running", True),
+        ("queued", True),
+        ("pending", True),
+        ("completed", False),
+        ("failed", False),
+        ("cancelled", False),
+        ("archived", False),
+        (None, False),
     ],
 )
-def test_should_keep_runtime(status, age, timeout, keep):
+def test_should_keep_runtime(status, keep):
     from app.contexts.agent.runtime_cleanup import should_keep_runtime
 
-    assert should_keep_runtime(status, age, timeout) is keep
+    assert should_keep_runtime(status) is keep
 
 
 def test_utc_unix_treats_naive_datetime_as_utc_not_local():
@@ -79,6 +78,32 @@ def test_new_run_does_not_compose_down_shared_lab():
     assert "docker_compose_down" not in source
 
 
+def test_worker_sigterm_cleans_scanners_before_exiting():
+    """Celery 强制撤销不能只停 Agent 容器，还必须清理本地扫描器进程组。
+
+    信号处理器内禁止 Docker 网络 IO（与日志迭代线程共享 urllib3 连接池，
+    嵌套调用可能死锁）——容器清理由取消 API / 重派认领 / 巡检三条路径兜底。
+    """
+    import signal
+    from unittest.mock import patch
+
+    from app.contexts.agent import tasks
+
+    with (
+        patch(
+            "app.contexts.agent.nodes.scan.base.kill_all_active_scanner_processes"
+        ) as kill_scanners,
+        patch.object(tasks.agent_runner_manager, "stop_all_active") as stop_runners,
+        patch.object(tasks.signal, "signal"),
+        patch.object(tasks.os, "kill") as exit_process,
+    ):
+        tasks._on_sigterm(signal.SIGTERM, None)
+
+    kill_scanners.assert_called_once_with()
+    stop_runners.assert_not_called()
+    exit_process.assert_called_once_with(tasks.os.getpid(), signal.SIGTERM)
+
+
 @pytest.mark.asyncio
 async def test_teardown_only_kills_runner():
     """取消时 AI 还在跑：强拆 agent-runner，但不拆共享 compose。"""
@@ -106,7 +131,7 @@ async def test_teardown_only_kills_runner():
 
 @pytest.mark.asyncio
 async def test_sweep_keeps_live_tears_down_the_rest():
-    """巡检：活着且未超时的保留；已结束 / 超时 / 库里没有的拆掉。"""
+    """巡检不按年龄拆 live run；只拆已结束或库里没有的运行时。"""
     from app.contexts.agent.runtime_cleanup import sweep_orphan_runtimes
 
     torn = []
@@ -115,7 +140,6 @@ async def test_sweep_keeps_live_tears_down_the_rest():
         torn.append(task_id)
 
     now = 10_000.0
-    timeout = 1800
     await sweep_orphan_runtimes(
         discovered_ids={"live", "done", "stuck", "ghost"},
         status_by_id={
@@ -123,35 +147,28 @@ async def test_sweep_keeps_live_tears_down_the_rest():
             "done": ("completed", now - 10),
             "stuck": ("running", now - 5000),
         },
-        now=now,
-        timeout_seconds=timeout,
         teardown=fake_teardown,
     )
-    assert set(torn) == {"done", "stuck", "ghost"}
-    assert "live" not in torn
+    assert set(torn) == {"done", "ghost"}
+    assert "live" not in torn and "stuck" not in torn
 
 
 @pytest.mark.asyncio
-async def test_sweep_default_uses_run_hard_timeout_not_container_timeout():
-    """默认门槛 = run 级硬顶；超过单容器 1800s 但未超硬顶的 live run 不被误杀。"""
+async def test_sweep_never_tears_down_old_live_run():
+    """无论运行多久，live run 都留给正常完成或人工取消。"""
     from app.contexts.agent import runtime_cleanup as rc
 
-    settings = MagicMock()
-    settings.agent_runner_timeout_seconds = 1800
-    settings.agent_run_hard_timeout_seconds = 7200
     torn = []
 
     async def fake_teardown(task_id: str) -> None:
         torn.append(task_id)
 
     now = 10_000.0
-    with patch("app.contexts.agent.runtime_cleanup.get_settings", return_value=settings):
-        await rc.sweep_orphan_runtimes(
-            discovered_ids={"long-running"},
-            status_by_id={"long-running": ("running", now - 4000)},  # >1800s，<7200s
-            now=now,
-            teardown=fake_teardown,
-        )
+    await rc.sweep_orphan_runtimes(
+        discovered_ids={"long-running"},
+        status_by_id={"long-running": ("running", now - 30 * 24 * 60 * 60)},
+        teardown=fake_teardown,
+    )
     assert torn == []
 
 
@@ -231,7 +248,7 @@ def _container(labels=None, mounts=None):
 
 
 def test_collect_task_ids_from_docker_not_yaml():
-    """任务标签 / 挂载路径算运行时；compose 项目名与残留 yaml 不算。"""
+    """任务标签 / agent-runner 挂载算运行时；Lab 挂了 workspace 不算。"""
     from app.contexts.agent.runtime_cleanup import collect_task_ids_from_containers
 
     base = "/tmp/crucible/audit"
@@ -244,10 +261,29 @@ def test_collect_task_ids_from_docker_not_yaml():
                 mounts=["/tmp/crucible/audit-task-c/claudecodeui"],
             ),
             _container(labels={"com.docker.compose.project": "crucible-infra"}),
+            _container(
+                labels={"managed_by": "crucible-agent-runner"},
+                mounts=["/tmp/crucible/audit-task-d/repo"],
+            ),
         ],
         base,
     )
-    assert ids == {"task-a", "task-c"}
+    assert ids == {"task-a", "task-d"}
+
+
+def test_lab_workspace_mount_is_not_orphan_runtime():
+    """已取消任务留下的 Lab 仍 bind 工作区时，巡检不得当成 agent-runner 反复拆。"""
+    from app.contexts.agent.runtime_cleanup import collect_task_ids_from_containers
+
+    lab = _container(
+        labels={
+            "com.docker.compose.project": "crucible-lab-94535dc3-0d5c-46e0-82fc-3ca528d79245",
+        },
+        mounts=[
+            "/tmp/crucible/audit-02210612-75d3-48f9-9ea3-cf70db1eaeb7/zentaopms",
+        ],
+    )
+    assert collect_task_ids_from_containers([lab], "/tmp/crucible/audit") == set()
 
 
 def test_collect_ids_ignores_lab_compose_project():

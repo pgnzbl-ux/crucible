@@ -19,12 +19,16 @@ def _engine_kwargs(url: str) -> dict:
             "connect_args": {"check_same_thread": False},
             "poolclass": StaticPool,
         }
-    return {"pool_size": 5, "max_overflow": 10}
+    # pre_ping：PG 重启/空闲断连后，池内旧连接首次使用前先探活，
+    # 避免把 stale connection 错误抛给请求
+    return {"pool_size": 5, "max_overflow": 10, "pool_pre_ping": True}
 
 
 engine = create_async_engine(
     settings.database_url,
-    echo=settings.debug,
+    # SQL echo 独立开关：不再跟随 DEBUG——echo 会把 INSERT 里的明文
+    # api_key/secret 打进日志，默认必须关闭
+    echo=settings.database_echo,
     **_engine_kwargs(settings.database_url),
 )
 

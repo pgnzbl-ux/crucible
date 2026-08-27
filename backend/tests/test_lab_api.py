@@ -47,6 +47,21 @@ async def session():
     await engine.dispose()
 
 
+@pytest.fixture(autouse=True)
+def _mock_manual_readiness_gate():
+    """管理 API 单测不访问真实 Docker/HTTP；探活细节由专门用例覆盖。"""
+    with patch(
+        "app.contexts.lab.service.LabService._probe_lab_ready",
+        new_callable=AsyncMock,
+        return_value=(True, ""),
+    ), patch(
+        "app.contexts.lab.service.LabService._refresh_target_url_from_runtime",
+        new_callable=AsyncMock,
+        return_value=(True, ""),
+    ):
+        yield
+
+
 async def seed(session, *, task_id="t1", status="running"):
     from app.contexts.identity.models import User
     from app.contexts.project.models import Project
@@ -210,6 +225,44 @@ async def test_get_detail_does_not_refresh_ttl_while_creating(session):
 
 
 @pytest.mark.asyncio
+async def test_management_payload_matches_response_contract(session):
+    """docker_ops 的容器 dict 带内部字段 state，响应模型 extra=forbid——
+    组装结果必须能直接通过契约模型校验（曾致 GET /labs 全 400/500）。"""
+    from app.contexts.lab.schemas import LabListResponse, LabResponse
+    from app.contexts.lab.service import LabService
+
+    svc, result, _task = await ready_lab(session)
+    docker_containers = [
+        {
+            "name": "web-1",
+            "state": "running",
+            "status": "Up 2 hours",
+            "ports": "0.0.0.0:3001->80/tcp",
+            "image": "nginx:alpine",
+        },
+    ]
+
+    with patch(
+        "app.contexts.lab.docker_ops.list_containers",
+        new_callable=AsyncMock,
+        return_value=docker_containers,
+    ):
+        grouped = await svc.list_grouped("u1")
+        detail = await svc.get_detail(result.lab_id, owner_id="u1")
+
+    LabListResponse(items=grouped)
+    LabResponse(**detail)
+    assert detail["containers"] == [
+        {
+            "name": "web-1",
+            "status": "Up 2 hours",
+            "ports": "0.0.0.0:3001->80/tcp",
+            "image": "nginx:alpine",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_destroy_creating_lab_without_live_task(session):
     from app.contexts.lab.models import Lab
 
@@ -227,6 +280,8 @@ async def test_destroy_creating_lab_without_live_task(session):
     assert status == "destroyed"
     down.assert_awaited_once_with(result.compose_project)
     assert (await session.get(Lab, result.lab_id)).status == "destroyed"
+    await session.refresh(task)
+    assert task.lab_id is None
 
 
 @pytest.mark.asyncio
@@ -644,23 +699,28 @@ async def test_list_grouped_by_project(session):
     assert grouped[0]["project_name"] == "demo"
     assert grouped[0]["labs"][0]["id"] == result.lab_id
     assert grouped[0]["labs"][0]["status"] == "ready"
-    assert grouped[0]["labs"][0]["containers"] == running
+    # state 是 docker_ops 的内部字段，不进响应（契约只暴露 4 个字段）
+    assert grouped[0]["labs"][0]["containers"] == [
+        {"name": "web", "status": "running", "ports": "", "image": "x"}
+    ]
     assert grouped[0]["labs"][0]["live_task_count"] >= 1
-    assert 3580 <= grouped[0]["labs"][0]["ttl_remaining_seconds"] <= 3590
+    # live 占用中 TTL 未起算，对外显示满额
+    assert grouped[0]["labs"][0]["ttl_remaining_seconds"] == 3600
 
 
 @pytest.mark.parametrize(
     ("db_status", "runtime", "live", "expected"),
     [
-        ("expired", "running", 0, "ready"),
-        ("expired", "running", 1, "ready"),
-        ("stopped", "running", 0, "ready"),
+        ("expired", "running", 0, None),
+        ("expired", "running", 1, None),
+        ("stopped", "running", 0, None),
         ("ready", "exited", 0, "stopped"),
+        ("ready", "partial", 0, "stopped"),
         ("ready", "none", 0, "expired"),
         ("stopped", "none", 0, "expired"),
         ("expired", "exited", 0, "stopped"),
         ("ready", "none", 1, None),
-        ("ready", "exited", 1, None),
+        ("ready", "exited", 1, "stopped"),
         ("creating", "running", 1, None),
         ("rebuilding", "running", 0, None),
         ("failed", "running", 0, None),
@@ -691,10 +751,25 @@ def test_container_runtime_kind_prefers_docker_state():
         == "exited"
     )
     assert container_runtime_kind([]) == "none"
+    assert (
+        container_runtime_kind(
+            [{"name": "web", "state": "restarting", "status": "Restarting (1)"}]
+        )
+        == "partial"
+    )
+    assert (
+        container_runtime_kind(
+            [
+                {"name": "db", "state": "running", "status": "Up 2 minutes"},
+                {"name": "web", "state": "exited", "status": "Exited (1)"},
+            ]
+        )
+        == "partial"
+    )
 
 
 @pytest.mark.asyncio
-async def test_list_grouped_promotes_expired_when_containers_running(session):
+async def test_list_grouped_does_not_promote_expired_without_http_probe(session):
     from app.contexts.lab.models import Lab
 
     svc, result, task = await ready_lab(session)
@@ -719,9 +794,9 @@ async def test_list_grouped_promotes_expired_when_containers_running(session):
     ):
         grouped = await svc.list_grouped("u1")
 
-    assert grouped[0]["labs"][0]["status"] == "ready"
+    assert grouped[0]["labs"][0]["status"] == "expired"
     await session.refresh(lab)
-    assert lab.status == "ready"
+    assert lab.status == "expired"
 
 
 @pytest.mark.asyncio
@@ -762,6 +837,39 @@ async def test_container_start_promotes_stopped_lab_to_ready(session):
 
 
 @pytest.mark.asyncio
+async def test_container_rm_never_leaves_lab_ready_when_other_service_runs(session):
+    from app.contexts.lab.models import Lab
+
+    svc, result, task = await ready_lab(session)
+    task.status = "completed"
+    lab = await session.get(Lab, result.lab_id)
+    await session.commit()
+
+    with patch(
+        "app.contexts.lab.docker_ops.container_rm", new_callable=AsyncMock
+    ), patch(
+        "app.contexts.lab.docker_ops.list_containers",
+        new_callable=AsyncMock,
+        return_value=[
+            {
+                "name": "db",
+                "status": "Up 2 minutes",
+                "state": "running",
+                "ports": "",
+                "image": "db",
+            }
+        ],
+    ):
+        status = await svc.container_action(
+            result.lab_id, "web", action="rm", owner_id="u1"
+        )
+
+    assert status == "stopped"
+    await session.refresh(lab)
+    assert lab.status == "stopped"
+
+
+@pytest.mark.asyncio
 async def test_start_lab_starts_exited_containers_when_db_says_expired(session):
     from app.contexts.lab.models import Lab
 
@@ -795,6 +903,49 @@ async def test_start_lab_starts_exited_containers_when_db_says_expired(session):
     start.assert_awaited_once_with(result.compose_project)
     await session.refresh(lab)
     assert lab.status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_start_lab_probe_failure_rolls_back_to_stopped(session):
+    from app.contexts.lab.models import Lab
+
+    svc, result, task = await ready_lab(session)
+    task.status = "completed"
+    lab = await session.get(Lab, result.lab_id)
+    lab.status = "stopped"
+    await session.commit()
+
+    with patch(
+        "app.contexts.lab.docker_ops.list_containers",
+        new_callable=AsyncMock,
+        return_value=[
+            {
+                "name": "web",
+                "state": "exited",
+                "status": "Exited (1)",
+                "ports": "",
+                "image": "x",
+            }
+        ],
+    ), patch(
+        "app.contexts.lab.docker_ops.compose_start",
+        new_callable=AsyncMock,
+        return_value=True,
+    ) as start, patch(
+        "app.contexts.lab.docker_ops.compose_stop", new_callable=AsyncMock
+    ) as stop, patch(
+        "app.contexts.lab.service.LabService._probe_lab_ready",
+        new_callable=AsyncMock,
+        return_value=(False, "HTTP 503"),
+    ):
+        with pytest.raises(RuntimeError, match="探活失败"):
+            await svc.start_lab(result.lab_id, owner_id="u1")
+
+    start.assert_awaited_once_with(result.compose_project)
+    stop.assert_awaited_once_with(result.compose_project)
+    await session.refresh(lab)
+    assert lab.status == "stopped"
+    assert "HTTP 503" in (lab.error_message or "")
 
 
 @pytest.mark.asyncio
@@ -1021,7 +1172,7 @@ async def test_docker_container_listing_and_membership():
         list_containers,
     )
 
-    output = "web\tUp 2 minutes\t0.0.0.0:3001->3000/tcp\tnginx:latest\n"
+    output = "web\trunning\tUp 2 minutes\t0.0.0.0:3001->3000/tcp\tnginx:latest\n"
     completed = MagicMock(returncode=0, stdout=output, stderr="")
     with patch("app.contexts.lab.docker_ops.subprocess.run", return_value=completed):
         containers = await list_containers("crucible-lab-abc")
@@ -1030,10 +1181,46 @@ async def test_docker_container_listing_and_membership():
     assert containers == [
         {
             "name": "web",
+            "state": "running",
             "status": "Up 2 minutes",
             "ports": "0.0.0.0:3001->3000/tcp",
             "image": "nginx:latest",
         }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_docker_published_ports_come_from_runtime_inspect():
+    from app.contexts.lab.docker_ops import list_published_ports
+
+    listed = MagicMock(returncode=0, stdout="abc123\n", stderr="")
+    inspected = MagicMock(
+        returncode=0,
+        stdout=(
+            '{"3000/tcp":[{"HostIp":"0.0.0.0","HostPort":"49153"}],'
+            '"8125/udp":[{"HostIp":"127.0.0.1","HostPort":"38125"}]}\n'
+        ),
+        stderr="",
+    )
+    with patch(
+        "app.contexts.lab.docker_ops.subprocess.run",
+        side_effect=[listed, inspected],
+    ):
+        bindings = await list_published_ports("crucible-lab-abc")
+
+    assert bindings == [
+        {
+            "host_ip": "0.0.0.0",
+            "host_port": 49153,
+            "container_port": 3000,
+            "protocol": "tcp",
+        },
+        {
+            "host_ip": "127.0.0.1",
+            "host_port": 38125,
+            "container_port": 8125,
+            "protocol": "udp",
+        },
     ]
 
 
@@ -1085,3 +1272,23 @@ def test_lab_router_busy_returns_409():
     assert body["error"]["code"] == "LAB_IN_USE"
     assert body["error"]["message"] == "靶场正被运行中的任务占用"
     assert body["error"]["details"]["task_ids"] == ["t1"]
+
+
+@pytest.mark.asyncio
+async def test_execute_maps_docker_failure_to_503():
+    """docker/compose 命令失败（CalledProcessError）必须映射为 503，而非裸 500。"""
+    import subprocess
+
+    from fastapi import HTTPException
+
+    from app.contexts.lab.api import _execute
+
+    async def boom():
+        raise subprocess.CalledProcessError(
+            1, ["docker", "compose", "down"], stderr="no such network"
+        )
+
+    with pytest.raises(HTTPException) as excinfo:
+        await _execute(boom())
+    assert excinfo.value.status_code == 503
+    assert "靶场基础设施操作失败" in str(excinfo.value.detail)

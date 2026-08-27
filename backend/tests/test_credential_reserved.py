@@ -17,7 +17,15 @@ def _cred(target: str, kind: str = "env_var") -> SimpleNamespace:
 
 @pytest.mark.parametrize(
     "target",
-    ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "HOME", "PATH", "NODE_KEY"],
+    [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "HOME",
+        "PATH",
+        "BASH_ENV",
+        "NODE_KEY",
+    ],
 )
 def test_create_request_rejects_reserved_env(target):
     from app.contexts.settings.schemas import CredentialCreateRequest

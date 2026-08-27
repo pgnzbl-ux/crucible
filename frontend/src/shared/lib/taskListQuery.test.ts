@@ -22,6 +22,7 @@ describe('buildTaskListApiParams', () => {
       buildTaskListApiParams({
         status: 'pending,queued',
         priority: 'high',
+        taskType: 'discovery',
         q: 'github.com',
         dateFrom: '2026-08-01',
         dateTo: '2026-08-13',
@@ -33,6 +34,7 @@ describe('buildTaskListApiParams', () => {
       offset: '20',
       status: 'pending,queued',
       priority: 'high',
+      task_type: 'discovery',
       q: 'github.com',
       date_from: '2026-08-01',
       date_to: '2026-08-13',

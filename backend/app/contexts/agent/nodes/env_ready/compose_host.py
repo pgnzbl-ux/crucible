@@ -2,39 +2,53 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
-import subprocess
 import re
+import subprocess
 import threading
 import time
 from collections.abc import Callable
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 COMPOSE_PROGRESS_INTERVAL = 2.0
 COMPOSE_PROGRESS_MAX = 220
 COMPOSE_UP_TIMEOUT = 600
+COMPOSE_WAIT_TIMEOUT = 300
+# 同一诊断指纹累计达此次数 → 中止 compose，回喂下一轮（避免空转到硬超时）
+COMPOSE_DIAG_REPEAT_ABORT = 40
 _COMPOSE_URGENT = re.compile(r"error|failed|fatal|exception", re.I)
 _COMPOSE_DIAG = re.compile(
     r"(?i)(\[error\]|error:|failed to solve|could not transfer|"
     r"dependencyresolution|npm err!|no such file|copy |"
     r"failed to execute|premature end|etimedout|econnreset|"
     r"address already in use|permission denied|security policy|"
-    r"failed to)"
+    r"failed to|fatal|traceback|connection refused|unhealthy|"
+    r"healthcheck|exited \([1-9][0-9]*\)|oomkilled)"
 )
 _COMPOSE_DIAG_NOISE = re.compile(
     r"(?i)to see the full stack trace|re-run maven|"
     r"for more information about the errors|"
     r"\[help 1\]|enable full debug logging"
 )
+_BUILD_STEP_TS = re.compile(r"^#\d+\s+[\d.]+\s+")
+_ISO_TS = re.compile(r"\d{4}-\d{2}-\d{2}T[\d:.+-]+")
+
 
 def compose_progress_text(line: str, limit: int = COMPOSE_PROGRESS_MAX) -> str | None:
     text = " ".join((line or "").split())
     if not text:
         return None
     return text[:limit]
+
+
+def progress_fingerprint(text: str) -> str:
+    """抹掉 BuildKit 步进秒数 / ISO 时间，得到可去重的稳定指纹。"""
+    normalized = _BUILD_STEP_TS.sub("#N ", text or "")
+    normalized = _ISO_TS.sub("<ts>", normalized)
+    return normalized[:180]
 
 
 def summarize_compose_failure(text: str, *, limit: int = 1600) -> str:
@@ -58,7 +72,11 @@ def summarize_compose_failure(text: str, *, limit: int = 1600) -> str:
 
 
 class ComposeProgressThrottle:
-    """把 docker compose 的刷屏日志收成可落库的进度句。"""
+    """把 docker compose 的刷屏日志收成可落库的进度句。
+
+    urgent（含 error 等）只对**新指纹**立即放行；与上次已 emit 相同的
+    诊断行仍走普通节流，避免同类错误打爆 UI。
+    """
 
     def __init__(
         self,
@@ -68,6 +86,7 @@ class ComposeProgressThrottle:
         self._emit = emit
         self.min_interval = min_interval
         self._last = 0.0
+        self._last_fp: str | None = None
         self._pending: str | None = None
 
     def push(self, line: str) -> None:
@@ -75,10 +94,13 @@ class ComposeProgressThrottle:
         if not text:
             return
         now = time.monotonic()
-        urgent = bool(_COMPOSE_URGENT.search(text))
+        fp = progress_fingerprint(text)
+        same_as_last = self._last_fp is not None and fp == self._last_fp
+        urgent = bool(_COMPOSE_URGENT.search(text)) and not same_as_last
         first = self._last == 0.0
         if first or urgent or (now - self._last) >= self.min_interval:
             self._last = now
+            self._last_fp = fp
             self._pending = None
             self._emit(text)
         else:
@@ -88,6 +110,36 @@ class ComposeProgressThrottle:
         if self._pending:
             self._emit(self._pending)
             self._pending = None
+
+
+class ComposeDiagStallGuard:
+    """同类诊断日志反复出现时要求中止 compose。"""
+
+    def __init__(self, limit: int = COMPOSE_DIAG_REPEAT_ABORT) -> None:
+        self.limit = max(1, int(limit))
+        self._counts: dict[str, int] = {}
+        self._samples: dict[str, str] = {}
+
+    def observe(self, line: str) -> str | None:
+        """若应中止，返回给下一轮 AI 的失败摘要；否则 None。"""
+        text = compose_progress_text(line)
+        if not text:
+            return None
+        if not (_COMPOSE_URGENT.search(text) or _COMPOSE_DIAG.search(text)):
+            return None
+        if _COMPOSE_DIAG_NOISE.search(text):
+            return None
+        fp = progress_fingerprint(text)
+        self._counts[fp] = self._counts.get(fp, 0) + 1
+        self._samples.setdefault(fp, text)
+        if self._counts[fp] < self.limit:
+            return None
+        sample = self._samples[fp]
+        return (
+            "docker compose 同类错误反复刷屏，已中止等待:\n"
+            f"{sample}\n"
+            "failed to build / repeating diagnostic logs"
+        )
 
 
 def resolve_compose_host_path(
@@ -122,10 +174,47 @@ def resolve_compose_host_path(
 
 def is_docker_unavailable(err: str) -> bool:
     """docker 守护进程连不上或 docker 命令根本不存在，与配方构建失败区分。"""
-    text = err or ""
-    if "Cannot connect to the Docker daemon" in text:
-        return True
-    return "docker compose 异常:" in text
+    text = (err or "").lower()
+    platform_markers = (
+        "cannot connect to the docker daemon",
+        "is the docker daemon running",
+        "error during connect",
+        "permission denied while trying to connect to the docker api",
+        "permission denied while trying to connect to the docker daemon",
+        "docker.sock: connect: permission denied",
+        "no such file or directory: 'docker'",
+        "docker compose 异常:",
+    )
+    return any(marker in text for marker in platform_markers)
+
+
+def classify_compose_failure_stage(err: str) -> str:
+    """把 compose 的失败分成 AI 能采取不同动作的阶段。"""
+    text = (err or "").lower()
+    if is_docker_unavailable(err):
+        return "docker_unavailable"
+    if "安全策略拒绝" in err or "security policy" in text:
+        return "compose_policy"
+    if "address already in use" in text or "port in use" in text:
+        return "port_conflict"
+    if "unhealthy" in text or "healthcheck" in text or "health check" in text:
+        return "container_healthcheck"
+    if "超时" in err or "timeout" in text or "timed out" in text:
+        return "compose_timeout"
+    build_markers = (
+        "failed to solve",
+        "failed to build",
+        "build fail",
+        "build failed",
+        "could not transfer",
+        "dependencyresolution",
+        "npm err!",
+        "copy ",
+        "dockerfile",
+    )
+    if any(marker in text for marker in build_markers):
+        return "compose_build"
+    return "container_start"
 
 
 def _compose_project_args(lab_id: str | None) -> list[str]:
@@ -199,11 +288,12 @@ async def docker_compose_up(
         "--progress", "plain",
         *_compose_project_args(_compose_ident(lab_id=lab_id, task_id=task_id)),
         "-f", abs_path, "up", "-d", "--build",
+        "--wait", "--wait-timeout", str(COMPOSE_WAIT_TIMEOUT),
     ]
 
-    def _run() -> tuple[int, str, bool]:
-        env = os.environ.copy()
-        env.setdefault("BUILDKIT_PROGRESS", "plain")
+    def _run() -> tuple[int, str, bool, str | None]:
+        from app.contexts.lab.compose_policy import compose_subprocess_env
+
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -212,7 +302,7 @@ async def docker_compose_up(
             encoding="utf-8",
             errors="replace",
             bufsize=1,
-            env=env,
+            env=compose_subprocess_env(),
         )
 
         def _forward(text: str) -> None:
@@ -221,8 +311,10 @@ async def docker_compose_up(
                 on_progress(text)
 
         throttle = ComposeProgressThrottle(_forward)
+        stall = ComposeDiagStallGuard(limit=COMPOSE_DIAG_REPEAT_ABORT)
         chunks: list[str] = []
         timed_out = False
+        stall_err: str | None = None
 
         def _kill() -> None:
             nonlocal timed_out
@@ -237,14 +329,20 @@ async def docker_compose_up(
                 for line in proc.stdout:
                     chunks.append(line)
                     throttle.push(line)
+                    stall_err = stall.observe(line)
+                    if stall_err:
+                        proc.kill()
+                        break
             rc = proc.wait()
         finally:
             timer.cancel()
             throttle.flush()
-        return rc, "".join(chunks), timed_out
+        return rc, "".join(chunks), timed_out, stall_err
 
     try:
-        rc, out, timed_out = await asyncio.to_thread(_run)
+        rc, out, timed_out, stall_err = await asyncio.to_thread(_run)
+        if stall_err:
+            return False, stall_err
         if timed_out:
             return False, f"docker compose up 超时(>{COMPOSE_UP_TIMEOUT}s)"
         if rc == 0:
@@ -262,23 +360,105 @@ async def collect_compose_logs(
     lab_id: str | None = None,
     task_id: str | None = None,
 ) -> str:
-    """收 docker compose logs 给下轮 AI 排障。"""
+    """收服务日志和容器状态给下轮 AI 排障。
+
+    先截前 2000 字符会按服务排序误丢 Web 容器根因；这里保留完整的
+    ``--tail`` 输出交给 ``summarize_compose_failure`` 扫描，并补充 Docker
+    healthcheck 最近输出、退出码和 OOM 状态。
+    """
     p_args = _compose_project_args(_compose_ident(lab_id=lab_id, task_id=task_id))
     cmd = ["docker", "compose", *p_args, "logs", "--tail=50"]
+    ps_cmd = ["docker", "compose", *p_args, "ps", "-a", "-q"]
     cwd = host_workdir
     if compose_path:
         abs_path = resolve_compose_host_path(compose_path, host_workdir, repo_dirname)
         cmd = ["docker", "compose", *p_args, "-f", abs_path.replace("\\", "/"), "logs", "--tail=50"]
+        ps_cmd = [
+            "docker", "compose", *p_args, "-f", abs_path.replace("\\", "/"),
+            "ps", "-a", "-q",
+        ]
         cwd = None
-    try:
-        result = await asyncio.to_thread(
-            subprocess.run,
+
+    def _collect() -> str:
+        sections: list[str] = []
+        result = subprocess.run(
             cmd,
-            cwd=cwd, capture_output=True, text=True, timeout=30,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
-        return (result.stdout or result.stderr)[:2000]
+        raw_logs = "\n".join(
+            part.strip() for part in (result.stdout, result.stderr) if part and part.strip()
+        )
+        if raw_logs:
+            sections.append(raw_logs)
+
+        ps_result = subprocess.run(
+            ps_cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        ids = [line.strip() for line in (ps_result.stdout or "").splitlines() if line.strip()]
+        if ids:
+            inspect_result = subprocess.run(
+                ["docker", "inspect", *ids],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            states = _summarize_container_states(inspect_result.stdout or "")
+            if states:
+                sections.append(f"--- container states ---\n{states}")
+        return "\n".join(sections)
+
+    try:
+        return await asyncio.to_thread(_collect)
     except Exception:  # noqa: BLE001
         return ""
+
+
+def _summarize_container_states(raw: str) -> str:
+    """从 docker inspect 中仅提取运行/健康诊断，不回传环境变量。"""
+    try:
+        documents = json.loads(raw or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(documents, list):
+        return ""
+
+    lines: list[str] = []
+    for item in documents:
+        if not isinstance(item, dict):
+            continue
+        state = item.get("State") if isinstance(item.get("State"), dict) else {}
+        config = item.get("Config") if isinstance(item.get("Config"), dict) else {}
+        labels = config.get("Labels") if isinstance(config.get("Labels"), dict) else {}
+        name = str(item.get("Name") or "").lstrip("/")
+        service = str(labels.get("com.docker.compose.service") or name or "unknown")
+        status = str(state.get("Status") or "unknown")
+        exit_code = state.get("ExitCode")
+        oom = bool(state.get("OOMKilled", False))
+        state_error = " ".join(str(state.get("Error") or "").split())[:300]
+        summary = f"{service}: status={status} exit={exit_code} oom_killed={str(oom).lower()}"
+        if state_error:
+            summary += f" error={state_error}"
+        health = state.get("Health") if isinstance(state.get("Health"), dict) else {}
+        health_status = str(health.get("Status") or "")
+        if health_status:
+            summary += f" health={health_status}"
+        lines.append(summary)
+        health_logs = health.get("Log") if isinstance(health.get("Log"), list) else []
+        for entry in health_logs[-3:]:
+            if not isinstance(entry, dict):
+                continue
+            output = " ".join(str(entry.get("Output") or "").split())[:600]
+            code = entry.get("ExitCode")
+            if output or code not in (None, 0):
+                lines.append(f"{service} healthcheck: exit={code} output={output or '(empty)'}")
+    return "\n".join(lines)
 
 
 async def docker_compose_down(
@@ -322,73 +502,3 @@ async def docker_compose_down(
             )
         except Exception:  # noqa: BLE001
             logger.warning("docker compose down 失败(best-effort)", exc_info=True)
-
-async def up_with_logs(
-    compose_rel: str,
-    host_workdir: str,
-    repo_dirname: str | None,
-    *,
-    lab_id: str | None,
-    on_progress=None,
-) -> tuple[bool, str]:
-    """执行 compose up；失败时附带 logs 摘要。不 down——由调用方决定。"""
-    ok, err = await docker_compose_up(
-        compose_rel,
-        host_workdir,
-        repo_dirname,
-        lab_id=lab_id,
-        on_progress=on_progress,
-    )
-    if ok:
-        return True, ""
-    logs = await collect_compose_logs(
-        host_workdir, compose_rel, repo_dirname, lab_id=lab_id
-    )
-    detail = (
-        f"compose up 失败: {err}" + "\n--- logs ---\n" + summarize_compose_failure(logs)
-    )
-    return False, detail
-
-
-async def fail_and_down(
-    host_workdir: str,
-    compose_rel: str,
-    repo_dirname: str | None,
-    *,
-    lab_id: str | None,
-    detail: str,
-) -> str:
-    """best-effort down，原样返回 detail。"""
-    await docker_compose_down(
-        host_workdir, compose_rel, repo_dirname, lab_id=lab_id
-    )
-    return detail
-
-
-async def probe_mapped_ports(
-    web_ports: list[int],
-    *,
-    container_ports: list[int] | None = None,
-    host_workdir: str,
-    compose_rel: str,
-    repo_dirname: str | None,
-    lab_id: str | None,
-) -> tuple[bool, int | None, str, str]:
-    """探活映射口。失败带 logs；成功返回 live_port/scheme。"""
-    from . import health as health_mod
-
-    ok, live_port, scheme = await health_mod.health_check(
-        web_ports, container_ports=container_ports
-    )
-    if ok and live_port is not None:
-        return True, live_port, scheme, ""
-    logs = await collect_compose_logs(
-        host_workdir, compose_rel, repo_dirname, lab_id=lab_id
-    )
-    fail = health_mod._health_fail_detail()
-    detail = (
-        f"健康检查不过(mapped_ports={web_ports})" + "\n" + fail + "\n--- logs ---\n"
-        + summarize_compose_failure(logs)
-    )
-    return False, None, "http", detail
-

@@ -1,0 +1,32 @@
+rules:
+  - id: jsp-scriptlet-taint
+    languages:
+      - regex
+    severity: ERROR
+    message: >-
+      JSP scriptlet reads request.getParameter and passes it to SQL execute,
+      out.print, or Runtime.exec in the same scriptlet. Prefer JSTL/EL with
+      escaping, prepared statements, and avoid scriptlets for request handling.
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+        - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+      owasp:
+        - A01:2017 - Injection
+        - A03:2021 - Injection
+      category: security
+      technology:
+        - jsp
+        - java
+      subcategory:
+        - vuln
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      crucible-overlay: true
+    paths:
+      include:
+        - "*.jsp"
+    pattern-either:
+      - pattern-regex: <%[^%]*getParameter\([^%]*(?:\.execute(?:Query|Update)?\(|out\.print(?:ln)?\(|Runtime\.getRuntime\(\)\.exec\()[^%]*%>

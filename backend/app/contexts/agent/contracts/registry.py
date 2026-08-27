@@ -1,7 +1,14 @@
-"""节点拓扑声明 — 换列表即可换驱动，不改节点实现。"""
+"""节点拓扑声明 — 能力 catalog + 按任务模式裁剪的子图。
+
+权威契约：docs/discovery-spec.md。
+- 仓库审计(task_type=discovery)：发现链 + dispatch → env_ready → lead_verify → finalize；
+  report 为 async_consumer 后处理（不挡任务权威终态）。
+- 漏洞验证(task_type=verify)：source/profile/env_ready/audit/reproduce/finalize；
+  report 同样为后处理文档消费者。
+"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 
@@ -9,6 +16,8 @@ class SkipWhen(StrEnum):
     NON_WEB = "non_web"
     GATE_FAIL = "gate_fail"
     GATE_UNCERTAIN = "gate_uncertain"
+    VERIFY_MODE = "verify_mode"
+    NO_DISPATCH_LEAD = "no_dispatch_lead"
 
 
 @dataclass(frozen=True)
@@ -18,46 +27,240 @@ class NodeSpec:
     requires: tuple[str, ...]
     produces: str
     skip_when: frozenset[SkipWhen] = frozenset()
+    # 数据前提(discovery-spec §4.2.2)：点分路径非空才就绪；缺失时按 on_missing_data 处理
+    require_data: tuple[str, ...] = ()
+    on_missing_data: str = "skip"  # skip | fail
+    # 被某信号 skip 时顺带定稿的 verdict（如 reproduce 被 GATE_FAIL skip → false_positive）。
+    # 键为 SkipWhen 的 value（"gate_fail" 等）；编排器 skip 分支统一应用，不再手写 helper。
+    skip_verdict: dict[str, str] = field(default_factory=dict)
+    # 断点续跑时校验工作区仍在（源码目录被清则降级 pending 重拉）
+    requires_workspace: bool = False
+    # 完成后把 output.project_path 发布为整条编排链的 source_path
+    updates_source_path: bool = False
+    # 失败收尾策略：fail(默认) | preserve_audit_verdict(报告失败保留审计结论)
+    failure_policy: str = "fail"
+    # 分析后处理：不阻塞任务权威终态；finalize 固化后即可对用户显示完成
+    async_consumer: bool = False
+
+
+# verify 子图专用终认节点（discovery 不实例化；终认走 lead_verify → LeadNodeRun）
+_VERIFY_AUDIT = NodeSpec(
+    key="audit", index=12, requires=("source", "profile"), produces="audit",
+)
+_VERIFY_REPRODUCE = NodeSpec(
+    key="reproduce",
+    index=13,
+    requires=("source", "env_ready", "audit"),
+    produces="reproduce",
+    skip_when=frozenset({
+        SkipWhen.NON_WEB, SkipWhen.GATE_FAIL, SkipWhen.GATE_UNCERTAIN,
+    }),
+    skip_verdict={"gate_fail": "false_positive"},
+)
 
 
 DEFAULT_PIPELINE: tuple[NodeSpec, ...] = (
-    NodeSpec(key="source", index=0, requires=(), produces="source"),
+    NodeSpec(
+        key="source", index=0, requires=(), produces="source",
+        requires_workspace=True, updates_source_path=True,
+    ),
     NodeSpec(key="profile", index=1, requires=("source",), produces="profile"),
     NodeSpec(
-        key="env_ready",
+        key="scan_gitleaks",
         index=2,
-        requires=("source", "profile"),
-        produces="env_ready",
-        skip_when=frozenset({SkipWhen.NON_WEB}),
+        requires=("source",),
+        produces="scan_gitleaks",
+        skip_when=frozenset({SkipWhen.VERIFY_MODE}),
     ),
     NodeSpec(
-        key="audit",
+        key="scan_osv",
         index=3,
-        requires=("source", "profile"),
-        produces="audit",
-        skip_when=frozenset({SkipWhen.NON_WEB}),
+        requires=("source",),
+        produces="scan_osv",
+        skip_when=frozenset({SkipWhen.VERIFY_MODE}),
     ),
     NodeSpec(
-        key="reproduce",
+        key="scan_semgrep",
         index=4,
-        requires=("source", "env_ready", "audit"),
-        produces="reproduce",
-        skip_when=frozenset({SkipWhen.NON_WEB, SkipWhen.GATE_FAIL, SkipWhen.GATE_UNCERTAIN}),
+        requires=("source", "profile"),
+        produces="scan_semgrep",
+        skip_when=frozenset({SkipWhen.VERIFY_MODE}),
+        require_data=("profile.semgrep_configs",),
+        on_missing_data="skip",
+    ),
+    NodeSpec(
+        key="api_inventory",
+        index=5,
+        requires=("source", "profile"),
+        produces="api_inventory",
+        skip_when=frozenset({SkipWhen.VERIFY_MODE}),
+    ),
+    NodeSpec(
+        key="env_ready",
+        index=6,
+        requires=("source", "profile", "dispatch"),
+        produces="env_ready",
+        skip_when=frozenset({SkipWhen.NON_WEB, SkipWhen.NO_DISPATCH_LEAD}),
+    ),
+    NodeSpec(
+        key="cluster",
+        index=7,
+        requires=("scan_semgrep", "scan_gitleaks", "scan_osv", "api_hunt"),
+        produces="cluster",
+        skip_when=frozenset({SkipWhen.VERIFY_MODE}),
+    ),
+    NodeSpec(
+        key="api_hunt",
+        index=8,
+        requires=("api_inventory",),
+        produces="api_hunt",
+        skip_when=frozenset({SkipWhen.VERIFY_MODE}),
+    ),
+    NodeSpec(
+        key="screen",
+        index=9,
+        requires=("cluster",),
+        produces="screen",
+        skip_when=frozenset({SkipWhen.VERIFY_MODE}),
+    ),
+    NodeSpec(
+        key="triage",
+        index=10,
+        requires=("screen",),
+        produces="triage",
+        skip_when=frozenset({SkipWhen.VERIFY_MODE}),
+    ),
+    NodeSpec(
+        key="dispatch",
+        index=11,
+        requires=("triage",),
+        produces="dispatch",
+        skip_when=frozenset({SkipWhen.VERIFY_MODE}),
+    ),
+    # discovery 显式终认工位：排空 Lead 队列（per-lead audit/reproduce → LeadNodeRun）；
+    # 无线索时 NO_DISPATCH_LEAD skip
+    NodeSpec(
+        key="lead_verify",
+        index=14,
+        requires=("dispatch", "env_ready"),
+        produces="lead_verify",
+        skip_when=frozenset({SkipWhen.NO_DISPATCH_LEAD}),
+    ),
+    NodeSpec(
+        key="finalize",
+        index=15,
+        requires=("profile", "env_ready", "lead_verify"),
+        produces="finalize",
     ),
     NodeSpec(
         key="report",
-        index=5,
-        requires=("profile", "env_ready", "audit", "reproduce"),
+        index=16,
+        requires=("finalize",),
         produces="report",
-        skip_when=frozenset({SkipWhen.NON_WEB}),
+        # 文档失败不推翻 finalize 已固化的权威结论；后处理不挡任务终态
+        failure_policy="preserve_audit_verdict",
+        async_consumer=True,
     ),
 )
 
 NODE_BY_KEY: dict[str, NodeSpec] = {spec.key: spec for spec in DEFAULT_PIPELINE}
+# verify 终认能力也进 catalog，供 node_by_key / 执行器注册查找
+NODE_BY_KEY["audit"] = _VERIFY_AUDIT
+NODE_BY_KEY["reproduce"] = _VERIFY_REPRODUCE
+
+# verify 保留 catalog index，但依赖只指向子图内节点。NodeRun 因此仍可
+# 与历史数据/前端能力编号稳定对齐，同时不再产生九个伪 skip 行。
+VERIFY_PIPELINE: tuple[NodeSpec, ...] = (
+    NODE_BY_KEY["source"],
+    NODE_BY_KEY["profile"],
+    NodeSpec(
+        key="env_ready", index=6, requires=("source", "profile"),
+        produces="env_ready", skip_when=frozenset({SkipWhen.NON_WEB}),
+    ),
+    _VERIFY_AUDIT,
+    _VERIFY_REPRODUCE,
+    NodeSpec(
+        key="finalize", index=15,
+        requires=("profile", "env_ready", "audit", "reproduce"),
+        produces="finalize",
+    ),
+    NodeSpec(
+        key="report", index=16,
+        requires=("finalize", "profile", "env_ready", "audit", "reproduce"),
+        produces="report",
+        failure_policy="preserve_audit_verdict",
+        async_consumer=True,
+    ),
+)
 
 
-def node_by_key(key: str) -> NodeSpec:
+def pipeline_for(task_type: str | None) -> tuple[NodeSpec, ...]:
+    """返回任务真正执行的子图；None 仅兼容历史 verify 记录。"""
+    if task_type == "discovery":
+        return DEFAULT_PIPELINE
+    if task_type in (None, "verify"):
+        return VERIFY_PIPELINE
+    raise ValueError(f"未知任务类型: {task_type}")
+
+
+def ancestor_keys(pipeline: tuple[NodeSpec, ...], key: str) -> set[str]:
+    """返回 key 的全部递归前置（不含自身）。"""
+    by_key = {spec.key: spec for spec in pipeline}
+    if key not in by_key:
+        raise KeyError(f"未知子图节点: {key}")
+    found: set[str] = set()
+    stack = list(by_key[key].requires)
+    while stack:
+        current = stack.pop()
+        if current in found:
+            continue
+        found.add(current)
+        stack.extend(by_key[current].requires)
+    return found
+
+
+def descendant_keys(pipeline: tuple[NodeSpec, ...], key: str) -> set[str]:
+    """返回从 key 开始必须失效的节点（含自身）。"""
+    keys = {spec.key for spec in pipeline}
+    if key not in keys:
+        raise KeyError(f"未知子图节点: {key}")
+    found = {key}
+    changed = True
+    while changed:
+        changed = False
+        for spec in pipeline:
+            if spec.key not in found and any(dep in found for dep in spec.requires):
+                found.add(spec.key)
+                changed = True
+    return found
+
+
+def node_by_key(key: str, *, task_type: str | None = None) -> NodeSpec:
     try:
-        return NODE_BY_KEY[key]
+        if task_type is None:
+            return NODE_BY_KEY[key]
+        return {spec.key: spec for spec in pipeline_for(task_type)}[key]
     except KeyError as e:
         raise KeyError(f"未知节点: {key}") from e
+
+
+def validate_pipeline(pipeline: tuple[NodeSpec, ...] = DEFAULT_PIPELINE) -> None:
+    """拓扑自检：requires 引用存在的节点、无环、索引唯一且递增。"""
+    keys = [s.key for s in pipeline]
+    assert len(keys) == len(set(keys)), "节点 key 重复"
+    indexes = [s.index for s in pipeline]
+    assert indexes == sorted(set(indexes)), "node_index 必须唯一且递增"
+    pipeline_keys = set(keys)
+    for spec in pipeline:
+        for dep in spec.requires:
+            assert dep in pipeline_keys, f"{spec.key} 依赖子图外节点 {dep}"
+    # 无环(Kahn)
+    pending = {s.key: set(s.requires) for s in pipeline}
+    resolved: set[str] = set()
+    while pending:
+        ready = [k for k, deps in pending.items() if deps <= resolved]
+        if not ready:
+            raise AssertionError(f"pipeline 存在环: {sorted(pending)}")
+        for k in ready:
+            pending.pop(k)
+            resolved.add(k)

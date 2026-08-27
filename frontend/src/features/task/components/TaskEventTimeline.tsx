@@ -1,26 +1,51 @@
 import { memo, useEffect, useMemo, useState } from 'react'
 import type { CSSProperties } from 'react'
-import { Alert, Badge, Button, Collapse, Empty, Segmented, Space, Tag, Typography } from 'antd'
+import {
+  Alert,
+  Badge,
+  Button,
+  Collapse,
+  Empty,
+  Segmented,
+  Space,
+  Tag,
+  Typography,
+} from 'antd'
 import {
   ArrowDownOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
+  CodeOutlined,
+  EditOutlined,
   ExperimentOutlined,
+  FileSearchOutlined,
+  LoadingOutlined,
   MessageOutlined,
   NodeIndexOutlined,
+  SendOutlined,
+  TeamOutlined,
   ToolOutlined,
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
 
 import type { AgentEvent } from '../../../shared/lib/api'
 import { EVENT_PHASE_LABELS, EVENT_TYPE_LABELS, NODE_LABELS, NODE_STATUS_META } from '../../../shared/lib/meta'
+import {
+  MAIN_THREAD,
+  buildStreamRows,
+  deriveThreads,
+  filterByThread,
+  type StreamRow as RowModel,
+} from '../../../shared/lib/streamRows'
 import { summarizeNodeOutput } from '../../../shared/lib/nodeOutput'
 import { humanizeAgentError } from '../../../shared/lib/humanizeAgentError'
 import type { SSEStatus } from '../../../shared/hooks/useTaskEvents'
 import { useErrorToast } from '../../../shared/hooks/useErrorToast'
 import { useStickToBottom } from '../../../shared/hooks/useStickToBottom'
+import { ThreadSwitcher } from './ThreadSwitcher'
 
 const { Text, Paragraph } = Typography
+const { CheckableTag } = Tag
 
 type StreamFilter = 'all' | 'thinking' | 'message' | 'tool' | 'error'
 
@@ -74,7 +99,9 @@ function matchesFilter(ev: AgentEvent, filter: StreamFilter): boolean {
   if (filter === 'all') return true
   const t = ev.event_type
   if (filter === 'thinking') return t === 'agent.thinking'
-  if (filter === 'message') return t === 'agent.message' || t === 'agent.completed' || t === 'phase.updated'
+  if (filter === 'message') {
+    return t === 'agent.message' || t === 'agent.completed' || t === 'phase.updated' || t === 'triage.progress'
+  }
   if (filter === 'tool') return t.startsWith('tool.call')
   if (filter === 'error') {
     const p = payloadOf(ev)
@@ -94,6 +121,7 @@ function typeColor(eventType: string): string {
   if (eventType.startsWith('tool.call')) return 'var(--crucible-primary)'
   if (eventType === 'agent.completed') return 'var(--crucible-success)'
   if (eventType === 'node.updated') return 'var(--crucible-warning)'
+  if (eventType === 'agent.subagent.updated') return 'var(--crucible-primary)'
   return 'var(--crucible-text-secondary)'
 }
 
@@ -117,6 +145,19 @@ export function streamRenderWindow<T>(
   return { rows: events.slice(-size), hidden: events.length - size }
 }
 
+// ---- 工具行图标：按工具名选择，使命令类执行一眼可辨 ----
+
+function toolIcon(tool: string) {
+  if (!tool) return <ToolOutlined />
+  if (tool === 'Bash' || tool === 'PowerShell') return <CodeOutlined />
+  if (tool === 'Read' || tool === 'Grep' || tool === 'Glob') return <FileSearchOutlined />
+  if (tool === 'Edit' || tool === 'Write' || tool === 'NotebookEdit') return <EditOutlined />
+  // 子代理派发：新版 CLI 叫 Agent，Task 是旧别名
+  if (tool === 'Task' || tool === 'Agent') return <TeamOutlined />
+  if (tool.startsWith('mcp__crucible__submit')) return <SendOutlined />
+  return <ToolOutlined />
+}
+
 interface TaskEventTimelineProps {
   events: AgentEvent[] | undefined
   running: boolean
@@ -138,15 +179,32 @@ export function TaskEventTimeline({
 }: TaskEventTimelineProps) {
   const [filter, setFilter] = useState<StreamFilter>('all')
   const [showAll, setShowAll] = useState(false)
+  /** 当前查看的线程；MAIN_THREAD = 主 Agent */
+  const [thread, setThread] = useState<string>(MAIN_THREAD)
   useErrorToast(sseStatus === 'reconnecting' && !!sseError, sseError, '实时连接中断，正在重连')
 
-  const filtered = useMemo(
-    () => (events ?? []).filter((ev) => matchesFilter(ev, filter)),
-    [events, filter],
+  // 切换节点时回到主线程，避免残留的子代理选中态找不到归属
+  useEffect(() => {
+    setThread(MAIN_THREAD)
+    setShowAll(false)
+  }, [nodeLabel])
+
+  const threads = useMemo(() => deriveThreads(events ?? []), [events])
+
+  // 过滤链：类型过滤 → 线程过滤 → 分组折叠 → 尾部窗口
+  const scoped = useMemo(() => {
+    const byType = (events ?? []).filter((ev) => matchesFilter(ev, filter))
+    return filterByThread(byType, thread)
+  }, [events, filter, thread])
+
+  const grouped = useMemo(() => buildStreamRows(scoped), [scoped])
+  const { rows, hidden } = useMemo(
+    () => streamRenderWindow(grouped, showAll),
+    [grouped, showAll],
   )
-  const { rows, hidden } = useMemo(() => streamRenderWindow(filtered, showAll), [filtered, showAll])
-  const last = filtered[filtered.length - 1]
-  const streamKey = `${filter}:${filtered.length}:${last?.run_id ?? ''}:${last?.sequence ?? ''}`
+
+  const last = scoped[scoped.length - 1]
+  const streamKey = `${filter}:${thread}:${scoped.length}:${last?.run_id ?? ''}:${last?.sequence ?? ''}`
 
   const { scrollRef, contentRef, handlers, pinned, scrollToBottom } = useStickToBottom(streamKey, {
     enabled: running,
@@ -155,9 +213,9 @@ export function TaskEventTimeline({
   // 用户上翻后统计错过的条数，回到底部时清零
   const [anchorCount, setAnchorCount] = useState<number | null>(null)
   useEffect(() => {
-    setAnchorCount((prev) => (pinned ? null : (prev ?? filtered.length)))
-  }, [pinned, filtered.length])
-  const behindCount = anchorCount === null ? 0 : Math.max(0, filtered.length - anchorCount)
+    setAnchorCount((prev) => (pinned ? null : (prev ?? scoped.length)))
+  }, [pinned, scoped.length])
+  const behindCount = anchorCount === null ? 0 : Math.max(0, scoped.length - anchorCount)
 
   return (
     <div className="crucible-stream-panel">
@@ -194,7 +252,7 @@ export function TaskEventTimeline({
             />
           )}
           <Text type="secondary" style={{ fontSize: 12 }}>
-            {filtered.length}/{events?.length ?? 0} 条
+            {scoped.length}/{events?.length ?? 0} 条
           </Text>
         </Space>
         <Segmented
@@ -209,8 +267,27 @@ export function TaskEventTimeline({
             { label: '错误', value: 'error' },
           ]}
         />
+        {threads.length > 0 && (
+          <ThreadSwitcher
+            threads={threads}
+            running={running}
+            value={thread}
+            onChange={setThread}
+          />
+        )}
       </Space>
-      {filtered.length > 0 ? (
+      {thread !== MAIN_THREAD && (
+        <div className="crucible-thread-banner">
+          <TeamOutlined style={{ marginRight: 6, color: 'var(--crucible-primary)' }} />
+          正在查看子代理「
+          {threads.find((th) => th.id === thread)?.label || `${thread.slice(0, 8)}…`}
+          」的事件流
+          <Button size="small" type="link" style={{ paddingInline: 0 }} onClick={() => setThread(MAIN_THREAD)}>
+            返回主 Agent
+          </Button>
+        </div>
+      )}
+      {rows.length > 0 ? (
         <div className="crucible-stream">
           <div
             className="crucible-stream-scroller"
@@ -228,8 +305,8 @@ export function TaskEventTimeline({
                   </Button>
                 </div>
               )}
-              {rows.map((ev) => (
-                <StreamRow key={`${ev.run_id}-${ev.sequence}-${ev.event_type}`} ev={ev} />
+              {rows.map((row) => (
+                <StreamRowComponent key={row.key} row={row} />
               ))}
               {running && (
                 <div className="crucible-stream-footer">
@@ -263,120 +340,134 @@ export function TaskEventTimeline({
 }
 
 /** 行内容只由事件本身决定，memo 让新事件到达时只挂新行，不重渲染既有行。 */
-const StreamRow = memo(function StreamRow({ ev }: { ev: AgentEvent }) {
-  const p = payloadOf(ev)
-  const label = EVENT_TYPE_LABELS[ev.event_type] ?? ev.event_type
-  const color = typeColor(ev.event_type)
+const StreamRowComponent = memo(function StreamRow({ row }: { row: RowModel }) {
+  const head =
+    row.kind === 'event'
+      ? row.ev
+      : row.kind === 'thinking'
+        ? row.evs[0]
+        : (row.start ?? row.done!)
+  const p = payloadOf(head)
+  const color =
+    row.kind === 'tool'
+      ? typeColor(
+          row.done && payloadOf(row.done).is_error === true ? 'tool.error' : 'tool',
+        )
+      : typeColor(head.event_type)
+
+  let body
+  let tagLabel
+  if (row.kind === 'thinking') {
+    tagLabel = EVENT_TYPE_LABELS['agent.thinking'] ?? 'thinking'
+    body = <ThinkingGroupBody evs={row.evs} />
+  } else if (row.kind === 'tool') {
+    tagLabel = EVENT_TYPE_LABELS['tool.call.started'] ?? 'tool'
+    body = <MergedToolBody start={row.start} done={row.done} />
+  } else {
+    tagLabel = EVENT_TYPE_LABELS[head.event_type] ?? head.event_type
+    body = renderBody(head, p)
+  }
 
   return (
     <div className="crucible-stream-row" style={{ '--stream-accent': color } as CSSProperties}>
       <Text type="secondary" className="crucible-stream-time">
-        {eventTime(ev)}
+        {eventTime(head)}
       </Text>
       <Tag className="crucible-stream-tag" variant="filled">
-        {label}
+        {tagLabel}
       </Tag>
-      <div className="crucible-stream-body">{renderBody(ev, p)}</div>
+      <div className="crucible-stream-body">{body}</div>
     </div>
   )
 })
 
-function renderBody(ev: AgentEvent, p: Record<string, unknown>) {
-  if (ev.event_type === 'agent.thinking') {
-    const text = asText(p.text)
+/** 连续思考折叠组：默认收起，展开后逐段完整展示。 */
+function ThinkingGroupBody({ evs }: { evs: AgentEvent[] }) {
+  const texts = evs.map((ev) => asText(payloadOf(ev).text)).filter(Boolean)
+  const preview = truncate((texts[0] || '').replace(/\s+/g, ' '), 80)
+  return (
+    <Collapse
+      ghost
+      size="small"
+      items={[
+        {
+          key: 'thinking',
+          label: (
+            <Text type="secondary" italic style={{ fontSize: 12 }}>
+              思考过程 · {texts.length} 段{preview ? ` · ${preview}` : ''}
+            </Text>
+          ),
+          children: (
+            <div>
+              {texts.map((text, i) => (
+                <Paragraph
+                  key={i}
+                  style={{
+                    marginBottom: i === texts.length - 1 ? 0 : 8,
+                    whiteSpace: 'pre-wrap',
+                    fontStyle: 'italic',
+                    color: 'var(--crucible-text-secondary)',
+                    fontSize: 12,
+                  }}
+                >
+                  {text}
+                </Paragraph>
+              ))}
+            </div>
+          ),
+        },
+      ]}
+    />
+  )
+}
+
+/**
+ * 工具合并行：命令（输入）与结果共用一条，默认收起、出错自动展开；
+ * 尚无结果时显示运行中态。
+ */
+function MergedToolBody({
+  start,
+  done,
+}: {
+  start: AgentEvent | null
+  done: AgentEvent | null
+}) {
+  const sp = start ? payloadOf(start) : {}
+  const dp = done ? payloadOf(done) : {}
+  const tool = (asText(sp.tool) || asText(dp.tool)) ?? ''
+  const inputObj = (
+    sp.input && typeof sp.input === 'object'
+      ? (sp.input as Record<string, unknown>)
+      : {}
+  )
+  const command =
+    asText(dp.command) || asText(sp.command) || asText(inputObj.command)
+  const inputJson = asText(sp.input)
+  const output = asText(dp.output)
+  const isError = dp.is_error === true
+  const pending = done === null
+
+  if (!start && done) {
+    // 孤儿结果：按旧行为渲染完成信息，避免静默丢日志
     return (
       <Collapse
         ghost
         size="small"
-        items={[
-          {
-            key: 't',
-            label: (
-              <Text type="secondary" italic style={{ fontSize: 12 }}>
-                {truncate(text.replace(/\s+/g, ' '), 80) || '思考中'}
-              </Text>
-            ),
-            children: (
-              <Paragraph
-                style={{
-                  marginBottom: 0,
-                  whiteSpace: 'pre-wrap',
-                  fontStyle: 'italic',
-                  color: 'var(--crucible-text-secondary)',
-                  fontSize: 12,
-                }}
-              >
-                {text}
-              </Paragraph>
-            ),
-          },
-        ]}
-      />
-    )
-  }
-
-  if (ev.event_type === 'agent.message') {
-    return (
-      <Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap', fontSize: 13 }}>
-        <MessageOutlined style={{ marginRight: 6, color: 'var(--crucible-primary)' }} />
-        {asText(p.text)}
-      </Paragraph>
-    )
-  }
-
-  if (ev.event_type === 'tool.call.started') {
-    const input = asText(p.input)
-    return (
-      <Collapse
-        ghost
-        size="small"
-        items={[
-          {
-            key: 'details',
-            label: (
-              <Text>
-                <ToolOutlined style={{ marginRight: 6 }} />
-                调用 <Text code>{asText(p.tool) || 'unknown'}</Text>
-              </Text>
-            ),
-            children: input ? (
-              <Paragraph
-                type="secondary"
-                style={{ marginBottom: 0, whiteSpace: 'pre-wrap', fontSize: 11 }}
-              >
-                {truncate(input, 800)}
-              </Paragraph>
-            ) : (
-              <Text type="secondary" style={{ fontSize: 11 }}>无输入参数</Text>
-            ),
-          },
-        ]}
-      />
-    )
-  }
-
-  if (ev.event_type === 'tool.call.completed') {
-    const isError = p.is_error === true
-    const output = asText(p.output)
-    return (
-      <Collapse
-        ghost
-        size="small"
-        defaultActiveKey={isEventDetailsDefaultOpen(ev.event_type, p) ? ['details'] : []}
+        defaultActiveKey={isError ? ['details'] : []}
         items={[
           {
             key: 'details',
             label: (
               <Text type={isError ? 'danger' : undefined}>
-                <ToolOutlined style={{ marginRight: 6 }} />
-                {isError ? '工具返回错误' : '工具完成'}
+                {toolIcon(asText(dp.tool))}
+                <span style={{ marginLeft: 6 }}>
+                  {isError ? '工具返回错误' : '工具完成'}
+                  {asText(dp.tool) ? <Text code style={{ marginLeft: 6 }}>{asText(dp.tool)}</Text> : null}
+                </span>
               </Text>
             ),
             children: output ? (
-              <Paragraph
-                type={isError ? 'danger' : 'secondary'}
-                style={{ marginBottom: 0, whiteSpace: 'pre-wrap', fontSize: 11 }}
-              >
+              <Paragraph type={isError ? 'danger' : 'secondary'} style={{ marginBottom: 0, whiteSpace: 'pre-wrap', fontSize: 11 }}>
                 {truncate(output, 1200)}
               </Paragraph>
             ) : (
@@ -388,39 +479,92 @@ function renderBody(ev: AgentEvent, p: Record<string, unknown>) {
     )
   }
 
-  if (ev.event_type === 'tool.call.denied') {
-    const reason = asText(p.reason || p.error) || '该工具调用不符合安全策略'
-    const input = asText(p.input)
+  const denyInfo = asText(sp.reason || sp.error)
+
+  return (
+    <Collapse
+      ghost
+      size="small"
+      defaultActiveKey={
+        pending || isError || denyInfo ? ['details'] : []
+      }
+      items={[
+        {
+          key: 'details',
+          label: (
+            <Text type={isError ? 'danger' : undefined}>
+              {toolIcon(tool)}
+              <span style={{ marginLeft: 6 }}>
+                {pending ? '调用中' : isError ? '返回错误' : denyInfo ? '已拒绝' : '已完成'}
+                <Text code style={{ marginLeft: 6 }}>{tool || 'unknown'}</Text>
+              </span>
+              {command && (
+                <Text type="secondary" code style={{ marginLeft: 10, fontSize: 11 }}>
+                  {truncate(command.replace(/\s+/g, ' '), 60)}
+                </Text>
+              )}
+              {pending && (
+                <LoadingOutlined spin style={{ marginLeft: 8, color: 'var(--crucible-primary)' }} />
+              )}
+            </Text>
+          ),
+          children: (
+            <div>
+              {denyInfo && <Text type="danger">{denyInfo}</Text>}
+              {inputJson && inputJson !== '{}' && (
+                <Paragraph
+                  type="secondary"
+                  style={{ marginBottom: output ? 8 : 0, whiteSpace: 'pre-wrap', fontSize: 11 }}
+                >
+                  {truncate(inputJson, 800)}
+                </Paragraph>
+              )}
+              {output ? (
+                <Paragraph
+                  type={isError ? 'danger' : 'secondary'}
+                  style={{ marginBottom: 0, whiteSpace: 'pre-wrap', fontSize: 11 }}
+                >
+                  {truncate(output, 1200)}
+                </Paragraph>
+              ) : pending ? (
+                <Text type="secondary" style={{ fontSize: 11 }}>等待结果…</Text>
+              ) : (
+                <Text type="secondary" style={{ fontSize: 11 }}>无输出内容</Text>
+              )}
+            </div>
+          ),
+        },
+      ]}
+    />
+  )
+}
+
+function renderBody(ev: AgentEvent, p: Record<string, unknown>) {
+  if (ev.event_type === 'agent.subagent.updated') {
+    const label = asText(p.label) || asText(p.tool_use_id) || '子代理'
+    const raw = asText(p.status)
+    const statusText =
+      raw === 'completed' ? '已完成' : raw === 'running' || raw === 'in_progress' ? '运行中' : raw
+    const runningLike = !raw || raw === 'running' || raw === 'in_progress'
     return (
-      <Collapse
-        ghost
-        size="small"
-        defaultActiveKey={isEventDetailsDefaultOpen(ev.event_type, p) ? ['details'] : []}
-        items={[
-          {
-            key: 'details',
-            label: (
-              <Text type="danger">
-                <ToolOutlined style={{ marginRight: 6 }} />
-                已拒绝 <Text code>{asText(p.tool) || 'unknown'}</Text>
-              </Text>
-            ),
-            children: (
-              <div>
-                <Text type="danger">{reason}</Text>
-                {input && (
-                  <Paragraph
-                    type="secondary"
-                    style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', fontSize: 11 }}
-                  >
-                    {truncate(input, 800)}
-                  </Paragraph>
-                )}
-              </div>
-            ),
-          },
-        ]}
-      />
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        {runningLike ? (
+          <LoadingOutlined spin style={{ marginRight: 6, color: 'var(--crucible-primary)' }} />
+        ) : (
+          <TeamOutlined style={{ marginRight: 6, color: 'var(--crucible-text-disabled)' }} />
+        )}
+        子代理 · {label}
+        {statusText ? ` · ${statusText}` : ''}
+      </Text>
+    )
+  }
+
+  if (ev.event_type === 'agent.message') {
+    return (
+      <Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap', fontSize: 13 }}>
+        <MessageOutlined style={{ marginRight: 6, color: 'var(--crucible-primary)' }} />
+        {asText(p.text)}
+      </Paragraph>
     )
   }
 
@@ -478,9 +622,27 @@ function renderBody(ev: AgentEvent, p: Record<string, unknown>) {
 
   if (ev.event_type === 'phase.updated') {
     const phase = asText(p.phase)
+    const phaseLabel = EVENT_PHASE_LABELS[phase] ?? NODE_LABELS[phase] ?? phase
     return (
       <Text>
-        {EVENT_PHASE_LABELS[phase] ?? phase} {asText(p.message) ? `· ${asText(p.message)}` : ''}
+        {phaseLabel} {asText(p.message) ? `· ${asText(p.message)}` : ''}
+      </Text>
+    )
+  }
+
+  if (ev.event_type === 'triage.progress') {
+    const message = asText(p.message)
+    if (message) {
+      return <Text>{message}{asText(p.reason) === 'budget' && !message.includes('预算') ? '（预算中断）' : ''}</Text>
+    }
+    const done = asText(p.adjudicated)
+    const pending = asText(p.pending)
+    const reason = asText(p.reason)
+    return (
+      <Text>
+        已审 {done}
+        {pending ? `，待审 ${pending}` : ''}
+        {reason === 'budget' ? '（预算中断）' : ''}
       </Text>
     )
   }

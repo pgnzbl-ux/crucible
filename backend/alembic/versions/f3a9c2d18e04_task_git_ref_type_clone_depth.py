@@ -16,19 +16,22 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "tasks",
-        sa.Column("project_ref_type", sa.String(length=16), nullable=True),
-    )
-    op.add_column(
-        "tasks",
-        sa.Column(
-            "clone_depth",
-            sa.Integer(),
-            nullable=True,
-            server_default="1",
-        ),
-    )
+    task_cols = {c["name"] for c in sa.inspect(op.get_bind()).get_columns("tasks")}
+    if "project_ref_type" not in task_cols:
+        op.add_column(
+            "tasks",
+            sa.Column("project_ref_type", sa.String(length=16), nullable=True),
+        )
+    if "clone_depth" not in task_cols:
+        op.add_column(
+            "tasks",
+            sa.Column(
+                "clone_depth",
+                sa.Integer(),
+                nullable=True,
+                server_default="1",
+            ),
+        )
 
 
 def downgrade() -> None:

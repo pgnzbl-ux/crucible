@@ -9,6 +9,7 @@ import {
   STREAM_RENDER_WINDOW,
   TaskEventTimeline,
 } from './TaskEventTimeline'
+import { threadBadgeStatus, ThreadMenu } from './ThreadSwitcher'
 
 describe('isEventDetailsDefaultOpen', () => {
   it('keeps thinking and successful tool details collapsed', () => {
@@ -111,5 +112,141 @@ describe('TaskEventTimeline 事件流窗口', () => {
     expect(filtered).toContain('查看全部')
     const empty = render([], false, { nodeLabel: '白盒审计' })
     expect(empty).toContain('「白盒审计」暂无事件')
+  })
+
+  it('renders discovery scan phase and triage progress in the stream', () => {
+    const html = render(
+      [
+        event(1, {
+          event_type: 'phase.updated',
+          payload: { phase: 'scan_gitleaks', message: '启动 gitleaks' },
+        }),
+        event(2, {
+          event_type: 'triage.progress',
+          payload: { adjudicated: 10, pending: 3, reason: 'budget' },
+        }),
+        event(3, {
+          event_type: 'triage.progress',
+          payload: {
+            node_key: 'triage',
+            message: '二审 3/12：CWE-89 app/db.py（族内 2 组）',
+            done: 3,
+            total: 12,
+          },
+        }),
+      ],
+      false,
+    )
+    expect(html).toContain('扫描·泄露')
+    expect(html).toContain('启动 gitleaks')
+    expect(html).toContain('二审进度')
+    expect(html).toContain('已审 10')
+    expect(html).toContain('二审 3/12：CWE-89 app/db.py（族内 2 组）')
+  })
+
+  it('renders profile phase labels in the stream', () => {
+    const html = render(
+      [
+        event(1, {
+          event_type: 'phase.updated',
+          payload: { phase: 'profile', message: '规则扫描完成（python/fastapi · 1 语言）' },
+        }),
+        event(2, {
+          event_type: 'phase.updated',
+          payload: { phase: 'profile', message: '启动轻度 AI 画像' },
+        }),
+      ],
+      false,
+    )
+    expect(html).toContain('项目画像')
+    expect(html).toContain('规则扫描完成')
+    expect(html).toContain('启动轻度 AI 画像')
+  })
+})
+
+describe('TaskEventTimeline 分组与线程（Cursor 式）', () => {
+  const nested = (sequence: number, type: string, p: Record<string, unknown>): AgentEvent => ({
+    id: `n${sequence}`,
+    run_id: 'r1',
+    sequence,
+    event_type: type,
+    payload: { event: { ...p, timestamp: 1756250400 + sequence } },
+    source: 'claude-agent-sdk',
+    created_at: '2026-08-27T00:00:00Z',
+  })
+
+  it('命令执行与结果合并为一条可折叠行，成功默认收起', () => {
+    const html = render([
+      nested(1, 'tool.call.started', {
+        tool: 'Bash',
+        input: { command: 'pytest -q tests/' },
+        tool_use_id: 't9',
+      }),
+      nested(2, 'tool.call.completed', { tool_use_id: 't9', output: '24 passed', is_error: false }),
+    ], false)
+    expect(html).toContain('pytest -q')
+    expect(html).toContain('已完成')
+    // 合并后不应再有独立的"工具结束"行
+    expect(html).not.toContain('>工具结束<')
+  })
+
+  it('连续思考折叠为思考过程组并显示段数', () => {
+    const html = render([
+      nested(1, 'agent.thinking', { text: '先看入口' }),
+      nested(2, 'agent.thinking', { text: '再看汇聚点' }),
+    ], false)
+    expect(html).toContain('思考过程 · 2 段')
+    expect(html).toContain('先看入口')
+  })
+
+  it('Task 调用渲染子代理入口按钮；清单直渲含主入口与状态点', () => {
+    const html = render([
+      nested(1, 'tool.call.started', {
+        tool: 'Task',
+        input: { description: '族 A 二审' },
+        tool_use_id: 'tu_1',
+      }),
+      nested(2, 'agent.subagent.updated', {
+        tool_use_id: 'tu_1',
+        label: '族 A 二审',
+        status: 'completed',
+      }),
+      nested(3, 'tool.call.started', {
+        tool: 'Bash',
+        tool_use_id: 'b1',
+        input: { command: 'ls' },
+        parent_tool_use_id: 'tu_1',
+      }),
+    ], true)
+    // 芯片墙已移除：工具栏只有单点入口，流内仍是主线程内容
+    expect(html).toContain('data-testid="thread-switcher"')
+    expect(html).toContain('子代理 1')
+    expect(html).not.toContain('data-thread="tu_1"')
+    expect(html).toContain('子代理 · 族 A 二审')
+
+    // 弹出清单：主入口 + 子代理行 + 完成绿点 + 事件计数
+    const menu = renderToStaticMarkup(
+      <App>
+        <ThreadMenu
+          threads={[{ id: 'tu_1', label: '族 A 二审', status: 'completed', count: 3 }]}
+          running={false}
+          value="tu_1"
+          onSelect={() => undefined}
+        />
+      </App>,
+    )
+    expect(menu).toContain('主 Agent')
+    expect(menu).toContain('data-thread="tu_1"')
+    expect(menu).toContain('is-active')
+    expect(menu).toContain('ant-badge-status-success')
+  })
+})
+
+describe('threadBadgeStatus', () => {
+  const th = (status: string) => ({ id: 'x', label: 'x', status, count: 0 })
+  it('运行中且无完成态 → processing；completed → success；其余 → default', () => {
+    expect(threadBadgeStatus(th(''), true)).toBe('processing')
+    expect(threadBadgeStatus(th('completed'), false)).toBe('success')
+    expect(threadBadgeStatus(th(''), false)).toBe('default')
   })
 })

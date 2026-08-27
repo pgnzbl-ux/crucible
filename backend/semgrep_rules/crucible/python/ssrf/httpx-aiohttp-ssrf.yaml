@@ -1,0 +1,168 @@
+rules:
+  - id: httpx-aiohttp-ssrf
+    languages:
+      - python
+    severity: ERROR
+    mode: taint
+    message: >-
+      Web request input flows into httpx or aiohttp outbound HTTP. This can
+      enable server-side request forgery (SSRF). Validate schemes and hosts
+      against an allowlist before fetching.
+    metadata:
+      cwe:
+        - "CWE-918: Server-Side Request Forgery (SSRF)"
+      owasp:
+        - A10:2021 - Server-Side Request Forgery (SSRF)
+      category: security
+      technology:
+        - httpx
+        - aiohttp
+        - flask
+        - django
+        - fastapi
+        - python
+      subcategory:
+        - vuln
+      confidence: MEDIUM
+      likelihood: MEDIUM
+      impact: HIGH
+      crucible-overlay: true
+    pattern-sources:
+      - pattern-either:
+          - pattern: flask.request.$W
+          - pattern: request.GET
+          - pattern: request.POST
+          - patterns:
+              - pattern-inside: |
+                  def $F(..., $P: $T = Query(...), ...):
+                      ...
+              - pattern: $P
+          - patterns:
+              - pattern-inside: |
+                  async def $F(..., $P: $T = Query(...), ...):
+                      ...
+              - pattern: $P
+          - patterns:
+              - pattern-inside: |
+                  def $F(..., $P: $T = Path(...), ...):
+                      ...
+              - pattern: $P
+          - patterns:
+              - pattern-inside: |
+                  async def $F(..., $P: $T = Path(...), ...):
+                      ...
+              - pattern: $P
+          - patterns:
+              - pattern-inside: |
+                  def $F(..., $P: $T = Body(...), ...):
+                      ...
+              - pattern: $P
+          - patterns:
+              - pattern-inside: |
+                  async def $F(..., $P: $T = Body(...), ...):
+                      ...
+              - pattern: $P
+          - patterns:
+              - pattern-inside: |
+                  def $F(..., $P: Request, ...):
+                      ...
+              - pattern: $P
+          - patterns:
+              - pattern-inside: |
+                  async def $F(..., $P: Request, ...):
+                      ...
+              - pattern: $P
+          - pattern: $REQ.query_params
+          - pattern: $REQ.path_params
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  import httpx
+                  ...
+              - pattern-inside: |
+                  import httpx as $A
+                  ...
+          - pattern-either:
+              - patterns:
+                  - pattern: httpx.get($URL, ...)
+                  - focus-metavariable: $URL
+              - patterns:
+                  - pattern: httpx.post($URL, ...)
+                  - focus-metavariable: $URL
+              - patterns:
+                  - pattern: httpx.request($METHOD, $URL, ...)
+                  - focus-metavariable: $URL
+              - patterns:
+                  - pattern: httpx.put($URL, ...)
+                  - focus-metavariable: $URL
+              - patterns:
+                  - pattern: httpx.patch($URL, ...)
+                  - focus-metavariable: $URL
+              - patterns:
+                  - pattern: httpx.delete($URL, ...)
+                  - focus-metavariable: $URL
+              - patterns:
+                  - pattern: $C.get($URL, ...)
+                  - focus-metavariable: $URL
+                  - pattern-inside: |
+                      $C = httpx.Client(...)
+                      ...
+              - patterns:
+                  - pattern: $C.post($URL, ...)
+                  - focus-metavariable: $URL
+                  - pattern-inside: |
+                      $C = httpx.Client(...)
+                      ...
+              - patterns:
+                  - pattern: $C.request($METHOD, $URL, ...)
+                  - focus-metavariable: $URL
+                  - pattern-inside: |
+                      $C = httpx.Client(...)
+                      ...
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  import aiohttp
+                  ...
+              - pattern-inside: |
+                  import aiohttp as $A
+                  ...
+          - pattern-either:
+              - patterns:
+                  - pattern: $SESS.get($URL, ...)
+                  - focus-metavariable: $URL
+                  - pattern-inside: |
+                      $SESS = aiohttp.ClientSession(...)
+                      ...
+              - patterns:
+                  - pattern: $SESS.post($URL, ...)
+                  - focus-metavariable: $URL
+                  - pattern-inside: |
+                      $SESS = aiohttp.ClientSession(...)
+                      ...
+              - patterns:
+                  - pattern: $SESS.request($METHOD, $URL, ...)
+                  - focus-metavariable: $URL
+                  - pattern-inside: |
+                      $SESS = aiohttp.ClientSession(...)
+                      ...
+              - patterns:
+                  - pattern-inside: |
+                      async with aiohttp.ClientSession(...) as $SESS:
+                          ...
+                  - pattern-either:
+                      - patterns:
+                          - pattern: $SESS.get($URL, ...)
+                          - focus-metavariable: $URL
+                      - patterns:
+                          - pattern: $SESS.post($URL, ...)
+                          - focus-metavariable: $URL
+    pattern-sanitizers:
+      - patterns:
+          - pattern-inside: |
+              $W = {...}
+              ...
+          - pattern-either:
+              - pattern: $W[$KEY]
+              - pattern: $W.get($KEY, ...)

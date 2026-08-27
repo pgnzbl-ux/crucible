@@ -1,0 +1,110 @@
+rules:
+  - id: gin-echo-sqli
+    languages:
+      - go
+    severity: ERROR
+    mode: taint
+    message: >-
+      Gin/Echo request input (Query/Param/Bind) flows into database/sql or GORM
+      (including Where). Use parameterized queries or GORM placeholders instead
+      of concatenating user input into SQL.
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp:
+        - A01:2017 - Injection
+        - A03:2021 - Injection
+      category: security
+      technology:
+        - gin
+        - echo
+        - gorm
+        - go
+      subcategory:
+        - vuln
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      crucible-overlay: true
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  func $F(..., $C *gin.Context, ...) {
+                    ...
+                  }
+              - pattern-inside: |
+                  func ($R $T) $F(..., $C *gin.Context, ...) {
+                    ...
+                  }
+          - pattern-either:
+              - pattern: $C.Query(...)
+              - pattern: $C.Param(...)
+              - pattern: $C.PostForm(...)
+              - pattern: $C.DefaultQuery(...)
+              - pattern: $C.GetQuery(...)
+              - pattern: $C.GetPostForm(...)
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  func $F(..., $C echo.Context, ...) {
+                    ...
+                  }
+              - pattern-inside: |
+                  func ($R $T) $F(..., $C echo.Context, ...) {
+                    ...
+                  }
+          - pattern-either:
+              - pattern: $C.QueryParam(...)
+              - pattern: $C.FormValue(...)
+              - pattern: $C.Param(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  func $F(..., $DB *sql.DB, ...) {
+                    ...
+                  }
+              - pattern-inside: |
+                  func $F(..., $DB *gorm.DB, ...) {
+                    ...
+                  }
+          - pattern-either:
+              - patterns:
+                  - pattern: $DB.Query($SQL, ...)
+                  - focus-metavariable: $SQL
+              - patterns:
+                  - pattern: $DB.QueryContext($CTX, $SQL, ...)
+                  - focus-metavariable: $SQL
+              - patterns:
+                  - pattern: $DB.QueryRow($SQL, ...)
+                  - focus-metavariable: $SQL
+              - patterns:
+                  - pattern: $DB.QueryRowContext($CTX, $SQL, ...)
+                  - focus-metavariable: $SQL
+              - patterns:
+                  - pattern: $DB.Exec($SQL, ...)
+                  - focus-metavariable: $SQL
+              - patterns:
+                  - pattern: $DB.ExecContext($CTX, $SQL, ...)
+                  - focus-metavariable: $SQL
+              - patterns:
+                  - pattern: $DB.Where($SQL, ...)
+                  - focus-metavariable: $SQL
+              - patterns:
+                  - pattern: $DB.Raw($SQL, ...)
+                  - focus-metavariable: $SQL
+              - patterns:
+                  - pattern: $DB.Order($SQL, ...)
+                  - focus-metavariable: $SQL
+              - patterns:
+                  - pattern: $DB.Having($SQL, ...)
+                  - focus-metavariable: $SQL
+              - patterns:
+                  - pattern: $DB.Select($SQL, ...)
+                  - focus-metavariable: $SQL
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: strconv.Atoi(...)
+          - pattern: strconv.ParseInt(...)
+          - pattern: strconv.Itoa(...)

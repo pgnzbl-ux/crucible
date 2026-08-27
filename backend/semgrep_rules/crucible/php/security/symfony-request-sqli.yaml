@@ -1,0 +1,82 @@
+rules:
+  - id: symfony-request-sqli
+    languages:
+      - php
+    severity: ERROR
+    mode: taint
+    message: >-
+      Symfony Request input flows into a raw SQL / QueryBuilder API
+      (executeQuery, executeStatement, createNativeQuery, where/andWhere/orderBy).
+      Prefer bound parameters or the ORM expression builder instead of
+      concatenating request data into SQL.
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp:
+        - A01:2017 - Injection
+        - A03:2021 - Injection
+      category: security
+      technology:
+        - php
+        - symfony
+        - doctrine
+      subcategory:
+        - vuln
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      crucible-overlay: true
+    pattern-sources:
+      - pattern-either:
+          - pattern: $REQ->query->get(...)
+          - pattern: $REQ->request->get(...)
+          - pattern: $REQ->get(...)
+          - pattern: $REQ->getContent(...)
+    pattern-propagators:
+      - pattern: $TO = json_decode($FROM, ...)
+        from: $FROM
+        to: $TO
+      - pattern: $TO = $FROM . $X
+        from: $FROM
+        to: $TO
+      - pattern: $TO = $X . $FROM
+        from: $FROM
+        to: $TO
+      - pattern: $TO .= $FROM
+        from: $FROM
+        to: $TO
+      - pattern: $TO = sprintf(..., $FROM, ...)
+        from: $FROM
+        to: $TO
+      - pattern: $TO = $ARR[$FROM]
+        from: $ARR
+        to: $TO
+      - pattern: $TO = $ARR[...]
+        from: $ARR
+        to: $TO
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: (int) $X
+          - pattern: (int)(...)
+          - pattern: intval(...)
+          - pattern: (float) $X
+    pattern-sinks:
+      - pattern-either:
+          - patterns:
+              - pattern: $CONN->executeQuery($SINK, ...)
+              - focus-metavariable: $SINK
+          - patterns:
+              - pattern: $CONN->executeStatement($SINK, ...)
+              - focus-metavariable: $SINK
+          - patterns:
+              - pattern: $EM->createNativeQuery($SINK, ...)
+              - focus-metavariable: $SINK
+          - patterns:
+              - pattern: $QB->where($SINK, ...)
+              - focus-metavariable: $SINK
+          - patterns:
+              - pattern: $QB->andWhere($SINK, ...)
+              - focus-metavariable: $SINK
+          - patterns:
+              - pattern: $QB->orderBy($SINK, ...)
+              - focus-metavariable: $SINK

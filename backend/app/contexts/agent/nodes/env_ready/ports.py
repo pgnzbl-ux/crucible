@@ -5,14 +5,35 @@ import logging
 import re
 import subprocess
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 logger = logging.getLogger(__name__)
 
-_SIDECAR_CONTAINER_PORTS = {3306, 5432, 6379, 27017, 5672, 1433, 9200, 11211}
+_SIDECAR_CONTAINER_PORTS = {
+    # DB
+    3306,
+    5432,
+    1433,
+    27017,
+    # cache
+    6379,
+    11211,
+    # MQ
+    5672,
+    9092,
+    4222,
+    # search
+    9200,
+    9300,
+    # object storage API / console（会答 HTTP，但不是复现 Web 入口）
+    9000,
+    9001,
+}
 _SHORT_PORT = re.compile(
-    r"^(?:(?:\d{1,3}\.){3}\d{1,3}:)?(\d+):(\d+)(?:/(?:tcp|udp))?$", re.I
+    r"^(?:(?:\d{1,3}\.){3}\d{1,3}:)?(\d+):(\d+)(?:/(tcp|udp))?$", re.I
 )
-_BARE_PORT = re.compile(r"^(\d+)(?:/(?:tcp|udp))?$")
 
 
 def parse_compose_port_mappings(text: str) -> list[tuple[int, int]]:
@@ -22,15 +43,19 @@ def parse_compose_port_mappings(text: str) -> list[tuple[int, int]]:
     ports_indent = 0
     pending_target: int | None = None
     pending_published: int | None = None
+    pending_protocol = "tcp"
 
     def flush_long() -> None:
-        nonlocal pending_target, pending_published
-        if pending_published is not None and pending_target is not None:
+        nonlocal pending_target, pending_published, pending_protocol
+        if (
+            pending_protocol == "tcp"
+            and pending_published is not None
+            and pending_target is not None
+        ):
             mappings.append((pending_published, pending_target))
-        elif pending_target is not None and pending_published is None:
-            mappings.append((pending_target, pending_target))
         pending_target = None
         pending_published = None
+        pending_protocol = "tcp"
 
     for raw in (text or "").splitlines():
         if not raw.strip() or raw.lstrip().startswith("#"):
@@ -55,6 +80,10 @@ def parse_compose_port_mappings(text: str) -> list[tuple[int, int]]:
         if published_m:
             pending_published = int(published_m.group(1))
             continue
+        protocol_m = re.match(r"protocol:\s*[\"']?(tcp|udp)[\"']?\s*$", stripped, re.I)
+        if protocol_m:
+            pending_protocol = protocol_m.group(1).lower()
+            continue
         if stripped.startswith("-"):
             flush_long()
             rest = stripped[1:].strip().strip("\"'")
@@ -68,14 +97,198 @@ def parse_compose_port_mappings(text: str) -> list[tuple[int, int]]:
                 continue
             short = _SHORT_PORT.match(rest)
             if short:
+                if (short.group(3) or "tcp").lower() != "tcp":
+                    continue
                 mappings.append((int(short.group(1)), int(short.group(2))))
                 continue
-            bare = _BARE_PORT.match(rest)
-            if bare:
-                port = int(bare.group(1))
-                mappings.append((port, port))
     flush_long()
     return mappings
+
+
+def _container_port_from_decl(item: Any) -> tuple[int | None, str]:
+    """返回声明中的 (container_port, protocol)，宿主端口可由 Docker 动态分配。"""
+    if isinstance(item, int):
+        return item, "tcp"
+    if isinstance(item, str):
+        raw = item.strip().strip("\"'")
+        base, slash, protocol = raw.rpartition("/")
+        if slash and protocol.lower() in {"tcp", "udp"}:
+            raw = base
+        else:
+            protocol = "tcp"
+        container = raw.rsplit(":", 1)[-1]
+        if "-" in container:
+            container = container.split("-", 1)[0]
+        return (int(container), protocol.lower()) if container.isdigit() else (None, protocol.lower())
+    if isinstance(item, dict):
+        target = item.get("target")
+        text = str(target or "")
+        protocol = str(item.get("protocol") or "tcp").lower()
+        return (int(text), protocol) if text.isdigit() else (None, protocol)
+    return None, "tcp"
+
+
+def compose_declares_web_port(text: str) -> bool:
+    """Compose 是否声明了至少一个 TCP Web 候选端口。
+
+    这里只做 up 前准入；真实 host_ip/host_port 必须在 up 后读 Docker inspect。
+    """
+    try:
+        document = yaml.safe_load(text or "")
+    except yaml.YAMLError:
+        return False
+    services = document.get("services") if isinstance(document, dict) else None
+    if not isinstance(services, dict):
+        return False
+    for service in services.values():
+        if not isinstance(service, dict):
+            continue
+        declarations = service.get("ports")
+        if not isinstance(declarations, list):
+            continue
+        for item in declarations:
+            container_port, protocol = _container_port_from_decl(item)
+            if (
+                container_port is not None
+                and protocol == "tcp"
+                and container_port not in _SIDECAR_CONTAINER_PORTS
+            ):
+                return True
+    return False
+
+
+def load_compose_declares_web_port(compose_abs: str) -> bool:
+    try:
+        text = Path(compose_abs).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return compose_declares_web_port(text)
+
+
+def web_runtime_bindings(
+    bindings: list[dict[str, Any]],
+) -> list[dict[str, str | int]]:
+    """过滤 Docker inspect 的实际 TCP Web 绑定，并折叠双栈重复项。"""
+    selected: dict[tuple[int, int], dict[str, str | int]] = {}
+    for item in bindings:
+        try:
+            host_port = int(item.get("host_port"))
+            container_port = int(item.get("container_port"))
+        except (TypeError, ValueError):
+            continue
+        if str(item.get("protocol") or "tcp").lower() != "tcp":
+            continue
+        if container_port in _SIDECAR_CONTAINER_PORTS:
+            continue
+        normalized = {
+            "host_ip": str(item.get("host_ip") or "0.0.0.0"),
+            "host_port": host_port,
+            "container_port": container_port,
+            "protocol": "tcp",
+        }
+        key = (host_port, container_port)
+        current = selected.get(key)
+        # Docker 双栈通常同时返回 0.0.0.0 与 ::；优先 IPv4，匹配现有 target_url 契约。
+        if current is None or str(current["host_ip"]) in {"::", "[::]"}:
+            selected[key] = normalized
+    return list(selected.values())
+
+
+def probe_host_for_binding(host_ip: str) -> str | None:
+    """把 wildcard 转成本机探测地址；IPv6-only 暂不发布为 IPv4 target_url。"""
+    raw = (host_ip or "0.0.0.0").strip().strip("[]")
+    if raw in {"", "0.0.0.0"}:
+        return "127.0.0.1"
+    if raw == "::":
+        return None
+    return raw
+
+
+def public_host_for_binding(host_ip: str, advertise_ip: str) -> str | None:
+    """返回复现容器可达的发布地址；loopback-only 映射不可对外发布。"""
+    raw = (host_ip or "0.0.0.0").strip().strip("[]")
+    if raw in {"", "0.0.0.0"}:
+        return advertise_ip
+    if raw in {"127.0.0.1", "::1", "localhost", "::"}:
+        return None
+    return raw
+
+
+async def load_runtime_web_bindings(
+    compose_project: str,
+) -> list[dict[str, str | int]]:
+    from app.contexts.lab.docker_ops import list_published_ports
+
+    return web_runtime_bindings(await list_published_ports(compose_project))
+
+
+def publishable_runtime_bindings(
+    bindings: list[dict[str, str | int]],
+    advertise_ip: str,
+) -> list[dict[str, str | int]]:
+    """补出 probe_host/public_host，只保留宿主与复现容器都可达的绑定。"""
+    result: list[dict[str, str | int]] = []
+    for item in bindings:
+        host_ip = str(item.get("host_ip") or "0.0.0.0")
+        probe_host = probe_host_for_binding(host_ip)
+        public_host = public_host_for_binding(host_ip, advertise_ip)
+        if not probe_host or not public_host:
+            continue
+        result.append({**item, "probe_host": probe_host, "public_host": public_host})
+    return result
+
+
+def recipe_declared_port(target_url: str | None) -> int | None:
+    """从配方 target_url 抽出声明端口（宿主或容器侧，由调用方匹配）。"""
+    raw = (target_url or "").strip()
+    if not raw:
+        return None
+    from urllib.parse import urlparse
+
+    parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+    if parsed.port is not None:
+        return int(parsed.port)
+    scheme = (parsed.scheme or "http").lower()
+    if scheme == "https":
+        return 443
+    if scheme == "http":
+        return 80
+    return None
+
+
+def filter_bindings_for_recipe(
+    bindings: list[dict[str, str | int]],
+    *,
+    target_url: str | None,
+) -> tuple[list[dict[str, str | int]], str | None]:
+    """按配方声明入口收窄探活候选。
+
+    - 未声明端口：返回全部 Web 绑定（已排除 sidecar）
+    - 声明端口且能匹配 host/container port：只返回匹配项
+    - 声明了但发布列表里没有：返回空列表 + 错误说明（禁止降级到旁路 HTTP 口）
+    """
+    preferred = recipe_declared_port(target_url)
+    if preferred is None:
+        return list(bindings), None
+    matched = [
+        item
+        for item in bindings
+        if int(item.get("host_port") or -1) == preferred
+        or int(item.get("container_port") or -1) == preferred
+    ]
+    if matched:
+        return matched, None
+    published = sorted(
+        {
+            f"{int(item['host_port'])}->{int(item['container_port'])}"
+            for item in bindings
+        }
+    )
+    return [], (
+        f"配方声明入口端口 {preferred} 未出现在已发布 Web 绑定中"
+        f"（published={published or '[]'}）。"
+        "禁止用其它碰巧通的 HTTP 口冒充靶场地址。"
+    )
 
 
 def web_host_ports(mappings: list[tuple[int, int]]) -> list[int]:
@@ -177,7 +390,7 @@ def rewrite_compose_host_ports(text: str, occupied: set[int]) -> str | None:
     """冲突的 Web 宿主口改为空闲口；只改 host 侧。无 Web 映射返回 None。"""
     mappings = parse_compose_port_mappings(text)
     web_ports = web_host_ports(mappings)
-    if not web_ports:
+    if not web_ports and not compose_declares_web_port(text):
         return None
     occupied_set = set(occupied)
     conflicts = [p for p in web_ports if p in occupied_set]

@@ -1,4 +1,5 @@
 """agent-runner 镜像：Python + Node + 完整 Linux 命令（非 slim）。"""
+
 import re
 from pathlib import Path
 
@@ -22,12 +23,42 @@ def test_agent_runner_image_is_analyst_toolbox_not_slim():
     lower = text.lower()
     assert "from node:" in lower or "nodejs" in lower
     assert "npm" in lower
-    for pkg in ("procps", "iproute2", "jq", "unzip", "file", "iputils-ping"):
+    for pkg in (
+        "procps",
+        "iproute2",
+        "jq",
+        "unzip",
+        "file",
+        "iputils-ping",
+    ):
         assert pkg in text
 
 
-def test_dockerfile_copies_node_skills_not_desktop_plugin():
+def test_runner_local_bin_path_exists_on_read_only_rootfs():
+    """镜像 PATH 中的目录必须在构建期存在，运行时根文件系统保持只读。"""
     text = DOCKERFILE.read_text(encoding="utf-8")
-    assert "COPY infrastructure/agent-runner/node-skills" in text
+    assert "install -d -o root -g root -m 0755 /home/runner/.local/bin" in text
+
+
+def test_runner_uses_linux_bash_env_for_provider_credential_isolation():
+    text = DOCKERFILE.read_text(encoding="utf-8")
+    scrubber = (
+        ROOT / "infrastructure" / "agent-runner" / "runner" / "bash_env.sh"
+    ).read_text(encoding="utf-8")
+    assert "BASH_ENV=/app/runner/bash_env.sh" in text
+    assert "unset ANTHROPIC_API_KEY" in scrubber
+    assert "unset ANTHROPIC_AUTH_TOKEN" in scrubber
+    # SCRUB=1 时 Claude Code 要求镜像内有 bubblewrap（及 socat）
+    assert "bubblewrap" in text
+    assert "socat" in text
+    assert "command -v bwrap" in text
+
+
+
+def test_dockerfile_does_not_bake_node_skills():
+    """Skill 由 worker -v 挂载；镜像不得 COPY 全量 node-skills。"""
+    text = DOCKERFILE.read_text(encoding="utf-8")
+    assert "COPY infrastructure/agent-runner/node-skills" not in text
     assert "COPY plugins/vuln-verify-expert" not in text
     assert "PLUGIN_DIR" not in text
+    assert "/node-skill" in text

@@ -1,4 +1,5 @@
-import { App, Button, List, Space, Tag, Typography, Upload } from 'antd'
+import { useState } from 'react'
+import { App, Button, List, Select, Space, Tag, Typography, Upload } from 'antd'
 import type { UploadProps } from 'antd'
 import { DownloadOutlined, PaperClipOutlined, UploadOutlined } from '@ant-design/icons'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -11,9 +12,12 @@ import { useErrorToast } from '../../../shared/hooks/useErrorToast'
 
 const { Text } = Typography
 
-export function EvidenceList({ reportId }: { reportId: string }) {
+type EvidenceKind = 'artifact' | 'log' | 'screenshot' | 'poc'
+
+export function EvidenceList({ reportId, readOnly = false }: { reportId: string; readOnly?: boolean }) {
   const { message } = App.useApp()
   const qc = useQueryClient()
+  const [kind, setKind] = useState<EvidenceKind>('artifact')
 
   const { data: evidences, isLoading, isError, error } = useQuery({
     queryKey: ['report-evidences', reportId],
@@ -27,7 +31,7 @@ export function EvidenceList({ reportId }: { reportId: string }) {
     customRequest: async (options) => {
       const { file, onSuccess, onError } = options
       try {
-        const ev = await api.uploadEvidence(reportId, file as File)
+        const ev = await api.uploadEvidence(reportId, file as File, kind)
         message.success(`已上传: ${ev.file_name}`)
         qc.invalidateQueries({ queryKey: ['report-evidences', reportId] })
         qc.invalidateQueries({ queryKey: ['task-report'] })
@@ -45,11 +49,25 @@ export function EvidenceList({ reportId }: { reportId: string }) {
         <Text type="secondary" style={{ fontSize: 13 }}>
           <PaperClipOutlined /> 证据文件（{evidences?.length ?? 0}）
         </Text>
-        <Upload {...uploadProps}>
-          <Button size="small" icon={<UploadOutlined />}>
-            上传证据
-          </Button>
-        </Upload>
+        {!readOnly && (
+          <Space size={6}>
+            <Select<EvidenceKind>
+              size="small"
+              value={kind}
+              onChange={setKind}
+              style={{ width: 108 }}
+              options={[
+                { value: 'artifact', label: '附件' },
+                { value: 'log', label: '日志' },
+                { value: 'screenshot', label: '截图' },
+                { value: 'poc', label: 'PoC' },
+              ]}
+            />
+            <Upload {...uploadProps}>
+              <Button size="small" icon={<UploadOutlined />}>上传证据</Button>
+            </Upload>
+          </Space>
+        )}
       </Space>
       <List<Evidence>
         size="small"

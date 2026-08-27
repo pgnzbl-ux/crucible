@@ -1,0 +1,40 @@
+rules:
+  - id: jdbc-sql-fragment-concat
+    languages:
+      - java
+    severity: ERROR
+    message: >-
+      SQL fragment is built by concatenating onto WHERE / ORDER BY / AND
+      without requiring a SELECT keyword. These fragments often feed a later
+      Statement.execute* / PreparedStatement and are a common SQLi shape in
+      hand-written JDBC.
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp:
+        - A01:2017 - Injection
+        - A03:2021 - Injection
+      category: security
+      technology:
+        - jdbc
+        - java
+      subcategory:
+        - vuln
+      confidence: HIGH
+      likelihood: HIGH
+      impact: HIGH
+      crucible-overlay: true
+    patterns:
+      - pattern-either:
+          - pattern: '" WHERE " + $X'
+          - pattern: '" WHERE " + $X + ...'
+          - pattern: '" where " + $X'
+          - pattern: '" where " + $X + ...'
+          - pattern: '" ORDER BY " + $X'
+          - pattern: '" ORDER BY " + $X + ...'
+          - pattern: '" order by " + $X'
+          - pattern: '" order by " + $X + ...'
+          - pattern: '" AND " + $X'
+          - pattern: '" AND " + $X + ...'
+          - pattern: '" and " + $X'
+          - pattern: '" and " + $X + ...'

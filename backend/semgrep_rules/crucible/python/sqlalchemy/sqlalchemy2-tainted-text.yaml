@@ -1,0 +1,105 @@
+rules:
+  - id: sqlalchemy2-tainted-text
+    languages:
+      - python
+    severity: ERROR
+    mode: taint
+    message: >-
+      Web request input flows into SQLAlchemy 2.0 textual SQL (text / execute /
+      exec_driver_sql / scalars / scalar). Use bound parameters
+      (text("... WHERE id = :id"), {"id": value}) or the expression language
+      instead of interpolating user input.
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp:
+        - A01:2017 - Injection
+        - A03:2021 - Injection
+      category: security
+      technology:
+        - sqlalchemy
+        - flask
+        - django
+        - fastapi
+        - python
+      subcategory:
+        - vuln
+      confidence: MEDIUM
+      likelihood: HIGH
+      impact: HIGH
+      crucible-overlay: true
+    pattern-sources:
+      - pattern-either:
+          - pattern: flask.request.$W
+          - pattern: request.GET
+          - pattern: request.POST
+          - patterns:
+              - pattern-inside: |
+                  def $F(..., $P: $T = Query(...), ...):
+                      ...
+              - pattern: $P
+          - patterns:
+              - pattern-inside: |
+                  async def $F(..., $P: $T = Query(...), ...):
+                      ...
+              - pattern: $P
+          - patterns:
+              - pattern-inside: |
+                  def $F(..., $P: $T = Path(...), ...):
+                      ...
+              - pattern: $P
+          - patterns:
+              - pattern-inside: |
+                  async def $F(..., $P: $T = Path(...), ...):
+                      ...
+              - pattern: $P
+          - patterns:
+              - pattern-inside: |
+                  def $F(..., $P: $T = Body(...), ...):
+                      ...
+              - pattern: $P
+          - patterns:
+              - pattern-inside: |
+                  async def $F(..., $P: $T = Body(...), ...):
+                      ...
+              - pattern: $P
+          - patterns:
+              - pattern-inside: |
+                  def $F(..., $P: Request, ...):
+                      ...
+              - pattern: $P
+          - patterns:
+              - pattern-inside: |
+                  async def $F(..., $P: Request, ...):
+                      ...
+              - pattern: $P
+          - pattern: $REQ.query_params
+          - pattern: $REQ.path_params
+    pattern-sinks:
+      - pattern-either:
+          - patterns:
+              - pattern: text($SQL)
+              - focus-metavariable: $SQL
+          - patterns:
+              - pattern: $S.execute(text($SQL), ...)
+              - focus-metavariable: $SQL
+          - patterns:
+              - pattern: $S.exec_driver_sql($SQL, ...)
+              - focus-metavariable: $SQL
+          - patterns:
+              - pattern: $S.scalars(text($SQL), ...)
+              - focus-metavariable: $SQL
+          - patterns:
+              - pattern: $S.scalar(text($SQL), ...)
+              - focus-metavariable: $SQL
+          - patterns:
+              - pattern: $S.scalar_one(text($SQL), ...)
+              - focus-metavariable: $SQL
+          - patterns:
+              - pattern: $S.scalar_one_or_none(text($SQL), ...)
+              - focus-metavariable: $SQL
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: int(...)
+          - pattern: float(...)
+          - pattern: bool(...)
