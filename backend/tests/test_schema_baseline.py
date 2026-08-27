@@ -91,7 +91,10 @@ def test_alembic_chain_from_baseline():
     )
     assert 'revision: str = "u4b1e7c30a91"' in time_budget
     assert 'down_revision: Union[str, None] = "t3a0d2b19e58"' in time_budget
-    assert _alembic_head() == "u4b1e7c30a91"
+    product_fields = (versions / "w8d4f2a61b73_report_product_fields.py").read_text(encoding="utf-8")
+    assert 'revision: str = "w8d4f2a61b73"' in product_fields
+    assert 'down_revision: Union[str, None] = "u4b1e7c30a91"' in product_fields
+    assert _alembic_head() == "w8d4f2a61b73"
 
 
 @pytest.mark.asyncio
@@ -158,6 +161,8 @@ async def test_create_all_schema_matches_models():
             finding_cols = {c["name"] for c in insp.get_columns("raw_findings")}
             assert "alert_group_id" in finding_cols
             assert "lead_node_runs" in insp.get_table_names()
+            report_cols = {c["name"] for c in insp.get_columns("reports")}
+            assert {"product_name", "affected_version", "project_address"} <= report_cols
             lead_node_cols = {c["name"] for c in insp.get_columns("lead_node_runs")}
             assert {
                 "lead_run_id", "task_id", "run_id", "node_key", "status", "attempt",

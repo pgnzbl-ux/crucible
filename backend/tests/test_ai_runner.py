@@ -297,7 +297,7 @@ def test_render_poc_markdown_python_fence():
 
 def test_apply_poc_overwrites_model_poc_commands():
     out = apply_poc_to_report_output(
-        {"report_data": _md_sections(poc_commands="```bash\ncurl x\n```"), "final_verdict": "confirmed"},
+        {"title": "Demo app 用户接口存在 SQL 注入漏洞", "product_name": "DemoApp", "affected_version": "main @ abc1234", "report_data": _md_sections(poc_commands="```bash\ncurl x\n```"), "final_verdict": "confirmed"},
         _poc_ok(code="print('REAL')\n"),
         "confirmed",
     )
@@ -308,7 +308,7 @@ def test_apply_poc_overwrites_model_poc_commands():
 
 def test_apply_poc_strips_on_verification_record():
     out = apply_poc_to_report_output(
-        {"report_data": _record_sections(), "final_verdict": "false_positive"},
+        {"title": "Demo app 用户接口越权问题的验证记录", "product_name": "DemoApp", "affected_version": "main @ abc1234", "report_data": _record_sections(), "final_verdict": "false_positive"},
         None,
         "false_positive",
     )
@@ -441,9 +441,16 @@ def test_validate_report_vulnerability_and_record_kinds():
     assert not ok
     assert "document_kind" in (err or "") or "8 节" in (err or "")
 
+    ok_title, err_title = validate_output(
+        "report",
+        {"report_data": _md_sections(), "final_verdict": "confirmed"},
+    )
+    assert not ok_title and "title" in (err_title or "")
+
     ok2, err2 = validate_output(
         "report",
         {
+            "title": "Demo app 用户接口存在 SQL 注入漏洞", "product_name": "DemoApp", "affected_version": "main @ abc1234",
             "report_data": _md_sections(),
             "final_verdict": "confirmed",
             "cvss": {
@@ -457,7 +464,7 @@ def test_validate_report_vulnerability_and_record_kinds():
 
     ok3, err3 = validate_output(
         "report",
-        {"report_data": _md_sections(), "final_verdict": "not_reproduced"},
+        {"title": "Demo app 用户接口越权问题的验证记录", "product_name": "DemoApp", "affected_version": "main @ abc1234", "report_data": _md_sections(), "final_verdict": "not_reproduced"},
     )
     assert not ok3
     assert "verification_record" in (err3 or "") or "document_kind" in (err3 or "")
@@ -465,6 +472,7 @@ def test_validate_report_vulnerability_and_record_kinds():
     ok4, err4 = validate_output(
         "report",
         {
+            "title": "Demo app 用户接口越权问题的验证记录", "product_name": "DemoApp", "affected_version": "main @ abc1234",
             "report_data": _record_sections(),
             "final_verdict": "not_reproduced",
             "cvss": {
@@ -479,13 +487,13 @@ def test_validate_report_vulnerability_and_record_kinds():
 
     ok5, err5 = validate_output(
         "report",
-        {"report_data": _record_sections(), "final_verdict": "not_reproduced"},
+        {"title": "Demo app 用户接口越权问题的验证记录", "product_name": "DemoApp", "affected_version": "main @ abc1234", "report_data": _record_sections(), "final_verdict": "not_reproduced"},
     )
     assert ok5, err5
 
     ok6, err6 = validate_output(
         "report",
-        {"report_data": _record_sections(poc_commands="curl x"), "final_verdict": "not_reproduced"},
+        {"title": "Demo app 用户接口越权问题的验证记录", "product_name": "DemoApp", "affected_version": "main @ abc1234", "report_data": _record_sections(poc_commands="curl x"), "final_verdict": "not_reproduced"},
     )
     assert not ok6
     assert "poc_commands" in (err6 or "")
@@ -563,14 +571,14 @@ def test_validate_report_accepts_needs_review_verification_record():
     """needs_review 走验证记录：8 节记录字段 OK；不得带 cvss / poc_commands。"""
     ok, err = validate_output(
         "report",
-        {"report_data": _record_sections(), "final_verdict": "needs_review"},
+        {"title": "Demo app 用户接口越权问题的验证记录", "product_name": "DemoApp", "affected_version": "main @ abc1234", "report_data": _record_sections(), "final_verdict": "needs_review"},
     )
     assert ok, err
 
     # needs_review 用漏洞报告 kind → 拒
     ok2, err2 = validate_output(
         "report",
-        {"report_data": _md_sections(), "final_verdict": "needs_review"},
+        {"title": "Demo app 用户接口越权问题的验证记录", "product_name": "DemoApp", "affected_version": "main @ abc1234", "report_data": _md_sections(), "final_verdict": "needs_review"},
     )
     assert not ok2
     assert "verification_record" in (err2 or "") or "document_kind" in (err2 or "")
@@ -579,6 +587,7 @@ def test_validate_report_accepts_needs_review_verification_record():
     ok3, err3 = validate_output(
         "report",
         {
+            "title": "Demo app 用户接口越权问题的验证记录", "product_name": "DemoApp", "affected_version": "main @ abc1234",
             "report_data": _record_sections(),
             "final_verdict": "needs_review",
             "cvss": {"vector": "x", "base_score": 5.0, "severity": "Medium"},
@@ -1060,3 +1069,22 @@ def test_apply_stream_usage_fallback_replaces_stringified_usage():
     meta = {"usage": "{'input_tokens': 9}"}
     apply_stream_usage_fallback(meta, {"usage": {"input_tokens": 9, "output_tokens": 1}})
     assert meta["usage"] == {"input_tokens": 9, "output_tokens": 1}
+
+
+def test_validate_report_title_format_and_missing():
+    ok, err = validate_output(
+        "report",
+        {
+            "title": "标题里没有句式关键词", "product_name": "DemoApp", "affected_version": "main @ abc1234",
+            "report_data": _md_sections(),
+            "final_verdict": "confirmed",
+            "cvss": {"vector": "AV:N/AC:L/PR:N/UI:N/C:H/I:H/A:H", "base_score": 9.8, "severity": "Critical"},
+        },
+    )
+    assert not ok and "存在" in (err or "")
+
+    missing = validate_output(
+        "report",
+        {"title": "  ", "report_data": _md_sections(), "final_verdict": "confirmed"},
+    )
+    assert not missing[0] and "title" in (missing[1] or "")

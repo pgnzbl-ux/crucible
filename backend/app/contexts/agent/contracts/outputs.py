@@ -98,6 +98,9 @@ class ReproduceHandoff(_HandoffBase):
 
 
 class ReportHandoff(_HandoffBase):
+    title: str | None = None
+    product_name: str | None = None
+    affected_version: str | None = None
     report_data: Any = None
     final_verdict: str | None = None
     # 文档层回显；权威结论以 FinalizeHandoff.analysis_verdict 为准

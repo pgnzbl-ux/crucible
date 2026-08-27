@@ -258,6 +258,7 @@ class InputAssembler:
                 return ReportInput(
                     profile=ProfileHandoff.model_validate(store.get_raw("profile")),
                     env_ready=EnvReadyHandoff.model_validate(store.get_raw("env_ready")),
+                    source=SourceHandoff.model_validate(store.get_raw("source")),
                     audit=AuditHandoff.model_validate({}),
                     reproduce=ReproduceHandoff.model_validate({}),
                     vulnerability_description=task.vulnerability_description or "",
@@ -272,6 +273,7 @@ class InputAssembler:
             return ReportInput(
                 profile=ProfileHandoff.model_validate(store.get_raw("profile")),
                 env_ready=EnvReadyHandoff.model_validate(store.get_raw("env_ready")),
+                source=SourceHandoff.model_validate(store.get_raw("source")),
                 audit=AuditHandoff.model_validate(store.get_raw("audit")),
                 reproduce=ReproduceHandoff.model_validate(repro_raw),
                 vulnerability_description=task.vulnerability_description or "",

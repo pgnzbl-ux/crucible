@@ -159,6 +159,12 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
     "report": {
         "type": "object",
         "properties": {
+            "title": {
+                "type": "string",
+                "description": "漏洞报告：「产品」「模块/接口」存在「漏洞类型」漏洞；验证记录：「产品」「模块/接口」「主张问题」的验证记录",
+            },
+            "product_name": {"type": "string", "description": "产品名称（README/源码推断）"},
+            "affected_version": {"type": "string", "description": "影响版本：ref_name @ commit 前7位，用注入 source 值"},
             "report_data": {"type": "object", "description": "document_kind + 8 节 Markdown"},
             "final_verdict": {
                 "type": "string",
@@ -168,7 +174,7 @@ NODE_INPUT_SCHEMAS: dict[str, dict] = {
             "cvss": {"type": "object", "description": "仅漏洞报告的 CVSS"},
             "vulnerable_file": {"type": "string"},
         },
-        "required": ["report_data", "final_verdict"],
+        "required": ["title", "product_name", "affected_version", "report_data", "final_verdict"],
     },
     "triage": {
         "type": "object",

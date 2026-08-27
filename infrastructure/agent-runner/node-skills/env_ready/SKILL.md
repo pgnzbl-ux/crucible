@@ -22,12 +22,22 @@ agent-runner 内没有 Docker CLI，这是平台设计，不是环境异常。�
 - `attempt = 1`：先 recon 再写文件。没有 `.vuln-env` 是正常的。可用 `node -e` / 读文件做只读探测，不要 `npm install` / `pip install`。
 - `attempt > 1`：现有 `.vuln-env` 是上一轮产物。先读取它，再结合 `failed_stage` 和 `previous_error` 对症，**一次只改一处**。不要因为构建网络抖动而改启动拓扑。阶段含义：`ai_submit`=上一轮未调用 submit_result（常因工具格式异常，本轮从 recon/写配方重来），`compose_build`=镜像构建，`container_start`=进程启动，`container_healthcheck`=Dockerfile/compose healthcheck，`health_check`=平台 HTTP 正文探活，`compose_policy`=安全策略，`compose_timeout`=Compose 执行超时。
 
+## 随技能参考文件（按需 Read，本目录 `/node-skill/references/`）
+
+| 文件 | 什么时候读 |
+|---|---|
+| `references/startup-troubleshooting.md` | `attempt > 1`：按 failed_stage / previous_error 对症（Connection refused、缺表、unhealthy、cache mount 坑…） |
+| `references/dockerfile-patterns.md` | 写/改 Dockerfile 时：各语言多阶段模板与坑 |
+| `references/project-detection.md` | recon 定语言/框架/端口/启动命令拿不准时 |
+| `references/existing-image.md` | 判断能否用现成镜像；中间件官方镜像表 |
+
 ### recon（写配方前必须能回答）
 
 读 README、依赖清单、启动配置、已有 Docker 文件，确认：
 
-- 几个可运行模块、各自启动命令与端口
-- 中间件（db / redis / mq）
+- 几个可运行模块、各自启动命令与端口；启动脚本背后的隐藏进程（如 `npm run start` 经 concurrently 再拉 worker/watchdog）各自的中间件需求
+- **中间件指纹（强制）**：在依赖清单与源码 import 里找客户端库——`ioredis`/`bullmq`/`redis`、`mysql`/`pg`/`mongo` 驱动、`kafka`/`rabbitmq`/`celery`、`minio`/`s3`。**凡是代码会连的中间件，compose 必须有对应服务**，哪怕 Dockerfile 里看不到
+- **`.env.example` / config 默认连接串（强制）**：里面的 `localhost`/`127.0.0.1` 和宿主映射端口（如 `16379`）是宿主机开发姿态，**不得原样带进容器**。必须在 compose `environment` 里显式覆盖为服务名 + 容器端口（如 `REDIS_HOST: redis`、`REDIS_PORT: "6379"`）
 - 服务怎么互相发现（`localhost` / hostname / Eureka）
 - 有没有硬编码 Windows 路径、只监听 `127.0.0.1`
 
@@ -35,20 +45,23 @@ agent-runner 内没有 Docker CLI，这是平台设计，不是环境异常。�
 
 ### 失败对症
 
+逐条对照仍拿不准时，`Read /node-skill/references/startup-troubleshooting.md`（含 maven cache mount 坑、COPY 静默、0.0.0.0、context-path 等速查）。
+
 | 看到 | 改 |
 |---|---|
 | `COPY` / no such file | 只改 `build.context` / COPY 路径，指向原仓库 |
 | `Could not transfer` / `DependencyResolution` / npm `ETIMEDOUT` / pip timeout | 加重试、串行构建、缓存挂载；不要合并容器 |
 | 宿主端口占用 | 只改 compose 的 host 侧映射口 |
+| `Connection refused`（redis / mysql / mq / minio 反复刷屏） | **缺依赖服务或连的是 localhost/错端口**：compose 补官方镜像服务 + `environment` 改服务名 + `depends_on` healthy。不要改应用端口、不要加连接重试 |
 | 健康检查不过 / 首页崩溃正文（Fatal、缺表、Whitelabel） | 进程是否已是 PID 1；DB/迁移是否真正执行；跨容器是否还在用 `localhost`。`previous_error` 会带首页正文，按正文修配方（init SQL / `depends_on` healthy），不要只改端口 |
 | compose 安全策略拒绝 | 去掉 privileged / host 网络 / 越界 mount |
 
 选启动方式：
 
-- 项目自带 compose → 复用，只改端口 / 卷
-- 有 Dockerfile 无 compose → 补最小 compose
-- 现成官方镜像 → 用镜像写 compose
-- 都没有 → 按语言惯例自建最小 Dockerfile + compose
+- **项目自带 compose → 整体复用（首选）**：保留它的全部服务、environment、healthcheck、`depends_on`，只改宿主侧端口映射 / 卷路径 / 项目名。它引用的外部依赖（DB/Redis/对象存储）已在其服务列表里就**原样带入**；确实被裁剪的服务要补回
+- 有 Dockerfile 无 compose → 按中间件指纹补齐依赖服务的最小 compose
+- 现成官方镜像 → 用镜像写 compose（依赖服务同样按指纹补齐）
+- 都没有 → 按语言惯例自建最小 Dockerfile + compose（模板先读 `references/dockerfile-patterns.md`；语言/端口判定读 `references/project-detection.md`）
 
 ## 配方形状
 

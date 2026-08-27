@@ -209,6 +209,9 @@ export interface ReportDetail {
   cvss_score: number | null
   severity: string | null
   vulnerable_file: string | null
+  product_name: string | null
+  affected_version: string | null
+  project_address: string | null
   poc_language: string | null
   poc_filename: string | null
   poc_code: string | null
@@ -235,6 +238,8 @@ export interface ReportSummary {
   summary: string | null
   verdict: string | null
   severity: string | null
+  product_name: string | null
+  affected_version: string | null
   published_at: string | null
   created_at: string
   updated_at: string

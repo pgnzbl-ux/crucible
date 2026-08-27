@@ -37,6 +37,9 @@ class ReportDetail(BaseModel):
     cvss_score: float | None = None
     severity: str | None = None
     vulnerable_file: str | None = None
+    product_name: str | None = None
+    affected_version: str | None = None
+    project_address: str | None = None
     report_data: dict[str, Any] | None = None
     md_artifact_key: str | None = None
     docx_artifact_key: str | None = None
@@ -65,6 +68,8 @@ class ReportSummary(BaseModel):
     summary: str | None
     verdict: str | None = None
     severity: str | None = None
+    product_name: str | None = None
+    affected_version: str | None = None
     published_at: datetime | None = None
     created_at: datetime
     updated_at: datetime

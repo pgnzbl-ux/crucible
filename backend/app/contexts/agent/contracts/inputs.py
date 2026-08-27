@@ -115,6 +115,7 @@ class ReproduceInput(_InputBase):
 class ReportInput(_InputBase):
     profile: ProfileHandoff
     env_ready: EnvReadyHandoff
+    source: SourceHandoff  # 影响版本：ref_name / commit_sha
     audit: AuditHandoff
     reproduce: ReproduceHandoff
     vulnerability_description: str = ""

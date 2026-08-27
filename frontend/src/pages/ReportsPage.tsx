@@ -212,11 +212,18 @@ function VerifyReportsTable() {
           <Text strong>{projectLabel(v)}</Text>
           <div>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              {sourceVersionLabel(row.project_ref, null)} · {row.title}
+              {row.affected_version ?? sourceVersionLabel(row.project_ref, null)} · {row.title}
             </Text>
           </div>
         </div>
       ),
+    },
+    {
+      title: '产品',
+      dataIndex: 'product_name',
+      width: 120,
+      ellipsis: true,
+      render: (v: string | null) => v ?? <Text type="secondary">—</Text>,
     },
     {
       title: '报告类型',

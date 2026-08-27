@@ -1117,6 +1117,9 @@ async def run_orchestration(
             result["cvss"] = report_out.get("cvss")
             result["vulnerable_file"] = report_out.get("vulnerable_file")
             result["poc"] = report_out.get("poc")
+            for key in ("title", "product_name", "affected_version"):
+                if report_out.get(key):
+                    result[key] = report_out[key]
             if report_out.get("final_verdict") and not result.get("verdict"):
                 result["verdict"] = report_out.get("final_verdict")
         return result

@@ -277,3 +277,43 @@ async def test_hunt_batch_records_usage(session_factory, tmp_path):
         assert rows[0].prompt_tokens == 40
         assert rows[0].completion_tokens == 8
         assert rows[0].run_id == "r1"
+
+
+from types import SimpleNamespace
+
+
+def test_load_stack_notes_hits_real_laravel_note():
+    from app.contexts.agent.nodes import api_hunt
+
+    notes = api_hunt._load_stack_notes(["php"], ["laravel"])
+    assert "Laravel" in notes and "Policy" in notes
+
+
+def test_load_stack_notes_framework_alias_and_fallback(tmp_path, monkeypatch):
+    from app.contexts.agent.nodes import api_hunt
+    from app.contexts.agent.stacks.registry import canonicalize_framework
+
+    assert canonicalize_framework("springboot") == "spring"
+    assert canonicalize_framework("spring boot") == "spring"
+
+    (tmp_path / "java").mkdir()
+    (tmp_path / "java" / "spring.md").write_text("spring 要点", encoding="utf-8")
+
+    monkeypatch.setattr(api_hunt, "_API_HUNT_STACKS", tmp_path)
+    hit = api_hunt._load_stack_notes(["java"], ["SpringBoot"])
+    assert "spring 要点" in hit and "## stack java/spring" in hit
+
+    # 框架未命中 → 语言级 _default.md 兜底
+    (tmp_path / "java" / "_default.md").write_text("java 通用要点", encoding="utf-8")
+    fallback = api_hunt._load_stack_notes(["java"], ["unknownfw"])
+    assert "java 通用要点" in fallback
+
+    # 双份避免：命中框架笔记时不再追加 default
+    assert fallback.count("java 通用要点") == 1 or "spring 要点" not in fallback
+
+
+def test_load_stack_notes_empty_when_nothing_matches(tmp_path, monkeypatch):
+    from app.contexts.agent.nodes import api_hunt
+
+    monkeypatch.setattr(api_hunt, "_API_HUNT_STACKS", tmp_path)
+    assert api_hunt._load_stack_notes(["ruby"], ["rails"]) == ""

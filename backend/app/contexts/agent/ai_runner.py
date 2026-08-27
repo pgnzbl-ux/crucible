@@ -183,6 +183,7 @@ def _mock_output(node_key: str, input_json: dict[str, Any]) -> dict[str, Any]:
             "vulnerable_file": "",
         }
     if node_key == "report":
+        out_title = "MockProduct demo 接口存在 Mock 漏洞"
         expected = input_json.get("expected_verdict")
         if expected not in _REPORT_VERDICTS:
             repro = input_json.get("reproduce") or {}
@@ -201,6 +202,9 @@ def _mock_output(node_key: str, input_json: dict[str, Any]) -> dict[str, Any]:
         report_data = {k: f"[Mock] {k}" for k in keys}
         report_data["document_kind"] = kind
         output = {
+            "title": out_title,
+            "product_name": "MockProduct",
+            "affected_version": "mock @ 0000000",
             "report_data": report_data,
             "final_verdict": expected,
             "vulnerable_file": "",
@@ -563,7 +567,15 @@ def _validate_report_output(output: dict) -> tuple[bool, str | None]:
     expected_kind = document_kind_for_verdict(verdict)
     if kind != expected_kind:
         return False, f"{verdict} 需要 document_kind={expected_kind}"
+    title = str(output.get("title") or "").strip()
+    if not title:
+        return False, "title 必填（漏洞报告：「产品」「模块/接口」存在「漏洞类型」漏洞）"
+    for field_name in ("product_name", "affected_version"):
+        if not str(output.get(field_name) or "").strip():
+            return False, f"{field_name} 必填（product_name 取 README/源码官方称呼；affected_version 用注入 source 的 ref@commit）"
     if kind == "vulnerability_report":
+        if "存在" not in title:
+            return False, "漏洞报告 title 须为「产品」「模块/接口」存在「漏洞类型」漏洞 句式"
         ok, err = _validate_report_data_markdown(rd, REPORT_SECTION_KEYS)
         if not ok:
             return False, err

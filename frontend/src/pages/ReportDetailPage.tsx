@@ -85,6 +85,13 @@ export function ReportDetailPage() {
               ) : null}
               <Tag color={getReportStatusMeta(report.status).color}>{getReportStatusMeta(report.status).label}</Tag>
               {report.severity ? <Tag>{report.severity}</Tag> : null}
+              {report.product_name ? <Tag color="blue">产品：{report.product_name}</Tag> : null}
+              {report.affected_version ? <Tag>影响版本：{report.affected_version}</Tag> : null}
+              {report.project_address ? (
+                <Tag title={report.project_address}>
+                  {report.project_address.startsWith('http') ? '项目地址' : '项目'}：{report.project_address}
+                </Tag>
+              ) : null}
               <Button size="small" icon={<DownloadOutlined />} onClick={() => exportFile('json')}>
                 导出 JSON
               </Button>

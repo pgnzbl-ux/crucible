@@ -50,6 +50,8 @@ LANG_ALIASES = {
 # 画像 framework id → 清单 parser key（与 PARSER_SPECS.key 对齐）
 FRAMEWORK_ALIASES: dict[str, str] = {
     "spring-boot": "spring",
+    "springboot": "spring",
+    "spring boot": "spring",
     "springframework": "spring",
     "next": "nextjs",
     "nuxt": "nextjs",

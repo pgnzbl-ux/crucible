@@ -45,12 +45,13 @@ def _profile_langs_fws(profile) -> tuple[list[str], list[str]]:
 
 
 def _load_stack_notes(langs: list[str], fws: list[str]) -> str:
-    """读取 api_hunt/stacks/<lang>/<fw>.md；存在则拼接。"""
+    """读取 api_hunt/stacks/<lang>/<fw>.md；框架未命中时回退 <lang>/_default.md。"""
     from app.contexts.agent.stacks.registry import canonicalize_framework, canonicalize_language
 
     chunks: list[str] = []
     for lang in langs:
         canon_lang = canonicalize_language(lang)
+        matched = False
         for fw in fws:
             canon_fw = canonicalize_framework(fw)
             path = _API_HUNT_STACKS / canon_lang / f"{canon_fw}.md"
@@ -61,7 +62,17 @@ def _load_stack_notes(langs: list[str], fws: list[str]) -> str:
             except OSError:
                 continue
             if text:
+                matched = True
                 chunks.append(f"## stack {canon_lang}/{canon_fw}\n\n{text}")
+        if not matched:
+            # 画像没识别出框架（或该框架暂无笔记）时，退语言级通用提示
+            fallback = _API_HUNT_STACKS / canon_lang / "_default.md"
+            try:
+                text = fallback.read_text(encoding="utf-8").strip() if fallback.is_file() else ""
+            except OSError:
+                text = ""
+            if text:
+                chunks.append(f"## stack {canon_lang}\n\n{text}")
     return "\n\n".join(chunks)
 
 
