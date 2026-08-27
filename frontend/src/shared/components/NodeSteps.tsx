@@ -427,7 +427,7 @@ export function NodeSteps({
                 </div>
                 {visual === 'blocked' ? (
                   <p className="crucible-node-list__summary">上游必要节点失败，本节点未执行</p>
-                ) : n.error_message ? (
+                ) : visual === 'running' ? null : n.error_message ? (
                   <pre className="crucible-node-error-log">{n.error_message}</pre>
                 ) : (
                   <>

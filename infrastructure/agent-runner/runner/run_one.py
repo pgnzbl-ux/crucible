@@ -630,21 +630,61 @@ async def _stream_messages(
     prompt: str,
     node_key: str | None = None,
 ) -> AsyncIterator[dict]:
-    """包裹 SDK async generator，把每条 Message 翻译为 dict。"""
+    """包裹 SDK async generator，把每条 Message 翻译为 dict。
+
+    每个事件额外携带 `parent_tool_use_id`（None = 主 Agent 线程；Task 子代理
+    的内层消息带其 Task 调用 id），前端据此做主/子代理线程分组。
+    """
     seq = 0
     session_id_seen: str | None = None
+    # tool_use_id -> {"tool": 名称, "command": Bash 命令}：
+    # 结果块只有 id 没有名字，用 started 侧登记回填，前端可合并命令+结果
+    tool_meta_by_id: dict[str, dict[str, str]] = {}
 
     try:
         async for message in query(prompt=prompt, options=options):
             seq += 1
             ts = time.time()
             sid = getattr(message, "session_id", None) or session_id_seen
+            parent = getattr(message, "parent_tool_use_id", None) or None
             message_type = type(message).__name__
 
-            # SystemMessage：只保留 init；thinking_tokens 等用量心跳丢弃
+            def _base() -> dict[str, Any]:
+                return {"session_id": sid, "sequence": seq, "timestamp": ts}
+
+            # Task 子代理生命周期：SDK 以 SystemMessage 形态推送，
+            # 此前被 keep-set 静默丢弃，导致前端无法感知子代理列表/状态
             if isinstance(message, SystemMessage):
                 if sid and sid != session_id_seen:
                     session_id_seen = sid
+                subtype = getattr(message, "subtype", None) or ""
+                if subtype in {
+                    "task_started", "task_progress", "task_notification", "task_updated",
+                }:
+                    data = getattr(message, "data", {}) or {}
+                    yield {
+                        "type": "agent.subagent.updated",
+                        "subtype": subtype,
+                        "tool_use_id": (
+                            data.get("task_id")
+                            or data.get("tool_use_id")
+                            or data.get("id")
+                            or ""
+                        ),
+                        "label": (
+                            data.get("description")
+                            or data.get("subject")
+                            or data.get("title")
+                            or ""
+                        ),
+                        "status": data.get("status") or "",
+                        "detail": _truncate(
+                            json.dumps(data, ensure_ascii=False, default=str), 400
+                        ),
+                        "parent_tool_use_id": parent,
+                        **_base(),
+                    }
+                    continue
                 event = _system_phase_event(
                     message, seq=seq, timestamp=ts, session_id=sid
                 )
@@ -658,13 +698,15 @@ async def _stream_messages(
                 err = getattr(message, "error", None)
                 if err:
                     err_msg = getattr(err, "message", str(err))
-                    yield _failed_event(
+                    ev = _failed_event(
                         err_msg,
                         model=getattr(message, "model", None),
                         session_id=sid,
                         sequence=seq,
                         timestamp=ts,
                     )
+                    ev["parent_tool_use_id"] = parent
+                    yield ev
                     continue
 
                 content = getattr(message, "content", None) or []
@@ -678,9 +720,8 @@ async def _stream_messages(
                             "type": "agent.thinking",
                             "text": thinking_text,
                             "model": getattr(message, "model", None),
-                            "session_id": sid,
-                            "sequence": seq,
-                            "timestamp": ts,
+                            "parent_tool_use_id": parent,
+                            **_base(),
                         }
                         continue
                     if isinstance(block, TextBlock):
@@ -688,19 +729,26 @@ async def _stream_messages(
                             "type": "agent.message",
                             "text": getattr(block, "text", "") or "",
                             "model": getattr(message, "model", None),
-                            "session_id": sid,
-                            "sequence": seq,
-                            "timestamp": ts,
+                            "parent_tool_use_id": parent,
+                            **_base(),
                         }
                     elif isinstance(block, ToolUseBlock):
+                        tool_name = getattr(block, "name", "unknown")
+                        tu_id = getattr(block, "id", None)
+                        meta_entry: dict[str, str] = {"tool": tool_name}
+                        if tool_name == "Bash":
+                            cmd = (getattr(block, "input", {}) or {}).get("command")
+                            if cmd:
+                                meta_entry["command"] = str(cmd)
+                        if tu_id:
+                            tool_meta_by_id[tu_id] = meta_entry
                         yield {
                             "type": "tool.call.started",
-                            "tool": getattr(block, "name", "unknown"),
+                            "tool": tool_name,
                             "input": getattr(block, "input", {}) or {},
-                            "tool_use_id": getattr(block, "id", None),
-                            "session_id": sid,
-                            "sequence": seq,
-                            "timestamp": ts,
+                            "tool_use_id": tu_id,
+                            "parent_tool_use_id": parent,
+                            **_base(),
                         }
                     elif not isinstance(block, (TextBlock, ToolUseBlock)):
                         # 未知 block：仍尝试当思考/文本露出，避免静默丢流
@@ -731,15 +779,22 @@ async def _stream_messages(
                                 for b in raw_content
                                 if hasattr(b, "text")
                             )
-                        yield {
+                        result_id = getattr(block, "tool_use_id", None)
+                        meta = tool_meta_by_id.get(result_id) or {}
+                        event: dict[str, Any] = {
                             "type": "tool.call.completed",
-                            "tool_use_id": getattr(block, "tool_use_id", None),
+                            "tool_use_id": result_id,
                             "output": _truncate(raw_content, 2000),
                             "is_error": bool(getattr(block, "is_error", False)),
-                            "session_id": sid,
-                            "sequence": seq,
-                            "timestamp": ts,
+                            # started 侧登记回填：前端合并命令+结果、按名渲染图标
+                            "parent_tool_use_id": parent,
+                            **_base(),
                         }
+                        if meta.get("tool"):
+                            event["tool"] = meta["tool"]
+                        if meta.get("command"):
+                            event["command"] = meta["command"]
+                        yield event
                 continue
 
             # ResultMessage（终态）
@@ -781,6 +836,7 @@ async def _stream_messages(
                 "type": "raw.message",
                 "message_type": message_type,
                 "session_id": sid,
+                "parent_tool_use_id": parent,
                 "raw": _truncate(str(message), 500),
                 "sequence": seq,
                 "timestamp": ts,

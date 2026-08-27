@@ -21,7 +21,7 @@ paths: ["backend/app/**/*.py", "backend/tests/**/*.py"]
 | 用户 | 非 root（user=1000） |
 | rootfs | 只读 |
 | capabilities | `cap_drop: ["ALL"]` |
-| 内存/CPU/PIDs | 必须限 |
+| 内存/CPU/PIDs | 必须限。现值默认 CPU 1.0 / 内存 `2g`；以 `.env` 的 `AGENT_RUNNER_MEMORY_LIMIT`/`AGENT_RUNNER_CPU_LIMIT` 为准（环境变量优先于代码默认，改动后重启 Worker 生效） |
 | 网络 | 默认可外联；容器注入公共 DNS（`223.5.5.5`/`8.8.8.8`/`1.1.1.1`）；专用网禁止 `internal` |
 | 超时 | 必须有，到点强制回收 |
 | tmpfs | `uid=1000,gid=1000,mode=0755` |

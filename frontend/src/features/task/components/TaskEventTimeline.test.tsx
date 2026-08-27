@@ -162,3 +162,65 @@ describe('TaskEventTimeline 事件流窗口', () => {
     expect(html).toContain('启动轻度 AI 画像')
   })
 })
+
+describe('TaskEventTimeline 分组与线程（Cursor 式）', () => {
+  const nested = (sequence: number, type: string, p: Record<string, unknown>): AgentEvent => ({
+    id: `n${sequence}`,
+    run_id: 'r1',
+    sequence,
+    event_type: type,
+    payload: { event: { ...p, timestamp: 1756250400 + sequence } },
+    source: 'claude-agent-sdk',
+    created_at: '2026-08-27T00:00:00Z',
+  })
+
+  it('命令执行与结果合并为一条可折叠行，成功默认收起', () => {
+    const html = render([
+      nested(1, 'tool.call.started', {
+        tool: 'Bash',
+        input: { command: 'pytest -q tests/' },
+        tool_use_id: 't9',
+      }),
+      nested(2, 'tool.call.completed', { tool_use_id: 't9', output: '24 passed', is_error: false }),
+    ], false)
+    expect(html).toContain('pytest -q')
+    expect(html).toContain('已完成')
+    // 合并后不应再有独立的"工具结束"行
+    expect(html).not.toContain('>工具结束<')
+  })
+
+  it('连续思考折叠为思考过程组并显示段数', () => {
+    const html = render([
+      nested(1, 'agent.thinking', { text: '先看入口' }),
+      nested(2, 'agent.thinking', { text: '再看汇聚点' }),
+    ], false)
+    expect(html).toContain('思考过程 · 2 段')
+    expect(html).toContain('先看入口')
+  })
+
+  it('Task 调用渲染主/子代理切换芯片，生命周期事件展示子代理状态', () => {
+    const html = render([
+      nested(1, 'tool.call.started', {
+        tool: 'Task',
+        input: { description: '族 A 二审' },
+        tool_use_id: 'tu_1',
+      }),
+      nested(2, 'agent.subagent.updated', {
+        tool_use_id: 'tu_1',
+        label: '族 A 二审',
+        status: 'completed',
+      }),
+      nested(3, 'tool.call.started', {
+        tool: 'Bash',
+        tool_use_id: 'b1',
+        input: { command: 'ls' },
+        parent_tool_use_id: 'tu_1',
+      }),
+    ], true)
+    expect(html).toContain('主 Agent')
+    expect(html).toContain('族 A 二审')
+    expect(html).toContain('data-thread="main"')
+    expect(html).toContain('data-thread="tu_1"')
+    expect(html).toContain('子代理 · 族 A 二审')
+  })
+})

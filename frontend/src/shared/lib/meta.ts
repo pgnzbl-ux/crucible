@@ -246,6 +246,7 @@ export const EVENT_TYPE_LABELS: Record<string, string> = {
   'agent.message': '回复',
   'agent.completed': '完成',
   'agent.failed': '失败',
+  'agent.subagent.updated': '子代理',
   'tool.call.started': '工具开始',
   'tool.call.completed': '工具结束',
   'tool.call.denied': '工具拒绝',

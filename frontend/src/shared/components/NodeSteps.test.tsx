@@ -285,7 +285,8 @@ describe('NodeSteps audit detail wiring', () => {
 
     expect(html).toContain('data-node-key="lead_verify"')
     expect(html).toContain('正在执行：多线索终认')
-    expect(html).toContain('正在终认 2 条线索')
+    // 运行态静默化：左侧列表不再流式展示实时详情句，进度由状态胶囊与汇总条承担
+    expect(html).not.toContain('正在终认 2 条线索')
     expect(html).not.toContain('data-node-key="audit"')
     expect(html).not.toContain('data-node-key="reproduce"')
   })

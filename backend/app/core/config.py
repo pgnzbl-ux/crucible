@@ -59,7 +59,8 @@ class Settings(BaseSettings):
 
     agent_runner_image: str = "crucible-agent-runner:base"
     agent_runner_cpu_limit: float = 1.0
-    agent_runner_memory_limit: str = "1g"
+    # 2g 起：子代理批量模式下多会话共享同一容器内存
+    agent_runner_memory_limit: str = "2g"
     agent_runner_network: str = "crucible-sandbox-net"
     agent_runner_workdir_base: str = "/tmp/crucible/audit"
     agent_runner_concurrency_limit: int = Field(4, ge=1, le=8)

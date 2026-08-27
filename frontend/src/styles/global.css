@@ -1038,6 +1038,28 @@ body,
   transform: translateX(-50%);
   box-shadow: var(--crucible-shadow-pop);
 }
+/* ── 主/子代理线程切换芯片（Cursor 式事件流） ── */
+.crucible-stream-threads {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 14px 0;
+}
+.crucible-thread-chip.ant-tag-checkable {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 10px;
+  border: 1px solid var(--crucible-border);
+  border-radius: 999px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.crucible-thread-chip.ant-tag-checkable-checked {
+  border-color: color-mix(in srgb, var(--crucible-primary) 45%, var(--crucible-border));
+  color: var(--crucible-primary);
+  background: color-mix(in srgb, var(--crucible-primary) 8%, transparent);
+}
 
 /* ── 任务详情：顶部编排画布（十字虚线网格，默认铺满） ── */
 .crucible-detail-nodes-pin {

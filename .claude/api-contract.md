@@ -186,6 +186,10 @@
 
 历史事件（默认当前/最新一次 run，最近 1000 条，`limit` 1–1000）。重试会新建 run，历史 run 的 `phase.updated` 不混进本接口。含 `agent.thinking` / `agent.message` / `tool.call.*` / `agent.failed`（`title`+`hint`）/ `node.updated` / `usage.updated`。
 
+**线程标识（子代理模式）**：所有容器侧 AI 事件携带 `parent_tool_use_id`——`null`=主 Agent 线程；Task 子代理内层消息带其 Task 调用的 tool_use_id，前端据此做线程分组/切换。另有：
+- `tool.call.completed` 由 started 侧登记回填 `tool` 名与 Bash 的 `command`
+- 新事件 `agent.subagent.updated`（子代理生命周期广播）：payload 含 `subtype`（task_started/task_progress/task_notification/task_updated）、`tool_use_id`、`label`、`status`、`detail`
+
 `usage.updated`：某次会话入台账后推送。payload 含 `node_key`、`usage`（本会话四字段+`total_tokens`）、`cumulative`（本节点本 run 累计，同形状）。不转发 SDK `thinking_tokens` 心跳。
 
 事件时间：`created_at` 一律带 UTC 偏移（开发 SQLite 读回 naive datetime 也按 UTC 输出）；节点 `started_at` / `finished_at` 同样带 UTC 偏移。每条事件的 `payload.timestamp` 必有 epoch 秒 —— SDK 事件用 SDK 自带值，平台事件（`phase.updated` 等）落库时补齐，SSE 回放才不会显示成浏览器收到的时刻。AI 事件 payload 带 `node_key` / `node_run_id`，`AgentEvent.node_run_id` 列同步写入；思考/工具事件可按节点过滤而不靠时间边界猜测。
