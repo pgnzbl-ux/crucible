@@ -323,21 +323,22 @@ async def adjudicate_group(
 async def adjudicate_families_batch(
     ctx, families, settings, stats,
 ) -> dict[str, Any]:
-    """批量子代理二审：整个节点一次容器，家族在容器内以 Task 子代理并行。
+    """批量子代理二审：家族在容器内以 Task 子代理并行。
 
-    输出契约 {"verdicts":[...]} 与单组形状同源（_validate_triage_output 分支）；
-    台账只记一次（model_usage 已聚合主环+子代理整树）。返回：
-      - {"ok": True} 全部落库/降级完成，继续族内传播
-      - {"cancelled": True} 任务已取消
-      - AgentRunnerError 向上抛（致命 LLM/网关故障），与逐族路径语义一致
-    未出现在输出中的族保持原状 → 由 mark_unaudited_for_review 兜底转人工。
+    按 triage_batch_chunk_size 分块并按块动态预算切片大小，防止多家族
+    切片叠加导致 Prompt 超长；遇到上下文超限异常时自动降级逐族审议。
     """
+    from app.contexts.agent.ai_runner import run_ai_node_with_shape_retry
+    from app.contexts.agent.llm_errors import is_fatal_llm_error
+    from app.contexts.finding.context_extractor import load_index
+    from app.contexts.finding.models import AlertGroup
+    from app.contexts.finding.narrative import narrative_from_agent
     from app.core.config import get_settings
 
     total = len(families)
     emit_phase(
         ctx,
-        f"批量代表审议启动（子代理模式）：{total} 族 · 单容器内并行",
+        f"批量代表审议启动（子代理模式）：{total} 族",
         phase="triage",
     )
     async def _precheck() -> str | None:
@@ -371,154 +372,174 @@ async def adjudicate_families_batch(
             max_ctx = getattr(provider, "max_context_tokens", None)
     except Exception:  # noqa: BLE001 — 切片预算兜底
         max_ctx = None
-    from app.contexts.finding.context_extractor import load_index
 
     index = load_index(ctx.host_workdir)
-
-    entries: list[dict[str, Any]] = []
-    family_by_gid: dict[str, Any] = {}
-    for family in families:
-        prepared = await _prepare_adjudication_input(
-            ctx, family.representative, settings, index=index, max_ctx=max_ctx,
-        )
-        if prepared is None:
-            continue
-        fields, _rep, _n = prepared
-        label = (
-            f"{family.representative.cwe or '?'} "
-            f"{family.representative.file_path or ''}"
-        ).strip()
-        entries.append({"label": label, **fields})
-        family_by_gid[str(family.representative.id)] = family
-
-    if not entries:
-        # 无可审代表（全部缺代表/pack）：交给传播前的兜底
-        return {"ok": True}
-
-    batch_input: dict[str, Any] = {
-        "mode": "batch",
-        "batch_size": len(entries),
-        "source_path": _workspace_repo_for(ctx),
-        "families": entries,
-    }
-
-    if not get_settings().claude_agent_sdk_enabled:
-        # Mock：与 _mock_output 同语义，逐族 tp 定格式，不起容器
-        output = {
-            "verdicts": [
-                {
-                    "group_id": e["group_id"], "verdict": "tp",
-                    "confidence": 0.85,
-                    "why": ["[Mock] 批量子代理模式固定二审"],
-                    "evidence": ["[Mock] evidence"],
-                    "summary": "[Mock] 批量判决",
-                    "reasoning": "[Mock] 批量判决",
-                    "attacker_controlled": True,
-                    "reaches_sink": True,
-                    "sanitizer": "none",
-                }
-                for e in entries
-            ],
-        }
-        meta: dict[str, Any] = {}
-    else:
-        from app.contexts.agent.ai_runner import run_ai_node_with_shape_retry
-        from app.contexts.agent.nodes.base import task_run_cancelled
-
-        meta = {}
-        try:
-            output = await run_ai_node_with_shape_retry(
-                node_key="triage",
-                input_json=batch_input,
-                host_workdir=ctx.host_workdir,
-                runner_env=ctx.runner_env or {},
-                on_event=ctx.on_event,
-                task_id=ctx.task_id,
-                meta_out=meta,
-                skill_override="triage_batch",
-            )
-        except AgentRunnerError as e:
-            # 取消拆容器（exit=137）不是失败：交由编排器取消链路收尾
-            if await task_run_cancelled(ctx.db_session, ctx.task_id, ctx.run_id):
-                return {"cancelled": True}
-            raise
-
-    # 台账一次：整树用量（主会话+子代理）已在 model_usage 聚合
-    from app.contexts.agent.usage_ledger import record_usage
-
-    await record_usage(
-        ctx.db_session, task_id=ctx.task_id, run_id=ctx.run_id,
-        node_key="triage",
-        usage={},
-        model_usage=meta.get("model_usage"),
-        source="agent",
-        on_event=ctx.on_event,
-    )
-
+    chunk_size = max(1, min(10, int(getattr(settings, "triage_batch_chunk_size", 5) or 5)))
+    family_chunks = [families[i : i + chunk_size] for i in range(0, len(families), chunk_size)]
     svc = FindingService(ctx.db_session)
-    done = 0
-    system_append = meta.get("system_append")
-    assistant_text = str(meta.get("assistant_text") or "")[:20000]
-    for item in output.get("verdicts") or []:
-        gid = str(item.get("group_id") or "").strip()
-        family = family_by_gid.get(gid)
-        if family is None:
-            continue
-        group = await ctx.db_session.get(AlertGroup, gid)
-        if group is None:
-            continue
-        verdict = item.get("verdict") or "need_more_context"
-        if verdict not in ("tp", "fp", "need_more_context"):
-            verdict = "need_more_context"
-        group.verdict_source = "agent"
-        qualify = {
-            "attacker_controlled": item.get("attacker_controlled"),
-            "reaches_sink": item.get("reaches_sink"),
-            "sanitizer": item.get("sanitizer"),
-        }
-        from app.contexts.finding.narrative import narrative_from_agent
+    done_total = 0
 
-        summary, reasoning = narrative_from_agent(item)
-        prompt_text = (
-            "[system] claude_code preset + triage_batch skill:\n"
-            f"{system_append if system_append else '(skill 未回传)'}\n\n"
-            f"[user][family {gid}] "
-            f"{next((en['label'] for en in entries if en['group_id'] == gid), '')}"
+    for chunk_idx, chunk in enumerate(family_chunks):
+        stop = await _precheck()
+        if stop == "cancelled":
+            return {"cancelled": True}
+        if stop == "budget":
+            return {"ok": True}
+
+        # 块内动态切片预算：避免单块合并后 Prompt 超过模型窗口
+        per_family_max_ctx = max(4_000, (max_ctx or 200_000) // len(chunk))
+        entries: list[dict[str, Any]] = []
+        family_by_gid: dict[str, Any] = {}
+        for family in chunk:
+            prepared = await _prepare_adjudication_input(
+                ctx, family.representative, settings, index=index, max_ctx=per_family_max_ctx,
+            )
+            if prepared is None:
+                continue
+            fields, _rep, _n = prepared
+            label = (
+                f"{family.representative.cwe or '?'} "
+                f"{family.representative.file_path or ''}"
+            ).strip()
+            entries.append({"label": label, **fields})
+            family_by_gid[str(family.representative.id)] = family
+
+        if not entries:
+            continue
+
+        batch_input: dict[str, Any] = {
+            "mode": "batch",
+            "batch_size": len(entries),
+            "source_path": _workspace_repo_for(ctx),
+            "families": entries,
+        }
+
+        output: dict[str, Any] = {}
+        meta: dict[str, Any] = {}
+        if not get_settings().claude_agent_sdk_enabled:
+            # Mock：与 _mock_output 同语义，逐族 tp 定格式，不起容器
+            output = {
+                "verdicts": [
+                    {
+                        "group_id": e["group_id"], "verdict": "tp",
+                        "confidence": 0.85,
+                        "why": ["[Mock] 批量子代理模式固定二审"],
+                        "evidence": ["[Mock] evidence"],
+                        "summary": "[Mock] 批量判决",
+                        "reasoning": "[Mock] 批量判决",
+                        "attacker_controlled": True,
+                        "reaches_sink": True,
+                        "sanitizer": "none",
+                    }
+                    for e in entries
+                ],
+            }
+        else:
+            try:
+                output = await run_ai_node_with_shape_retry(
+                    node_key="triage",
+                    input_json=batch_input,
+                    host_workdir=ctx.host_workdir,
+                    runner_env=ctx.runner_env or {},
+                    on_event=ctx.on_event,
+                    task_id=ctx.task_id,
+                    meta_out=meta,
+                    skill_override="triage_batch",
+                )
+            except AgentRunnerError as e:
+                if await task_run_cancelled(ctx.db_session, ctx.task_id, ctx.run_id):
+                    return {"cancelled": True}
+                err_lower = str(e).lower()
+                if is_fatal_llm_error(str(e)) and any(
+                    k in err_lower for k in ("prompt is too long", "context size", "context window", "maximum context length")
+                ):
+                    emit_phase(
+                        ctx,
+                        f"批量子代理批次 {chunk_idx + 1} 遇到 Prompt 超长，安全回退逐族单组审议",
+                        phase="triage",
+                    )
+                    for family in chunk:
+                        if await task_run_cancelled(ctx.db_session, ctx.task_id, ctx.run_id):
+                            return {"cancelled": True}
+                        if await adjudicate_group(ctx, family.representative, settings):
+                            stats.agent += 1
+                            done_total += 1
+                    continue
+                raise
+
+        # 台账记录
+        from app.contexts.agent.usage_ledger import record_usage
+
+        await record_usage(
+            ctx.db_session, task_id=ctx.task_id, run_id=ctx.run_id,
+            node_key="triage",
+            usage={},
+            model_usage=meta.get("model_usage"),
+            source="agent",
+            on_event=ctx.on_event,
         )
-        await svc.record_adjudication(
-            group=group,
-            adjudication=Adjudication(
-                alert_group_id=group.id, attempt=1,
-                provider_id=None, model=meta.get("model"),
-                verdict=verdict,
-                confidence=float(item.get("confidence") or 0.0),
-                why=list(item.get("why") or []),
-                evidence=list(item.get("evidence") or []),
-                need=list(item.get("need") or []),
-                summary=summary,
-                reasoning=reasoning,
-                context_log=[{
-                    "round": 1, "slices": None, "via": "agent-runner-batch",
-                    "qualify": qualify,
-                }],
-                prompt_text=prompt_text[:50000],
-                response_text=assistant_text,
-                usage={},
-            ),
-        )
-        stats.agent += 1
-        done += 1
+
+        system_append = meta.get("system_append")
+        assistant_text = str(meta.get("assistant_text") or "")[:20000]
+        for item in output.get("verdicts") or []:
+            gid = str(item.get("group_id") or "").strip()
+            family = family_by_gid.get(gid)
+            if family is None:
+                continue
+            group = await ctx.db_session.get(AlertGroup, gid)
+            if group is None:
+                continue
+            verdict = item.get("verdict") or "need_more_context"
+            if verdict not in ("tp", "fp", "need_more_context"):
+                verdict = "need_more_context"
+            group.verdict_source = "agent"
+            qualify = {
+                "attacker_controlled": item.get("attacker_controlled"),
+                "reaches_sink": item.get("reaches_sink"),
+                "sanitizer": item.get("sanitizer"),
+            }
+            summary, reasoning = narrative_from_agent(item)
+            prompt_text = (
+                "[system] claude_code preset + triage_batch skill:\n"
+                f"{system_append if system_append else '(skill 未回传)'}\n\n"
+                f"[user][family {gid}] "
+                f"{next((en['label'] for en in entries if en['group_id'] == gid), '')}"
+            )
+            await svc.record_adjudication(
+                group=group,
+                adjudication=Adjudication(
+                    alert_group_id=group.id, attempt=1,
+                    provider_id=None, model=meta.get("model"),
+                    verdict=verdict,
+                    confidence=float(item.get("confidence") or 0.0),
+                    why=list(item.get("why") or []),
+                    evidence=list(item.get("evidence") or []),
+                    need=list(item.get("need") or []),
+                    summary=summary,
+                    reasoning=reasoning,
+                    context_log=[{
+                        "round": 1, "slices": None, "via": "agent-runner-batch",
+                        "qualify": qualify,
+                    }],
+                    prompt_text=prompt_text[:50000],
+                    response_text=assistant_text,
+                    usage={},
+                ),
+            )
+            stats.agent += 1
+            done_total += 1
+
     emit_phase(
         ctx,
-        f"批量代表审议完成：{done}/{len(entries)} 族已判定（未覆盖的族自动转人工）",
+        f"批量代表审议完成：{done_total}/{total} 族已判定（未覆盖的族自动转人工）",
         phase="triage",
     )
     if ctx.on_event:
         ctx.on_event({
             "type": "triage.progress",
             "node_key": "triage",
-            "done": done,
-            "total": len(entries),
-            "message": f"批量审议完成 {done}/{len(entries)}",
+            "done": done_total,
+            "total": total,
+            "message": f"批量审议完成 {done_total}/{total}",
         })
     return {"ok": True}

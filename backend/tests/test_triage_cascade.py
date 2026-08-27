@@ -37,6 +37,7 @@ async def factory():
 def _cascade_settings(**kw):
     # SimpleNamespace：避免 MagicMock 缺省属性污染 crypto.settings / Fernet key
     base = dict(
+        settings_encrypt_key="k-xSZSThnM0m32Y0DN_wo7RAPuUybJ1PJCYCC0aCHSI=",
         triage_hide_sast_conclusion=True,
         claude_agent_sdk_enabled=True,
         triage_high_confidence=0.8,
@@ -390,6 +391,7 @@ def test_fast_provider_snapshot_keeps_request_settings():
     from app.core.config import get_settings
 
     # 恢复可能被并列用例 MagicMock 污染的模块级 settings（reveal_secret → Fernet）
+    get_settings.cache_clear()
     crypto.settings = get_settings()
     crypto._fernet = None
 

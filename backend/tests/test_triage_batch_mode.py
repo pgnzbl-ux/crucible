@@ -267,3 +267,40 @@ def test_node_schema_declares_triage_batch():
     assert set(["group_id", "verdict", "confidence", "why", "summary", "reasoning"]) \
         <= set(items["required"])
     assert _json.dumps(schema)  # 可序列化子集
+
+
+@pytest.mark.asyncio
+async def test_batch_context_length_error_falls_back_to_single_group(factory, tmp_path):
+    """当批量子代理模式因 Prompt 过长报错时，自动降级逐族单组审议，避免任务失败。"""
+    from app.core.agent_runner import AgentRunnerError
+    from app.contexts.finding.models import AlertGroup
+
+    ctx, session = await _seed_two_families(factory, tmp_path)
+    single_group_calls = []
+
+    async def mock_batch_fails_with_prompt_too_long(**kw):
+        if kw.get("skill_override") == "triage_batch":
+            raise AgentRunnerError("AI 节点 triage LLM 调用失败: 400 Prompt is too long")
+        # 降级单组路径
+        single_group_calls.append(kw)
+        return {
+            "verdict": "tp",
+            "confidence": 0.9,
+            "why": ["fallback why"],
+            "summary": "fallback summary",
+            "reasoning": "fallback reasoning",
+            "evidence": [{"file": "module/db.py", "lines": "2-2"}],
+            "attacker_controlled": True,
+            "reaches_sink": True,
+            "sanitizer": "none",
+        }
+
+    with patch(
+        "app.contexts.agent.ai_runner.run_ai_node_with_shape_retry",
+        new=mock_batch_fails_with_prompt_too_long,
+    ):
+        outcome = await _run_triage(ctx)
+
+    assert outcome["adjudicated_count"] == 2
+    assert len(single_group_calls) == 2, "遇到 Prompt is too long 应逐族单组完成审议"
+
