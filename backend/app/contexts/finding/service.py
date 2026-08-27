@@ -415,7 +415,7 @@ class FindingService:
         group = await self.get_group(group_id)
         if group is None:
             return None
-        if task.status == "needs_review":
+        if task.status in ("needs_review", "failed", "cancelled"):
             if group.status == "dispatched":
                 group.status = "needs_review"
                 await self.session.flush()
@@ -448,7 +448,7 @@ class FindingService:
             .where(
                 AlertGroup.status == "dispatched",
                 Task.task_type == "verify",
-                Task.status.in_(("completed", "needs_review", "failed")),
+                Task.status.in_(("completed", "needs_review", "failed", "cancelled")),
             )
         )
         if owner_id:
@@ -583,11 +583,16 @@ class FindingService:
             await self.session.flush()
             return
         if from_node in ("lead_verify", "dispatch"):
-            # 终认重试：清 LeadRun/LeadNodeRun，保留发现组与二审判决
+            # 终认重试：清 LeadRun/LeadNodeRun，将滞留 dispatched 的组回退为 needs_review，保留发现组与二审判决
             await self.session.execute(
                 delete(LeadNodeRun).where(LeadNodeRun.task_id == task_id)
             )
             await self.session.execute(delete(LeadRun).where(LeadRun.task_id == task_id))
+            await self.session.execute(
+                update(AlertGroup)
+                .where(AlertGroup.task_id == task_id, AlertGroup.status == "dispatched")
+                .values(status="needs_review")
+            )
             await self.session.flush()
             return
         engine = self._SCAN_RETRY_ENGINES.get(from_node)

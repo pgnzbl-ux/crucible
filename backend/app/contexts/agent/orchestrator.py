@@ -1237,6 +1237,15 @@ async def _finalize_node_failure(
     )
     run.finished_at = datetime.now(timezone.utc)
     task.status = "failed"
+    # F-52: 节点失败回收残留未终认 leads
+    from app.contexts.agent.lead_worker import terminalize_task_leads
+    try:
+        await terminalize_task_leads(
+            session, task_id=task.id,
+            reason=f"节点失败收尾，线索未终认: {clip_error_log(detail)[:120]}",
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("节点失败收尾清理残留线索失败 task=%s", task.id, exc_info=True)
     await session.commit()
     await _start_lab_ttl_after_task(session, task)
     await _maybe_upload_node_failure(

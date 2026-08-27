@@ -162,7 +162,7 @@ async def upload_evidence(
     user_id: CurrentUserId,
     svc: Annotated[ReportService, Depends(get_report_service)],
     file: UploadFile = File(..., description="证据文件（日志/截图/PoC）"),
-    kind: Annotated[str, Form(description="artifact | log | screenshot | poc")] = "artifact",
+    kind: Annotated[str, Form(pattern=r"^(artifact|log|screenshot|poc|other)$", description="artifact | log | screenshot | poc | other")] = "artifact",
 ) -> EvidenceResponse:
     """上传证据文件 → MinIO → 落 evidences 表。返回带预签名下载 URL 的记录。"""
     # 流式读入并限制 50MB（防滥用；超大证据建议走对象存储直传，P1 再做）

@@ -201,6 +201,18 @@ def _validate_top_level(document: dict[str, Any]) -> None:
         raise ComposePolicyError("禁止 include")
     if document.get("extends") is not None:
         raise ComposePolicyError("禁止顶层 extends")
+    if document.get("secrets") is not None:
+        raise ComposePolicyError("禁止顶层 secrets（防止挂载宿主敏感文件）")
+    if document.get("configs") is not None:
+        raise ComposePolicyError("禁止顶层 configs（防止挂载宿主敏感文件）")
+    if document.get("secrets") is not None:
+        raise ComposePolicyError("禁止顶层 secrets（防止挂载宿主敏感文件）")
+    if document.get("configs") is not None:
+        raise ComposePolicyError("禁止顶层 configs（防止挂载宿主敏感文件）")
+    if document.get("secrets") is not None:
+        raise ComposePolicyError("禁止顶层 secrets（防止挂载宿主敏感文件）")
+    if document.get("configs") is not None:
+        raise ComposePolicyError("禁止顶层 configs（防止挂载宿主敏感文件）")
     networks = document.get("networks")
     if isinstance(networks, dict):
         for name, cfg in networks.items():
@@ -224,6 +236,10 @@ def _validate_top_level(document: dict[str, Any]) -> None:
 
 
 def _validate_service_extras(name: str, service: dict[str, Any]) -> None:
+    if service.get("secrets") is not None:
+        raise ComposePolicyError(f"服务 {name} 禁止 secrets")
+    if service.get("configs") is not None:
+        raise ComposePolicyError(f"服务 {name} 禁止 configs")
     if service.get("env_file") is not None:
         raise ComposePolicyError(f"服务 {name} 禁止 env_file")
     if service.get("extends") is not None:
@@ -268,8 +284,11 @@ def validate_compose_file(compose_path: str, workdir: str) -> None:
         if service.get("privileged") is True:
             raise ComposePolicyError(f"服务 {name} 禁止 privileged")
         for field in ("network_mode", "pid", "ipc"):
-            if str(service.get(field) or "").lower() == "host":
+            val = str(service.get(field) or "").strip().lower()
+            if val == "host":
                 raise ComposePolicyError(f"服务 {name} 禁止 {field}: host")
+            if val.startswith("container:") or val.startswith("service:"):
+                raise ComposePolicyError(f"服务 {name} 禁止 {field}: {val}（禁止跨容器命名空间共享）")
         if service.get("devices"):
             raise ComposePolicyError(f"服务 {name} 禁止 devices")
         if service.get("cap_add"):

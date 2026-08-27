@@ -27,6 +27,12 @@ import pytest
             "deploy": {"resources": {"reservations": {"devices": [{"capabilities": ["gpu"]}]}}},
         },
         {"image": "demo", "environment": ["LEAK=${AUTH_SECRET}"]},
+        {"image": "demo", "secrets": ["app_secret"]},
+        {"image": "demo", "configs": ["app_config"]},
+        {"image": "demo", "network_mode": "container:other_container"},
+        {"image": "demo", "pid": "container:other_container"},
+        {"image": "demo", "ipc": "container:other_container"},
+        {"image": "demo", "network_mode": "service:other_service"},
     ],
 )
 def test_compose_policy_rejects_dangerous_services(tmp_path, service):
@@ -59,6 +65,14 @@ def test_compose_policy_rejects_dangerous_services(tmp_path, service):
         },
         {
             "include": [{"path": "other.yml"}],
+            "services": {"app": {"image": "demo"}},
+        },
+        {
+            "secrets": {"k": {"file": "/etc/shadow"}},
+            "services": {"app": {"image": "demo"}},
+        },
+        {
+            "configs": {"k": {"file": "/etc/passwd"}},
             "services": {"app": {"image": "demo"}},
         },
     ],

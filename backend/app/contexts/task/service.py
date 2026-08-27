@@ -538,6 +538,12 @@ class TaskService:
     async def retry_task(
         self, task_id: str, owner_id: str, from_node: str | None = None
     ) -> str:
+        # F-51: 禁止从 lead_verify 单独重试（避免排空队列后无 dispatch 重新入队），规范化回退至 dispatch
+        if from_node == "lead_verify":
+            from_node = "dispatch" 
+        # F-51: 禁止从 lead_verify 单独重试（避免排空队列后无 dispatch 重新入队），规范化回退至 dispatch
+        if from_node == "lead_verify":
+            from_node = "dispatch" 
         """重试任务:新建 TaskRun，返回新 run_id。
 
         from_node 为空:从节点 0（源码获取）整条重跑，不拷贝上一 run 的 NodeRun。

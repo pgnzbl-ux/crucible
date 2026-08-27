@@ -62,16 +62,23 @@ def _get_redis():
         return None
 
 
+# Lua 原子递增并设过期时间：首个请求原子设 TTL，杜绝网络异常致使键无 TTL 永久 429 (F-57)
+_RATE_LIMIT_LUA = """
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return current
+"""
+
 def _redis_check(key: str, *, limit: int, window_seconds: float) -> bool | None:
     client = _get_redis()
     if client is None:
         return None
     rk = f"rl:{key}"
     try:
-        count = client.incr(rk)
-        if count == 1:
-            client.expire(rk, max(1, int(window_seconds)))
-        return count <= limit
+        count = client.eval(_RATE_LIMIT_LUA, 1, rk, max(1, int(window_seconds)))
+        return int(count) <= limit
     except Exception:  # noqa: BLE001
         global _redis_client, _redis_failed_at
         _redis_client = None

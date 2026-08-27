@@ -20,6 +20,8 @@ def _base_kwargs(**overrides):
         "s3_secret_key": "s",
         "auth_secret": "prod-secret-not-example",
         "environment": "production",
+        # 合法 Fernet 32B urlsafe base64；独立于 auth_secret（安全红线）
+        "settings_encrypt_key": "k-xSZSThnM0m32Y0DN_wo7RAPuUybJ1PJCYCC0aCHSI=",
         "claude_agent_sdk_enabled": True,
         "llm_gateway_enabled": True,
         "llm_base_url_relaxed": False,
@@ -57,6 +59,34 @@ def test_production_rejects_missing_metrics_token():
 
     with pytest.raises(ValueError, match="METRICS_TOKEN"):
         Settings(**_base_kwargs(metrics_token=""))
+
+
+def test_production_requires_independent_encrypt_key():
+    """SETTINGS_ENCRYPT_KEY 是独立凭据加密钥：生产缺失即拒启。"""
+    from cryptography.fernet import Fernet
+
+    from app.core.config import Settings
+
+    good = Fernet.generate_key().decode()
+    assert Fernet(good).encrypt(b"x") != b"x"  # sanity：样例确为可用密钥
+    with pytest.raises(ValueError, match="SETTINGS_ENCRYPT_KEY"):
+        Settings(**_base_kwargs(settings_encrypt_key=""))
+
+
+def test_production_rejects_bad_format_encrypt_key():
+    """格式非法的加解密钥必须在启动期被拦截，而不是首个请求才炸。"""
+    from app.core.config import Settings
+
+    with pytest.raises(ValueError, match="SETTINGS_ENCRYPT_KEY"):
+        Settings(**_base_kwargs(settings_encrypt_key="not-a-fernet-key"))
+
+
+def test_production_encrypt_key_may_not_alias_auth_secret():
+    """独立性红线：直接拿 AUTH_SECRET 值当加解密钥不是合法 Fernet，同样被拒。"""
+    from app.core.config import Settings
+
+    with pytest.raises(ValueError, match="SETTINGS_ENCRYPT_KEY"):
+        Settings(**_base_kwargs(settings_encrypt_key="prod-secret-not-example"))
 
 
 def test_production_rejects_wildcard_cors():
@@ -121,3 +151,30 @@ def test_metrics_requires_token_when_configured(monkeypatch):
     ok = client.get("/metrics", headers={"Authorization": "Bearer secret-metrics"})
     assert ok.status_code == 200
     assert b"#" in ok.content or b"http" in ok.content or len(ok.content) >= 0
+
+
+def test_environment_normalization_and_alias():
+    from app.core.config import Settings
+
+    s1 = Settings(**_base_kwargs(environment="Production"))
+    assert s1.environment == "production"
+
+    s2 = Settings(**_base_kwargs(environment="prod"))
+    assert s2.environment == "production"
+
+    s3 = Settings(**_base_kwargs(environment="dev", llm_base_url_relaxed=True, metrics_token=""))
+    assert s3.environment == "development"
+
+
+def test_environment_rejects_invalid_names():
+    from app.core.config import Settings
+
+    with pytest.raises(ValueError, match="ENVIRONMENT"):
+        Settings(**_base_kwargs(environment="invalid_env"))
+
+
+def test_staging_enforces_security_hardening():
+    from app.core.config import Settings
+
+    with pytest.raises(ValueError, match="LLM_BASE_URL_RELAXED"):
+        Settings(**_base_kwargs(environment="staging", llm_base_url_relaxed=True))

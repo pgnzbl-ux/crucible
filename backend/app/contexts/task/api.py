@@ -84,7 +84,7 @@ async def create_task_from_upload(
     vulnerability_description: Annotated[str | None, Form()] = None,
     task_type: Annotated[str, Form(pattern=r"^(verify|discovery)$")] = "verify",
     name: Annotated[str | None, Form()] = None,
-    priority: Annotated[str, Form()] = "medium",
+    priority: Annotated[str, Form(pattern=r"^(low|medium|high|critical)$")] = "medium",
     vulnerability_reasoning: Annotated[str | None, Form()] = None,
     credential_refs: Annotated[str | None, Form(description="JSON 数组，凭据 id 列表")] = None,
 ) -> TaskDetail:
@@ -115,6 +115,8 @@ async def create_task_from_upload(
             raise HTTPException(400, "credential_refs 必须是 JSON 字符串数组")
         refs = parsed
 
+    from pydantic import ValidationError
+
     try:
         return await svc.create_task_from_upload(
             owner_id=user_id,
@@ -127,6 +129,8 @@ async def create_task_from_upload(
             vulnerability_reasoning=vulnerability_reasoning,
             credential_refs=refs,
         )
+    except ValidationError as e:
+        raise HTTPException(422, str(e)) from e
     except TaskDispatchError as e:
         raise HTTPException(503, str(e)) from e
     except ObjectStoreError as e:

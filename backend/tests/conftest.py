@@ -15,6 +15,8 @@ os.environ.setdefault("REDIS_CLUE_URL", "redis://localhost:6379/3")
 os.environ.setdefault("S3_ENDPOINT", "http://localhost:9000")
 os.environ.setdefault("S3_ACCESS_KEY", "test-access-key")
 os.environ.setdefault("S3_SECRET_KEY", "test-secret-key")
+# 凭据加解密独立测试密钥（合法 Fernet 32B urlsafe base64）——与 AUTH_SECRET 无关
+os.environ.setdefault("SETTINGS_ENCRYPT_KEY", "k-xSZSThnM0m32Y0DN_wo7RAPuUybJ1PJCYCC0aCHSI=")
 os.environ.setdefault("SCANNER_AUTO_INSTALL", "false")
 
 

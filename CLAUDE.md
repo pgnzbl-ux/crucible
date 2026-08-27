@@ -21,7 +21,7 @@ Crucible 是一个 AI 驱动的漏洞自动验证平台。安全研究员提交�
 - **事件驱动** — Context 间通过 Redis Pub/Sub 异步通信
 - **Agent GateWay** — Agent 执行抽象为平台能力而非胶水代码
 - **Agent 平台模式化子图编排** — Celery worker 的 `orchestrator.py` 按 `pipeline_for(task_type)` 驱动：`discovery`=`DEFAULT_PIPELINE`（source/profile/scan_*/api_inventory/env_ready/cluster/api_hunt/screen/triage/dispatch/lead_verify/finalize/report）；`verify`=`VERIFY_PIPELINE`（source/profile/env_ready/audit/reproduce/finalize/report，共 7 节点，发现侧不实例化）。审计任务 dispatch 入 Redis db3 终认队，由 `lead_verify`（LeadWorker）逐线索复用 audit/reproduce 落 `LeadNodeRun`；`finalize` 固化任务终态，`report` 为后处理文档。AI 节点用独立 agent-runner 容器 + `submit_result` 回传结构化 output
-- **Security by Default** — 沙箱真隔离、Agent 零信任。LLM 凭据通过 `docker run --env` 注入容器(容器销毁 env 消失,这部分零落盘成立)。LLM API Key / 任务凭据 **Fernet 加密落库**（`seal_secret` / `reveal_secret`，存量明文可读），响应层 `mask_secret` 掩码。
+- **Security by Default** — 沙箱真隔离、Agent 零信任。LLM 凭据通过 `docker run --env` 注入容器(容器销毁 env 消失,这部分零落盘成立)。LLM API Key / 任务凭据 **Fernet 加密落库**（`seal_secret` / `reveal_secret`，存量明文可读），响应层 `mask_secret` 掩码)。加解密使用**独立 SETTINGS_ENCRYPT_KEY**（禁止从 AUTH_SECRET 派生;生产启动校验）。
 
 ## 快速启动
 

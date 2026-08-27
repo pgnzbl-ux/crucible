@@ -105,3 +105,45 @@ async def test_create_provider_seals_api_key(monkeypatch):
         assert reveal_secret(row.api_key_encrypted) == "sk-test-key"
         assert created.api_key_masked != "sk-test-key"
     await engine.dispose()
+
+
+def test_key_is_independent_from_auth_secret(monkeypatch):
+    """安全红线：未配置独立 SETTINGS_ENCRYPT_KEY 时禁止从 AUTH_SECRET 派生。"""
+    from types import SimpleNamespace
+
+    import app.core.crypto as crypto
+    from app.core.crypto import CryptoKeyNotConfiguredError
+
+    fake = SimpleNamespace(settings_encrypt_key="", auth_secret="some-jwt-secret")
+    monkeypatch.setattr(crypto, "get_settings", lambda: fake)
+    monkeypatch.delenv("SETTINGS_ENCRYPT_KEY", raising=False)
+
+    with pytest.raises(CryptoKeyNotConfiguredError):
+        crypto.seal_secret("sk-anything")
+
+
+def test_ciphertext_with_wrong_key_raises_not_passthrough(monkeypatch):
+    """密文解不开必须显式报错；只有非密文形态的存量明文才允许透传。"""
+    from types import SimpleNamespace
+
+    from cryptography.fernet import Fernet
+
+    import app.core.crypto as crypto
+    from app.core.crypto import CredentialDecryptError, seal_secret
+
+    key_a = Fernet.generate_key().decode()
+    key_b = Fernet.generate_key().decode()
+    assert key_a != key_b
+
+    monkeypatch.setattr(
+        crypto, "get_settings", lambda: SimpleNamespace(settings_encrypt_key=key_a)
+    )
+    sealed = seal_secret("sk-provider-key")
+
+    monkeypatch.setattr(
+        crypto, "get_settings", lambda: SimpleNamespace(settings_encrypt_key=key_b)
+    )
+    with pytest.raises(CredentialDecryptError):
+        crypto.reveal_secret(sealed)
+    # 存量明文（非 gAAAA 形态）依旧透传
+    assert crypto.reveal_secret("sk-legacy-plain") == "sk-legacy-plain"

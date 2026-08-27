@@ -4,7 +4,6 @@ from pathlib import Path
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 BACKEND_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 
@@ -157,11 +156,38 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _enforce_production_security(self) -> "Settings":
-        if self.environment != "production":
+        valid_envs = {"development", "staging", "production", "test"}
+        alias_map = {"dev": "development", "prod": "production"}
+        env_raw = (self.environment or "").strip().lower()
+        env_norm = alias_map.get(env_raw, env_raw)
+        if env_norm not in valid_envs:
+            raise ValueError(
+                f"无效的 ENVIRONMENT='{self.environment}'，合法值为: "
+                f"{', '.join(sorted(valid_envs))}"
+            )
+        self.environment = env_norm
+        if self.environment not in ("production", "staging"):
             return self
         weak_secrets = {"", "dev-secret-change-in-production", "secret", "changeme"}
         if not self.auth_secret or self.auth_secret.strip() in weak_secrets:
             raise ValueError("生产环境必须设置强随机 AUTH_SECRET")
+        encrypt_key = self.settings_encrypt_key.strip()
+        if not encrypt_key:
+            raise ValueError(
+                "生产环境必须设置独立的 SETTINGS_ENCRYPT_KEY（凭据加解密密钥，"
+                "禁止复用 AUTH_SECRET）。生成：python -c "
+                '"from cryptography.fernet import Fernet; '
+                'print(Fernet.generate_key().decode())"'
+            )
+        from cryptography.fernet import Fernet as _Fernet
+
+        try:
+            _Fernet(encrypt_key.encode("utf-8"))
+        except Exception as exc:  # noqa: BLE001 启动期格式拦截，避免首个请求才炸
+            raise ValueError(
+                f"SETTINGS_ENCRYPT_KEY 不是合法 Fernet 密钥"
+                f"（32 字节 urlsafe base64）: {exc}"
+            ) from exc
         if "sqlite" in self.database_url:
             raise ValueError("生产环境禁止使用 SQLite，必须使用 PostgreSQL")
         if self.llm_base_url_relaxed:

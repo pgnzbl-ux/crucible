@@ -84,26 +84,27 @@ def report_columns_from_orch_result(orch_result: dict) -> dict:
     verdict = orch_result.get("verdict")
     confirmed = verdict in _CONFIRMED_VERDICTS
     score = cvss.get("base_score") if isinstance(cvss, dict) and confirmed else None
+    raw_title = (
+        str(orch_result.get("title")).strip()
+        if str(orch_result.get("title") or "").strip()
+        else (
+            "代码审计报告" if document_kind == "code_audit_report"
+            else "漏洞验证报告" if confirmed else "漏洞验证记录"
+        )
+    )
     return {
         "verdict": verdict,
         "cvss_score": float(score) if isinstance(score, (int, float)) and not isinstance(score, bool) else None,
-        "severity": (cvss.get("severity") if isinstance(cvss, dict) and confirmed else None),
-        "vulnerable_file": orch_result.get("vulnerable_file") or None,
-        "product_name": (str(orch_result.get("product_name")).strip() or None) if orch_result.get("product_name") else None,
-        "affected_version": (str(orch_result.get("affected_version")).strip() or None) if orch_result.get("affected_version") else None,
+        "severity": (str(cvss.get("severity"))[:20] if isinstance(cvss, dict) and confirmed and cvss.get("severity") else None),
+        "vulnerable_file": (str(orch_result.get("vulnerable_file"))[:1024] if orch_result.get("vulnerable_file") else None),
+        "product_name": (str(orch_result.get("product_name")).strip()[:255] or None) if orch_result.get("product_name") else None,
+        "affected_version": (str(orch_result.get("affected_version")).strip()[:64] or None) if orch_result.get("affected_version") else None,
         "summary": str(intro or "")[:500],
-        "title": (
-            str(orch_result.get("title")).strip()
-            if str(orch_result.get("title") or "").strip()
-            else (
-                "代码审计报告" if document_kind == "code_audit_report"
-                else "漏洞验证报告" if confirmed else "漏洞验证记录"
-            )
-        ),
-        "poc_language": (str(poc["language"]) if confirmed and poc.get("language") else None),
-        "poc_filename": (str(poc["filename"]) if confirmed and poc.get("filename") else None),
+        "title": raw_title[:255],
+        "poc_language": (str(poc["language"])[:16] if confirmed and poc.get("language") else None),
+        "poc_filename": (str(poc["filename"])[:255] if confirmed and poc.get("filename") else None),
         "poc_code": (str(poc["code"]) if confirmed and poc.get("code") else None),
-        "poc_usage": (str(poc["usage"]) if confirmed and poc.get("usage") else None),
+        "poc_usage": (str(poc["usage"])[:1024] if confirmed and poc.get("usage") else None),
     }
 
 
@@ -745,7 +746,7 @@ async def _run_analysis(task_id: str, run_id: str, *, celery_task: object) -> di
                                 vulnerable_file=cols["vulnerable_file"],
                                 product_name=cols["product_name"],
                                 affected_version=cols["affected_version"],
-                                project_address=task.project_address,
+                                project_address=(task.project_address or '')[:512] if task.project_address else None,
                                 report_data=json.dumps(report_data, ensure_ascii=False, default=str),
                                 title=cols["title"],
                                 summary=cols["summary"],

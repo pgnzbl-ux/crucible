@@ -76,8 +76,20 @@ class FinalizeNode:
             "confirmed" if any(lr.verdict == "confirmed" for lr in confirmed)
             else "partial" if confirmed else None
         )
+        # F-51: 检查是否存在仍处于 dispatched 状态的孤儿组（防假 completed）
+        dispatched_orphan_count = 0
+        if not leads and ctx.db_session is not None:
+            from sqlalchemy import func
+            from app.contexts.finding.models import AlertGroup
+            dispatched_orphan_count = (await ctx.db_session.execute(
+                select(func.count(AlertGroup.id)).where(
+                    AlertGroup.task_id == ctx.task_id,
+                    AlertGroup.status == "dispatched",
+                )
+            )).scalar_one() or 0
+
         analysis_status = (
-            "needs_review" if needs_review or failed_leads else "completed"
+            "needs_review" if (needs_review or failed_leads or dispatched_orphan_count > 0) else "completed"
         )
         return {
             "analysis_verdict": analysis_verdict,
