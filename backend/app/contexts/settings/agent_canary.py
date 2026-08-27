@@ -27,6 +27,10 @@ from .schemas import LlmAgentCanaryChecks, LlmProviderAgentTestResult
 logger = logging.getLogger(__name__)
 
 CANARY_DEADLINE_SECONDS = 300
+# 抗抖动：LLM/网关非确定性抖动会让一次性采样随机红。仅对"瞬时类"失败
+# 自动重试一次；凭据泄露、工具被拒等确定性失败重试没有意义。
+MAX_CANARY_ATTEMPTS = 2
+_TRANSIENT_MARKERS = ("LLM 调用失败", "未调用 submit_result", "兼容测试超时")
 _AUTH_ENV_NAMES = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 _TEXT_EXCERPT = 240
 
@@ -136,6 +140,13 @@ def _observed_checks(
         or marker is None
         or _normalize_marker_text(output.get("marker")) == marker
     )
+    # 多轮以实证为准：num_turns 口径随网关漂移（有的恒报 1），
+    # 但「读文件→提交结果」本身就是两次独立模型回合的铁证。
+    submitted = any(name.endswith("__submit_result") for name in tool_names)
+    multi_turn_observed = (
+        (_optional_int(meta.get("num_turns")) or 0) >= 2
+        or (read_observed and submitted)
+    )
     # 凭据隔离以探针文件为准，不采信模型自报。
     return LlmAgentCanaryChecks(
         read_tool=read_observed and marker_ok,
@@ -143,11 +154,30 @@ def _observed_checks(
         and probe_ok
         and (output is None or output.get("probe_completed") is True),
         mcp_submit=output is not None
-        and any(name.endswith("__submit_result") for name in tool_names),
-        multi_turn=(_optional_int(meta.get("num_turns")) or 0) >= 2,
+        and submitted,
+        multi_turn=multi_turn_observed,
         credential_isolation=probe_ok and probe.get("credential_visible") is False,
         single_terminal=len(terminals) == 1,
     )
+
+
+def _evidence_lines(events: list[tuple[str, str]], meta: dict) -> list[str]:
+    """失败证据摘要：工具序列 + 模型末条回复片段，供 UI 直接归因。"""
+    lines: list[str] = []
+    tool_seq = [tool for event_type, tool in events if event_type == "tool.call.started"]
+    if tool_seq:
+        lines.append(f"工具序列：{' > '.join(tool_seq)}")
+    terminals = [t for t, _ in events if t in {"agent.completed", "agent.failed"}]
+    if terminals:
+        lines.append(f"结束态：{' > '.join(terminals)}")
+    assistant_excerpt = _excerpt(meta.get("assistant_text"), 160)
+    if assistant_excerpt:
+        lines.append(f"模型末条回复：{assistant_excerpt}")
+    return lines
+
+
+def _is_transient_failure(result_message: str) -> bool:
+    return any(marker in result_message for marker in _TRANSIENT_MARKERS)
 
 
 def _write_probe(workdir: Path, marker: str) -> None:
@@ -184,8 +214,8 @@ async def _stop_canary(task_id: str, workdir: Path) -> None:
     )
 
 
-async def run_provider_agent_canary(provider) -> LlmProviderAgentTestResult:
-    """使用指定 Provider 跑一次真实 Docker Agent 兼容性测试。"""
+async def _canary_once(provider) -> LlmProviderAgentTestResult:
+    """单次尝试：使用指定 Provider 跑一次真实 Docker Agent 兼容性测试。"""
     runtime = (
         provider
         if isinstance(provider, ProviderRuntimeConfig)
@@ -244,12 +274,14 @@ async def run_provider_agent_canary(provider) -> LlmProviderAgentTestResult:
                 await asyncio.wait_for(run_task, timeout=20)
             except (TimeoutError, asyncio.CancelledError, AgentRunnerError):
                 run_task.cancel()
-            return _failure(
+            timeout_result = _failure(
                 runtime,
-                f"Agent 兼容测试超时（{CANARY_DEADLINE_SECONDS} 秒），已回收容器",
+                f"Agent 兼容测试超时（{CANARY_DEADLINE_SECONDS} 秒），已回收容器；慢网关请调大 Provider timeout_ms 后重试",
                 started=started,
                 meta=meta,
             )
+            timeout_result.evidence = _evidence_lines(events, meta)
+            return timeout_result
 
         probe = _read_probe(workdir)
         terminals = [
@@ -267,6 +299,7 @@ async def run_provider_agent_canary(provider) -> LlmProviderAgentTestResult:
         )
         failed = [name for name, passed in checks.model_dump().items() if not passed]
         ok = not failed and terminals == ["agent.completed"]
+        evidence_lines = _evidence_lines(events, meta)
         if ok:
             message = "Agent 兼容测试通过"
         else:
@@ -288,6 +321,7 @@ async def run_provider_agent_canary(provider) -> LlmProviderAgentTestResult:
             duration_ms=int((time.monotonic() - started) * 1000),
             num_turns=num_turns,
             usage=_usage(meta.get("usage")),
+            evidence=evidence_lines,
         )
     except AgentRunnerError as exc:
         _merge_sidecar_meta(workdir, meta)
@@ -325,13 +359,15 @@ async def run_provider_agent_canary(provider) -> LlmProviderAgentTestResult:
             runtime.id,
             _excerpt(raw_error, 200),
         )
-        return _failure(
+        failed_result = _failure(
             runtime,
             message,
             checks=checks,
             started=started,
             meta=meta,
         )
+        failed_result.evidence = _evidence_lines(events, meta)
+        return failed_result
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "agent compatibility test infrastructure failure id=%s", canary_id
@@ -345,3 +381,26 @@ async def run_provider_agent_canary(provider) -> LlmProviderAgentTestResult:
     finally:
         await _stop_canary(task_id, workdir)
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+async def run_provider_agent_canary(provider) -> LlmProviderAgentTestResult:
+    """对非确定性 LLM/网关做抗抖动采样：瞬时类失败自动再试一次。
+
+    确定性失败（凭据泄露、工具被拒、镜像缺失等）不重试——重跑不会改变结论。
+    evidence 按次序累积，前端可逐条展开归因。
+    """
+    aggregate_evidence: list[str] = []
+    for attempt in range(1, MAX_CANARY_ATTEMPTS + 1):
+        result = await _canary_once(provider)
+        prefix = f"[第 {attempt} 次] "
+        lines = result.evidence or []
+        aggregate_evidence.extend(prefix + line for line in lines) if lines else \
+            aggregate_evidence.append(f"{prefix}（无工具事件）")
+        result.attempts = attempt
+        if result.ok or attempt >= MAX_CANARY_ATTEMPTS or not _is_transient_failure(result.message):
+            result.evidence = aggregate_evidence
+            if not result.ok and attempt > 1:
+                result.message = f"自动重试后仍未通过。{result.message}"
+            elif result.ok and attempt > 1:
+                result.message = f"第 {attempt} 次尝试通过（前次为瞬时抖动）。{result.message}"
+            return result

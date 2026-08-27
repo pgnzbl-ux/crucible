@@ -44,7 +44,7 @@ import { PageHeader } from '../shared/components/PageHeader'
 import { PageContainer } from '../shared/components/PageContainer'
 import { RuntimePanel } from '../features/settings/RuntimePanel'
 
-const { Text } = Typography
+const { Text, Paragraph } = Typography
 
 const DEFAULT_TEMPERATURE = 0.2
 const DEFAULT_MAX_CONTEXT_TOKENS = 200_000
@@ -330,6 +330,11 @@ function ProviderFormDrawer({
             <Space orientation="vertical" size={8}>
               <Tag color={agentTestResult.ok ? 'green' : 'red'}>
                 {agentTestResult.ok ? <CheckCircleOutlined /> : <ApiOutlined />} {agentTestResult.message}
+                {(agentTestResult.attempts ?? 1) > 1 ? (
+                  <Text type="secondary" style={{ marginLeft: 6 }}>
+                    （共 {agentTestResult.attempts} 次尝试）
+                  </Text>
+                ) : null}
               </Tag>
               <Space size={[4, 4]} wrap>
                 {Object.entries({
@@ -337,20 +342,41 @@ function ProviderFormDrawer({
                   bash_tool: 'Bash',
                   mcp_submit: '结果提交',
                   multi_turn: '多轮',
-                  credential_isolation: '凭据隔离',
+                  // 平台项：校验的是本机凭据剥离逻辑，与 Provider 质量无关，恒绿不代表模型可用
+                  credential_isolation: '凭据隔离·平台项',
                   single_terminal: '正常结束',
-                }).map(([key, label]) => (
-                  <Tag
-                    key={key}
-                    color={agentTestResult.checks[key as keyof typeof agentTestResult.checks] ? 'green' : 'red'}
-                  >
-                    {label}
-                  </Tag>
-                ))}
+                }).map(([key, label]) => {
+                  const passed = agentTestResult.checks[key as keyof typeof agentTestResult.checks]
+                  return (
+                    <Tag
+                      key={key}
+                      color={
+                        key === 'credential_isolation'
+                          ? passed ? 'blue' : 'red'
+                          : passed ? 'green' : 'red'
+                      }
+                    >
+                      {label}
+                    </Tag>
+                  )
+                })}
               </Space>
               <Text type="secondary">
                 {agentTestResult.model} · {agentTestResult.num_turns ?? '-'} 轮 · {agentTestResult.duration_ms ?? '-'} ms
               </Text>
+              {!agentTestResult.ok && (agentTestResult.evidence?.length ?? 0) > 0 && (
+                <div>
+                  {(agentTestResult.evidence ?? []).map((line, i) => (
+                    <Paragraph
+                      key={i}
+                      type="secondary"
+                      style={{ marginBottom: 2, fontSize: 11, whiteSpace: 'pre-wrap' }}
+                    >
+                      {line}
+                    </Paragraph>
+                  ))}
+                </div>
+              )}
             </Space>
           </Card>
         )}

@@ -1,18 +1,23 @@
 export const ACTIVE_STATUSES = ['pending', 'queued', 'running'] as const
 export const RETRY_STATUSES = ['failed', 'cancelled', 'completed', 'needs_review'] as const
 export const BLOCK_DELETE_STATUSES = ['running', 'pending', 'queued', 'archived'] as const
-/** 单节点重试允许的起点（与后端 _RETRYABLE_FROM_NODES 对齐）。source/profile 走整条重试。 */
+/** 单节点重试允许的起点（与后端 _RETRYABLE_FROM_NODES 对齐 = 两子图并集减 source/profile）。
+ * source/profile 走整条重试。taskActions.test.ts 用拓扑源派生锁死两者相等，防再次漂移。 */
 export const RETRYABLE_FROM_NODES = [
   'scan_gitleaks',
   'scan_osv',
   'scan_semgrep',
-  'env_ready',
+  'api_inventory',
+  'api_hunt',
   'cluster',
   'screen',
   'triage',
   'dispatch',
+  'env_ready',
   'audit',
   'reproduce',
+  'lead_verify',
+  'finalize',
   'report',
 ] as const
 

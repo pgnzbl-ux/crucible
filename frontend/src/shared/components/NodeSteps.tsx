@@ -42,6 +42,7 @@ import { LeadVerifyDetail } from './LeadVerifyDetail'
 import { NodeDag } from './NodeDag'
 import { NodeOutputDetail } from './NodeOutputDetail'
 import { canRetryFromNode } from '../lib/taskActions'
+import { useTicker } from '../hooks/useTicker'
 
 const { Text } = Typography
 
@@ -161,6 +162,15 @@ export function NodeSteps({
 
   const sseOverlay = useMemo(() => overlayFromSseEvents(sseEvents), [sseEvents])
   const [showSkipped, setShowSkipped] = useState(false)
+  // 存在运行中节点时启用秒级心跳，驱动"已进行"实时跳动（SSE 连通期无轮询）
+  const hasRunning = (nodes ?? []).some((n) => {
+    const status = displayNodeStatus(
+      applyNodeOverlay(n, sseOverlay.get(n.node_key)) as NodeRun['status'],
+      taskStatus,
+    )
+    return status === 'running'
+  })
+  const now = useTicker(hasRunning)
 
   if (!runId) {
     return <Text type="secondary">尚无运行记录</Text>
@@ -360,7 +370,7 @@ export function NodeSteps({
           const stageIndex = stages.findIndex((stage) => stage.nodeKeys.includes(n.node_key))
           const stage = stageIndex >= 0 ? stages[stageIndex] : null
           const parallel = Boolean(stage?.parallel)
-          const duration = formatDuration(n.started_at, n.finished_at)
+          const duration = formatDuration(n.started_at, n.finished_at, now)
           const skipReason = visual === 'skipped' ? skipReasonLabel(n, taskType) : ''
           const detail = nodeDetail(n)
           const hasMetrics = nodeMetrics(n).length > 0

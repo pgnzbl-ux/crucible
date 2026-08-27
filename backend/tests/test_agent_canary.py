@@ -134,16 +134,24 @@ async def test_agent_canary_rejects_model_claim_without_observed_tools(
 
 @pytest.mark.asyncio
 async def test_agent_canary_timeout_forces_container_cleanup(monkeypatch, tmp_path):
-    _patch_runtime(monkeypatch, tmp_path)
-    removed = agent_canary.asyncio.Event()
+    """超时会拆容器并按收尾语义失败；重试后仍以"兼容测试超时"返回。
 
-    def remove_for_task(_task_id, _workdir=None):
-        removed.set()
-        return 1
+    每次尝试（瞬时类自动重试）都要有自己独立的门闩，避免前次的状态残留。
+    """
+    _patch_runtime(monkeypatch, tmp_path)
+    gates: list = []
 
     async def blocked_run_ai_node(**_kwargs):
-        await removed.wait()
+        # 每次尝试一个全新的未触发事件；stop 时由 remove_for_task 置位最后一个
+        gate = agent_canary.asyncio.Event()
+        gates.append(gate)
+        await gate.wait()
         raise agent_canary.AgentRunnerError("container removed")
+
+    def remove_for_task(_task_id, _workdir=None):
+        if gates:
+            gates[-1].set()
+        return 1
 
     monkeypatch.setattr(
         agent_canary.agent_runner_manager,
@@ -157,7 +165,8 @@ async def test_agent_canary_timeout_forces_container_cleanup(monkeypatch, tmp_pa
 
     assert result.ok is False
     assert "超时" in result.message or "超过" in result.message
-    assert removed.is_set()
+    assert gates and all(g.is_set() for g in gates), "每次尝试都必须回收容器"
+    assert result.attempts == 2
     assert not list(tmp_path.iterdir())
 
 
@@ -252,3 +261,98 @@ def test_read_tool_accepts_read_lineno_prefix_on_marker():
         marker="crucible-canary-abc",
     )
     assert checks.read_tool is True
+
+
+@pytest.mark.asyncio
+async def test_canary_retries_once_on_transient_failure(monkeypatch, tmp_path):
+    """LLM 抖动类失败自动重试一次；第二次通过则整体绿并标注尝试次数。"""
+    _patch_runtime(monkeypatch, tmp_path)
+    calls = {"n": 0}
+
+    async def flaky_then_ok(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            kwargs["on_event"]({"type": "tool.call.started", "tool": "Read"})
+            kwargs["meta_out"].update({"num_turns": 2})
+            from app.core.agent_runner import AgentRunnerError as _E
+
+            raise _E("AI 节点 canary LLM 调用失败: 上游 503")
+        workdir = tmp_path / kwargs["task_id"]
+        marker = (workdir / "canary" / "marker.txt").read_text(encoding="utf-8")
+        (workdir / "canary" / "probe-result.json").write_text(
+            json.dumps({"python_ok": True, "credential_visible": False, "visible_names": []}),
+            encoding="utf-8",
+        )
+        for tool in ("Read", "Bash", "mcp__crucible__submit_result"):
+            kwargs["on_event"]({"type": "tool.call.started", "tool": tool})
+        kwargs["on_event"]({"type": "agent.completed"})
+        kwargs["meta_out"].update({"num_turns": 3})
+        return {
+            "marker": marker,
+            "probe_completed": True,
+            "credential_visible": False,
+            "summary": "ok",
+        }
+
+    monkeypatch.setattr(agent_canary, "run_ai_node", flaky_then_ok)
+
+    result = await agent_canary.run_provider_agent_canary(_provider())
+
+    assert result.ok is True
+    assert result.attempts == 2
+    assert "第 2 次尝试通过" in result.message
+    assert any("瞬时抖动" in line or "[第 1 次]" in line for line in result.evidence)
+
+
+@pytest.mark.asyncio
+async def test_canary_keeps_single_attempt_for_deterministic_failure(monkeypatch, tmp_path):
+    """确定性失败（如工具被拒的通用错误）不重试：重跑不改变结论。"""
+    _patch_runtime(monkeypatch, tmp_path)
+    calls = {"n": 0}
+
+    async def always_fail(**kwargs):
+        calls["n"] += 1
+        from app.core.agent_runner import AgentRunnerError as _E
+
+        raise _E("Tool Bash was denied by policy")
+
+    monkeypatch.setattr(agent_canary, "run_ai_node", always_fail)
+
+    result = await agent_canary.run_provider_agent_canary(_provider())
+
+    assert calls["n"] == 1
+    assert result.ok is False
+    assert result.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_multi_turn_passes_via_observed_sequence_without_num_turns(
+    monkeypatch, tmp_path
+):
+    """网关自报 num_turns 缺失/失真时，读文件→提交序列本身证明多轮。"""
+    _patch_runtime(monkeypatch, tmp_path)
+
+    async def no_num_turns(**kwargs):
+        workdir = tmp_path / kwargs["task_id"]
+        marker = (workdir / "canary" / "marker.txt").read_text(encoding="utf-8")
+        (workdir / "canary" / "probe-result.json").write_text(
+            json.dumps({"python_ok": True, "credential_visible": False, "visible_names": []}),
+            encoding="utf-8",
+        )
+        for tool in ("Read", "Bash", "mcp__crucible__submit_result"):
+            kwargs["on_event"]({"type": "tool.call.started", "tool": tool})
+        kwargs["on_event"]({"type": "agent.completed"})
+        # 不写 num_turns，模拟口径漂移的网关
+        return {
+            "marker": marker,
+            "probe_completed": True,
+            "credential_visible": False,
+            "summary": "ok",
+        }
+
+    monkeypatch.setattr(agent_canary, "run_ai_node", no_num_turns)
+
+    result = await agent_canary.run_provider_agent_canary(_provider())
+
+    assert result.ok is True
+    assert result.checks.multi_turn is True

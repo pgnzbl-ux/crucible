@@ -459,7 +459,11 @@ Provider **没有独立启用/停用字段**。Agent 运行时只读取唯一的
 
 ### POST `/api/v1/settings/llm/providers/{id}/agent-test`
 
-管理员：用该 Provider 起一次真实 Docker Agent canary（校验 Bash / MCP `submit_result` / 多轮 / 凭据隔离）。不存在 → **404**。响应 `{ ok, message, checks, provider_id, model, duration_ms, num_turns, usage }`。
+管理员：用该 Provider 起一次真实 Docker Agent canary（校验 Bash / MCP `submit_result` / 多轮 / 凭据隔离）。不存在 → **404**。同一 Provider 并发请求 → **409**（进程内串行锁）。
+
+抗抖动：LLM 抖动类失败（LLM 调用失败 / 未提交结果 / 超时）自动重试一次；确定性失败（凭据泄露、工具拒绝等）不重试。响应 `{ ok, message, checks, provider_id, model, duration_ms, num_turns, usage, attempts, evidence[] }`——`attempts` 为实际尝试次数；`evidence` 按次序累积每次的工具序列/结束态/模型末回复摘要，供前端归因展示。
+
+校验口径：`multi_turn` 以实证为准（num_turns≥2 或 Read→submit 序列成立）；`credential_isolation` 只验证平台自身的凭据剥离逻辑，与 Provider 质量**无关**，任何 Provider 该项恒绿不代表模型可用。
 
 ### POST `/api/v1/settings/llm/test`
 

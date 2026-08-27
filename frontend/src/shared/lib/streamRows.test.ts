@@ -110,3 +110,17 @@ describe('deriveThreads / filterByThread', () => {
     expect(sub.includes(mainMsg)).toBe(false)
   })
 })
+
+describe('SUBAGENT_TOOLS / Agent 新名', () => {
+  it('Agent 工具（新版 CLI）同样建立子代理线程', () => {
+    const agentStart = ev('tool.call.started', {
+      tool: 'Agent',
+      input: { description: '族 B 二审' },
+      tool_use_id: 'ag_1',
+    })
+    const inner = ev('agent.message', { text: 'x', parent_tool_use_id: 'ag_1' })
+    const threads = deriveThreads([agentStart, inner])
+    expect(threads).toHaveLength(1)
+    expect(threads[0]).toMatchObject({ id: 'ag_1', label: '族 B 二审', count: 1 })
+  })
+})

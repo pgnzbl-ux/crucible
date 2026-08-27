@@ -378,6 +378,10 @@ export interface LlmProviderAgentTestResult {
   duration_ms: number | null
   num_turns: number | null
   usage: Record<string, number>
+  /** 瞬时类失败自动重试后的总尝试次数 */
+  attempts?: number
+  /** 失败证据摘要（工具序列/结束态/模型末回复），按尝试次序累积 */
+  evidence?: string[]
 }
 
 // ── Credential（任务级凭据） ──

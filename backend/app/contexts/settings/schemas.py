@@ -138,6 +138,9 @@ class LlmProviderAgentTestResult(BaseModel):
     duration_ms: int | None = None
     num_turns: int | None = None
     usage: dict[str, int] = Field(default_factory=dict)
+    # 抗抖动：瞬时类失败自动重试后的总尝试次数；失败时附每次尝试的证据摘要
+    attempts: int = 1
+    evidence: list[str] = Field(default_factory=list)
 
 
 # ── Credential（任务级凭据） ──

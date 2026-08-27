@@ -9,8 +9,10 @@ import {
   defaultTaskDetailTab,
   shouldFetchTaskReport,
   reportBelongsToCurrentRun,
+  RETRYABLE_FROM_NODES,
   taskDetailTabFromValue,
 } from './taskActions'
+import { PIPELINE_NODE_ORDER } from './meta'
 
 describe('taskActions', () => {
   it.each([
@@ -42,12 +44,24 @@ describe('taskActions', () => {
     ['failed', 'cluster', 'failed', true],
     ['failed', 'dispatch', 'failed', true],
     ['failed', 'scan_semgrep', 'failed', true],
+    ['failed', 'lead_verify', 'failed', true],
+    ['failed', 'finalize', 'failed', true],
     ['failed', 'source', 'failed', false],
     ['failed', 'profile', 'failed', false],
     ['failed', 'reproduce', 'completed', false],
     ['running', 'reproduce', 'failed', false],
   ])('canRetryFromNode(%s, %s, %s) → %s', (taskStatus, nodeKey, nodeStatus, expected) => {
     expect(canRetryFromNode(taskStatus, nodeKey, nodeStatus)).toBe(expected)
+  })
+
+  it('RETRYABLE_FROM_NODES 与后端派生规则锁死一致：两子图并集减 source/profile', () => {
+    // 防漂移：后端 _RETRYABLE_FROM_NODES = DEFAULT_PIPELINE ∪ VERIFY_PIPELINE − {source,profile}；
+    // 前端镜像若手工增删，必须同步后端，否则节点按钮显示与 API 允许范围脱节
+    const expected = new Set(
+      PIPELINE_NODE_ORDER.filter((key) => key !== 'source' && key !== 'profile'),
+    )
+    const actual = new Set<string>(RETRYABLE_FROM_NODES)
+    expect(actual).toEqual(expected)
   })
 
   it.each([

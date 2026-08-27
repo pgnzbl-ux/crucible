@@ -771,14 +771,21 @@ async def _stream_messages(
                     content = [content]
                 for block in content:
                     if isinstance(block, ToolResultBlock):
-                        # content 可能是 str 或 list（list of text/image blocks）
+                        # content 形态：str | list[dict]（SDK 0.2.x 原样透传 CLI 的
+                        # 块列表，Agent 工具结果恒为 [{"type":"text","text":...}]）
+                        # | list[对象]（旧形态兼容）。只提取文本，跳过 image 等块。
                         raw_content = getattr(block, "content", "") or ""
                         if isinstance(raw_content, list):
-                            raw_content = " ".join(
-                                getattr(b, "text", "")
-                                for b in raw_content
-                                if hasattr(b, "text")
-                            )
+                            parts: list[str] = []
+                            for b in raw_content:
+                                t = (
+                                    b.get("text")
+                                    if isinstance(b, dict)
+                                    else getattr(b, "text", None)
+                                )
+                                if isinstance(t, str) and t:
+                                    parts.append(t)
+                            raw_content = " ".join(parts)
                         result_id = getattr(block, "tool_use_id", None)
                         meta = tool_meta_by_id.get(result_id) or {}
                         event: dict[str, Any] = {

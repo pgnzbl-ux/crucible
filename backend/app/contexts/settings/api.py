@@ -1,4 +1,5 @@
 from typing import Annotated
+import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +30,9 @@ router = APIRouter(
     tags=["settings"],
     dependencies=[Depends(get_current_user_id)],
 )
+
+# Agent 兼容测试的 per-provider 串行锁（进程内；同一 Provider 同时只允许一次）
+_AGENT_TEST_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 async def get_settings_repo(session: Annotated[AsyncSession, Depends(get_db_session)]) -> SettingsRepository:
@@ -131,7 +135,12 @@ async def test_provider_agent(
     provider_id: str,
     svc: Annotated[SettingsService, Depends(get_settings_service)],
 ) -> LlmProviderAgentTestResult:
-    result = await svc.test_agent_compatibility(provider_id)
+    # 同一 Provider 串行：并发双击会叠加容器争抢，放大超时类随机失败
+    lock = _AGENT_TEST_LOCKS.setdefault(provider_id, asyncio.Lock())
+    if lock.locked():
+        raise HTTPException(409, "该 Provider 的 Agent 兼容测试正在进行中，请等待当前测试结束")
+    async with lock:
+        result = await svc.test_agent_compatibility(provider_id)
     if result is None:
         raise HTTPException(404, "Provider 不存在")
     return result

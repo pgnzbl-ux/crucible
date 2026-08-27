@@ -105,12 +105,15 @@ function shortText(v: unknown, max = 40): string {
   return v.length > max ? `${v.slice(0, max)}…` : v
 }
 
-/** 从流内推导子代理列表：Task 调用建立条目，agent.subagent.updated 更新状态。 */
+/** 子代理派发工具名：新版 CLI 叫 Agent，Task 是旧别名。 */
+export const SUBAGENT_TOOLS = new Set(['Task', 'Agent'])
+
+/** 从流内推导子代理列表：Task/Agent 调用建立条目，agent.subagent.updated 更新状态。 */
 export function deriveThreads(events: readonly AgentEvent[]): ThreadInfo[] {
   const map = new Map<string, ThreadInfo>()
   for (const ev of events) {
     const p = payloadOf(ev)
-    if (ev.event_type === 'tool.call.started' && p.tool === 'Task') {
+    if (ev.event_type === 'tool.call.started' && SUBAGENT_TOOLS.has(String(p.tool ?? ''))) {
       const t = threadOf(ev)
       const id = String(p.tool_use_id ?? '')
       if (!id || map.has(id)) continue

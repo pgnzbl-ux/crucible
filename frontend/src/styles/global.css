@@ -1038,27 +1038,60 @@ body,
   transform: translateX(-50%);
   box-shadow: var(--crucible-shadow-pop);
 }
-/* ── 主/子代理线程切换芯片（Cursor 式事件流） ── */
-.crucible-stream-threads {
+/* ── 子代理线程：工具栏单点入口 + 弹出清单 + 查看中横幅（ZCode 式） ── */
+.crucible-thread-menu {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 320px;
+  min-width: 260px;
+  max-width: 380px;
+  overflow: auto;
+}
+.crucible-thread-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.crucible-thread-menu__item:hover {
+  background: var(--crucible-bg);
+}
+.crucible-thread-menu__item.is-active {
+  background: color-mix(in srgb, var(--crucible-primary) 10%, transparent);
+  color: var(--crucible-primary);
+}
+.crucible-thread-menu__icon {
+  flex: 0 0 auto;
+  color: var(--crucible-text-secondary);
+}
+.crucible-thread-menu__item.is-active .crucible-thread-menu__icon {
+  color: var(--crucible-primary);
+}
+.crucible-thread-menu__label {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.crucible-thread-menu__count {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.crucible-thread-banner {
+  display: flex;
   align-items: center;
   gap: 4px;
-  padding: 4px 14px 0;
-}
-.crucible-thread-chip.ant-tag-checkable {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 10px;
-  border: 1px solid var(--crucible-border);
-  border-radius: 999px;
+  margin: 4px 14px 0;
+  padding: 4px 10px;
+  border: 1px solid color-mix(in srgb, var(--crucible-primary) 25%, var(--crucible-border));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--crucible-primary) 6%, transparent);
   font-size: 12px;
-  cursor: pointer;
-}
-.crucible-thread-chip.ant-tag-checkable-checked {
-  border-color: color-mix(in srgb, var(--crucible-primary) 45%, var(--crucible-border));
-  color: var(--crucible-primary);
-  background: color-mix(in srgb, var(--crucible-primary) 8%, transparent);
 }
 
 /* ── 任务详情：顶部编排画布（十字虚线网格，默认铺满） ── */

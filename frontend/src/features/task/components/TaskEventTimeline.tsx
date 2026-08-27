@@ -42,6 +42,7 @@ import { humanizeAgentError } from '../../../shared/lib/humanizeAgentError'
 import type { SSEStatus } from '../../../shared/hooks/useTaskEvents'
 import { useErrorToast } from '../../../shared/hooks/useErrorToast'
 import { useStickToBottom } from '../../../shared/hooks/useStickToBottom'
+import { ThreadSwitcher } from './ThreadSwitcher'
 
 const { Text, Paragraph } = Typography
 const { CheckableTag } = Tag
@@ -151,7 +152,8 @@ function toolIcon(tool: string) {
   if (tool === 'Bash' || tool === 'PowerShell') return <CodeOutlined />
   if (tool === 'Read' || tool === 'Grep' || tool === 'Glob') return <FileSearchOutlined />
   if (tool === 'Edit' || tool === 'Write' || tool === 'NotebookEdit') return <EditOutlined />
-  if (tool === 'Task') return <TeamOutlined />
+  // 子代理派发：新版 CLI 叫 Agent，Task 是旧别名
+  if (tool === 'Task' || tool === 'Agent') return <TeamOutlined />
   if (tool.startsWith('mcp__crucible__submit')) return <SendOutlined />
   return <ToolOutlined />
 }
@@ -265,36 +267,24 @@ export function TaskEventTimeline({
             { label: '错误', value: 'error' },
           ]}
         />
+        {threads.length > 0 && (
+          <ThreadSwitcher
+            threads={threads}
+            running={running}
+            value={thread}
+            onChange={setThread}
+          />
+        )}
       </Space>
-      {threads.length > 0 && (
-        <div className="crucible-stream-threads">
-          <CheckableTag
-            className="crucible-thread-chip"
-            checked={thread === MAIN_THREAD}
-            onChange={() => setThread(MAIN_THREAD)}
-            data-thread="main"
-          >
-            <MessageOutlined style={{ marginRight: 4 }} />
-            主 Agent
-          </CheckableTag>
-          {threads.map((th) => (
-            <CheckableTag
-              key={th.id}
-              className="crucible-thread-chip"
-              checked={thread === th.id}
-              onChange={() => setThread(thread === th.id ? MAIN_THREAD : th.id)}
-              data-thread={th.id}
-            >
-              <TeamOutlined style={{ marginRight: 4 }} />
-              {th.label || th.id}
-              <Badge
-                status={
-                  running && !th.status ? 'processing' : th.status === 'completed' ? 'success' : 'default'
-                }
-                style={{ marginLeft: 6 }}
-              />
-            </CheckableTag>
-          ))}
+      {thread !== MAIN_THREAD && (
+        <div className="crucible-thread-banner">
+          <TeamOutlined style={{ marginRight: 6, color: 'var(--crucible-primary)' }} />
+          正在查看子代理「
+          {threads.find((th) => th.id === thread)?.label || `${thread.slice(0, 8)}…`}
+          」的事件流
+          <Button size="small" type="link" style={{ paddingInline: 0 }} onClick={() => setThread(MAIN_THREAD)}>
+            返回主 Agent
+          </Button>
         </div>
       )}
       {rows.length > 0 ? (
@@ -552,12 +542,19 @@ function MergedToolBody({
 function renderBody(ev: AgentEvent, p: Record<string, unknown>) {
   if (ev.event_type === 'agent.subagent.updated') {
     const label = asText(p.label) || asText(p.tool_use_id) || '子代理'
-    const status = asText(p.status)
+    const raw = asText(p.status)
+    const statusText =
+      raw === 'completed' ? '已完成' : raw === 'running' || raw === 'in_progress' ? '运行中' : raw
+    const runningLike = !raw || raw === 'running' || raw === 'in_progress'
     return (
       <Text type="secondary" style={{ fontSize: 12 }}>
-        <TeamOutlined style={{ marginRight: 6, color: 'var(--crucible-primary)' }} />
+        {runningLike ? (
+          <LoadingOutlined spin style={{ marginRight: 6, color: 'var(--crucible-primary)' }} />
+        ) : (
+          <TeamOutlined style={{ marginRight: 6, color: 'var(--crucible-text-disabled)' }} />
+        )}
         子代理 · {label}
-        {status ? ` · ${status}` : ''}
+        {statusText ? ` · ${statusText}` : ''}
       </Text>
     )
   }

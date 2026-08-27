@@ -142,3 +142,55 @@ async def test_thinking_tokens_heartbeat_still_dropped():
     messages = [FSystem(subtype="system", data={"thinking_tokens": 1})]
     events = await _collect(messages)
     assert events == []
+
+
+@pytest.mark.asyncio
+async def test_tool_result_content_list_of_dicts_is_joined():
+    """SDK 0.2.x：ToolResultBlock.content 可为 dict 块列表（Agent 工具结果恒为此形态）。
+
+    旧实现用 hasattr(b,'text') 提取，dict 全部落空 → 事件 output 变空串，
+    前端显示"无输出内容"。必须同时兼容 dict 与对象两种块形态，跳过 image 块。
+    """
+    messages = [
+        FAssistant(
+            parent_tool_use_id=None,
+            model="m1",
+            session_id="s1",
+            content=[FToolUse(id="ag1", name="Agent", input={"description": "族 A"})],
+        ),
+        FUser(
+            parent_tool_use_id=None,
+            session_id="s1",
+            content=[
+                FToolResult(
+                    tool_use_id="ag1",
+                    content=[
+                        {"type": "text", "text": "子代理结论一"},
+                        {"type": "image", "source": {"data": "..."}},  # 非 text 块跳过
+                        {"type": "text", "text": "子代理结论二"},
+                    ],
+                    is_error=False,
+                ),
+            ],
+        ),
+    ]
+
+    events = await _collect(messages)
+    done = [e for e in events if e["type"] == "tool.call.completed"]
+    assert len(done) == 1
+    assert done[0]["output"] == "子代理结论一 子代理结论二"
+    assert done[0]["tool"] == "Agent", "started 侧登记应回填工具名"
+
+
+@pytest.mark.asyncio
+async def test_tool_result_content_plain_string_still_works():
+    """旧形态（纯字符串 content）回归保护。"""
+    messages = [
+        FUser(
+            parent_tool_use_id=None,
+            session_id="s1",
+            content=[FToolResult(tool_use_id="b1", content="plain text", is_error=False)],
+        ),
+    ]
+    events = await _collect(messages)
+    assert events[0]["output"] == "plain text"

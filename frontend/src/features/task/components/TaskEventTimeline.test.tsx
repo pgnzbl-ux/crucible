@@ -9,6 +9,7 @@ import {
   STREAM_RENDER_WINDOW,
   TaskEventTimeline,
 } from './TaskEventTimeline'
+import { threadBadgeStatus, ThreadMenu } from './ThreadSwitcher'
 
 describe('isEventDetailsDefaultOpen', () => {
   it('keeps thinking and successful tool details collapsed', () => {
@@ -198,7 +199,7 @@ describe('TaskEventTimeline 分组与线程（Cursor 式）', () => {
     expect(html).toContain('先看入口')
   })
 
-  it('Task 调用渲染主/子代理切换芯片，生命周期事件展示子代理状态', () => {
+  it('Task 调用渲染子代理入口按钮；清单直渲含主入口与状态点', () => {
     const html = render([
       nested(1, 'tool.call.started', {
         tool: 'Task',
@@ -217,10 +218,35 @@ describe('TaskEventTimeline 分组与线程（Cursor 式）', () => {
         parent_tool_use_id: 'tu_1',
       }),
     ], true)
-    expect(html).toContain('主 Agent')
-    expect(html).toContain('族 A 二审')
-    expect(html).toContain('data-thread="main"')
-    expect(html).toContain('data-thread="tu_1"')
+    // 芯片墙已移除：工具栏只有单点入口，流内仍是主线程内容
+    expect(html).toContain('data-testid="thread-switcher"')
+    expect(html).toContain('子代理 1')
+    expect(html).not.toContain('data-thread="tu_1"')
     expect(html).toContain('子代理 · 族 A 二审')
+
+    // 弹出清单：主入口 + 子代理行 + 完成绿点 + 事件计数
+    const menu = renderToStaticMarkup(
+      <App>
+        <ThreadMenu
+          threads={[{ id: 'tu_1', label: '族 A 二审', status: 'completed', count: 3 }]}
+          running={false}
+          value="tu_1"
+          onSelect={() => undefined}
+        />
+      </App>,
+    )
+    expect(menu).toContain('主 Agent')
+    expect(menu).toContain('data-thread="tu_1"')
+    expect(menu).toContain('is-active')
+    expect(menu).toContain('ant-badge-status-success')
+  })
+})
+
+describe('threadBadgeStatus', () => {
+  const th = (status: string) => ({ id: 'x', label: 'x', status, count: 0 })
+  it('运行中且无完成态 → processing；completed → success；其余 → default', () => {
+    expect(threadBadgeStatus(th(''), true)).toBe('processing')
+    expect(threadBadgeStatus(th('completed'), false)).toBe('success')
+    expect(threadBadgeStatus(th(''), false)).toBe('default')
   })
 })
