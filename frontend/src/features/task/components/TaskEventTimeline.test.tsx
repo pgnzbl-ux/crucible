@@ -240,13 +240,52 @@ describe('TaskEventTimeline 分组与线程（Cursor 式）', () => {
     expect(menu).toContain('is-active')
     expect(menu).toContain('ant-badge-status-success')
   })
+
+  it('Subagent 完成时渲染执行结论与产出内容', () => {
+    const html = render([
+      nested(1, 'tool.call.started', {
+        tool: 'Task',
+        input: { description: '族 A 二审', prompt: '详细核查 SQL 注入' },
+        tool_use_id: 'tu_1',
+      }),
+      nested(2, 'tool.call.completed', {
+        tool_use_id: 'tu_1',
+        output: '经过分析，发现确有未过滤的用户输入进入 SQL 执行语句',
+        is_error: false,
+      }),
+    ], false)
+    expect(html).toContain('子代理 · 族 A 二审')
+    expect(html).toContain('已完成')
+    expect(html).toContain('子代理执行结论')
+    expect(html).toContain('经过分析，发现确有未过滤的用户输入')
+  })
+
+  it('Subagent 失败时渲染错误态和提示', () => {
+    const html = render([
+      nested(1, 'tool.call.started', {
+        tool: 'Task',
+        input: { description: '族 B 审查' },
+        tool_use_id: 'tu_2',
+      }),
+      nested(2, 'tool.call.completed', {
+        tool_use_id: 'tu_2',
+        output: '模型调用超时中断',
+        is_error: true,
+      }),
+    ], false)
+    expect(html).toContain('执行失败')
+    expect(html).toContain('子代理异常退出')
+    expect(html).toContain('模型调用超时中断')
+  })
 })
 
 describe('threadBadgeStatus', () => {
-  const th = (status: string) => ({ id: 'x', label: 'x', status, count: 0 })
-  it('运行中且无完成态 → processing；completed → success；其余 → default', () => {
+  const th = (status: string, isError?: boolean) => ({ id: 'x', label: 'x', status, count: 0, isError })
+  it('运行中且无完成态 → processing；completed → success；failed/error → error；其余 → default', () => {
     expect(threadBadgeStatus(th(''), true)).toBe('processing')
     expect(threadBadgeStatus(th('completed'), false)).toBe('success')
+    expect(threadBadgeStatus(th('failed'), false)).toBe('error')
+    expect(threadBadgeStatus(th('', true), false)).toBe('error')
     expect(threadBadgeStatus(th(''), false)).toBe('default')
   })
 })

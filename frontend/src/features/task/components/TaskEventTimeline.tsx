@@ -17,6 +17,7 @@ import {
   CloseCircleOutlined,
   CodeOutlined,
   EditOutlined,
+  EnterOutlined,
   ExperimentOutlined,
   FileSearchOutlined,
   LoadingOutlined,
@@ -24,6 +25,7 @@ import {
   NodeIndexOutlined,
   SendOutlined,
   TeamOutlined,
+  ThunderboltOutlined,
   ToolOutlined,
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
@@ -36,6 +38,7 @@ import {
   deriveThreads,
   filterByThread,
   type StreamRow as RowModel,
+  type ThreadInfo,
 } from '../../../shared/lib/streamRows'
 import { summarizeNodeOutput } from '../../../shared/lib/nodeOutput'
 import { humanizeAgentError } from '../../../shared/lib/humanizeAgentError'
@@ -43,9 +46,9 @@ import type { SSEStatus } from '../../../shared/hooks/useTaskEvents'
 import { useErrorToast } from '../../../shared/hooks/useErrorToast'
 import { useStickToBottom } from '../../../shared/hooks/useStickToBottom'
 import { ThreadSwitcher } from './ThreadSwitcher'
+import { MarkdownBody } from '../../../shared/components/MarkdownBody'
 
 const { Text, Paragraph } = Typography
-const { CheckableTag } = Tag
 
 type StreamFilter = 'all' | 'thinking' | 'message' | 'tool' | 'error'
 
@@ -116,12 +119,14 @@ function matchesFilter(ev: AgentEvent, filter: StreamFilter): boolean {
 }
 
 function typeColor(eventType: string): string {
-  if (eventType.includes('failed') || eventType.endsWith('denied')) return 'var(--crucible-error)'
+  if (eventType.includes('failed') || eventType.endsWith('denied') || eventType === 'tool.error' || eventType === 'subagent.error') {
+    return 'var(--crucible-error)'
+  }
   if (eventType === 'agent.thinking') return 'var(--crucible-text-disabled)'
-  if (eventType.startsWith('tool.call')) return 'var(--crucible-primary)'
-  if (eventType === 'agent.completed') return 'var(--crucible-success)'
+  if (eventType.startsWith('tool.call') || eventType === 'tool') return 'var(--crucible-primary)'
+  if (eventType === 'agent.completed' || eventType === 'subagent.completed') return 'var(--crucible-success)'
   if (eventType === 'node.updated') return 'var(--crucible-warning)'
-  if (eventType === 'agent.subagent.updated') return 'var(--crucible-primary)'
+  if (eventType === 'agent.subagent.updated' || eventType === 'subagent') return 'var(--crucible-primary)'
   return 'var(--crucible-text-secondary)'
 }
 
@@ -153,7 +158,7 @@ function toolIcon(tool: string) {
   if (tool === 'Read' || tool === 'Grep' || tool === 'Glob') return <FileSearchOutlined />
   if (tool === 'Edit' || tool === 'Write' || tool === 'NotebookEdit') return <EditOutlined />
   // 子代理派发：新版 CLI 叫 Agent，Task 是旧别名
-  if (tool === 'Task' || tool === 'Agent') return <TeamOutlined />
+  if (tool === 'Task' || tool === 'Agent') return <ThunderboltOutlined />
   if (tool.startsWith('mcp__crucible__submit')) return <SendOutlined />
   return <ToolOutlined />
 }
@@ -190,6 +195,7 @@ export function TaskEventTimeline({
   }, [nodeLabel])
 
   const threads = useMemo(() => deriveThreads(events ?? []), [events])
+  const currentThreadInfo = useMemo(() => threads.find((th) => th.id === thread), [threads, thread])
 
   // 过滤链：类型过滤 → 线程过滤 → 分组折叠 → 尾部窗口
   const scoped = useMemo(() => {
@@ -276,17 +282,31 @@ export function TaskEventTimeline({
           />
         )}
       </Space>
+
       {thread !== MAIN_THREAD && (
         <div className="crucible-thread-banner">
           <TeamOutlined style={{ marginRight: 6, color: 'var(--crucible-primary)' }} />
-          正在查看子代理「
-          {threads.find((th) => th.id === thread)?.label || `${thread.slice(0, 8)}…`}
-          」的事件流
-          <Button size="small" type="link" style={{ paddingInline: 0 }} onClick={() => setThread(MAIN_THREAD)}>
+          <span>
+            正在查看子代理「<strong>{currentThreadInfo?.label || `${thread.slice(0, 8)}…`}</strong>」
+          </span>
+          {currentThreadInfo?.status === 'completed' && <Tag color="success" style={{ marginInline: 6 }}>已完成</Tag>}
+          {currentThreadInfo?.status === 'failed' && <Tag color="error" style={{ marginInline: 6 }}>执行失败</Tag>}
+          {(currentThreadInfo?.status === 'running' || !currentThreadInfo?.status) && (
+            <Tag color="processing" style={{ marginInline: 6 }}>
+              <LoadingOutlined spin style={{ marginRight: 4 }} />运行中
+            </Tag>
+          )}
+          <Button
+            size="small"
+            type="link"
+            style={{ paddingInline: 0, marginLeft: 'auto' }}
+            onClick={() => setThread(MAIN_THREAD)}
+          >
             返回主 Agent
           </Button>
         </div>
       )}
+
       {rows.length > 0 ? (
         <div className="crucible-stream">
           <div
@@ -306,8 +326,25 @@ export function TaskEventTimeline({
                 </div>
               )}
               {rows.map((row) => (
-                <StreamRowComponent key={row.key} row={row} />
+                <StreamRowComponent
+                  key={row.key}
+                  row={row}
+                  currentThread={thread}
+                  onSelectThread={setThread}
+                />
               ))}
+              {/* 子代理独立视图下，若未在最后一条完整渲染结论，在此显式附上最终输出 */}
+              {thread !== MAIN_THREAD && currentThreadInfo?.output && (
+                <div className="crucible-subagent-standalone-conclusion">
+                  <div className="crucible-subagent-conclusion-header">
+                    <CheckCircleOutlined style={{ color: 'var(--crucible-success)', marginRight: 6 }} />
+                    <Text strong>子代理执行完成 · 最终产出结论</Text>
+                  </div>
+                  <div className="crucible-subagent-conclusion-body">
+                    <MarkdownBody source={currentThreadInfo.output} />
+                  </div>
+                </div>
+              )}
               {running && (
                 <div className="crucible-stream-footer">
                   <span className="crucible-stream-pulse" />
@@ -340,7 +377,15 @@ export function TaskEventTimeline({
 }
 
 /** 行内容只由事件本身决定，memo 让新事件到达时只挂新行，不重渲染既有行。 */
-const StreamRowComponent = memo(function StreamRow({ row }: { row: RowModel }) {
+const StreamRowComponent = memo(function StreamRow({
+  row,
+  currentThread,
+  onSelectThread,
+}: {
+  row: RowModel
+  currentThread?: string
+  onSelectThread?: (threadId: string) => void
+}) {
   const head =
     row.kind === 'event'
       ? row.ev
@@ -348,18 +393,31 @@ const StreamRowComponent = memo(function StreamRow({ row }: { row: RowModel }) {
         ? row.evs[0]
         : (row.start ?? row.done!)
   const p = payloadOf(head)
-  const color =
-    row.kind === 'tool'
-      ? typeColor(
-          row.done && payloadOf(row.done).is_error === true ? 'tool.error' : 'tool',
-        )
-      : typeColor(head.event_type)
+
+  let color: string
+  if (row.kind === 'subagent') {
+    const isErr = row.done && payloadOf(row.done).is_error === true
+    color = isErr ? 'var(--crucible-error)' : row.done ? 'var(--crucible-success)' : 'var(--crucible-primary)'
+  } else if (row.kind === 'tool') {
+    color = typeColor(row.done && payloadOf(row.done).is_error === true ? 'tool.error' : 'tool')
+  } else {
+    color = typeColor(head.event_type)
+  }
 
   let body
   let tagLabel
   if (row.kind === 'thinking') {
     tagLabel = EVENT_TYPE_LABELS['agent.thinking'] ?? 'thinking'
     body = <ThinkingGroupBody evs={row.evs} />
+  } else if (row.kind === 'subagent') {
+    tagLabel = 'subagent'
+    body = (
+      <SubagentCardBody
+        row={row}
+        inSubagentView={currentThread === row.id}
+        onFocus={() => onSelectThread?.(row.id)}
+      />
+    )
   } else if (row.kind === 'tool') {
     tagLabel = EVENT_TYPE_LABELS['tool.call.started'] ?? 'tool'
     body = <MergedToolBody start={row.start} done={row.done} />
@@ -380,6 +438,105 @@ const StreamRowComponent = memo(function StreamRow({ row }: { row: RowModel }) {
     </div>
   )
 })
+
+/**
+ * Codex / zcode 风格 Subagent 复合卡片：
+ * - 头部：任务名称、状态 Tag（成功/错误/进行中）、步骤提示、聚焦按钮
+ * - 任务目标：Prompt / Description 摘要
+ * - 最终结论：执行完成时高亮呈现产出结论（支持 Markdown），彻底解决结束信息不可见问题
+ */
+function SubagentCardBody({
+  row,
+  inSubagentView,
+  onFocus,
+}: {
+  row: Extract<RowModel, { kind: 'subagent' }>
+  inSubagentView?: boolean
+  onFocus: () => void
+}) {
+  const sp = row.start ? payloadOf(row.start) : {}
+  const dp = row.done ? payloadOf(row.done) : {}
+  const inputObj = (sp.input && typeof sp.input === 'object' ? sp.input : {}) as Record<string, unknown>
+  const description =
+    asText(sp.description) ||
+    asText(inputObj.description) ||
+    asText(inputObj.prompt) ||
+    '子代理审计任务'
+  const isDone = row.done !== null
+  const isError = dp.is_error === true
+  const output = asText(dp.output)
+
+  return (
+    <div className={`crucible-subagent-card${isError ? ' is-error' : isDone ? ' is-completed' : ''}`}>
+      <div className="crucible-subagent-header">
+        <div className="crucible-subagent-title">
+          <ThunderboltOutlined style={{ color: isError ? 'var(--crucible-error)' : isDone ? 'var(--crucible-success)' : 'var(--crucible-primary)' }} />
+          <span>子代理 · {truncate(description.replace(/\s+/g, ' '), 50)}</span>
+          {isDone ? (
+            isError ? (
+              <Tag color="error">执行失败</Tag>
+            ) : (
+              <Tag color="success">已完成</Tag>
+            )
+          ) : (
+            <Tag color="processing">
+              <LoadingOutlined spin style={{ marginRight: 4 }} />执行中
+            </Tag>
+          )}
+        </div>
+        <Space size="small">
+          {!inSubagentView && (
+            <Button
+              size="small"
+              type="primary"
+              ghost
+              icon={<EnterOutlined />}
+              onClick={onFocus}
+            >
+              进入子代理视图
+            </Button>
+          )}
+        </Space>
+      </div>
+
+      {description && description.length > 50 && (
+        <div className="crucible-subagent-objective">
+          <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 2 }}>任务目标：</Text>
+          {truncate(description, 300)}
+        </div>
+      )}
+
+      {/* 最终结论区 */}
+      {isDone ? (
+        <div className={`crucible-subagent-conclusion${isError ? ' is-error' : ''}`}>
+          <div className="crucible-subagent-conclusion-title">
+            {isError ? (
+              <CloseCircleOutlined style={{ color: 'var(--crucible-error)' }} />
+            ) : (
+              <CheckCircleOutlined style={{ color: 'var(--crucible-success)' }} />
+            )}
+            <Text strong style={{ fontSize: 12 }}>
+              {isError ? '子代理异常退出' : '子代理执行结论'}
+            </Text>
+          </div>
+          {output ? (
+            <div className="crucible-subagent-conclusion-content">
+              <MarkdownBody source={truncate(output, 2000)} />
+            </div>
+          ) : (
+            <Text type="secondary" style={{ fontSize: 11 }}>（无返回值输出）</Text>
+          )}
+        </div>
+      ) : (
+        <div style={{ marginTop: 6 }}>
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            子代理正在后台执行分析中，点击上方「进入子代理视图」可实时追踪内部思考与工具调用…
+          </Text>
+        </div>
+      )}
+    </div>
+  )
+}
 
 /** 连续思考折叠组：默认收起，展开后逐段完整展示。 */
 function ThinkingGroupBody({ evs }: { evs: AgentEvent[] }) {
@@ -551,7 +708,7 @@ function renderBody(ev: AgentEvent, p: Record<string, unknown>) {
         {runningLike ? (
           <LoadingOutlined spin style={{ marginRight: 6, color: 'var(--crucible-primary)' }} />
         ) : (
-          <TeamOutlined style={{ marginRight: 6, color: 'var(--crucible-text-disabled)' }} />
+          <ThunderboltOutlined style={{ marginRight: 6, color: 'var(--crucible-text-disabled)' }} />
         )}
         子代理 · {label}
         {statusText ? ` · ${statusText}` : ''}
@@ -560,11 +717,12 @@ function renderBody(ev: AgentEvent, p: Record<string, unknown>) {
   }
 
   if (ev.event_type === 'agent.message') {
+    const text = asText(p.text)
     return (
-      <Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap', fontSize: 13 }}>
+      <div className="crucible-stream-message">
         <MessageOutlined style={{ marginRight: 6, color: 'var(--crucible-primary)' }} />
-        {asText(p.text)}
-      </Paragraph>
+        <span style={{ fontSize: 13, whiteSpace: 'pre-wrap' }}>{text}</span>
+      </div>
     )
   }
 
@@ -670,3 +828,4 @@ function renderBody(ev: AgentEvent, p: Record<string, unknown>) {
   const fallback = asText(p.text || p.message || p.error)
   return <Text>{fallback || ev.event_type}</Text>
 }
+

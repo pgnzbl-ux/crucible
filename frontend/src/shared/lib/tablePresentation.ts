@@ -78,3 +78,23 @@ export function formatFileSize(bytes: number | null | undefined): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
+
+export function formatTaskDuration(
+  createdAt: string | null | undefined,
+  updatedAt: string | null | undefined,
+  isRunning = false,
+): string {
+  if (!createdAt) return '—'
+  const start = new Date(createdAt).getTime()
+  if (Number.isNaN(start)) return '—'
+  const end = isRunning ? Date.now() : updatedAt ? new Date(updatedAt).getTime() : start
+  const diffSec = Math.max(0, Math.floor((end - start) / 1000))
+  if (diffSec < 60) return `${diffSec}秒`
+  const min = Math.floor(diffSec / 60)
+  const sec = diffSec % 60
+  if (min < 60) return `${min}分${sec ? `${sec}秒` : ''}`
+  const hr = Math.floor(min / 60)
+  const remainingMin = min % 60
+  return `${hr}小时${remainingMin}分`
+}
+

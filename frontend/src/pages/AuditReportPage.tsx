@@ -14,6 +14,8 @@ import { tableRowNavigateProps } from '../shared/lib/tableRowNavigate'
 import { projectLabel, sourceVersionLabel } from '../shared/lib/tablePresentation'
 import { getReportStatusMeta, getVerdictMeta } from '../shared/lib/meta'
 
+import { MarkdownBody } from '../shared/components/MarkdownBody'
+
 const { Paragraph, Text, Title } = Typography
 
 function basisLabel(basis: string | null | undefined) {
@@ -59,7 +61,9 @@ export function AuditReportPage() {
       title: '验证方式',
       dataIndex: 'verification_basis',
       width: 110,
-      render: (v: string | null) => basisLabel(v),
+      render: (v: string | null) => (
+        <Tag color={v === 'lab' ? 'blue' : 'gold'}>{basisLabel(v)}</Tag>
+      ),
     },
     {
       title: '引擎',
@@ -102,10 +106,14 @@ export function AuditReportPage() {
       <PageContainer>
         {task && (
           <Card size="small" style={{ marginBottom: 16 }}>
-            <Descriptions column={2} size="small">
-              <Descriptions.Item label="任务 ID">{task.task_id}</Descriptions.Item>
-              <Descriptions.Item label="任务状态">{task.task_status}</Descriptions.Item>
-              <Descriptions.Item label="创建">
+            <Descriptions column={2} size="small" bordered>
+              <Descriptions.Item label="任务 ID">
+                <Text code>{task.task_id}</Text>
+              </Descriptions.Item>
+              <Descriptions.Item label="任务状态">
+                <Tag color={task.task_status === 'completed' ? 'green' : 'blue'}>{task.task_status}</Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="创建时间">
                 {task.created_at ? dayjs(task.created_at).format('YYYY-MM-DD HH:mm') : '—'}
               </Descriptions.Item>
               <Descriptions.Item label="发布状态">
@@ -119,7 +127,7 @@ export function AuditReportPage() {
             </Descriptions>
           </Card>
         )}
-        <Title level={5}>单漏洞报告</Title>
+        <Title level={5} style={{ margin: '16px 0 8px' }}>单漏洞终认报告清单</Title>
         <Table<VulnReportSummary>
           rowKey="alert_group_id"
           loading={vulnsQuery.isLoading || vulnsQuery.isFetching}
@@ -160,8 +168,8 @@ export function AuditVulnReportPage() {
   useErrorToast(isError, error, '漏洞报告加载失败')
 
   const summary = typeof data?.summary === 'string' ? data.summary : '漏洞报告'
-  const reasoning = typeof data?.reasoning === 'string' ? data.reasoning : '—'
-  const remediation = typeof data?.remediation === 'string' ? data.remediation : '暂缺'
+  const reasoning = typeof data?.reasoning === 'string' ? data.reasoning : ''
+  const remediation = typeof data?.remediation === 'string' ? data.remediation : ''
   const basis = typeof data?.verification_basis === 'string' ? data.verification_basis : null
   const finalVerdict = typeof data?.final_verdict === 'string' ? data.final_verdict : null
   const engines = Array.isArray(data?.engines) ? data.engines.map(String).join(', ') : '—'
@@ -199,35 +207,45 @@ export function AuditVulnReportPage() {
           <Card loading />
         ) : (
           <Space direction="vertical" size={16} style={{ width: '100%' }}>
-            <Card title="简述" size="small">
-              <Paragraph>{summary}</Paragraph>
+            <Card title="漏洞简述" size="small">
+              <Paragraph style={{ fontSize: 14, fontWeight: 500 }}>{summary}</Paragraph>
             </Card>
-            <Card title="代码/依赖推理" size="small">
-              <Paragraph style={{ whiteSpace: 'pre-wrap' }}>{reasoning}</Paragraph>
+            <Card title="代码与依赖推理链" size="small">
+              {reasoning ? <MarkdownBody source={reasoning} /> : <Text type="secondary">暂缺</Text>}
             </Card>
-            <Card title="定位与证据" size="small">
-              <Descriptions column={1} size="small">
-                <Descriptions.Item label="文件">{String(locus.file_path || '—')}</Descriptions.Item>
-                <Descriptions.Item label="函数">{String(locus.function_symbol || '—')}</Descriptions.Item>
-                <Descriptions.Item label="行">{String(locus.line_span || locus.line_start || '—')}</Descriptions.Item>
-                <Descriptions.Item label="CWE">{String(locus.cwe || '—')}</Descriptions.Item>
+            <Card title="漏洞定位与代码证据" size="small">
+              <Descriptions column={2} size="small" bordered>
+                <Descriptions.Item label="文件路径" span={2}>
+                  <Text code>{String(locus.file_path || '—')}</Text>
+                </Descriptions.Item>
+                <Descriptions.Item label="函数符号">
+                  <Text code>{String(locus.function_symbol || '—')}</Text>
+                </Descriptions.Item>
+                <Descriptions.Item label="行号区间">
+                  <Text code>{String(locus.line_span || locus.line_start || '—')}</Text>
+                </Descriptions.Item>
+                <Descriptions.Item label="CWE 映射">
+                  {locus.cwe ? <Tag color="volcano" className="crucible-cwe-tag">{String(locus.cwe)}</Tag> : '—'}
+                </Descriptions.Item>
+                <Descriptions.Item label="来源引擎">
+                  <Text>{engines}</Text>
+                </Descriptions.Item>
               </Descriptions>
             </Card>
-            <Card title="来源引擎" size="small">
-              <Text>{engines}</Text>
-            </Card>
             <Card title="终认结论" size="small">
-              <Space>
+              <Space size="middle">
                 {finalVerdict ? (
-                  <Tag color={getVerdictMeta(finalVerdict).color}>{getVerdictMeta(finalVerdict).label}</Tag>
+                  <Tag color={getVerdictMeta(finalVerdict).color} style={{ fontSize: 13, padding: '2px 8px' }}>
+                    {getVerdictMeta(finalVerdict).label}
+                  </Tag>
                 ) : (
                   '—'
                 )}
-                <Text type="secondary">{basisLabel(basis)}</Text>
+                <Tag color="blue">{basisLabel(basis)}</Tag>
               </Space>
             </Card>
-            <Card title="修复建议" size="small">
-              <Paragraph style={{ whiteSpace: 'pre-wrap' }}>{remediation}</Paragraph>
+            <Card title="安全修复建议" size="small">
+              {remediation ? <MarkdownBody source={remediation} /> : <Text type="secondary">暂无修复建议</Text>}
             </Card>
           </Space>
         )}
@@ -235,3 +253,4 @@ export function AuditVulnReportPage() {
     </>
   )
 }
+

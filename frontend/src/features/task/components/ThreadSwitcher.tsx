@@ -13,20 +13,34 @@ export interface ThreadLike {
   count: number
 }
 
-/** 徽标状态判定（纯函数，便于测试）：运行中无完成态→蓝脉冲；已完成→绿；其余→灰。 */
-export function threadBadgeStatus(th: ThreadLike, running: boolean): 'processing' | 'success' | 'default' {
-  if (running && !th.status) return 'processing'
+/** 徽标状态判定（纯函数，便于测试）：失败/错误→红；已完成→绿；运行中无终态→蓝脉冲；其余→灰。 */
+export function threadBadgeStatus(
+  th: ThreadLike & { isError?: boolean },
+  running: boolean,
+): 'processing' | 'success' | 'error' | 'default' {
+  if (th.status === 'failed' || th.isError === true) return 'error'
   if (th.status === 'completed') return 'success'
+  if (running && (!th.status || th.status === 'running' || th.status === 'in_progress')) {
+    return 'processing'
+  }
   return 'default'
 }
 
-function StatusDot({ th, running }: { th: ThreadLike; running: boolean }) {
+function StatusDot({ th, running }: { th: ThreadLike & { isError?: boolean }; running: boolean }) {
   const status = threadBadgeStatus(th, running)
   return (
     <Badge
       status={status}
       style={{ marginLeft: 'auto', flex: '0 0 auto' }}
-      title={status === 'processing' ? '运行中' : status === 'success' ? '已完成' : ''}
+      title={
+        status === 'processing'
+          ? '运行中'
+          : status === 'success'
+            ? '已完成'
+            : status === 'error'
+              ? '执行失败'
+              : ''
+      }
     />
   )
 }

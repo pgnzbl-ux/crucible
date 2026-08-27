@@ -14,7 +14,7 @@ import type { TaskSummary } from '../../../shared/lib/api'
 import { getStatusMeta, getPriorityMeta, getVerdictMeta } from '../../../shared/lib/meta'
 import { canCancel, canDelete, canRetry, CONFIRM_COPY } from '../../../shared/lib/taskActions'
 import { tableRowNavigateProps } from '../../../shared/lib/tableRowNavigate'
-import { auditResultLabel, projectLabel, sourceVersionLabel } from '../../../shared/lib/tablePresentation'
+import { auditResultLabel, formatTaskDuration, projectLabel, sourceVersionLabel } from '../../../shared/lib/tablePresentation'
 
 const { Text } = Typography
 
@@ -77,10 +77,15 @@ export function TaskTable({
       width: 140,
       render: (v: string, row) => {
         const m = getStatusMeta(v)
+        const isRunning = canCancel(v)
         return (
           <div>
             <Tag color={m.color}>{m.label}</Tag>
-            <div><Text type="secondary" style={{ fontSize: 12 }}>更新 {dayjs(row.updated_at).format('MM-DD HH:mm')}</Text></div>
+            <div>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                耗时 {formatTaskDuration(row.created_at, row.updated_at, isRunning)}
+              </Text>
+            </div>
           </div>
         )
       },
@@ -88,14 +93,18 @@ export function TaskTable({
     {
       title: '审计结果',
       dataIndex: 'verdict',
-      width: 150,
+      width: 170,
       render: (v: string | null, row) => (
         <div>
           <Tag color={v ? getVerdictMeta(v).color : row.status === 'completed' ? 'green' : 'default'}>
             {auditResultLabel(row.status, v)}
           </Tag>
           {row.task_type === 'discovery' ? (
-            <div><Text type="secondary" style={{ fontSize: 12 }}>线索 {row.finding_count} · 待复核 {row.pending_review_count} · 确认 {row.confirmed_count}</Text></div>
+            <div>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                线索 {row.finding_count} · <span style={{ color: row.confirmed_count > 0 ? '#52c41a' : undefined, fontWeight: row.confirmed_count > 0 ? 600 : undefined }}>确认 {row.confirmed_count}</span>
+              </Text>
+            </div>
           ) : null}
           {row.report_status ? <div><Text type="secondary" style={{ fontSize: 12 }}>报告：{row.report_status === 'published' ? '已发布' : '已生成'}</Text></div> : null}
         </div>
@@ -104,7 +113,7 @@ export function TaskTable({
     {
       title: '发起时间',
       dataIndex: 'created_at',
-      width: 170,
+      width: 150,
       render: (v: string) => dayjs(v).format('MM-DD HH:mm:ss'),
     },
     {

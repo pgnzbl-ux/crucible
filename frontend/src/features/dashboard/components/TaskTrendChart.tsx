@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { Tooltip } from 'antd'
 import dayjs from 'dayjs'
 
 import type { TaskSummary } from '../../../shared/lib/api'
@@ -16,15 +17,18 @@ interface TaskTrendChartProps {
 
 export function TaskTrendChart({ tasks }: TaskTrendChartProps) {
   const data = useMemo(() => {
-    const days: Record<string, { date: string; count: number }> = {}
+    const days: Record<string, { date: string; fullDate: string; count: number; completed: number; failed: number }> = {}
     for (let i = 6; i >= 0; i--) {
-      const d = dayjs().subtract(i, 'day').format('MM-DD')
-      days[d] = { date: d, count: 0 }
+      const dObj = dayjs().subtract(i, 'day')
+      const d = dObj.format('MM-DD')
+      days[d] = { date: d, fullDate: dObj.format('YYYY-MM-DD'), count: 0, completed: 0, failed: 0 }
     }
     for (const t of tasks) {
       const d = dayjs(t.created_at).format('MM-DD')
       if (days[d]) {
         days[d].count += 1
+        if (t.status === 'completed') days[d].completed += 1
+        if (t.status === 'failed') days[d].failed += 1
       }
     }
     return Object.values(days)
@@ -47,29 +51,58 @@ export function TaskTrendChart({ tasks }: TaskTrendChartProps) {
       }}
     >
       {data.map((item) => {
-        const barHeight = item.count === 0 ? 2 : Math.max(8, (item.count / maxCount) * 170)
+        const isPeak = item.count === maxCount && item.count > 0
+        const barHeight = item.count === 0 ? 3 : Math.max(12, (item.count / maxCount) * 170)
         return (
           <div
             key={item.date}
             style={{ display: 'flex', flex: 1, minWidth: 0, flexDirection: 'column', alignItems: 'center' }}
           >
-            <span style={{ color: 'var(--crucible-text-secondary)', fontSize: 12 }}>{item.count}</span>
+            <span
+              style={{
+                color: isPeak ? 'var(--crucible-primary)' : 'var(--crucible-text-secondary)',
+                fontSize: 12,
+                fontWeight: isPeak ? 700 : 500,
+                marginBottom: 2,
+              }}
+            >
+              {item.count}
+            </span>
             <div style={{ height: 180, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', width: '100%' }}>
-              <div
-                style={{
-                  width: '70%',
-                  height: barHeight,
-                  minHeight: 2,
-                  background: item.count ? 'var(--crucible-primary)' : 'var(--crucible-border)',
-                  borderRadius: '4px 4px 0 0',
-                  transition: 'height 240ms ease-out',
-                }}
-              />
+              <Tooltip
+                title={
+                  <div>
+                    <div><strong>{item.fullDate}</strong></div>
+                    <div>发起审计：{item.count} 次</div>
+                    {item.completed > 0 && <div style={{ color: '#52c41a' }}>已完成：{item.completed}</div>}
+                    {item.failed > 0 && <div style={{ color: '#ff4d4f' }}>失败：{item.failed}</div>}
+                  </div>
+                }
+              >
+                <div
+                  style={{
+                    width: '68%',
+                    maxWidth: 42,
+                    height: barHeight,
+                    minHeight: 3,
+                    background: item.count
+                      ? isPeak
+                        ? 'linear-gradient(180deg, #1677ff 0%, #36cfc9 100%)'
+                        : 'linear-gradient(180deg, #4096ff 0%, #1677ff 100%)'
+                      : 'var(--crucible-border)',
+                    borderRadius: '6px 6px 0 0',
+                    cursor: 'pointer',
+                    boxShadow: item.count ? '0 2px 6px rgba(22, 119, 255, 0.2)' : 'none',
+                    transition: 'all 240ms ease-out',
+                  }}
+                />
+              </Tooltip>
             </div>
-            <span style={{ color: 'var(--crucible-text-secondary)', fontSize: 12 }}>{item.date}</span>
+            <span style={{ color: 'var(--crucible-text-secondary)', fontSize: 12, marginTop: 4 }}>{item.date}</span>
           </div>
         )
       })}
     </div>
   )
 }
+

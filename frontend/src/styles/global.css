@@ -671,27 +671,45 @@ body,
 /* ── 统计卡 ── */
 .stat-card {
   border-radius: 12px;
-  min-height: 120px;
+  min-height: 124px;
   overflow: hidden;
   position: relative;
   cursor: pointer;
-  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  background: var(--crucible-surface, #ffffff);
+  transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.2s ease, box-shadow 0.22s cubic-bezier(0.16, 1, 0.3, 1);
   border: 1px solid var(--crucible-border);
 }
+.stat-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: transparent;
+  transition: background 0.2s ease;
+}
 .stat-card:hover {
-  transform: translateY(-2px);
+  transform: translateY(-3px);
   border-color: var(--crucible-primary);
-  box-shadow: var(--crucible-shadow-md);
+  box-shadow: 0 10px 24px -6px rgba(0, 0, 0, 0.08), 0 4px 10px -2px rgba(0, 0, 0, 0.04);
+}
+.stat-card:hover::before {
+  background: var(--crucible-primary);
 }
 .stat-card-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
+  width: 42px;
+  height: 42px;
   border-radius: 10px;
-  font-size: 18px;
+  font-size: 19px;
   margin-bottom: 12px;
+  transition: transform 0.2s ease;
+}
+.stat-card:hover .stat-card-icon {
+  transform: scale(1.06);
 }
 .stat-card-icon-primary {
   background: var(--crucible-primary-light);
@@ -715,19 +733,63 @@ body,
 }
 .stat-card-title {
   font-size: 13px;
+  font-weight: 500;
   color: var(--crucible-text-secondary);
 }
 .stat-card-value {
   font-size: 28px;
   font-weight: 700;
   line-height: 1.2;
-  margin-top: 2px;
+  margin-top: 3px;
   color: var(--crucible-text);
+  font-variant-numeric: tabular-nums;
 }
 .stat-card-trend {
   font-size: 12px;
   color: var(--crucible-text-disabled);
   margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.stat-card:hover .stat-card-trend {
+  color: var(--crucible-primary);
+}
+
+/* ── CWE 徽标与数据流路径组件样式 ── */
+.crucible-cwe-tag {
+  font-family: var(--crucible-font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.2px;
+}
+.crucible-dataflow-trace {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-family: var(--crucible-font-mono);
+  font-size: 12px;
+  padding: 6px 10px;
+  background: rgba(0, 0, 0, 0.025);
+  border-radius: 6px;
+  border: 1px solid var(--crucible-border);
+}
+.crucible-dataflow-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.crucible-dataflow-arrow {
+  color: var(--crucible-primary);
+  font-weight: bold;
+}
+.crucible-duration-badge {
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--crucible-text-secondary);
 }
 
 /* ── 登录页（双栏布局） ── */
@@ -1085,13 +1147,98 @@ body,
 .crucible-thread-banner {
   display: flex;
   align-items: center;
-  gap: 4px;
-  margin: 4px 14px 0;
-  padding: 4px 10px;
-  border: 1px solid color-mix(in srgb, var(--crucible-primary) 25%, var(--crucible-border));
+  gap: 6px;
+  margin: 4px 14px 6px;
+  padding: 6px 12px;
+  border: 1px solid color-mix(in srgb, var(--crucible-primary) 30%, var(--crucible-border));
   border-radius: 6px;
   background: color-mix(in srgb, var(--crucible-primary) 6%, transparent);
   font-size: 12px;
+}
+
+/* ── Codex / zcode 风格 Subagent 复合卡片 ── */
+.crucible-subagent-card {
+  border: 1px solid color-mix(in srgb, var(--crucible-primary) 25%, var(--crucible-border));
+  background: color-mix(in srgb, var(--crucible-primary) 3%, var(--crucible-surface, #ffffff));
+  border-radius: var(--crucible-radius-md, 8px);
+  padding: 10px 12px;
+  margin: 4px 0;
+  transition: all 0.2s ease;
+}
+.crucible-subagent-card:hover {
+  border-color: var(--crucible-primary);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+.crucible-subagent-card.is-error {
+  border-color: color-mix(in srgb, var(--crucible-error) 40%, var(--crucible-border));
+  background: color-mix(in srgb, var(--crucible-error) 4%, var(--crucible-surface, #ffffff));
+}
+.crucible-subagent-card.is-completed {
+  border-color: color-mix(in srgb, var(--crucible-success) 35%, var(--crucible-border));
+}
+.crucible-subagent-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.crucible-subagent-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 13px;
+}
+.crucible-subagent-objective {
+  margin: 6px 0 8px;
+  padding: 6px 10px;
+  background: rgba(0, 0, 0, 0.025);
+  border-left: 3px solid var(--crucible-primary);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--crucible-text);
+  white-space: pre-wrap;
+}
+.crucible-subagent-conclusion {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--crucible-success) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--crucible-success) 30%, transparent);
+  border-radius: 6px;
+}
+.crucible-subagent-conclusion.is-error {
+  background: color-mix(in srgb, var(--crucible-error) 8%, transparent);
+  border-color: color-mix(in srgb, var(--crucible-error) 30%, transparent);
+}
+.crucible-subagent-conclusion-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.crucible-subagent-conclusion-content {
+  font-size: 12px;
+  line-height: 1.5;
+}
+.crucible-subagent-standalone-conclusion {
+  margin: 12px 14px 8px;
+  padding: 10px 14px;
+  background: color-mix(in srgb, var(--crucible-success) 7%, var(--crucible-surface, #ffffff));
+  border: 1px solid color-mix(in srgb, var(--crucible-success) 35%, var(--crucible-border));
+  border-radius: 8px;
+}
+.crucible-subagent-conclusion-header {
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+.crucible-subagent-conclusion-body {
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 /* ── 任务详情：顶部编排画布（十字虚线网格，默认铺满） ── */

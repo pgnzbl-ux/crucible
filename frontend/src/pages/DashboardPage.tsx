@@ -54,12 +54,12 @@ export function DashboardPage() {
 
   const tasks = data?.items ?? []
   const cards = [
-    { key: 'running', title: '进行中的审计', value: sumTaskStats(stats?.by_status ?? {}, 'pending,queued,running'), icon: <ThunderboltOutlined />, tone: 'primary' as const, href: '/tasks?status=pending%2Cqueued%2Crunning' },
-    { key: 'review', title: '验证中', value: findingStats?.by_queue.verifying ?? 0, icon: <ClockCircleOutlined />, tone: 'warning' as const, href: '/findings?scope=verifying' },
-    { key: 'confirming', title: '已确认', value: findingStats?.by_queue.confirmed ?? 0, icon: <CheckCircleOutlined />, tone: 'success' as const, href: '/findings?scope=confirmed' },
-    { key: 'confirmed', title: '代码可达', value: findingStats?.by_queue.reachable ?? 0, icon: <BugOutlined />, tone: 'warning' as const, href: '/findings?scope=reachable' },
-    { key: 'findings', title: '漏洞线索', value: findingStats?.by_queue.workbench ?? 0, icon: <BugOutlined />, tone: 'default' as const, href: '/findings' },
-    { key: 'total', title: '审计运行', value: stats?.total ?? 0, icon: <FileProtectOutlined />, tone: 'default' as const, href: '/tasks' },
+    { key: 'running', title: '进行中的审计', value: sumTaskStats(stats?.by_status ?? {}, 'pending,queued,running'), icon: <ThunderboltOutlined />, tone: 'primary' as const, href: '/tasks?status=pending%2Cqueued%2Crunning', trend: '实时分析中' },
+    { key: 'review', title: '验证中', value: findingStats?.by_queue.verifying ?? 0, icon: <ClockCircleOutlined />, tone: 'warning' as const, href: '/findings?scope=verifying', trend: 'AI 定向复核' },
+    { key: 'confirming', title: '已确认漏洞', value: findingStats?.by_queue.confirmed ?? 0, icon: <CheckCircleOutlined />, tone: 'success' as const, href: '/findings?scope=confirmed', trend: '完全证实真漏洞' },
+    { key: 'confirmed', title: '代码可达', value: findingStats?.by_queue.reachable ?? 0, icon: <BugOutlined />, tone: 'warning' as const, href: '/findings?scope=reachable', trend: '调用链路闭环' },
+    { key: 'findings', title: '工作台线索', value: findingStats?.by_queue.workbench ?? 0, icon: <BugOutlined />, tone: 'default' as const, href: '/findings', trend: '待研判线索池' },
+    { key: 'total', title: '全部审计运行', value: stats?.total ?? 0, icon: <FileProtectOutlined />, tone: 'default' as const, href: '/tasks', trend: '历史任务归档' },
   ]
 
   const recentColumns: ColumnsType<TaskSummary> = [
@@ -77,7 +77,7 @@ export function DashboardPage() {
     {
       title: '当前状态',
       dataIndex: 'status',
-      width: 100,
+      width: 110,
       render: (v: string) => {
         const m = getStatusMeta(v)
         return <Tag color={m.color}>{m.label}</Tag>
@@ -86,18 +86,24 @@ export function DashboardPage() {
     {
       title: '审计结果',
       dataIndex: 'verdict',
-      width: 140,
+      width: 160,
       render: (v: string | null, row) => (
         <div>
           <Text>{auditResultLabel(row.status, v)}</Text>
-          {row.task_type === 'discovery' ? <div><Text type="secondary" style={{ fontSize: 12 }}>线索 {row.finding_count} · 确认 {row.confirmed_count}</Text></div> : null}
+          {row.task_type === 'discovery' ? (
+            <div>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                线索 {row.finding_count} · 确认 <span style={{ color: row.confirmed_count > 0 ? '#52c41a' : undefined, fontWeight: row.confirmed_count > 0 ? 600 : undefined }}>{row.confirmed_count}</span>
+              </Text>
+            </div>
+          ) : null}
         </div>
       ),
     },
     {
-      title: '最近更新',
+      title: '更新时间',
       dataIndex: 'updated_at',
-      width: 150,
+      width: 140,
       render: (v: string) => dayjs(v).format('MM-DD HH:mm'),
     },
   ]
@@ -122,7 +128,7 @@ export function DashboardPage() {
               value={card.value}
               icon={card.icon}
               tone={card.tone}
-              trend="点击查看"
+              trend={card.trend}
               onClick={() => navigate(card.href)}
             />
           </Col>

@@ -4,6 +4,7 @@ import {
   auditResultLabel,
   findingStatusLabel,
   formatFileSize,
+  formatTaskDuration,
   projectLabel,
   reportTypeLabel,
   screeningStatusMeta,
@@ -44,5 +45,14 @@ describe('table presentation', () => {
     expect(screeningStatusMeta('retained')).toEqual({ label: '线索', color: 'red' })
     expect(screeningStatusMeta('suppressed')).toEqual({ label: '误报', color: 'default' })
     expect(screeningStatusMeta('processing')).toEqual({ label: '研判中', color: 'processing' })
+  })
+
+  it('formats task durations human-readably', () => {
+    const t0 = '2026-08-27T10:00:00Z'
+    const t1 = '2026-08-27T10:00:45Z'
+    const t2 = '2026-08-27T10:03:20Z'
+    expect(formatTaskDuration(t0, t1)).toBe('45秒')
+    expect(formatTaskDuration(t0, t2)).toBe('3分20秒')
+    expect(formatTaskDuration(null, null)).toBe('—')
   })
 })

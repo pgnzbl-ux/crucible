@@ -110,28 +110,44 @@ export function FindingDetailPage() {
         </Space>
 
         <Card title="漏洞线索" size="small">
-          <Descriptions column={2} size="small">
-            <Descriptions.Item label="项目" span={2}>{data.project_address ?? '-'}</Descriptions.Item>
+          <Descriptions column={2} size="small" bordered>
+            <Descriptions.Item label="项目" span={2}><Text strong>{data.project_address ?? '-'}</Text></Descriptions.Item>
             <Descriptions.Item label="审计运行">
               <Button type="link" style={{ padding: 0 }} onClick={() => navigate(`/tasks/${data.task_id}`)}>
                 {data.task_id.slice(0, 8)}
               </Button>
             </Descriptions.Item>
             <Descriptions.Item label="源码版本">{data.project_ref ?? '默认版本'}</Descriptions.Item>
-            <Descriptions.Item label="CWE">{data.cwe ?? '-'}</Descriptions.Item>
-            <Descriptions.Item label="线索等级">{data.clue_grade ?? '-'}</Descriptions.Item>
-            <Descriptions.Item label="位置" span={2}>
-              {displaySourcePath(data.file_path)}
-              {data.function_symbol ? ` · ${data.function_symbol}()` : ''}
-              {data.line_span ? ` L${data.line_span}` : ''}
-            </Descriptions.Item>
-            <Descriptions.Item label="状态">
-              <Tag>{data.status}</Tag>
-              {data.resolution && (
-                <Tag color={data.resolution === 'confirmed' ? 'red' : 'gold'}>
-                  {data.resolution === 'confirmed' ? '已确认' : data.resolution === 'code_reachable' ? '代码可达' : data.resolution}
+            <Descriptions.Item label="CWE">
+              {data.cwe ? (
+                <Tag color={data.cwe_source === 'inferred' ? 'gold' : 'volcano'} className="crucible-cwe-tag">
+                  {data.cwe_source === 'inferred' ? '推断 ' : ''}{data.cwe}
                 </Tag>
+              ) : (
+                <Text type="secondary">—</Text>
               )}
+            </Descriptions.Item>
+            <Descriptions.Item label="线索等级">
+              <Tag color={data.clue_grade === 'A' ? 'red' : data.clue_grade === 'B' ? 'orange' : 'default'}>
+                {data.clue_grade ? `等级 ${data.clue_grade}` : '—'}
+              </Tag>
+            </Descriptions.Item>
+            <Descriptions.Item label="代码位置" span={2}>
+              <Text code>
+                {displaySourcePath(data.file_path)}
+                {data.function_symbol ? ` · ${data.function_symbol}()` : ''}
+                {data.line_span ? ` L${data.line_span}` : ''}
+              </Text>
+            </Descriptions.Item>
+            <Descriptions.Item label="处置状态">
+              <Space size={4}>
+                <Tag>{data.status}</Tag>
+                {data.resolution && (
+                  <Tag color={data.resolution === 'confirmed' ? 'red' : 'gold'}>
+                    {data.resolution === 'confirmed' ? '已确认' : data.resolution === 'code_reachable' ? '代码可达' : data.resolution}
+                  </Tag>
+                )}
+              </Space>
             </Descriptions.Item>
             <Descriptions.Item label="AI 判决">
               {data.ai_verdict ? (
@@ -139,21 +155,27 @@ export function FindingDetailPage() {
                   <Tag color={getAiVerdictMeta(data.ai_verdict).color}>
                     {getAiVerdictMeta(data.ai_verdict).label}
                   </Tag>
-                  {data.ai_confidence != null && <Text>{data.ai_confidence.toFixed(2)}</Text>}
+                  {data.ai_confidence != null && (
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      置信度 {Math.round(data.ai_confidence * 100)}%
+                    </Text>
+                  )}
                 </Space>
               ) : (
-                '尚未研判'
+                <Text type="secondary">尚未研判</Text>
               )}
             </Descriptions.Item>
-            <Descriptions.Item label="引擎">{formatFindingEngines(data.engine_set)}</Descriptions.Item>
-            <Descriptions.Item label="成员数">{data.member_count}</Descriptions.Item>
+            <Descriptions.Item label="命中引擎">{formatFindingEngines(data.engine_set)}</Descriptions.Item>
+            <Descriptions.Item label="合并规则数">{data.member_count} 个</Descriptions.Item>
             {data.verification_task_id && (
               <Descriptions.Item label="定向验证" span={2}>
                 <Button type="link" style={{ padding: 0 }} onClick={() => navigate(`/tasks/${data.verification_task_id}`)}>
                   {data.verification_task_id.slice(0, 8)}
                 </Button>
                 {data.verification_verdict && (
-                  <Tag style={{ marginLeft: 8 }}>{getVerdictMeta(data.verification_verdict).label}</Tag>
+                  <Tag color={getVerdictMeta(data.verification_verdict).color} style={{ marginLeft: 8 }}>
+                    {getVerdictMeta(data.verification_verdict).label}
+                  </Tag>
                 )}
               </Descriptions.Item>
             )}
@@ -176,10 +198,17 @@ export function FindingDetailPage() {
               </Paragraph>
             ) : null}
             {sourceToSink ? (
-              <Paragraph>
-                <Text type="secondary">数据流：</Text>
-                {sourceToSink}
-              </Paragraph>
+              <div style={{ marginBottom: 12 }}>
+                <Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>数据流向追踪：</Text>
+                <div className="crucible-dataflow-trace">
+                  {sourceToSink.split(' → ').map((step, idx, arr) => (
+                    <span key={idx} className="crucible-dataflow-step">
+                      <Text code>{step}</Text>
+                      {idx < arr.length - 1 && <span className="crucible-dataflow-arrow">→</span>}
+                    </span>
+                  ))}
+                </div>
+              </div>
             ) : null}
             {evidence.fields.length > 0 ? (
               <Descriptions column={1} size="small" style={{ marginBottom: evidence.body ? 8 : 0 }}>
@@ -226,9 +255,13 @@ export function FindingDetailPage() {
             <Paragraph>
               <Text strong>结论：</Text>
               <Tag color={latestAdj.verdict === 'tp' ? 'red' : latestAdj.verdict === 'fp' ? 'default' : 'orange'}>
-                {latestAdj.verdict}
+                {latestAdj.verdict === 'tp' ? '确认漏洞 (TP)' : latestAdj.verdict === 'fp' ? '误报 (FP)' : latestAdj.verdict}
               </Tag>
-              {latestAdj.confidence != null && <Text>{latestAdj.confidence.toFixed(2)}</Text>}
+              {latestAdj.confidence != null && (
+                <Text type="secondary" style={{ marginLeft: 8 }}>
+                  置信度 {Math.round(latestAdj.confidence * 100)}%
+                </Text>
+              )}
             </Paragraph>
             {latestAdj.summary && (
               <Paragraph>
@@ -237,13 +270,15 @@ export function FindingDetailPage() {
               </Paragraph>
             )}
             {latestAdj.reasoning && (
-              <Paragraph>
-                <Text strong>推理：</Text>
-                <span style={{ whiteSpace: 'pre-wrap' }}>{latestAdj.reasoning}</span>
-              </Paragraph>
+              <div style={{ marginBottom: 12 }}>
+                <Text strong style={{ display: 'block', marginBottom: 4 }}>推理过程：</Text>
+                <div style={{ padding: '8px 12px', background: 'rgba(0,0,0,0.02)', borderRadius: 6, whiteSpace: 'pre-wrap', fontSize: 13 }}>
+                  {latestAdj.reasoning}
+                </div>
+              </div>
             )}
             <Paragraph>
-              <Text strong>理由：</Text>
+              <Text strong>研判依据：</Text>
               <ul style={{ margin: '4px 0', paddingLeft: 20 }}>
                 {(latestAdj.why ?? []).map((w, i) => (
                   <li key={i}>{w}</li>
@@ -252,13 +287,15 @@ export function FindingDetailPage() {
             </Paragraph>
             {(latestAdj.evidence ?? []).length > 0 && (
               <Paragraph>
-                <Text strong>证据：</Text>
-                {latestAdj.evidence.map((e, i) => (
-                  <Tag key={i}>
-                    {e.file}
-                    {e.lines ? ` L${e.lines}` : ''}
-                  </Tag>
-                ))}
+                <Text strong>证据文件：</Text>
+                <Space size={[4, 4]} wrap style={{ marginLeft: 6 }}>
+                  {latestAdj.evidence.map((e, i) => (
+                    <Tag key={i}>
+                      {e.file}
+                      {e.lines ? ` L${e.lines}` : ''}
+                    </Tag>
+                  ))}
+                </Space>
               </Paragraph>
             )}
             {(latestAdj.need ?? []).length > 0 && (
