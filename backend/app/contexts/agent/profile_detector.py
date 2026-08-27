@@ -14,13 +14,14 @@ import re
 from pathlib import Path
 
 # 语言检测规则(触发文件 → 语言)(对齐 project-detection.md)；顺序 = 权重平手时的 tie-break
+# 后端编译型/服务端语言优先于前端 nodejs(避免全栈项目 package.json 夺主)
 LANGUAGE_RULES: list[tuple[str, list[str]]] = [
-    ("nodejs", ["package.json"]),
-    ("python", ["requirements.txt", "pyproject.toml"]),
     ("java", ["pom.xml", "build.gradle"]),
+    ("python", ["requirements.txt", "pyproject.toml"]),
     ("go", ["go.mod"]),
     ("php", ["composer.json", "index.php"]),
     ("rust", ["Cargo.toml"]),
+    ("nodejs", ["package.json"]),
     ("static", ["index.html"]),  # 仅静态 HTML(最低优先级；根目录命中才计)
 ]
 
@@ -267,31 +268,100 @@ def append_ai_language(languages: list[dict], ai_language: str | None) -> list[d
     return [*languages, {"id": ai_language, "evidence_files": [], "source": "ai", "confidence": 0.6}]
 
 
+_FRONTEND_DIR_RE = re.compile(
+    r"^(?:frontend|ui|.*-ui|client|web|assets|static|app-ui)(?:/|$)", re.IGNORECASE
+)
+
+# 框架到主要语言的映射关系表
+FRAMEWORK_TO_LANGUAGE: dict[str, str] = {
+    "spring": "java",
+    "spring-boot": "java",
+    "spring-mvc": "java",
+    "quarkus": "java",
+    "micronaut": "java",
+    "struts": "java",
+    "express": "nodejs",
+    "nestjs": "nodejs",
+    "koa": "nodejs",
+    "fastify": "nodejs",
+    "next": "nodejs",
+    "nuxt": "nodejs",
+    "django": "python",
+    "fastapi": "python",
+    "flask": "python",
+    "tornado": "python",
+    "streamlit": "python",
+    "gin": "go",
+    "echo": "go",
+    "fiber": "go",
+    "chi": "go",
+    "laravel": "php",
+    "symfony": "php",
+    "thinkphp": "php",
+    "codeigniter": "php",
+    "yii": "php",
+    "cakephp": "php",
+    "wordpress": "php",
+    "actix-web": "rust",
+    "axum": "rust",
+    "rocket": "rust",
+}
+
+
 def _language_weight(fact: dict) -> tuple[int, int]:
-    """证据权重：根目录文件计 2、子目录计 1；平手按 LANGUAGE_RULES 顺序。"""
+    """证据权重：
+    - 根目录文件计 5 分；
+    - 常规子目录文件计 2 分；
+    - 前端专用子目录文件（如 scadalts-ui/package.json）计 1 分；
+    平手按 LANGUAGE_RULES 顺序。
+    """
     order = next((i for i, (lang, _) in enumerate(LANGUAGE_RULES) if lang == fact.get("id")), 99)
-    weight = sum(2 if "/" not in p else 1 for p in (fact.get("evidence_files") or ["x"]))
-    return (-weight, order)
+    total_score = 0
+    for p in fact.get("evidence_files") or ["x"]:
+        if "/" not in p:
+            total_score += 5
+        elif _FRONTEND_DIR_RE.match(p):
+            total_score += 1
+        else:
+            total_score += 2
+    return (-total_score, order)
 
 
-def derive_primary_language(languages: list[dict]) -> str | None:
-    """由 languages 按证据权重派生主语言；rules 事实优先，AI 追加项不夺主。"""
+def derive_primary_language(languages: list[dict], framework: str | None = None) -> str | None:
+    """由 languages 按证据权重与框架关联派生主语言；rules 事实优先，AI 追加项不夺主。"""
     rules = [f for f in languages if f.get("source") == "rules"]
     pool = rules or list(languages)
     if not pool:
         return None
+
+    # 1. 若已知明确框架（如 spring-boot/spring-mvc），优先锁定框架所属的语言
+    if framework:
+        fw_clean = framework.lower().strip()
+        matched_lang = FRAMEWORK_TO_LANGUAGE.get(fw_clean)
+        if not matched_lang:
+            for k, l in FRAMEWORK_TO_LANGUAGE.items():
+                if k in fw_clean or fw_clean in k:
+                    matched_lang = l
+                    break
+        if matched_lang and any(f.get("id") == matched_lang for f in pool):
+            return matched_lang
+
+    # 2. 否则按证据权重（根目录 > 子目录 > 前端子目录）与规则顺序裁定
     return min(pool, key=_language_weight)["id"]
 
 
 def derive_semgrep_configs(languages: list[dict]) -> list[str]:
-    """纯函数派生 semgrep --config 列表；只认 source!=ai 的事实(防 AI 谎报选错规则包)。
+    """纯函数派生 semgrep --config 列表。
 
+    规则证据优先（防 AI 误报/幻觉污染规则包）；若无触发文件但有 AI 识别语言，采纳 AI 语言。
     产出的每一项都是规则库语言目录名（php/python/…），不是画像语言 id（nodejs）。
     """
     from app.core.semgrep_rules import require_allowed_lang_dirs
     from app.contexts.agent.stacks.registry import semgrep_dirs_for_languages
 
     facts = [f for f in languages if f.get("source") != "ai"]
+    if not facts:
+        facts = list(languages)
     return require_allowed_lang_dirs(semgrep_dirs_for_languages(facts))
 
 

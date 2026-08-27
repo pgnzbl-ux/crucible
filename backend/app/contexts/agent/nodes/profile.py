@@ -54,8 +54,8 @@ PROFILE_FACT_KEYS = (
 # 旧缓存/旧 AI 输出才有的单数字段，sanitize 时读入再交给 rebuild 升级
 _LEGACY_ALIAS_KEYS = ("language", "framework")
 
-# AI 不得写死的派生字段：出现即丢弃、一律重算（language 只作 append_ai_language 的输入）
-_AI_FORBIDDEN_KEYS = frozenset({"languages", "primary_language", "semgrep_configs", "language"})
+# AI 不得写死的底层派生/清单字段（由纯函数重算），其余字段以 AI 判定为准
+_AI_FORBIDDEN_KEYS = frozenset({"languages", "primary_language", "semgrep_configs", "package_managers", "osv_manifests"})
 
 
 def coerce_is_web(value: Any) -> bool | None:
@@ -68,13 +68,15 @@ def coerce_is_web(value: Any) -> bool | None:
 def rebuild_derived_fields(profile: dict[str, Any]) -> dict[str, Any]:
     """从 languages 重算主语言/兼容字段/semgrep_configs；frameworks 与 framework 互相同步。"""
     languages = profile.get("languages") or []
-    primary = derive_primary_language(languages)
-    profile["primary_language"] = primary
-    profile["language"] = primary
-    profile["semgrep_configs"] = derive_semgrep_configs(languages)
     frameworks = profile.get("frameworks")
     if not frameworks and profile.get("framework"):
         frameworks = [profile["framework"]]
+    current_framework = frameworks[0] if frameworks else profile.get("framework")
+
+    primary = derive_primary_language(languages, framework=current_framework)
+    profile["primary_language"] = primary
+    profile["language"] = primary
+    profile["semgrep_configs"] = derive_semgrep_configs(languages)
     profile["frameworks"] = frameworks or []
     profile["framework"] = frameworks[0] if frameworks else None
     # 契约形状稳定：缺省的清单字段补空(缓存路径无仓库可重扫，空 = scan_osv 整仓扫)
@@ -100,11 +102,7 @@ def upgrade_profile_facts(facts: dict[str, Any]) -> dict[str, Any]:
 
 
 def merge_profile(ai: dict[str, Any], hints: dict[str, Any]) -> dict[str, Any]:
-    """AI 产出优先；空缺由规则引擎 hints 补齐。is_web 非 bool 则保留 hints。
-
-    语言约束(§6.0)：AI 的 language 只能以 source=ai 追加，不覆盖 rules 证据、
-    不进 semgrep_configs；派生字段无论 AI 写了什么都重算。
-    """
+    """AI 产出为最终权威判定；规则引擎 hints 提供基础线索与多语言补充。"""
     merged = dict(hints)
     for key, value in ai.items():
         if key == "is_web" or key in _AI_FORBIDDEN_KEYS:
@@ -115,11 +113,36 @@ def merge_profile(ai: dict[str, Any], hints: dict[str, Any]) -> dict[str, Any]:
     for key in _HINT_FILL_KEYS:
         if merged.get(key) in (None, "") and hints.get(key) not in (None, ""):
             merged[key] = hints[key]
+
     coerced = coerce_is_web(ai.get("is_web")) if "is_web" in ai else None
     if coerced is not None:
         merged["is_web"] = coerced
-    merged["languages"] = append_ai_language(hints.get("languages") or [], ai.get("language"))
-    merged["profile_source"] = "rules+ai"
+
+    # AI 判定的语言权威生效
+    ai_lang = str(ai.get("language") or "").strip().lower()
+    rules_languages = list(hints.get("languages") or [])
+    if ai_lang:
+        existing = next((f for f in rules_languages if f.get("id") == ai_lang), None)
+        if existing:
+            # AI 从全仓多语言中裁决出主业务语言（如前后端全栈中的 Java），置顶并作为主语言
+            existing["confidence"] = 1.0
+            merged["languages"] = [existing] + [f for f in rules_languages if f.get("id") != ai_lang]
+            merged["primary_language"] = ai_lang
+            merged["language"] = ai_lang
+        else:
+            # AI 报的无触发文件语言：作为低置信追加事实留档（不毒化 semgrep 规则包）
+            merged["languages"] = append_ai_language(rules_languages, ai_lang)
+            if not rules_languages:
+                merged["primary_language"] = ai_lang
+                merged["language"] = ai_lang
+    else:
+        merged["languages"] = rules_languages
+
+    if ai.get("framework"):
+        merged["framework"] = ai["framework"]
+        merged["frameworks"] = [ai["framework"]]
+
+    merged["profile_source"] = "ai"
     return rebuild_derived_fields(merged)
 
 
@@ -245,22 +268,16 @@ class ProfileNode:
         from app.core.config import get_settings
 
         settings = get_settings()
-        # 强 Web / 强非 Web：规则已足够，AI 不出关键路径（降低阻塞 Semgrep/清单的成本）
-        if (
-            not settings.claude_agent_sdk_enabled
-            or not profile_needs_ai(root, hints)
-        ):
+        # 强制 AI 介入：SDK 开启时一律起 AI 节点做深度画像与权威判定；SDK 关闭（测试/离线）降级规则画像
+        if not settings.claude_agent_sdk_enabled:
             facts = require_is_web(sanitize_profile(hints))
-            if not settings.claude_agent_sdk_enabled:
-                emit_phase(ctx, "SDK 关闭，采用规则画像", phase=self.node_key)
-            else:
-                emit_phase(ctx, "规则画像已充分，跳过 AI", phase=self.node_key)
+            emit_phase(ctx, "SDK 关闭，采用规则画像", phase=self.node_key)
             await _persist_profile(ctx, commit_sha, facts)
             return facts
 
         from app.contexts.agent.ai_runner import run_ai_node
 
-        emit_phase(ctx, "启动轻度 AI 画像", phase=self.node_key)
+        emit_phase(ctx, "启动 AI 深度画像分析与判定", phase=self.node_key)
         repo = src.repo_dirname
         input_json = {
             "source_path": src.workspace_path or workspace_repo_path(repo),
@@ -284,3 +301,4 @@ class ProfileNode:
         emit_phase(ctx, _merged_phase_message(facts), phase=self.node_key)
         await _persist_profile(ctx, commit_sha, facts)
         return facts
+

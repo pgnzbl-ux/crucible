@@ -193,3 +193,52 @@ def test_uncertain_java_pom_needs_ai():
     assert hints["language"] == "java"
     assert hints["is_web"] is False
     assert profile_needs_ai(d, hints) is True
+
+
+def test_polyglot_java_backend_with_ui_package_json():
+    """Java 后端(根 pom.xml/build.gradle) + 前端目录(scadalts-ui/package.json)：
+    主语言必须判定为 java，而不是被前端 package.json 夺主为 nodejs。
+    """
+    from app.contexts.agent.profile_detector import detect_profile
+
+    d = _make_project({
+        "pom.xml": "<project><dependencies><dependency><groupId>org.springframework</groupId></dependency></dependencies></project>",
+        "build.gradle": "apply plugin: 'java'",
+        "scadalts-ui/package.json": '{"name":"ui","dependencies":{"vue":"^2.6.0"}}',
+        "scadalts-ui/src/App.vue": "<template><div/></template>",
+    })
+    r = detect_profile(d)
+    assert r["primary_language"] == "java"
+    assert r["language"] == "java"
+    assert "spring" in (r["framework"] or "").lower()
+    # 两种语言都在 languages 列表中（保证 Semgrep/OSV 都能扫描）
+    lang_ids = {f["id"] for f in r["languages"]}
+    assert "java" in lang_ids
+    assert "nodejs" in lang_ids
+
+
+def test_framework_alignment_locks_language():
+    """当已知明确框架（如 spring-mvc）时，必须匹配对应的主要语言（java）。"""
+    from app.contexts.agent.nodes.profile import rebuild_derived_fields
+
+    raw_profile = {
+        "languages": [
+            {"id": "nodejs", "evidence_files": ["package.json"], "source": "rules"},
+            {"id": "java", "evidence_files": ["pom.xml"], "source": "rules"},
+        ],
+        "framework": "spring-mvc",
+    }
+    rebuilt = rebuild_derived_fields(raw_profile)
+    assert rebuilt["primary_language"] == "java"
+    assert rebuilt["language"] == "java"
+
+
+def test_derive_semgrep_configs_adopts_ai_language_when_no_rules_manifests():
+    """仓库无触发文件(无 pom.xml/requirements.txt)但 AI 识别出 Python 时，Semgrep 仍能获得规则配置。"""
+    from app.contexts.agent.profile_detector import derive_semgrep_configs
+
+    ai_languages = [{"id": "python", "evidence_files": [], "source": "ai", "confidence": 1.0}]
+    configs = derive_semgrep_configs(ai_languages)
+    assert configs == ["python"]
+
+

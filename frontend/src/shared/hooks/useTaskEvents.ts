@@ -2,11 +2,12 @@
  * useTaskEvents — 订阅任务实时事件流（SSE）
  *
  * 设计要点：
- * - 浏览器原生 EventSource，无需额外依赖
- * - 自动断线重连：onerror 后 delay 重连（指数退避 1s→2s→4s 上限 10s）
- * - 客户端组件卸载自动关闭
- * - token 通过 query 注入（EventSource 不支持自定义 header）
- * - 自管重连带 last_event_id，服务端跳过已回放 sequence
+ * - 采用标准 fetch + ReadableStream，通过 Authorization: Bearer <token> 请求头鉴权，
+ *   彻底避免在 URL Query 中携带凭据，杜绝 Nginx access.log / 浏览器历史记录泄露
+ * - 自动断线重连：遇到网络中断后指数退避重连（1s→2s→4s 上限 10s）
+ * - 客户端组件卸载通过 AbortController 自动中止连接
+ * - 自管重连通过 Last-Event-ID 请求头传递 sequence，服务端跳过已回放事件
+ * - 事件批量落库调度（flushIntervalMs 缓冲），防止高频 Agent 输出导致频繁渲染
  *
  * 返回：
  * - events: 累积的全部事件数组（包含历史回放 + 实时推送）
@@ -56,12 +57,11 @@ export function useTaskEvents<T = unknown>(
   const [status, setStatus] = useState<SSEStatus>('idle')
   const [error, setError] = useState<string | null>(null)
 
-  const eventSourceRef = useRef<EventSource | null>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
   const reconnectAttemptsRef = useRef(0)
   const reconnectTimerRef = useRef<number | null>(null)
   const closedByUnmountRef = useRef(false)
   const seenEventKeysRef = useRef(new Set<string>())
-  // Agent 输出是突发的，逐帧 setState 会把整条渲染链按帧数放大
   const pendingRef = useRef<SSEEvent<T>[]>([])
   const flushTimerRef = useRef<number | null>(null)
   const errorRef = useRef<string | null>(null)
@@ -88,12 +88,10 @@ export function useTaskEvents<T = unknown>(
 
     const lastEventIdRef = { current: 0 as number }
 
-    let es: EventSource | null = null
-
     const cleanup = () => {
-      if (es) {
-        es.close()
-        es = null
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort()
+        abortControllerRef.current = null
       }
       if (reconnectTimerRef.current != null) {
         window.clearTimeout(reconnectTimerRef.current)
@@ -128,91 +126,133 @@ export function useTaskEvents<T = unknown>(
       flushTimerRef.current = window.setTimeout(flush, flushIntervalMs)
     }
 
-    const connect = async () => {
-      if (closedByUnmountRef.current) return
-      let ticket: string | null = null
+    const handleSseData = (rawData: string) => {
       try {
-        const issued = await api.issueSseTicket(taskId)
-        ticket = issued.ticket
-      } catch (error) {
-        if (isUnauthorizedError(error) || !localStorage.getItem('crucible_token')) {
-          setStatus('closed')
-          errorRef.current = '登录已过期，请重新登录'
-          setError(errorRef.current)
+        const parsed = JSON.parse(rawData) as SSEEvent<T>
+        if (parsed.type === 'ready') {
+          setStatus('open')
+          reconnectAttemptsRef.current = 0
           return
         }
-        // 取票失败时开发环境可回退 ?token=；生产后端会拒绝
-        ticket = null
+        if (typeof parsed.sequence === 'number' && parsed.sequence > lastEventIdRef.current) {
+          lastEventIdRef.current = parsed.sequence
+        }
+        const eventKey = parsed.sequence == null
+          ? null
+          : `${parsed.run_id ?? ''}:${parsed.sequence}`
+        if (eventKey && seenEventKeysRef.current.has(eventKey)) return
+        if (eventKey) seenEventKeysRef.current.add(eventKey)
+        pendingRef.current.push(parsed)
+        scheduleFlush()
+        if (errorRef.current !== null) {
+          errorRef.current = null
+          setError(null)
+        }
+      } catch (err) {
+        console.warn('[useTaskEvents] 解析 SSE 帧失败:', err, rawData)
       }
+    }
+
+    const connect = async () => {
       if (closedByUnmountRef.current) return
+      const token = localStorage.getItem('crucible_token')
+      if (!token) {
+        setStatus('closed')
+        errorRef.current = '登录已过期，请重新登录'
+        setError(errorRef.current)
+        return
+      }
+
+      const controller = new AbortController()
+      abortControllerRef.current = controller
+
       const urlString = buildTaskEventStreamUrl({
         origin: window.location.origin,
         taskId,
-        ticket,
-        token: ticket ? null : localStorage.getItem('crucible_token'),
         lastEventId: lastEventIdRef.current,
       })
-      const newEs = new EventSource(urlString)
-      es = newEs
-      eventSourceRef.current = newEs
 
-      newEs.onmessage = (e: MessageEvent) => {
-        try {
-          const parsed = JSON.parse(e.data) as SSEEvent<T>
-          // ready 帧也走 onmessage(后端不发 event: 具名行,统一 type 字段)
-          if (parsed.type === 'ready') {
-            setStatus('open')
-            reconnectAttemptsRef.current = 0
-            return
-          }
-          if (typeof parsed.sequence === 'number' && parsed.sequence > lastEventIdRef.current) {
-            lastEventIdRef.current = parsed.sequence
-          }
-          // 去重：同一 run 的 sequence 不重复（历史回放 + 实时推送短暂重叠）
-          const eventKey = parsed.sequence == null
-            ? null
-            : `${parsed.run_id ?? ''}:${parsed.sequence}`
-          if (eventKey && seenEventKeysRef.current.has(eventKey)) return
-          if (eventKey) seenEventKeysRef.current.add(eventKey)
-          pendingRef.current.push(parsed)
-          scheduleFlush()
-          if (errorRef.current !== null) {
-            errorRef.current = null
-            setError(null)
-          }
-        } catch (err) {
-          console.warn('[useTaskEvents] 解析 SSE 帧失败:', err, e.data)
-        }
-      }
+      try {
+        const response = await fetch(urlString, {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: 'text/event-stream',
+            ...(lastEventIdRef.current > 0 ? { 'Last-Event-ID': String(lastEventIdRef.current) } : {}),
+          },
+          signal: controller.signal,
+        })
 
-      newEs.onerror = () => {
-        if (closedByUnmountRef.current) return
-        if (newEs.readyState === EventSource.CLOSED) {
-          void (async () => {
+        if (!response.ok) {
+          if (response.status === 401) {
             try {
               await api.me()
-            } catch (error) {
-              if (isUnauthorizedError(error) || !localStorage.getItem('crucible_token')) {
+            } catch (authErr) {
+              if (isUnauthorizedError(authErr)) {
                 setStatus('closed')
                 errorRef.current = '登录已过期，请重新登录'
                 setError(errorRef.current)
                 return
               }
             }
-            if (closedByUnmountRef.current) return
-            const attempt = reconnectAttemptsRef.current + 1
-            reconnectAttemptsRef.current = attempt
-            const delay = Math.min(1000 * 2 ** (attempt - 1), maxReconnectDelay)
-            setStatus('reconnecting')
-            errorRef.current = `连接中断，${Math.round(delay / 1000)}s 后重连...`
+          }
+          if (response.status === 404) {
+            setStatus('closed')
+            errorRef.current = '任务不存在'
             setError(errorRef.current)
-            reconnectTimerRef.current = window.setTimeout(() => {
-              cleanup()
-              void connect()
-            }, delay)
-          })()
+            return
+          }
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`)
         }
+
+        setStatus('open')
+        reconnectAttemptsRef.current = 0
+
+        const reader = response.body?.getReader()
+        if (!reader) {
+          throw new Error('ReadableStream not supported')
+        }
+
+        const decoder = new TextDecoder()
+        let buffer = ''
+
+        while (!controller.signal.aborted) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split(/\r?\n/)
+          buffer = lines.pop() ?? ''
+
+          for (const line of lines) {
+            const trimmed = line.trim()
+            if (!trimmed || trimmed.startsWith(':')) {
+              continue
+            }
+            if (trimmed.startsWith('data:')) {
+              const dataPayload = trimmed.slice(5).trim()
+              if (dataPayload) {
+                handleSseData(dataPayload)
+              }
+            }
+          }
+        }
+      } catch (err: unknown) {
+        if (controller.signal.aborted || closedByUnmountRef.current) return
+        console.warn('[useTaskEvents] SSE 连接中断:', err)
       }
+
+      if (closedByUnmountRef.current) return
+
+      const attempt = reconnectAttemptsRef.current + 1
+      reconnectAttemptsRef.current = attempt
+      const delay = Math.min(1000 * 2 ** (attempt - 1), maxReconnectDelay)
+      setStatus('reconnecting')
+      errorRef.current = `连接中断，${Math.round(delay / 1000)}s 后重连...`
+      setError(errorRef.current)
+      reconnectTimerRef.current = window.setTimeout(() => {
+        cleanup()
+        void connect()
+      }, delay)
     }
 
     void connect()
@@ -220,7 +260,6 @@ export function useTaskEvents<T = unknown>(
     return () => {
       closedByUnmountRef.current = true
       cleanup()
-      eventSourceRef.current = null
       setStatus('closed')
     }
   }, [taskId, enabled, maxEvents, maxReconnectDelay, flushIntervalMs])

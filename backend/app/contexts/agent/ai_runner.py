@@ -84,10 +84,10 @@ NODE_OUTPUT_SCHEMAS: dict[str, dict] = {
         "optional": [],
     },
     "profile": {
-        "required": ["is_web"],
+        "required": ["is_web", "language"],
         "optional": [
-            "language", "framework", "port", "has_dockerfile", "has_compose",
-            "detected_services", "start_command", "non_web_reason",
+            "framework", "port", "has_dockerfile", "has_compose",
+            "detected_services", "start_command", "non_web_reason", "summary",
         ],
     },
     "env_ready": {

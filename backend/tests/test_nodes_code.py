@@ -209,8 +209,8 @@ async def test_profile_node_sdk_off_uses_detector(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_profile_node_sdk_on_skips_ai_when_rules_sufficient(tmp_path):
-    """SDK 开启：强 Web 规则画像充分时跳过 AI，不阻塞下游。"""
+async def test_profile_node_sdk_on_always_calls_ai(tmp_path):
+    """SDK 开启：一律启动 AI 画像节点并由 AI 做出权威判定。"""
     (tmp_path / "requirements.txt").write_text("fastapi\n")
     (tmp_path / "main.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
     events: list[dict] = []
@@ -228,25 +228,38 @@ async def test_profile_node_sdk_on_skips_ai_when_rules_sufficient(tmp_path):
             }
         },
     )
+    ai_out = {
+        "is_web": True,
+        "language": "python",
+        "framework": "fastapi",
+        "port": 8000,
+        "detected_services": [],
+        "has_dockerfile": False,
+        "has_compose": False,
+        "summary": "FastAPI Web 应用",
+    }
     fake_settings = MagicMock(claude_agent_sdk_enabled=True)
     with (
         patch("app.core.config.get_settings", return_value=fake_settings),
         patch(
             "app.contexts.agent.ai_runner.run_ai_node",
             new_callable=AsyncMock,
+            return_value=ai_out,
         ) as mocked,
     ):
         out = await ProfileNode().execute(ctx)
-    mocked.assert_not_awaited()
+    mocked.assert_awaited_once()
     assert out["is_web"] is True
-    assert out["profile_source"] == "rules"
+    assert out["language"] == "python"
+    assert out["framework"] == "fastapi"
+    assert out["profile_source"] == "ai"
     phase_msgs = [e["message"] for e in events if e.get("type") == "phase.updated"]
-    assert any("跳过 AI" in m for m in phase_msgs)
+    assert any("启动 AI 深度画像分析与判定" in m for m in phase_msgs)
 
 
 @pytest.mark.asyncio
 async def test_profile_node_sdk_on_calls_ai_when_rules_ambiguous(tmp_path):
-    """SDK 开启且规则不足以判定时，仍走轻度 AI，hints 必须传入。"""
+    """SDK 开启且规则不足以判定时，仍走 AI 画像，hints 必须传入。"""
     (tmp_path / "readme.md").write_text("a small utility script\n")
     (tmp_path / "app.py").write_text("print('hi')\n")
     events: list[dict] = []
@@ -269,10 +282,6 @@ async def test_profile_node_sdk_on_calls_ai_when_rules_ambiguous(tmp_path):
     with (
         patch("app.core.config.get_settings", return_value=fake_settings),
         patch(
-            "app.contexts.agent.nodes.profile.profile_needs_ai",
-            return_value=True,
-        ),
-        patch(
             "app.contexts.agent.ai_runner.run_ai_node",
             new_callable=AsyncMock,
             return_value=ai_out,
@@ -282,10 +291,10 @@ async def test_profile_node_sdk_on_calls_ai_when_rules_ambiguous(tmp_path):
     mocked.assert_awaited_once()
     call_kw = mocked.await_args.kwargs
     assert "hints" in call_kw["input_json"]
-    assert out["profile_source"] == "rules+ai"
+    assert out["profile_source"] == "ai"
     phase_msgs = [e["message"] for e in events if e.get("type") == "phase.updated"]
     assert any("规则扫描完成" in m for m in phase_msgs)
-    assert any("启动轻度 AI 画像" in m for m in phase_msgs)
+    assert any("启动 AI 深度画像分析与判定" in m for m in phase_msgs)
     assert any("画像合并完成" in m for m in phase_msgs)
 
 
