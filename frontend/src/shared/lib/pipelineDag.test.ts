@@ -19,6 +19,15 @@ describe('pipelineDag 前提表契约', () => {
     expect(Object.keys(PIPELINE_REQUIRES)).toEqual(PIPELINE_NODE_ORDER)
   })
 
+  it('PIPELINE_NODE_ORDER 是合法执行序：每个节点排在其全部 requires 之后', () => {
+    for (const [key, requires] of Object.entries(PIPELINE_REQUIRES)) {
+      const at = PIPELINE_NODE_ORDER.indexOf(key)
+      for (const dep of requires) {
+        expect(at, `${key} 应排在依赖 ${dep} 之后`).toBeGreaterThan(PIPELINE_NODE_ORDER.indexOf(dep))
+      }
+    }
+  })
+
   it('keeps the backend audit dependency even when verify hides skipped discovery nodes', () => {
     expect(PIPELINE_REQUIRES.audit).toEqual(['source', 'profile', 'dispatch'])
     expect(PIPELINE_REQUIRES.env_ready).toEqual(['source', 'profile', 'dispatch'])

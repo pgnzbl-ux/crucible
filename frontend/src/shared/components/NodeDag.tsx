@@ -1,3 +1,4 @@
+import { Tooltip } from 'antd'
 import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import {
   CheckCircleOutlined,
@@ -10,6 +11,7 @@ import {
 } from '@ant-design/icons'
 
 import { NODE_LABELS, formatTokenCount, isAiNode, mergeTokenUsage } from '../lib/meta'
+import { formatDuration } from '../lib/nodeOutput'
 import {
   DAG_STATUS_TEXT,
   dagVisualStatus,
@@ -25,6 +27,8 @@ export interface DagNodeModel {
   status: string
   error_message?: string | null
   output?: Record<string, unknown> | null
+  started_at?: string | null
+  finished_at?: string | null
   usage?: {
     prompt_tokens: number
     completion_tokens: number
@@ -120,6 +124,49 @@ function nodeCaption(key: string, output?: Record<string, unknown> | null): stri
     return label ? `${output.endpoint_count} 端点 · ${label}` : `${output.endpoint_count} 端点`
   }
   return NODE_CAPTIONS[key] ?? ''
+}
+
+export interface NodeTipRow {
+  label: string
+  value: string
+}
+
+/** 流程图节点悬停详情行：状态 / 耗时 / 摘要 / Token 明细 / 错误首行。 */
+export function buildNodeTip(input: {
+  statusText: string
+  caption?: string
+  duration?: string
+  usage?: DagNodeModel['usage'] | null
+  error?: string | null
+}): NodeTipRow[] {
+  const rows: NodeTipRow[] = [{ label: '状态', value: input.statusText }]
+  if (input.duration) rows.push({ label: '耗时', value: input.duration })
+  if (input.caption) rows.push({ label: '摘要', value: input.caption })
+  const u = input.usage
+  if (u && u.total_tokens > 0) {
+    rows.push({
+      label: 'Token',
+      value: `${formatTokenCount(u.total_tokens)}（prompt ${u.prompt_tokens} · completion ${u.completion_tokens} · cache_read ${u.cache_read_input_tokens} · cache_creation ${u.cache_creation_input_tokens}）`,
+    })
+  }
+  if (input.error) {
+    const first = input.error.split('\n')[0]
+    rows.push({ label: '错误', value: first.length > 120 ? `${first.slice(0, 120)}…` : first })
+  }
+  return rows
+}
+
+function NodeTipContent({ rows }: { rows: NodeTipRow[] }) {
+  return (
+    <dl className="crucible-node-tip">
+      {rows.map((row) => (
+        <div className="crucible-node-tip__row" key={row.label}>
+          <dt>{row.label}</dt>
+          <dd>{row.value}</dd>
+        </div>
+      ))}
+    </dl>
+  )
 }
 
 function DagOverview({
@@ -349,59 +396,58 @@ export function NodeDag({ nodes, mode = 'discovery', contain = true, overview = 
           const visual = dagVisualStatus(model)
           const selectable = Boolean(onSelect && model.selectable)
           const label = NODE_LABELS[box.key] ?? box.key
+          const tipRows = buildNodeTip({
+            statusText: DAG_STATUS_TEXT[visual],
+            caption: box.shape === 'box' ? nodeCaption(box.key, model.output) : '',
+            duration: formatDuration(model.started_at, model.finished_at) || undefined,
+            usage: model.usage,
+            error: model.error_message,
+          })
           return (
-            <div
-              key={box.key}
-              className={[
-                'crucible-dag-node',
-                `crucible-dag-node--${box.key}`,
-                `is-${visual}`,
-                `is-${box.shape}`,
-                model.selected ? 'is-selected' : '',
-                selectable ? 'is-selectable' : '',
-              ]
-                .filter(Boolean)
-                .join(' ')}
-              data-node-key={box.key}
-              title={model.error_message || label}
-              style={{ left: box.x, top: box.y, width: box.width, height: box.height }}
-              onClick={selectable ? () => onSelect?.(box.key) : undefined}
-            >
-              {box.shape === 'box' ? (
-                <>
-                  {isAiNode(box.key) ? (
-                    <span className="crucible-dag-node__ai" title="AI 节点">AI</span>
-                  ) : null}
-                  <span className="crucible-dag-node__port is-in" />
-                  <span className="crucible-dag-node__status" title={DAG_STATUS_TEXT[visual]}>{statusIcon(visual)}</span>
-                  <span className="crucible-dag-node__copy">
-                    <span className="crucible-dag-node__label">{label}</span>
-                    <span className="crucible-dag-node__caption">{nodeCaption(box.key, model.output)}</span>
-                    {model.usage && model.usage.total_tokens > 0 ? (
-                      <span
-                        className="crucible-dag-node__tokens"
-                        title={[
-                          `prompt ${model.usage.prompt_tokens}`,
-                          `completion ${model.usage.completion_tokens}`,
-                          `cache_read ${model.usage.cache_read_input_tokens}`,
-                          `cache_creation ${model.usage.cache_creation_input_tokens}`,
-                        ].join(' · ')}
-                      >
-                        {formatTokenCount(model.usage.total_tokens)} tok
-                      </span>
+            <Tooltip key={box.key} placement="top" title={<NodeTipContent rows={tipRows} />}>
+              <div
+                className={[
+                  'crucible-dag-node',
+                  `crucible-dag-node--${box.key}`,
+                  `is-${visual}`,
+                  `is-${box.shape}`,
+                  model.selected ? 'is-selected' : '',
+                  selectable ? 'is-selectable' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+                data-node-key={box.key}
+                style={{ left: box.x, top: box.y, width: box.width, height: box.height }}
+                onClick={selectable ? () => onSelect?.(box.key) : undefined}
+              >
+                {box.shape === 'box' ? (
+                  <>
+                    {isAiNode(box.key) ? (
+                      <span className="crucible-dag-node__ai" title="AI 节点">AI</span>
                     ) : null}
-                  </span>
-                  <span className="crucible-dag-node__port is-out" />
-                </>
-              ) : box.shape === 'diamond' ? (
-                <>
-                  <span className="crucible-dag-node__diamond" />
+                    <span className="crucible-dag-node__port is-in" />
+                    <span className="crucible-dag-node__status">{statusIcon(visual)}</span>
+                    <span className="crucible-dag-node__copy">
+                      <span className="crucible-dag-node__label">{label}</span>
+                      <span className="crucible-dag-node__caption">{nodeCaption(box.key, model.output)}</span>
+                      {model.usage && model.usage.total_tokens > 0 ? (
+                        <span className="crucible-dag-node__tokens">
+                          {formatTokenCount(model.usage.total_tokens)} tok
+                        </span>
+                      ) : null}
+                    </span>
+                    <span className="crucible-dag-node__port is-out" />
+                  </>
+                ) : box.shape === 'diamond' ? (
+                  <>
+                    <span className="crucible-dag-node__diamond" />
+                    <span className="crucible-dag-node__label">{label}</span>
+                  </>
+                ) : (
                   <span className="crucible-dag-node__label">{label}</span>
-                </>
-              ) : (
-                <span className="crucible-dag-node__label">{label}</span>
-              )}
-            </div>
+                )}
+              </div>
+            </Tooltip>
           )
         })}
         </div>

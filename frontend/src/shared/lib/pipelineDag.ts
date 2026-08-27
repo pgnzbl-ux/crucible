@@ -8,7 +8,7 @@ import { PIPELINE_NODE_ORDER } from './meta'
 
 export type PipelineMode = 'verify' | 'discovery'
 
-/** 与 backend `DEFAULT_PIPELINE.requires` 逐项对齐。 */
+/** 与 backend `DEFAULT_PIPELINE.requires` 逐项对齐；键序 = PIPELINE_NODE_ORDER 执行序。 */
 export const PIPELINE_REQUIRES: Record<string, readonly string[]> = {
   source: [],
   profile: ['source'],
@@ -16,12 +16,12 @@ export const PIPELINE_REQUIRES: Record<string, readonly string[]> = {
   scan_osv: ['source'],
   scan_semgrep: ['source', 'profile'],
   api_inventory: ['source', 'profile'],
-  env_ready: ['source', 'profile', 'dispatch'],
-  cluster: ['scan_semgrep', 'scan_gitleaks', 'scan_osv', 'api_hunt'],
   api_hunt: ['api_inventory'],
+  cluster: ['scan_semgrep', 'scan_gitleaks', 'scan_osv', 'api_hunt'],
   screen: ['cluster'],
   triage: ['screen'],
   dispatch: ['triage'],
+  env_ready: ['source', 'profile', 'dispatch'],
   audit: ['source', 'profile', 'dispatch'],
   reproduce: ['source', 'env_ready', 'audit'],
   lead_verify: ['dispatch', 'env_ready'],

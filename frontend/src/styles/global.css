@@ -1799,6 +1799,12 @@ body,
   font-variant-numeric: tabular-nums;
   color: var(--crucible-text-secondary);
 }
+.crucible-node-list__duration {
+  font-family: var(--crucible-font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--crucible-text-secondary);
+}
 .crucible-node-list__stage {
   display: flex;
   align-items: center;
@@ -1888,6 +1894,56 @@ body,
   border: 1px solid var(--crucible-border);
   border-radius: 6px;
   color: var(--crucible-error);
+}
+/* ── 节点产出指标小卡片（审计过程列表正文） ── */
+.crucible-node-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.crucible-node-metrics__item {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 10px;
+  border: 1px solid var(--crucible-border);
+  border-radius: 6px;
+  background: var(--crucible-bg);
+  line-height: 1.2;
+}
+.crucible-node-metrics__item small {
+  color: var(--crucible-text-secondary);
+  font-size: 10px;
+}
+.crucible-node-metrics__item em {
+  font-family: var(--crucible-font-mono);
+  font-size: 12px;
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+}
+/* ── 流程图节点悬停详情（antd Tooltip 深色底） ── */
+.crucible-node-tip {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  max-width: 360px;
+  font-size: 12px;
+}
+.crucible-node-tip__row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+.crucible-node-tip__row dt {
+  flex: 0 0 auto;
+  color: rgba(255, 255, 255, 0.65);
+}
+.crucible-node-tip__row dd {
+  margin: 0;
+  font-family: var(--crucible-font-mono);
+  word-break: break-all;
 }
 .crucible-node-flow__detail {
   padding: 10px 12px;

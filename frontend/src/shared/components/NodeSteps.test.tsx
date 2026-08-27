@@ -763,3 +763,82 @@ describe('NodeSteps compact topology', () => {
     expect(html).toContain('展开流程图')
   })
 })
+
+describe('NodeSteps per-node detail enrichment', () => {
+  it('完成态 cluster 渲染指标小卡片与耗时，而非一行摘要', () => {
+    const html = renderWithNodes(
+      [
+        {
+          id: 'n-cluster',
+          node_index: 7,
+          node_key: 'cluster',
+          status: 'completed',
+          attempt: 1,
+          error_message: null,
+          started_at: '2026-08-26T10:00:00Z',
+          finished_at: '2026-08-26T10:02:05Z',
+          output: {
+            group_count: 12,
+            groups_by_engine: { semgrep: 10, api_hunt: 2 },
+            index_symbol_count: 340,
+          },
+        },
+      ],
+      undefined,
+      'discovery',
+    )
+    expect(html).toContain('crucible-node-metrics')
+    expect(html).toContain('引擎分布')
+    expect(html).toContain('semgrep 10 · api_hunt 2')
+    expect(html).toContain('crucible-node-list__duration')
+    expect(html).toContain('2m05s')
+  })
+
+  it('discovery 跳过的 env_ready 给出跳过原因', () => {
+    const html = renderWithNodes(
+      [
+        {
+          id: 'n-env',
+          node_index: 6,
+          node_key: 'env_ready',
+          status: 'skipped',
+          attempt: 1,
+          error_message: null,
+          started_at: null,
+          finished_at: null,
+          output: {},
+        },
+      ],
+      undefined,
+      'discovery',
+    )
+    expect(html).toContain('跳过 · 非 Web 或无合格线索')
+  })
+
+  it('完成态 finalize 显示权威结论指标', () => {
+    const html = renderWithNodes(
+      [
+        {
+          id: 'n-fin',
+          node_index: 15,
+          node_key: 'finalize',
+          status: 'completed',
+          attempt: 1,
+          error_message: null,
+          started_at: null,
+          finished_at: null,
+          output: {
+            analysis_verdict: 'confirmed',
+            analysis_status: 'completed',
+            lead_count: 3,
+            confirmed_count: 2,
+          },
+        },
+      ],
+      undefined,
+      'discovery',
+    )
+    expect(html).toContain('权威结论')
+    expect(html).toContain('已确认')
+  })
+})

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { summarizeNodeOutput, applyNodeOverlay, displayNodeStatus, compactNodeCaption, isNodeListLoading, overlayFromSseEvents, parseInitialCreds, nodeStepsPollMs } from './nodeOutput'
+import { summarizeNodeOutput, applyNodeOverlay, displayNodeStatus, compactNodeCaption, isNodeListLoading, overlayFromSseEvents, parseInitialCreds, nodeStepsPollMs, formatDuration, nodeMetrics, skipReasonLabel } from './nodeOutput'
 
 describe('summarizeNodeOutput', () => {
   it('source: MinIO 命中时写出仓库与 commit', () => {
@@ -448,5 +448,134 @@ describe('overlayFromSseEvents', () => {
       cache_creation_input_tokens: 0,
       total_tokens: 536,
     })
+  })
+})
+
+describe('formatDuration', () => {
+  it('完成节点：秒 / 分秒 / 时分三档', () => {
+    expect(formatDuration('2026-08-26T10:00:00Z', '2026-08-26T10:00:45Z')).toBe('45s')
+    expect(formatDuration('2026-08-26T10:00:00Z', '2026-08-26T10:03:24Z')).toBe('3m24s')
+    expect(formatDuration('2026-08-26T10:00:00Z', '2026-08-26T11:05:00Z')).toBe('1h05m')
+  })
+
+  it('运行中用 now 计算已进行时长', () => {
+    expect(formatDuration('2026-08-26T10:00:00Z', null, Date.parse('2026-08-26T10:02:30Z'))).toBe('2m30s')
+  })
+
+  it('缺开始时间或坏时间返回空串', () => {
+    expect(formatDuration(null, '2026-08-26T10:00:00Z')).toBe('')
+    expect(formatDuration('not-a-date', '2026-08-26T10:00:00Z')).toBe('')
+  })
+})
+
+describe('nodeMetrics', () => {
+  it('非完成态与专用面板节点不产出指标', () => {
+    expect(nodeMetrics({ node_key: 'cluster', status: 'running', output: { group_count: 3 } })).toEqual([])
+    expect(nodeMetrics({ node_key: 'audit', status: 'completed', output: { gate_verdict: 'pass' } })).toEqual([])
+    expect(nodeMetrics({ node_key: 'env_ready', status: 'completed', output: { target_url: 'http://x' } })).toEqual([])
+    expect(nodeMetrics({ node_key: 'lead_verify', status: 'completed', output: { lead_count: 1 } })).toEqual([])
+  })
+
+  it('cluster: 组数 / 引擎分布 / 符号索引', () => {
+    expect(
+      nodeMetrics({
+        node_key: 'cluster',
+        status: 'completed',
+        output: {
+          group_count: 12,
+          groups_by_engine: { semgrep: 10, api_hunt: 2 },
+          index_symbol_count: 340,
+          dropped_c_count: 0,
+        },
+      }),
+    ).toEqual([
+      { label: '组数', value: '12' },
+      { label: '引擎分布', value: 'semgrep 10 · api_hunt 2' },
+      { label: '符号索引', value: '340' },
+    ])
+  })
+
+  it('scan_*: 发现数与降级状态', () => {
+    expect(
+      nodeMetrics({ node_key: 'scan_semgrep', status: 'completed', output: { finding_count: 7, outcome: 'degraded' } }),
+    ).toEqual([
+      { label: '发现', value: '7' },
+      { label: '引擎状态', value: '降级' },
+    ])
+  })
+
+  it('finalize: 权威结论与线索计数', () => {
+    expect(
+      nodeMetrics({
+        node_key: 'finalize',
+        status: 'completed',
+        output: {
+          analysis_verdict: 'confirmed',
+          analysis_status: 'completed',
+          lead_count: 3,
+          confirmed_count: 2,
+          needs_review_count: 1,
+        },
+      }),
+    ).toEqual([
+      { label: '权威结论', value: '已确认' },
+      { label: '状态', value: '已定论' },
+      { label: '线索', value: '3' },
+      { label: '已确认', value: '2' },
+      { label: '待复核线索', value: '1' },
+    ])
+  })
+
+  it('dispatch / api_hunt / screen 关键计数', () => {
+    expect(
+      nodeMetrics({ node_key: 'dispatch', status: 'completed', output: { queued_count: 2, has_lead: true } }),
+    ).toEqual([
+      { label: '入队线索', value: '2' },
+      { label: '合格线索', value: '有' },
+    ])
+    expect(
+      nodeMetrics({
+        node_key: 'api_hunt',
+        status: 'completed',
+        output: { candidate_count: 5, candidate_state_counts: { suspect: 4, confirmed: 1 } },
+      }),
+    ).toEqual([
+      { label: '候选', value: '5' },
+      { label: '状态分布', value: 'suspect 4 · confirmed 1' },
+    ])
+    expect(
+      nodeMetrics({
+        node_key: 'screen',
+        status: 'completed',
+        output: { escalated_count: 6, tp_count: 2, fp_count: 3, need_more_count: 1 },
+      }).map((m) => m.label),
+    ).toEqual(['升级送审', '真阳', '误报', '待定'])
+  })
+})
+
+describe('skipReasonLabel', () => {
+  it('verify 模式扫描链节点给出验证模式原因', () => {
+    expect(skipReasonLabel({ node_key: 'scan_semgrep', status: 'skipped', output: {} }, 'verify')).toBe('验证模式不执行')
+    expect(skipReasonLabel({ node_key: 'lead_verify', status: 'skipped', output: {} }, 'verify')).toBe('验证模式不执行')
+  })
+
+  it('discovery 分支出口的原因', () => {
+    expect(skipReasonLabel({ node_key: 'env_ready', status: 'skipped', output: {} }, 'discovery')).toBe('非 Web 或无合格线索')
+    expect(skipReasonLabel({ node_key: 'lead_verify', status: 'skipped', output: {} }, 'discovery')).toBe('无合格线索')
+    expect(skipReasonLabel({ node_key: 'scan_semgrep', status: 'skipped', output: {} }, 'discovery')).toBe('无适用语言扫描配置')
+  })
+
+  it('verify 的 reproduce 跳过指向 Gate / 非 Web', () => {
+    expect(skipReasonLabel({ node_key: 'reproduce', status: 'skipped', output: {} }, 'verify')).toBe('Gate 未通过 / 非 Web')
+  })
+
+  it('后端写入 skip_reason 时优先透传', () => {
+    expect(
+      skipReasonLabel({ node_key: 'env_ready', status: 'skipped', output: { skip_reason: 'profile.is_web=false' } }, 'discovery'),
+    ).toBe('profile.is_web=false')
+  })
+
+  it('非 skipped 节点不产出原因', () => {
+    expect(skipReasonLabel({ node_key: 'env_ready', status: 'completed', output: {} }, 'discovery')).toBe('')
   })
 })

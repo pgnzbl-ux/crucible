@@ -101,7 +101,9 @@ export const NODE_LABELS: Record<string, string> = {
   over: '结束',
 }
 
-// 拓扑顺序(discovery-spec §4.2.4)；后端按 node_index 返回
+// 执行顺序（就绪波次，与 DAG flowColumn 对齐）：与后端 catalog node_index 刻意不同——
+// env_ready 的 catalog 索引是 6，但依赖 dispatch，实际在 dispatch 之后执行；
+// api_hunt 的 catalog 索引是 8，但 cluster 依赖它，必须排在 cluster 之前。
 export const PIPELINE_NODE_ORDER: string[] = [
   'source',
   'profile',
@@ -109,12 +111,12 @@ export const PIPELINE_NODE_ORDER: string[] = [
   'scan_osv',
   'scan_semgrep',
   'api_inventory',
-  'env_ready',
-  'cluster',
   'api_hunt',
+  'cluster',
   'screen',
   'triage',
   'dispatch',
+  'env_ready',
   'audit',
   'reproduce',
   'lead_verify',

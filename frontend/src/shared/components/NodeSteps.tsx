@@ -19,9 +19,12 @@ import { NODE_LABELS, PIPELINE_NODE_ORDER, VERIFY_MODE_SKIPPED_KEYS, formatToken
 import {
   applyNodeOverlay,
   displayNodeStatus,
+  formatDuration,
   isNodeListLoading,
   isNodeSelectable,
+  nodeMetrics,
   overlayFromSseEvents,
+  skipReasonLabel,
   summarizeNodeOutput,
   nodeStepsPollMs,
 } from '../lib/nodeOutput'
@@ -37,6 +40,7 @@ import { AuditDetail } from './AuditDetail'
 import { EnvReadyDetail } from './EnvReadyDetail'
 import { LeadVerifyDetail } from './LeadVerifyDetail'
 import { NodeDag } from './NodeDag'
+import { NodeOutputDetail } from './NodeOutputDetail'
 import { canRetryFromNode } from '../lib/taskActions'
 
 const { Text } = Typography
@@ -71,7 +75,7 @@ function nodeSummary(n: Pick<NodeRun, 'node_key' | 'status' | 'output' | 'error_
   return summarizeNodeOutput(n.node_key, n.output, n.status)
 }
 
-/** 完成的 audit / env_ready 有结构化字段可排版，其余节点一句摘要就够。 */
+/** 完成的 audit / env_ready / lead_verify 有结构化面板；其余节点指标卡片，无指标再退回一句摘要。 */
 function nodeDetail(n: Pick<NodeRun, 'node_key' | 'status' | 'output'>) {
   if (n.node_key === 'audit' && n.status === 'completed') return <AuditDetail output={n.output} />
   if (n.node_key === 'env_ready' && n.status === 'completed') return <EnvReadyDetail output={n.output} />
@@ -253,6 +257,8 @@ export function NodeSteps({
         error_message: n.error_message,
         output: n.output,
         usage: n.usage ?? null,
+        started_at: n.started_at,
+        finished_at: n.finished_at,
         selectable: !!onSelectNode && isNodeSelectable(n.status),
         selected: selectedNode === n.node_key,
       }))
@@ -268,6 +274,8 @@ export function NodeSteps({
       error_message: null,
       output: {},
       usage: null,
+      started_at: null,
+      finished_at: null,
       selectable: false,
       selected: false,
     })
@@ -352,6 +360,10 @@ export function NodeSteps({
           const stageIndex = stages.findIndex((stage) => stage.nodeKeys.includes(n.node_key))
           const stage = stageIndex >= 0 ? stages[stageIndex] : null
           const parallel = Boolean(stage?.parallel)
+          const duration = formatDuration(n.started_at, n.finished_at)
+          const skipReason = visual === 'skipped' ? skipReasonLabel(n, taskType) : ''
+          const detail = nodeDetail(n)
+          const hasMetrics = nodeMetrics(n).length > 0
           return (
             <div
               key={n.node_key}
@@ -404,6 +416,11 @@ export function NodeSteps({
                         {formatTokenCount(n.usage.total_tokens)} tok
                       </span>
                     ) : null}
+                    {duration ? (
+                      <span className="crucible-node-list__duration">
+                        {visual === 'running' ? `已进行 ${duration}` : duration}
+                      </span>
+                    ) : null}
                     {n.attempt > 1 ? <span>第 {n.attempt} 次</span> : null}
                     <span className={`crucible-node-list__status is-${visual}`}>{DAG_STATUS_TEXT[visual]}</span>
                   </div>
@@ -413,7 +430,18 @@ export function NodeSteps({
                 ) : n.error_message ? (
                   <pre className="crucible-node-error-log">{n.error_message}</pre>
                 ) : (
-                  (nodeDetail(n) ?? <p className="crucible-node-list__summary">{nodeSummary(n)}</p>)
+                  <>
+                    {detail ?? (hasMetrics ? (
+                      <NodeOutputDetail node={n} />
+                    ) : (
+                      <p className="crucible-node-list__summary">
+                        {skipReason ? `跳过 · ${skipReason}` : nodeSummary(n)}
+                      </p>
+                    ))}
+                    {detail && skipReason ? (
+                      <p className="crucible-node-list__summary">跳过 · {skipReason}</p>
+                    ) : null}
+                  </>
                 )}
                 {!!onRetryFromNode && canRetryFromNode(taskStatus ?? '', n.node_key, n.status) && (
                   <Button

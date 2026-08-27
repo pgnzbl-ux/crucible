@@ -1,5 +1,8 @@
 /** 把节点 output 收成进度条上一句人话，方便观测过程。 */
 
+import type { NodeRun } from './api'
+import { VERIFY_MODE_SKIPPED_KEYS } from './meta'
+
 export type NodeKey = 'source' | 'profile' | 'env_ready' | 'audit' | 'reproduce' | 'report'
 
 const VERDICT_LABEL: Record<string, string> = {
@@ -397,4 +400,148 @@ function triageProgressCaption(p: Record<string, unknown>): string {
   if (adjudicated == null && pending == null) return ''
   const reason = str(p.reason) === 'budget' ? '（预算中断）' : ''
   return `已审 ${String(adjudicated ?? 0)}${pending != null ? `，待审 ${String(pending)}` : ''}${reason}`
+}
+
+// ---------------------------------------------------------------------------
+// 节点耗时 / 指标 / 跳过原因 —— 审计过程列表与流程图悬停共用的展示数据
+// ---------------------------------------------------------------------------
+
+/**
+ * 节点耗时：`45s` / `3m24s` / `1h05m`。运行中（finishedAt 为空）用当前时间，
+ * 随列表轮询刷新；now 参数仅供测试注入。
+ */
+export function formatDuration(
+  startedAt?: string | null,
+  finishedAt?: string | null,
+  now?: number,
+): string {
+  if (!startedAt) return ''
+  const start = Date.parse(startedAt)
+  if (Number.isNaN(start)) return ''
+  const end = finishedAt ? Date.parse(finishedAt) : now ?? Date.now()
+  if (Number.isNaN(end) || end < start) return ''
+  const total = Math.floor((end - start) / 1000)
+  if (total < 60) return `${total}s`
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  if (m < 60) return s ? `${m}m${String(s).padStart(2, '0')}s` : `${m}m`
+  const h = Math.floor(m / 60)
+  const rm = m % 60
+  return rm ? `${h}h${String(rm).padStart(2, '0')}m` : `${h}h`
+}
+
+export interface NodeMetric {
+  label: string
+  value: string
+}
+
+export type NodeStatusOutputLike = Pick<NodeRun, 'node_key' | 'status' | 'output'>
+
+function num(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
+}
+
+/** 计数字典（groups_by_engine / candidate_state_counts）收成 `semgrep 12 · osv 3` 短句。 */
+function countPairs(raw: unknown, limit = 3): string {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return ''
+  return Object.entries(raw as Record<string, unknown>)
+    .filter(([, v]) => typeof v === 'number' && v > 0)
+    .sort((a, b) => (b[1] as number) - (a[1] as number))
+    .slice(0, limit)
+    .map(([k, v]) => `${k} ${v}`)
+    .join(' · ')
+}
+
+/**
+ * 已完成节点的关键产出指标（2–4 项）。audit / env_ready / lead_verify 有专用
+ * 详情面板，不在此列；旧数据缺字段时自然回退到一行摘要。
+ */
+export function nodeMetrics(node: NodeStatusOutputLike): NodeMetric[] {
+  if (node.status !== 'completed') return []
+  const o = node.output ?? {}
+  const key = node.node_key
+  const metrics: NodeMetric[] = []
+  const push = (label: string, value: string | number | null | undefined) => {
+    if (value === null || value === undefined || value === '') return
+    metrics.push({ label, value: String(value) })
+  }
+  const verdict = (v: unknown) => VERDICT_LABEL[str(v)] || str(v) || null
+
+  if (key === 'source') {
+    const origin = { minio: 'MinIO 缓存', git: 'Git clone', upload: '本地上传' }[str(o.origin)] || str(o.origin)
+    const sha = sha7(o.commit_sha)
+    push('提交', sha ? `@${sha}` : null)
+    push('来源', origin)
+    push('目录', str(o.repo_dirname) || str(o.project_key))
+  } else if (key === 'profile') {
+    push('语言', str(o.primary_language) || str(o.language))
+    push('框架', str(o.framework) || (Array.isArray(o.frameworks) ? o.frameworks.map((f) => str(f)).filter(Boolean).join(' / ') : ''))
+    if (o.is_web === true || o.is_web === false) push('Web', o.is_web ? '是' : '否')
+    push('端口', num(o.port))
+  } else if (key.startsWith('scan_')) {
+    push('发现', num(o.finding_count))
+    const outcome = str(o.outcome) || str(o.status)
+    push('引擎状态', outcome === 'degraded' ? '降级' : outcome === 'success' ? '正常' : outcome || null)
+  } else if (key === 'api_inventory') {
+    push('端点', num(o.endpoint_count))
+    push('PVE', num(o.pve_count))
+    const parsers = Array.isArray(o.parsers) ? o.parsers.map((p) => str(p)).filter(Boolean) : []
+    push('解析器', parsers.join(' / ') || str(o.parser) || null)
+  } else if (key === 'api_hunt') {
+    push('候选', num(o.candidate_count))
+    push('状态分布', countPairs(o.candidate_state_counts))
+    if (o.budget_exhausted === true) push('预算', '已耗尽')
+  } else if (key === 'cluster') {
+    push('组数', num(o.group_count))
+    push('引擎分布', countPairs(o.groups_by_engine))
+    push('符号索引', num(o.index_symbol_count))
+    const dropped = num(o.dropped_c_count)
+    if (dropped != null && dropped > 0) push('C 档丢弃', dropped)
+  } else if (key === 'screen') {
+    push('升级送审', num(o.escalated_count))
+    push('真阳', num(o.tp_count))
+    push('误报', num(o.fp_count))
+    push('待定', num(o.need_more_count))
+  } else if (key === 'triage') {
+    push('已判定', num(o.adjudicated_count))
+    push('真阳', num(o.tp_count))
+    push('误报', num(o.fp_count))
+    push('待定', num(o.need_more_count))
+    const residual = num(o.skipped_unaudited_count)
+    if (residual != null && residual > 0) push('未审残留', residual)
+  } else if (key === 'dispatch') {
+    push('入队线索', num(o.queued_count))
+    if (typeof o.has_lead === 'boolean') push('合格线索', o.has_lead ? '有' : '无')
+  } else if (key === 'reproduce') {
+    push('结论', verdict(o.verdict))
+    push('复现', o.reproduced === true ? '成功' : o.reproduced === false ? '未成功' : null)
+    push('尝试', Array.isArray(o.attempts) ? o.attempts.length : null)
+  } else if (key === 'finalize') {
+    push('权威结论', verdict(o.analysis_verdict) || verdict(o.final_verdict))
+    push('状态', o.analysis_status === 'needs_review' ? '待复核' : o.analysis_status === 'completed' ? '已定论' : str(o.analysis_status) || null)
+    push('线索', num(o.lead_count))
+    push('已确认', num(o.confirmed_count))
+    const review = num(o.needs_review_count)
+    if (review != null && review > 0) push('待复核线索', review)
+  } else if (key === 'report') {
+    push('文档结论', verdict(o.final_verdict))
+  }
+  return metrics
+}
+
+/**
+ * 跳过原因：编排器 skip 只落状态不落原因（output 为空对象），这里按
+ * 节点与任务模式推断；后端将来写入 skip_reason / skip_signal 时优先采用。
+ */
+export function skipReasonLabel(node: NodeStatusOutputLike, taskType?: 'verify' | 'discovery'): string {
+  if (node.status !== 'skipped') return ''
+  const raw = str(node.output?.skip_reason) || str(node.output?.skip_signal)
+  if (raw) return raw
+  const key = node.node_key
+  if (taskType !== 'discovery' && VERIFY_MODE_SKIPPED_KEYS.has(key)) return '验证模式不执行'
+  if (key === 'env_ready') return taskType === 'discovery' ? '非 Web 或无合格线索' : '非 Web 项目'
+  if (key === 'lead_verify') return '无合格线索'
+  if (key === 'reproduce') return 'Gate 未通过 / 非 Web'
+  if (key === 'scan_semgrep') return '无适用语言扫描配置'
+  return '按分支信号跳过'
 }
