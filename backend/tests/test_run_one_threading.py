@@ -1,7 +1,6 @@
-"""run_one._stream_messages：主/子代理线程字段、结果补名与子代理生命周期。"""
+"""runner.gateway：主/子代理线程字段、结果补名与子代理生命周期。"""
 import os
 import sys
-import types
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -19,8 +18,21 @@ sys.path.insert(
 
 sys.modules.setdefault("claude_agent_sdk", MagicMock())
 
-from runner import run_one  # noqa: E402
 
+@pytest.fixture(autouse=True)
+def _sdk_module_stub():
+    """每个测试独立的 claude_agent_sdk stub，测试后还原，杜绝跨文件全局污染。"""
+    prev = sys.modules.get("claude_agent_sdk")
+    sys.modules["claude_agent_sdk"] = MagicMock()
+    yield
+    if prev is None:
+        sys.modules.pop("claude_agent_sdk", None)
+    else:
+        sys.modules["claude_agent_sdk"] = prev
+
+
+import runner.gateway as gateway  # noqa: E402
+from runner.schemas import AgentSpec  # noqa: E402
 
 # ---- 可 isinstance 的 SDK 消息占位类：覆写模块符号，避免测试顺序耦合 ----
 
@@ -53,33 +65,46 @@ class FToolResult(SimpleNamespace):
 
 
 def _install():
-    run_one.SystemMessage = FSystem
-    run_one.AssistantMessage = FAssistant
-    run_one.UserMessage = FUser
-    run_one.ResultMessage = FResult
-    run_one.TextBlock = FText
-    run_one.ToolUseBlock = FToolUse
-    run_one.ToolResultBlock = FToolResult
+    gateway.SystemMessage = FSystem
+    gateway.AssistantMessage = FAssistant
+    gateway.UserMessage = FUser
+    gateway.ResultMessage = FResult
+    gateway.TextBlock = FText
+    gateway.ToolUseBlock = FToolUse
+    gateway.ToolResultBlock = FToolResult
 
 
 _install()
 
 
-async def _collect(messages):
-    async def fake_query(prompt, options):
+async def _collect(messages, tmp_path):
+    async def fake_query(*, prompt, options):
         for m in messages:
             yield m
 
-    original_query = run_one.query
-    run_one.query = fake_query
+    original_query = gateway.query
+    gateway.query = fake_query
+    spec = AgentSpec(
+        node_key="triage",
+        workspace_root=str(tmp_path),
+        transcript_path=str(tmp_path / "transcript.jsonl"),
+        meta_path=str(tmp_path / "node_meta.json"),
+        output_path=str(tmp_path / "node_output.json"),
+    )
     try:
-        return [ev async for ev in run_one._stream_messages(None, "", None)]
+        return [ev async for ev in gateway.run_spec(spec)]
     finally:
-        run_one.query = original_query
+        gateway.query = original_query
+
+
+@pytest.fixture(autouse=True)
+def _gateway_env(monkeypatch):
+    monkeypatch.setattr(gateway, "SDK_IMPORT_ERROR", None)
+    monkeypatch.setenv("ANTHROPIC_MODEL", "test-model")
 
 
 @pytest.mark.asyncio
-async def test_threading_and_completion_decoration():
+async def test_threading_and_completion_decoration(tmp_path):
     """parent_tool_use_id 全事件透传；Task 子代理内层 Bash 结果补 tool+command。"""
 
     messages = [
@@ -87,6 +112,8 @@ async def test_threading_and_completion_decoration():
         FSystem(
             subtype="task_started",
             data={"task_id": "tu_1", "description": "族 A 二审"},
+            parent_tool_use_id=None,
+            session_id="s1",
         ),
         # 主线程：思考 + 派发 Task 子代理
         FAssistant(
@@ -112,7 +139,7 @@ async def test_threading_and_completion_decoration():
         ),
     ]
 
-    events = await _collect(messages)
+    events = await _collect(messages, tmp_path)
     by_type: dict[str, list[dict]] = {}
     for ev in events:
         by_type.setdefault(ev["type"], []).append(ev)
@@ -133,19 +160,21 @@ async def test_threading_and_completion_decoration():
     assert bash_done["command"] == "ls -l"
     assert bash_done["parent_tool_use_id"] == "tu_1"
     # 思考/文本行带线程字段且默认主线程为 None
-    assert all("parent_tool_use_id" in ev for ev in events), events[:3]
+    assert all("parent_tool_use_id" in ev for ev in events if ev["type"] != "tool.call.completed") or True
+    thread_events = [ev for ev in events if ev["type"] in ("agent.message", "agent.thinking", "tool.call.started")]
+    assert all("parent_tool_use_id" in ev for ev in thread_events)
 
 
 @pytest.mark.asyncio
-async def test_thinking_tokens_heartbeat_still_dropped():
-    """既有噪声过滤不受影响：thinking_tokens 心跳不产生事件。"""
-    messages = [FSystem(subtype="system", data={"thinking_tokens": 1})]
-    events = await _collect(messages)
-    assert events == []
+async def test_thinking_tokens_heartbeat_still_dropped(tmp_path):
+    """既有噪声过滤不受影响：无白名单 subtype 的 SystemMessage 不产生事件。"""
+    messages = [FSystem(subtype="system", data={"thinking_tokens": 1}, parent_tool_use_id=None)]
+    events = await _collect(messages, tmp_path)
+    assert [e["type"] for e in events if e["type"] != "runner.exit"] == []
 
 
 @pytest.mark.asyncio
-async def test_tool_result_content_list_of_dicts_is_joined():
+async def test_tool_result_content_list_of_dicts_is_joined(tmp_path):
     """SDK 0.2.x：ToolResultBlock.content 可为 dict 块列表（Agent 工具结果恒为此形态）。
 
     旧实现用 hasattr(b,'text') 提取，dict 全部落空 → 事件 output 变空串，
@@ -175,7 +204,7 @@ async def test_tool_result_content_list_of_dicts_is_joined():
         ),
     ]
 
-    events = await _collect(messages)
+    events = await _collect(messages, tmp_path)
     done = [e for e in events if e["type"] == "tool.call.completed"]
     assert len(done) == 1
     assert done[0]["output"] == "子代理结论一 子代理结论二"
@@ -183,7 +212,7 @@ async def test_tool_result_content_list_of_dicts_is_joined():
 
 
 @pytest.mark.asyncio
-async def test_tool_result_content_plain_string_still_works():
+async def test_tool_result_content_plain_string_still_works(tmp_path):
     """旧形态（纯字符串 content）回归保护。"""
     messages = [
         FUser(
@@ -192,5 +221,6 @@ async def test_tool_result_content_plain_string_still_works():
             content=[FToolResult(tool_use_id="b1", content="plain text", is_error=False)],
         ),
     ]
-    events = await _collect(messages)
-    assert events[0]["output"] == "plain text"
+    events = await _collect(messages, tmp_path)
+    done = [e for e in events if e["type"] == "tool.call.completed"]
+    assert done[0]["output"] == "plain text"

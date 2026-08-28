@@ -988,6 +988,84 @@ def test_summarize_compose_failure_scans_past_database_noise():
     assert "connection refused" in summary
 
 
+def test_summarize_compose_failure_preserves_continuous_compiler_output():
+    """多行编译报错（包含无 error 单词的代码行、类型提示）必须 100% 连续完整保留。"""
+    from app.contexts.agent.nodes.env_ready.compose_host import summarize_compose_failure
+
+    log = "\n".join([
+        "#1 [internal] load build definition from Dockerfile",
+        "#2 [internal] load .dockerignore",
+        "#3 [builder 1/4] WORKDIR /app",
+        "#4 [builder 2/4] COPY . .",
+        "#5 [builder 3/4] RUN go build -o certimate",
+        "#5 1.234 ./main.go:42:15: undefined: NewCertManager",
+        "#5 1.235 ./main.go:45:2: not enough arguments in call to auth.Check",
+        "#5 1.235 \thave (string)",
+        "#5 1.235 \twant (context.Context, string)",
+        "#5 ERROR: process \"/bin/sh -c go build -o certimate\" did not complete successfully: exit code: 1",
+        "------",
+        " > [builder 3/4] RUN go build -o certimate:",
+        "1.234 ./main.go:42:15: undefined: NewCertManager",
+        "1.235 ./main.go:45:2: not enough arguments in call to auth.Check",
+        "1.235 \thave (string)",
+        "1.235 \twant (context.Context, string)",
+        "------",
+        "ERROR: failed to solve: process \"/bin/sh -c go build -o certimate\" did not complete successfully: exit code: 1",
+    ])
+    summary = summarize_compose_failure(log)
+    assert "undefined: NewCertManager" in summary
+    assert "not enough arguments in call to auth.Check" in summary
+    assert "have (string)" in summary
+    assert "want (context.Context, string)" in summary
+    assert "exit code: 1" in summary
+
+
+def test_summarize_compose_failure_preserves_npm_dependency_tree():
+    """npm 依赖冲突报错中的依赖树（While resolving / Found）必须连续完整保留。"""
+    from app.contexts.agent.nodes.env_ready.compose_host import summarize_compose_failure
+
+    log = "\n".join([
+        "#8 [webui-builder 4/4] RUN cd /app/ui && npm ci && npm run build",
+        "#8 4.512 npm ERR! code ERESOLVE",
+        "#8 4.513 npm ERR! ERESOLVE could not resolve",
+        "#8 4.514 npm ERR!",
+        "#8 4.515 npm ERR! While resolving: @types/react@18.0.0",
+        "#8 4.516 npm ERR! Found: react@19.0.0",
+        "#8 4.517 npm ERR! node_modules/react",
+        "#8 4.518 npm ERR!",
+        "#8 4.519 npm ERR! Fix the upstream dependency conflict, or retry",
+        "#8 4.520 npm ERR! this command with --force or --legacy-peer-deps",
+        "#8 ERROR: process \"/bin/sh -c cd /app/ui && npm ci && npm run build\" did not complete successfully: exit code: 1",
+    ])
+    summary = summarize_compose_failure(log)
+    assert "ERESOLVE" in summary
+    assert "While resolving: @types/react@18.0.0" in summary
+    assert "Found: react@19.0.0" in summary
+    assert "--legacy-peer-deps" in summary
+
+
+def test_summarize_compose_failure_preserves_python_traceback():
+    """Python 多行 Traceback 堆栈必须连续保留。"""
+    from app.contexts.agent.nodes.env_ready.compose_host import summarize_compose_failure
+
+    log = "\n".join([
+        "app_1 | 2026-08-28 15:47:10 INFO Starting web server",
+        "app_1 | Traceback (most recent call last):",
+        "app_1 |   File \"/app/manage.py\", line 22, in <module>",
+        "app_1 |     main()",
+        "app_1 |   File \"/app/manage.py\", line 18, in main",
+        "app_1 |     execute_from_command_line(sys.argv)",
+        "app_1 | django.db.utils.OperationalError: could not connect to server: Connection refused",
+        "app_1 | \tIs the server running on host \"db\" (172.20.0.2) and accepting",
+        "app_1 | \tTCP/IP connections on port 5432?",
+    ])
+    summary = summarize_compose_failure(log)
+    assert "Traceback (most recent call last):" in summary
+    assert "/app/manage.py" in summary
+    assert "OperationalError: could not connect to server" in summary
+    assert "172.20.0.2" in summary
+
+
 def test_container_state_summary_keeps_healthcheck_output_without_env():
     from app.contexts.agent.nodes.env_ready.compose_host import _summarize_container_states
 

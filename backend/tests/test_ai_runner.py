@@ -17,7 +17,7 @@ sys.path.insert(
 import pytest
 from unittest.mock import MagicMock, patch
 
-from runner.node_schemas import NODE_INPUT_SCHEMAS
+from app.contexts.agent.contracts.node_input_schemas import NODE_INPUT_SCHEMAS
 
 from app.contexts.agent.ai_runner import (
     AI_NODE_MAX_SHAPE_RETRIES,
@@ -759,7 +759,7 @@ async def test_missing_output_includes_failed_event(tmp_path, monkeypatch):
     settings = MagicMock()
     settings.claude_agent_sdk_enabled = True
 
-    def _fake_run(spec, on_event):
+    def _fake_run(spec, on_event, on_ready=None):
         on_event({
             "type": "agent.failed",
             "error": "节点 env_ready 未调用 submit_result(无 .node_output.json)",
@@ -797,7 +797,7 @@ async def test_missing_output_prefers_failed_event_over_usage_jsonl(tmp_path, mo
         '"cacheReadInputTokens": 13592576, "is_error": false}'
     )
 
-    def _fake_run(spec, on_event):
+    def _fake_run(spec, on_event, on_ready=None):
         on_event({
             "type": "agent.completed",
             "usage": {"inputTokens": 119514},
@@ -835,7 +835,7 @@ async def test_missing_output_annotates_dsml_tool_leak(tmp_path, monkeypatch):
     settings = MagicMock()
     settings.claude_agent_sdk_enabled = True
 
-    def _fake_run(spec, on_event):
+    def _fake_run(spec, on_event, on_ready=None):
         on_event({
             "type": "agent.message",
             "text": "]\n</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>",
@@ -899,13 +899,15 @@ class _MgrStub:
         self.script = list(script)
         self.calls: list[dict] = []
 
-    def run_with_streaming(self, spec, on_event):  # noqa: ANN001
-        input_path = Path(spec.host_workdir) / Path(spec.env["NODE_INPUT_PATH"]).relative_to("/workspace")
-        output_path = Path(spec.host_workdir) / Path(spec.env["NODE_OUTPUT_PATH"]).relative_to("/workspace")
-        self.calls.append(json.loads(input_path.read_text("utf-8")))
+    def run_with_streaming(self, spec, on_event, on_ready=None):  # noqa: ANN001
+        body = spec.agent_spec
+        output_rel = str(body["output_path"]).removeprefix("/workspace/")
+        output_path = Path(spec.host_workdir) / output_rel
+        self.calls.append(body["node_payload"])
         item = self.script.pop(0)
         if isinstance(item, Exception):
             raise item
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
             json.dumps(item, ensure_ascii=False), encoding="utf-8"
         )
@@ -950,8 +952,8 @@ async def test_shape_retry_feeds_error_back_and_recovers(tmp_path, monkeypatch):
         )
     assert out["core_claim"] == "匿名可读 /mock 回显"
     assert len(stub.calls) == 2
-    assert "attempt" not in stub.calls[0]["input_json"]
-    second = stub.calls[1]["input_json"]
+    assert "attempt" not in stub.calls[0]
+    second = stub.calls[1]
     assert second["attempt"] == 2
     assert "schema 校验" in second["previous_error"]
     assert "kill_chain" in second["previous_error"]

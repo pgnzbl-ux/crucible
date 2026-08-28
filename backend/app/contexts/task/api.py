@@ -1,7 +1,7 @@
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -276,3 +276,40 @@ async def get_run_nodes(
     if nodes is None:
         raise HTTPException(404, "任务不存在")
     return nodes
+
+
+@router.get("/{task_id}/transcript")
+async def get_task_transcript(
+    task_id: str,
+    svc: Annotated[TaskService, Depends(get_task_service)],
+    user_id: CurrentUserId,
+    node_key: str = Query("triage", description="节点名，如 triage / audit / env_ready"),
+    run_id: str | None = Query(None, description="可选 run_id"),
+) -> PlainTextResponse:
+    """获取任务节点的全量冷存储转录日志（从 MinIO 读取）。"""
+    task = await svc.get_task(task_id, user_id)
+    if task is None:
+        raise HTTPException(404, "任务不存在")
+    from app.contexts.agent.transcript_archival import get_node_transcript
+
+    content = get_node_transcript(
+        task_id=task_id,
+        run_id=run_id or task.latest_run_id or task_id,
+        node_key=node_key,
+        owner_id=user_id,
+    )
+    if not content:
+        content = get_node_transcript(
+            task_id=task_id,
+            run_id=run_id or "adhoc",
+            node_key=node_key,
+            owner_id="system",
+        )
+    if not content:
+        raise HTTPException(404, f"未找到节点 {node_key} 的转录日志")
+    return PlainTextResponse(
+        content,
+        media_type="application/x-jsonlines",
+        headers={"Content-Disposition": f'attachment; filename="{task_id}_{node_key}_transcript.jsonl"'},
+    )
+

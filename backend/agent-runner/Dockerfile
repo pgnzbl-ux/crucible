@@ -1,7 +1,8 @@
 # Crucible Agent Runner 基础镜像
 #
 # 用途：Claude Agent SDK 的隔离执行环境（分析员工具箱）。Celery worker 通过
-#       docker SDK 拉起本镜像，容器内运行 python -m runner.run_one。
+#       docker SDK 拉起本镜像，默认入口 tini → python -m runner.server
+#       （HTTP/SSE 守护；执行契约经 AgentSpec 下发，调试可用 python -m runner.run_one）。
 #
 # 设计原则：
 # - Python 钉死 3.11.15、Node 钉死 20.20.2-bookworm（不用 3.11 / 20 浮动标签）。
@@ -102,6 +103,12 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
     PATH="/usr/local/bin:/home/runner/.local/bin:${PATH}"
 
-# tini → python -m runner.run_one
-#   run_one 读 /workspace/.node.json + /node-skill/SKILL.md → JSONL 到 stdout
-ENTRYPOINT ["tini", "--", "python", "-m", "runner.run_one"]
+# runner.server HTTP/SSE 固定监听 8000；worker 发布为宿主环回随机端口
+# （等效 -P 的随机分配，但仅绑 127.0.0.1，不暴露局域网）
+EXPOSE 8000
+
+# tini 作为 PID 1 回收孤儿子进程
+# 默认启动 HTTP/SSE 微服务守护模式（同时支持通过 docker run 参数覆盖执行 runner.run_one）
+ENTRYPOINT ["tini", "--"]
+CMD ["python", "-m", "runner.server"]
+

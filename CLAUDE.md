@@ -58,7 +58,7 @@ Crucible/
 │   │   ├── Dockerfile           # build context=项目根；skill 不 COPY，起容器 -v 挂当前节点
 │   │   ├── requirements.txt
 │   │   ├── node-skills/         # 每 AI 节点 SKILL.md 母本（host；-v → /node-skill）
-│   │   └── runner/run_one.py    # 容器内 entrypoint（/node-skill/SKILL.md → system_prompt + JSONL）
+│   │   └── runner/{server,gateway,policies,tools,transcript,schemas,errors}.py  # 纯净 SDK 网关（HTTP/SSE 守护，契约由 backend 下发）
 │   ├── deploy/                  # 生产部署模板（systemd + Nginx）
 │   └── semgrep_rules/           # 静态扫描规则
 ├── frontend/

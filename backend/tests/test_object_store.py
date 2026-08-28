@@ -17,7 +17,7 @@ def test_physical_buckets_are_three():
     assert PHYSICAL_BUCKETS == ("crucible-durable", "crucible-task", "crucible-public")
 
 
-def test_kind_registry_has_six_kinds():
+def test_kind_registry_has_seven_kinds():
     from app.shared.object_store import KIND_REGISTRY
 
     assert set(KIND_REGISTRY) == {
@@ -26,6 +26,7 @@ def test_kind_registry_has_six_kinds():
         "evidence",
         "report",
         "node_run",
+        "transcript",
         "avatar",
     }
     assert KIND_REGISTRY["source"].bucket == "crucible-durable"
@@ -33,11 +34,13 @@ def test_kind_registry_has_six_kinds():
     assert KIND_REGISTRY["evidence"].bucket == "crucible-task"
     assert KIND_REGISTRY["report"].bucket == "crucible-task"
     assert KIND_REGISTRY["node_run"].bucket == "crucible-task"
+    assert KIND_REGISTRY["transcript"].bucket == "crucible-task"
     assert KIND_REGISTRY["avatar"].bucket == "crucible-public"
     assert KIND_REGISTRY["avatar"].writable is False
     assert KIND_REGISTRY["source"].presign is False
     assert KIND_REGISTRY["recipe"].presign is False
     assert KIND_REGISTRY["node_run"].presign is False
+    assert KIND_REGISTRY["transcript"].presign is False
     assert KIND_REGISTRY["evidence"].presign is True
     assert KIND_REGISTRY["report"].presign is True
     assert KIND_REGISTRY["avatar"].presign is True

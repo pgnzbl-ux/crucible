@@ -20,14 +20,18 @@ COMPOSE_WAIT_TIMEOUT = 300
 # 同一诊断指纹累计达此次数 → 中止 compose，回喂下一轮（避免空转到硬超时）
 COMPOSE_DIAG_REPEAT_ABORT = 40
 _COMPOSE_URGENT = re.compile(r"error|failed|fatal|exception", re.I)
-_COMPOSE_DIAG = re.compile(
-    r"(?i)(\[error\]|error:|failed to solve|could not transfer|"
-    r"dependencyresolution|npm err!|no such file|copy |"
+_COMPOSE_START_MARKER = re.compile(
+    r"(?i)(\[error\]|error:|failed to solve|failed to build|build fail|"
+    r"could not transfer|dependencyresolution|npm err!|no such file|"
     r"failed to execute|premature end|etimedout|econnreset|"
     r"address already in use|permission denied|security policy|"
     r"failed to|fatal|traceback|connection refused|unhealthy|"
-    r"healthcheck|exited \([1-9][0-9]*\)|oomkilled)"
+    r"healthcheck|exited \([1-9][0-9]*\)|oomkilled|syntaxerror|"
+    r"typeerror|referenceerror|compilation error|cannot find|"
+    r"undefined:|not enough arguments|cannot use|panic:|exception)"
 )
+_COMPOSE_STEP_HEADER = re.compile(r"^#\d+\s+\[|^\s*>\s*\[|^[-=]{3,}")
+_COMPOSE_DIAG = _COMPOSE_START_MARKER
 _COMPOSE_DIAG_NOISE = re.compile(
     r"(?i)to see the full stack trace|re-run maven|"
     r"for more information about the errors|"
@@ -51,24 +55,55 @@ def progress_fingerprint(text: str) -> str:
     return normalized[:180]
 
 
-def summarize_compose_failure(text: str, *, limit: int = 1600) -> str:
-    """抽出 COPY / Maven 传输失败等根因行，丢掉 Maven Help 与拉层进度。"""
+def summarize_compose_failure(text: str, *, limit: int = 8000) -> str:
+    """提取连续的错误上下文，保留编译器输出、Traceback 与关键诊断，丢掉 Maven Help 等纯噪声。"""
     raw = text or ""
     if not raw.strip():
         return ""
-    hits: list[str] = []
-    for line in raw.splitlines():
+    lines = raw.splitlines()
+
+    # 1. 过滤纯噪声提示（如 Maven -X 提示、help 链接等）
+    cleaned_lines: list[str] = []
+    for line in lines:
         stripped = line.strip()
         if not stripped or _COMPOSE_DIAG_NOISE.search(stripped):
             continue
-        if _COMPOSE_DIAG.search(stripped):
-            clipped = stripped[:300]
-            if not hits or hits[-1] != clipped:
-                hits.append(clipped)
-    if hits:
-        joined = "\n".join(hits)
-        return joined[:limit]
-    return raw[-limit:]
+        cleaned_lines.append(line)
+
+    if not cleaned_lines:
+        return raw[-limit:]
+
+    # 2. 寻找错误起始位置（优先在最近的行中寻找首个错误标记）
+    window_size = 150
+    search_start = max(0, len(cleaned_lines) - window_size)
+    window = cleaned_lines[search_start:]
+
+    first_err_local_idx: int | None = None
+    for idx, line in enumerate(window):
+        if _COMPOSE_START_MARKER.search(line):
+            first_err_local_idx = idx
+            break
+
+    if first_err_local_idx is not None:
+        first_err_idx = search_start + first_err_local_idx
+        # 向上回溯寻找失败步骤的头部（如 ------\n > [step]\n------ 或 #10 [step]）
+        start_idx = first_err_idx
+        for back_idx in range(first_err_idx - 1, max(-1, first_err_idx - 15), -1):
+            line = cleaned_lines[back_idx]
+            if _COMPOSE_STEP_HEADER.search(line):
+                start_idx = back_idx
+            elif start_idx != first_err_idx:
+                # 已经跨过了 header 块，停止回溯
+                break
+        selected_lines = cleaned_lines[start_idx:]
+    else:
+        # 没有匹配到特定错误特征时，保留最后 100 行连续日志
+        selected_lines = cleaned_lines[-100:]
+
+    joined = "\n".join(selected_lines)
+    if len(joined) > limit:
+        return joined[-limit:]
+    return joined
 
 
 class ComposeProgressThrottle:

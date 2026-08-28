@@ -1,9 +1,11 @@
-"""run_one.py 压缩产物治理：Read/Grep 拦截钩子 + read_slice 有界读取。"""
-import json
+"""runner 压缩产物治理：Read/Grep 拦截钩子 + read_slice 有界读取。"""
 import os
 import sys
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import MagicMock
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(
@@ -18,7 +20,26 @@ sys.path.insert(
 # 容器入口依赖 SDK；单测只验证拦截与切片逻辑，不真调 query()
 sys.modules.setdefault("claude_agent_sdk", MagicMock())
 
-from runner import run_one  # noqa: E402 — 需先注入 sys.path 与 SDK stub
+
+@pytest.fixture(autouse=True)
+def _sdk_module_stub():
+    """每个测试独立的 claude_agent_sdk stub，测试后还原，杜绝跨文件全局污染。"""
+    prev = sys.modules.get("claude_agent_sdk")
+    sys.modules["claude_agent_sdk"] = MagicMock()
+    yield
+    if prev is None:
+        sys.modules.pop("claude_agent_sdk", None)
+    else:
+        sys.modules["claude_agent_sdk"] = prev
+
+
+from runner.policies import is_minified_file, make_read_guard_hook  # noqa: E402
+from runner.tools import (  # noqa: E402
+    READ_SLICE_MAX_MATCHES,
+    READ_SLICE_MAX_OUTPUT,
+    make_read_slice_tool,
+    read_slice_impl,
+)
 
 
 def _write_sized(path: Path, size: int, lines: int) -> None:
@@ -37,27 +58,29 @@ def _minified_file(tmp_path: Path, name: str = "bundle.min.js") -> Path:
     return p
 
 
-# ── _is_minified_file ──
+# ── is_minified_file ──
 
 
 def test_is_minified_file_classifies_by_size_and_lines(tmp_path):
-    hit, size, lines = run_one._is_minified_file(_minified_file(tmp_path))
+    hit, size, lines = is_minified_file(_minified_file(tmp_path))
     assert (hit, size, lines) == (True, 400_000, 3)
 
     normal = tmp_path / "normal.js"
     _write_sized(normal, 400_000, 3000)
-    hit, _, _ = run_one._is_minified_file(normal)
+    hit, _, _ = is_minified_file(normal)
     assert hit is False
 
-    assert run_one._is_minified_file(tmp_path / "nope.js")[0] is False
+    assert is_minified_file(tmp_path / "nope.js")[0] is False
 
 
-# ── _read_guard_hook ──
+# ── read guard hook ──
 
 
-async def test_read_guard_denies_read_on_minified(tmp_path, capsys):
+async def test_read_guard_denies_read_on_minified(tmp_path):
     p = _minified_file(tmp_path)
-    res = await run_one._read_guard_hook(
+    events: list[dict] = []
+    hook = make_read_guard_hook(events.append, workspace_root=str(tmp_path))
+    res = await hook(
         {"tool_name": "Read", "tool_input": {"file_path": str(p), "offset": 280, "limit": 15}},
         None,
         None,
@@ -67,15 +90,16 @@ async def test_read_guard_denies_read_on_minified(tmp_path, capsys):
     reason = decision["permissionDecisionReason"]
     assert "read_slice" in reason
     assert "不要重试 Read" in reason
-    event = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
-    assert event["type"] == "tool.call.denied"
-    assert event["tool"] == "Read"
-    assert "minified artifact" in event["reason"]
+    assert len(events) == 1
+    assert events[0]["type"] == "tool.call.denied"
+    assert events[0]["tool"] == "Read"
+    assert "minified artifact" in events[0]["reason"]
 
 
 async def test_read_guard_denies_grep_on_minified(tmp_path):
     p = _minified_file(tmp_path)
-    res = await run_one._read_guard_hook(
+    hook = make_read_guard_hook(lambda e: None, workspace_root=str(tmp_path))
+    res = await hook(
         {"tool_name": "Grep", "tool_input": {"pattern": "eval", "path": str(p)}},
         None,
         None,
@@ -86,26 +110,24 @@ async def test_read_guard_denies_grep_on_minified(tmp_path):
 async def test_read_guard_allows_normal_and_missing_targets(tmp_path):
     normal = tmp_path / "normal.js"
     _write_sized(normal, 400_000, 3000)
+    hook = make_read_guard_hook(lambda e: None, workspace_root=str(tmp_path))
     for tool_input in ({"file_path": str(normal)}, {"file_path": str(tmp_path / "nope.js")}):
-        res = await run_one._read_guard_hook(
-            {"tool_name": "Read", "tool_input": tool_input}, None, None
-        )
+        res = await hook({"tool_name": "Read", "tool_input": tool_input}, None, None)
         assert res == {}
 
 
-async def test_read_guard_resolves_relative_path_against_workspace_root(tmp_path, monkeypatch):
+async def test_read_guard_resolves_relative_path_against_workspace_root(tmp_path):
     p = _minified_file(tmp_path)
-    monkeypatch.setattr(run_one, "_WORKSPACE_ROOT", str(tmp_path))
-    res = await run_one._read_guard_hook(
+    hook = make_read_guard_hook(lambda e: None, workspace_root=str(tmp_path))
+    res = await hook(
         {"tool_name": "Read", "tool_input": {"file_path": p.name}}, None, None
     )
     assert res["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
-async def test_read_guard_ignores_other_tools(tmp_path):
-    res = await run_one._read_guard_hook(
-        {"tool_name": "Bash", "tool_input": {"command": "cat x"}}, None, None
-    )
+async def test_read_guard_ignores_other_tools():
+    hook = make_read_guard_hook(lambda e: None)
+    res = await hook({"tool_name": "Bash", "tool_input": {"command": "cat x"}}, None, None)
     assert res == {}
 
 
@@ -117,9 +139,7 @@ def test_read_slice_pattern_mode_returns_bounded_excerpts(tmp_path):
     needle = b"location.hash"
     p.write_bytes(b"a" * 1000 + needle + b"b" * 1000)
 
-    res = run_one._read_slice_impl(
-        str(p), pattern="location.hash", context=50, root=str(tmp_path)
-    )
+    res = read_slice_impl(str(p), pattern="location.hash", context=50, root=str(tmp_path))
     assert res["matches"], "应命中一处"
     m = res["matches"][0]
     assert m["byte_offset"] == 1000
@@ -131,12 +151,10 @@ def test_read_slice_pattern_mode_returns_bounded_excerpts(tmp_path):
 def test_read_slice_pattern_caps_total_output(tmp_path):
     p = tmp_path / "b.js"
     p.write_bytes(b" SecretToken" * 5000)
-    res = run_one._read_slice_impl(
-        str(p), pattern="SecretToken", context=100, root=str(tmp_path)
-    )
+    res = read_slice_impl(str(p), pattern="SecretToken", context=100, root=str(tmp_path))
     total = sum(len(m["excerpt"].encode()) for m in res["matches"])
-    assert total <= run_one._READ_SLICE_MAX_OUTPUT
-    assert len(res["matches"]) <= run_one._READ_SLICE_MAX_MATCHES
+    assert total <= READ_SLICE_MAX_OUTPUT
+    assert len(res["matches"]) <= READ_SLICE_MAX_MATCHES
     assert res["capped"] is True
 
 
@@ -144,64 +162,51 @@ def test_read_slice_window_mode_pages(tmp_path):
     p = tmp_path / "b.js"
     p.write_bytes(b"0123456789" * 2560)  # 25600 字节 ASCII
 
-    first = run_one._read_slice_impl(str(p), byte_offset=0, byte_length=1024, root=str(tmp_path))
+    first = read_slice_impl(str(p), byte_offset=0, byte_length=1024, root=str(tmp_path))
     assert first["byte_offset"] == 0
     assert len(first["excerpt"]) == 1024
     assert first["has_more"] is True
 
-    last = run_one._read_slice_impl(str(p), byte_offset=25500, byte_length=4096, root=str(tmp_path))
+    last = read_slice_impl(str(p), byte_offset=25500, byte_length=4096, root=str(tmp_path))
     assert len(last["excerpt"]) == 100
     assert last["has_more"] is False
 
 
 def test_read_slice_rejects_paths_outside_root(tmp_path):
-    res = run_one._read_slice_impl("/etc/passwd", root=str(tmp_path))
+    res = read_slice_impl("/etc/passwd", root=str(tmp_path))
     assert "error" in res
 
-    res = run_one._read_slice_impl(str(tmp_path / "nope.js"), root=str(tmp_path))
+    res = read_slice_impl(str(tmp_path / "nope.js"), root=str(tmp_path))
     assert "文件不存在" in res["error"]
 
 
 def test_read_slice_rejects_invalid_regex(tmp_path):
     p = tmp_path / "b.js"
     p.write_bytes(b"var a=1;")
-    res = run_one._read_slice_impl(str(p), pattern="(", root=str(tmp_path))
+    res = read_slice_impl(str(p), pattern="(", root=str(tmp_path))
     assert "正则无效" in res["error"]
 
 
-# ── 注册 ──
+# ── MCP 工具装配 ──
 
 
-def test_build_options_registers_read_guard_and_slice(monkeypatch):
-    from dataclasses import dataclass, field
-    from pathlib import Path
+def test_make_read_slice_tool_delegates_to_impl(tmp_path):
+    stub = ModuleType("claude_agent_sdk")
 
-    captured: dict = {}
+    def _fake_tool(*args, **kwargs):
+        def _wrap(fn):
+            fn._tool_meta = kwargs
+            return fn
+        return _wrap
 
-    class CaptureOptions:
-        def __init__(self, **kwargs):
-            captured.clear()
-            captured.update(kwargs)
+    stub.tool = _fake_tool
+    sys.modules["claude_agent_sdk"] = stub
 
-    # 其他 run_one 测试会把 run_one.HookMatcher 换成 fake 且不还原，
-    # 这里同样换成自己的 fake（有 .matcher 属性），直接检查捕获到的注册结果
-    @dataclass
-    class FakeHookMatcher:
-        matcher: str | None = None
-        hooks: list = field(default_factory=list)
+    tool_fn = make_read_slice_tool(workspace_root=str(tmp_path))
+    p = tmp_path / "b.js"
+    p.write_bytes(b"0123456789" * 100)
+    import asyncio
 
-    root = Path(__file__).resolve().parents[2]
-    monkeypatch.setenv(
-        "NODE_SKILL_DIR",
-        str(root / "backend" / "agent-runner" / "node-skills"),
-    )
-    run_one.ClaudeAgentOptions = CaptureOptions
-    run_one.HookMatcher = FakeHookMatcher
-
-    run_one._build_options(model="m", max_turns=5, node_key="triage")
-
-    by_matcher = {m.matcher: m for m in captured["hooks"]["PreToolUse"]}
-    assert by_matcher["Bash"].hooks == [run_one._pre_tool_use_hook]
-    assert by_matcher["Read"].hooks == [run_one._read_guard_hook]
-    assert by_matcher["Grep"].hooks == [run_one._read_guard_hook]
-    assert "mcp__crucible__read_slice" in captured["allowed_tools"]
+    out = asyncio.run(tool_fn({"file_path": str(p), "byte_offset": 0, "byte_length": 16}))
+    assert out["excerpt"] == "0123456789012345"
+    assert out["size_bytes"] == 1000

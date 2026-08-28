@@ -1,7 +1,7 @@
 """节点交接契约 — 公开 Input / Handoff / ControlSignals。
 
 见 docs/discovery-spec.md §4.2/§6.1/§6.2。AI submit_result
-schema 仍在 backend/agent-runner/runner/node_schemas.py，不在本包重复。
+AI submit schema 单一真相在本包 node_input_schemas.py，经 AgentSpec.submit_schema 下发 runner。
 """
 from __future__ import annotations
 

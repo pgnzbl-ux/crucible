@@ -1,13 +1,14 @@
-"""AI 节点容器编排 — 每节点起一个 agent-runner 容器调 SDK。
+"""AI 节点容器编排 — 每节点起一个 agent-runner 容器，经 HTTP/SSE 调 SDK 网关。
 
 流程:
-  1. 写本次执行专属的 node.json(node_key + input_json)到 host_workdir/.runner/<id>
-  2. 起 agent-runner 容器：
+  1. 构造 AgentSpec（node_payload + submit schema 契约下发 + skill 路径），
+     宿主侧留痕 node.json 到 host_workdir/.runner/<id>
+  2. 起 agent-runner 容器（默认入口 runner.server HTTP/SSE 守护）：
      - bind host_workdir → /workspace
      - bind node-skills/<node> → /node-skill:ro（仅当前节点 skill）
-     - 注入 ANTHROPIC_* env + NODE_KEY
-  3. 容器内 run_one.py 读 /node-skill/SKILL.md 作 system_prompt，跑完 submit_result
-  4. submit_result 把 input 写到本次执行专属的 node_output.json
+     - 注入 ANTHROPIC_* Provider 凭据 env + 随机 RUNNER_AUTH_TOKEN
+  3. worker POST /v1/execute 消费 SSE 事件信封（解包为扁平事件回调）
+  4. 容器内 submit_result 把 input 写到本次执行专属的 node_output.json
   5. worker 读 node_output.json → schema 校验 → 返回 output_json
 """
 from __future__ import annotations
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
+from app.contexts.agent.contracts.node_input_schemas import NODE_INPUT_SCHEMAS
 from app.contexts.agent.llm_errors import classify_llm_api_error, is_llm_api_failure
 from app.core.agent_runner import (
     AgentRunnerError,
@@ -572,7 +574,10 @@ def _validate_report_output(output: dict) -> tuple[bool, str | None]:
         return False, "title 必填（漏洞报告：「产品」「模块/接口」存在「漏洞类型」漏洞）"
     for field_name in ("product_name", "affected_version"):
         if not str(output.get(field_name) or "").strip():
-            return False, f"{field_name} 必填（product_name 取 README/源码官方称呼；affected_version 用注入 source 的 ref@commit）"
+            return False, (
+                f"{field_name} 必填（product_name 取 README/源码官方称呼；"
+                "affected_version 用注入 source 的 ref@commit）"
+            )
     if kind == "vulnerability_report":
         if "存在" not in title:
             return False, "漏洞报告 title 须为「产品」「模块/接口」存在「漏洞类型」漏洞 句式"
@@ -807,6 +812,8 @@ async def _run_one_container_unthrottled(
     node_input_path = control_dir / "node.json"
     node_output_path = control_dir / "node_output.json"
     node_meta_path = control_dir / "node_meta.json"
+    node_transcript_path = control_dir / "transcript.jsonl"
+    # 宿主侧审计留痕（runner 经 AgentSpec.node_payload 获取输入，不再读该文件）
     node_input_path.write_text(
         json.dumps({"node_key": node_key, "input_json": input_json}, ensure_ascii=False),
         encoding="utf-8",
@@ -814,17 +821,30 @@ async def _run_one_container_unthrottled(
 
     skill_dir = resolve_node_skill_dir(skill_override or node_key)
 
-    # 2. 构造 spec + 起容器(NODE_KEY env + skill 卷映射)
+    # 2. 构造 AgentSpec（契约下发：submit schema 单一来源在 backend contracts）+
+    #    AgentRunnerSpec（凭据 env + skill 卷映射），经 HTTP/SSE 驱动执行。
+    schema_key = skill_override or node_key
+    agent_spec_body: dict[str, Any] = {
+        "node_key": node_key,
+        "run_id": execution_id,
+        "node_payload": input_json,
+        "submit_schema": NODE_INPUT_SCHEMAS.get(schema_key),
+        "skill_path": "/node-skill/SKILL.md",
+        "max_turns": get_settings().claude_sdk_max_turns,
+        "workspace_root": "/workspace",
+        "source_path": input_json.get("source_path"),
+        "output_path": f"/workspace/.runner/{execution_id}/node_output.json",
+        "meta_path": f"/workspace/.runner/{execution_id}/node_meta.json",
+        "transcript_path": f"/workspace/.runner/{execution_id}/transcript.jsonl",
+    }
+    if schema_key == "triage_batch":
+        # 批量审议：主会话用子代理并行（策略属 backend，runner 只放行）。
+        # CLI 新版把 Task 工具改名为 Agent，两个名字都放行。
+        agent_spec_body["allowed_tools_extra"] = ["Task", "Agent"]
+
     spec = AgentRunnerSpec(
-        env={
-            **env,
-            "NODE_KEY": node_key,
-            "NODE_INPUT_PATH": f"/workspace/.runner/{execution_id}/node.json",
-            "NODE_OUTPUT_PATH": f"/workspace/.runner/{execution_id}/node_output.json",
-            "NODE_META_PATH": f"/workspace/.runner/{execution_id}/node_meta.json",
-            # 技能模式切换提交契约（如 triage → triage_batch）
-            **({"NODE_SCHEMA_KEY": skill_override} if skill_override and skill_override != node_key else {}),
-        },
+        env=env,
+        agent_spec=agent_spec_body,
         host_workdir=host_workdir,
         skill_host_dir=str(skill_dir),
         extra_labels={"crucible.task_id": task_id, "task_id": task_id} if task_id else {},
@@ -867,26 +887,61 @@ async def _run_one_container_unthrottled(
     exit_code: int
     summary: dict[str, Any] | None
     node_timeout = await _ai_node_timeout_seconds()
+    _handle_ref: dict[str, Any] = {}
+
+    def _on_ready(handle: Any) -> None:
+        _handle_ref["handle"] = handle
+
     if node_timeout > 0:
         manager_before: set[str] = set(getattr(agent_runner_manager, "_active_ids", set()) or set())
         try:
             exit_code, summary = await asyncio.wait_for(
                 asyncio.to_thread(
-                    agent_runner_manager.run_with_streaming, spec, _on_event,
+                    agent_runner_manager.run_with_streaming, spec, _on_event, on_ready=_on_ready,
                 ),
                 timeout=node_timeout,
             )
         except asyncio.TimeoutError:
-            # 线程仍阻塞在 container.wait()：按 create 顺序差异找出本容器强杀，
-            # run_with_streaming 的 finally 随后正常收尾。
+            # 线程仍阻塞在 SSE 消费：先请求 runner 优雅收尾，再按 create 顺序差异
+            # 找出本容器强杀兜底，run_with_streaming 的 finally 随后正常收尾。
+            handle = _handle_ref.get("handle")
+            if handle is not None:
+                try:
+                    await asyncio.to_thread(handle.cancel)
+                except Exception:  # noqa: BLE001 — 取消尽力而为
+                    pass
             _kill_active_runner_containers(agent_runner_manager, manager_before)
             raise AgentRunnerError(
                 f"AI 节点 {node_key} 超过单节点最长执行时间（{node_timeout}s），已终止容器"
             ) from None
     else:
         exit_code, summary = await asyncio.to_thread(
-            agent_runner_manager.run_with_streaming, spec, _on_event
+            agent_runner_manager.run_with_streaming, spec, _on_event, on_ready=_on_ready
         )
+
+    # 2.5 异步/兜底归档全量 Transcript 到 MinIO（冷热分流）
+    # 优先读宿主机映射文件（防 OOM/崩溃，零内存拷贝），若不存在则使用 summary 中的缓存
+    transcript_content = ""
+    if node_transcript_path.exists():
+        try:
+            transcript_content = node_transcript_path.read_text(encoding="utf-8")
+        except Exception:
+            pass
+    if not transcript_content and summary and summary.get("transcript"):
+        transcript_content = summary["transcript"]
+
+    if transcript_content:
+        try:
+            from .transcript_archival import archive_node_transcript
+            archive_node_transcript(
+                task_id=task_id or "adhoc",
+                run_id=execution_id,
+                node_key=node_key,
+                owner_id="system",
+                transcript_text=transcript_content,
+            )
+        except Exception as _e:
+            logger.debug("Transcript 归档非阻塞报错: %s", _e)
 
     # 3. 读 .node_output.json(submit_result 写的)
     output_path = node_output_path

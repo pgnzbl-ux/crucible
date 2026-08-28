@@ -1,1 +1,6 @@
 claude-agent-sdk==0.2.134
+# 全量钉版：镜像可重现构建（server 是生产入口，web 栈漂移 = 协议漂移）
+fastapi==0.115.14
+uvicorn[standard]==0.34.2
+pydantic==2.11.7
+httpx==0.28.1

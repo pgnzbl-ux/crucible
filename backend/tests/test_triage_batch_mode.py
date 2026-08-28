@@ -252,17 +252,12 @@ def test_triage_output_validator_rejects_bad_batch_items():
 
 
 def test_node_schema_declares_triage_batch():
-    """容器侧 submit 契约必须包含批量形态（NODE_SCHEMA_KEY 切换依据）。"""
+    """submit 契约必须包含批量形态（backend 单一来源；经 AgentSpec 下发）。"""
     import json as _json
 
-    schema_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "agent-runner", "runner", "node_schemas.py",
-    )
-    raw = open(schema_path, encoding="utf-8").read()
-    namespace = {}
-    exec(compile(raw, schema_path, "exec"), namespace)
-    schema = namespace["NODE_INPUT_SCHEMAS"]["triage_batch"]
+    from app.contexts.agent.contracts.node_input_schemas import NODE_INPUT_SCHEMAS
+
+    schema = NODE_INPUT_SCHEMAS["triage_batch"]
     items = schema["properties"]["verdicts"]["items"]
     assert set(["group_id", "verdict", "confidence", "why", "summary", "reasoning"]) \
         <= set(items["required"])

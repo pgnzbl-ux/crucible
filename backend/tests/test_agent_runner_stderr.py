@@ -1,77 +1,20 @@
-"""验证 run_with_streaming 在容器失败时把 stderr 存入 summary。
-
-回归 bug:容器在 finally 里被 stop_and_remove 删除后,
-executor 再去 containers.get 取不到 stderr,导致 error_message
-只剩"非0退出"。修复后 summary 应含 stderr_tail。
-"""
-import sys
+"""agent-runner HTTP/SSE 驱动：summary 诊断、SSE 解析、容器编排安全参数。"""
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from unittest.mock import MagicMock, patch
 
-from app.core.agent_runner import AGENT_EXTRA_HOSTS, AgentRunnerManager, AgentRunnerSpec
+import pytest
 
-
-def test_failed_container_stderr_in_summary():
-    """容器非 0 退出时,summary 含 stderr_tail(从 container.logs 取)。"""
-    fake_container = MagicMock()
-    fake_container.logs.side_effect = [
-        # 流式 stdout 消费(run_with_streaming 主循环):返回空,直接 EOF
-        iter([]),
-        # 失败后抓 stderr 的调用(tail=50, stdout=False, stderr=True)
-        b"some error on stderr\nFATAL: bad key\n",
-    ]
-    fake_container.wait.return_value = {"StatusCode": 1}
-    fake_container.attrs = {"State": {"OOMKilled": False}}
-    fake_container.id = "cid123"
-    fake_container.reload = MagicMock()
-
-    fake_runner = MagicMock()
-    fake_runner.container = fake_container
-    fake_runner.id = "cid123"
-    fake_runner.name = "test-runner"
-    fake_runner.stop_and_remove = MagicMock()
-
-    mgr = AgentRunnerManager.__new__(AgentRunnerManager)
-    mgr._client = MagicMock()
-
-    with patch.object(mgr, "create", return_value=fake_runner):
-        spec = AgentRunnerSpec(host_workdir="/tmp/x", env={})
-        events = []
-        exit_code, summary = mgr.run_with_streaming(spec, events.append)
-
-    assert exit_code == 1
-    assert "stderr_tail" in summary, "summary 必须含 stderr_tail(失败诊断)"
-    assert "FATAL: bad key" in summary["stderr_tail"], "stderr_tail 应含容器 stderr"
-    assert summary["container_id"] == "cid123"
-
-
-def test_success_container_empty_stderr_in_summary():
-    """容器成功(exit 0)时,summary 的 stderr_tail 为空串。"""
-    fake_container = MagicMock()
-    fake_container.logs.side_effect = [iter([])]  # stdout 空,EOF
-    fake_container.wait.return_value = {"StatusCode": 0}
-    fake_container.attrs = {"State": {"OOMKilled": False}}
-    fake_container.id = "cidok"
-    fake_container.reload = MagicMock()
-
-    fake_runner = MagicMock()
-    fake_runner.container = fake_container
-    fake_runner.id = "cidok"
-    fake_runner.name = "ok-runner"
-    fake_runner.stop_and_remove = MagicMock()
-
-    mgr = AgentRunnerManager.__new__(AgentRunnerManager)
-    mgr._client = MagicMock()
-
-    with patch.object(mgr, "create", return_value=fake_runner):
-        spec = AgentRunnerSpec(host_workdir="/tmp/x", env={})
-        exit_code, summary = mgr.run_with_streaming(spec, lambda e: None)
-
-    assert exit_code == 0
-    assert summary.get("stderr_tail", "MISSING") == ""
+from app.core.agent_runner import (
+    AGENT_EXTRA_HOSTS,
+    AgentRunnerError,
+    AgentRunnerManager,
+    AgentRunnerSpec,
+    _iter_sse_events,
+)
 
 
 def test_extra_hosts_empty_without_host_docker_internal():
@@ -136,6 +79,38 @@ def test_create_keeps_default_seccomp_and_drops_linux_capabilities():
     assert "cap_add" not in kwargs
 
 
+def test_run_with_streaming_injects_runner_auth_token():
+    """每次容器执行注入随机 RUNNER_AUTH_TOKEN（server fail-closed 鉴权）。"""
+    fake_container = MagicMock()
+    fake_container.id = "cid-auth"
+    fake_runner = MagicMock()
+    fake_runner.container = fake_container
+    fake_runner.id = "cid-auth"
+    fake_runner.name = "auth-runner"
+
+    mgr = AgentRunnerManager.__new__(AgentRunnerManager)
+    mgr._client = MagicMock()
+    mgr._active_ids = set()
+
+    created_specs: list[AgentRunnerSpec] = []
+
+    def spy_create(spec, name=None):
+        created_specs.append(spec)
+        return fake_runner
+
+    spec = AgentRunnerSpec(host_workdir="/tmp/x", env={"ANTHROPIC_API_KEY": "sk"}, agent_spec={"node_key": "audit"})
+    with patch.object(mgr, "create", side_effect=spy_create), \
+         patch.object(mgr, "_wait_runner_ready", return_value="http://10.0.0.9:8000"), \
+         patch.object(mgr, "_consume_sse", return_value=(0, False, "")):
+        mgr.run_with_streaming(spec, lambda e: None)
+
+    token = created_specs[0].env.get("RUNNER_AUTH_TOKEN")
+    assert token and len(token) >= 32
+    assert created_specs[0].env["ANTHROPIC_API_KEY"] == "sk"
+    # 原始 spec 不被就地污染
+    assert "RUNNER_AUTH_TOKEN" not in spec.env
+
+
 def test_create_bind_mounts_skill_dir_readonly():
     from app.core.agent_runner import AgentRunnerManager, AgentRunnerSpec
 
@@ -193,11 +168,28 @@ def test_ensure_network_leaves_egress_network_alone():
     mgr._client.networks.create.assert_not_called()
 
 
+# ── HTTP/SSE 驱动 ──
+
+
+def test_run_with_streaming_requires_agent_spec():
+    mgr = AgentRunnerManager.__new__(AgentRunnerManager)
+    with pytest.raises(AgentRunnerError, match="agent_spec"):
+        mgr.run_with_streaming(AgentRunnerSpec(host_workdir="/tmp/x"), lambda e: None)
+
+
+def test_run_with_streaming_rejects_network_disabled():
+    mgr = AgentRunnerManager.__new__(AgentRunnerManager)
+    spec = AgentRunnerSpec(
+        host_workdir="/tmp/x",
+        agent_spec={"node_key": "audit"},
+        network_disabled=True,
+    )
+    with pytest.raises(AgentRunnerError, match="network_disabled"):
+        mgr.run_with_streaming(spec, lambda e: None)
+
+
 def test_run_with_streaming_registers_and_clears_active():
     fake_container = MagicMock()
-    fake_container.logs.side_effect = [iter([])]
-    fake_container.wait.return_value = {"StatusCode": 0}
-    fake_container.attrs = {"State": {"OOMKilled": False}}
     fake_container.id = "cid-active"
     fake_container.reload = MagicMock()
 
@@ -211,68 +203,150 @@ def test_run_with_streaming_registers_and_clears_active():
     mgr._client = MagicMock()
     mgr._active_ids = {"cid-active"}
 
-    with patch.object(mgr, "create", return_value=fake_runner):
-        mgr.run_with_streaming(AgentRunnerSpec(host_workdir="/tmp/x"), lambda e: None)
-
-    assert "cid-active" not in mgr._active_ids
-
-
-def test_failed_container_combined_logs_when_stderr_stream_empty():
-    """stdout=False/stderr=True 可能空，必须回退抓 stdout+stderr。"""
-    fake_container = MagicMock()
-    fake_container.logs.side_effect = [
-        iter([]),
-        b"",  # stderr-only 空
-        b"/usr/local/bin/python: ModuleNotFoundError: No module named 'runner'\n",
-    ]
-    fake_container.wait.return_value = {"StatusCode": 1}
-    fake_container.attrs = {"State": {"OOMKilled": False}}
-    fake_container.id = "cid-empty-stderr"
-    fake_container.reload = MagicMock()
-
-    fake_runner = MagicMock()
-    fake_runner.container = fake_container
-    fake_runner.id = "cid-empty-stderr"
-    fake_runner.name = "empty-stderr-runner"
-    fake_runner.stop_and_remove = MagicMock()
-
-    mgr = AgentRunnerManager.__new__(AgentRunnerManager)
-    mgr._client = MagicMock()
-
-    with patch.object(mgr, "create", return_value=fake_runner):
-        spec = AgentRunnerSpec(host_workdir="/tmp/x", env={})
+    spec = AgentRunnerSpec(host_workdir="/tmp/x", agent_spec={"node_key": "audit"})
+    with patch.object(mgr, "create", return_value=fake_runner), \
+         patch.object(mgr, "_wait_runner_ready", return_value="http://10.0.0.9:8000"), \
+         patch.object(
+             mgr, "_consume_sse",
+             return_value=(0, False, ""),
+         ):
         exit_code, summary = mgr.run_with_streaming(spec, lambda e: None)
 
-    assert exit_code == 1
-    assert "No module named 'runner'" in summary["stderr_tail"]
+    assert exit_code == 0
+    assert "cid-active" not in mgr._active_ids
+    assert summary["transcript"] == ""
+    assert summary["oom_killed"] is False
+    assert summary["stderr_tail"] == ""
 
 
-def _make_mgr_with(fake_container, runner_name="r"):
+def test_sse_events_flow_to_on_event_and_transcript():
+    fake_container = MagicMock()
+    fake_container.id = "cid-sse"
+    fake_container.reload = MagicMock()
+    fake_runner = MagicMock()
+    fake_runner.container = fake_container
+    fake_runner.id = "cid-sse"
+    fake_runner.name = "sse-runner"
+    fake_runner.stop_and_remove = MagicMock()
+
+    envelopes = [
+        {"event_type": "agent.message", "sequence": 1, "timestamp": 1.0,
+         "session_id": "s1", "parent_tool_use_id": None, "payload": {"text": "hi"}},
+        {"event_type": "runner.exit", "sequence": 2, "timestamp": 2.0,
+         "session_id": "s1", "parent_tool_use_id": None, "payload": {"exit_code": 0}},
+    ]
+
+    captured_events: list[dict] = []
+
+    def fake_consume(runner, handle, spec, token, transcript_events, on_event):
+        for env in envelopes:
+            from app.core.agent_runner import RUNNER_EXIT_EVENT, decode_envelope
+            flat = decode_envelope(env)
+            transcript_events.append(flat)
+            if flat["type"] != RUNNER_EXIT_EVENT:
+                on_event(flat)
+        return 0, False, ""
+
     mgr = AgentRunnerManager.__new__(AgentRunnerManager)
     mgr._client = MagicMock()
     mgr._active_ids = set()
+
+    spec = AgentRunnerSpec(host_workdir="/tmp/x", agent_spec={"node_key": "audit"})
+    with patch.object(mgr, "create", return_value=fake_runner), \
+         patch.object(mgr, "_wait_runner_ready", return_value="http://10.0.0.9:8000"), \
+         patch.object(mgr, "_consume_sse", side_effect=fake_consume):
+        exit_code, summary = mgr.run_with_streaming(spec, captured_events.append)
+
+    assert exit_code == 0
+    assert [e["type"] for e in captured_events] == ["agent.message"]
+    assert "runner.exit" in summary["transcript"]
+    # on_ready 收到句柄且 cancel 可用
+    assert summary["container_id"] == "cid-sse"
+
+
+def test_run_with_streaming_propagates_on_ready_handle():
+    fake_container = MagicMock()
+    fake_container.id = "cid-ready"
     fake_runner = MagicMock()
     fake_runner.container = fake_container
-    fake_runner.id = fake_container.id
-    fake_runner.name = runner_name
-    fake_runner.stop_and_remove = MagicMock()
-    return mgr, fake_runner
+    fake_runner.id = "cid-ready"
+    fake_runner.name = "ready-runner"
+
+    mgr = AgentRunnerManager.__new__(AgentRunnerManager)
+    mgr._client = MagicMock()
+    mgr._active_ids = set()
+
+    seen: dict = {}
+
+    def on_ready(handle):
+        seen["handle"] = handle
+
+    spec = AgentRunnerSpec(host_workdir="/tmp/x", agent_spec={"node_key": "audit"})
+    with patch.object(mgr, "create", return_value=fake_runner), \
+         patch.object(mgr, "_wait_runner_ready", return_value="http://10.0.0.9:8000"), \
+         patch.object(mgr, "_consume_sse", return_value=(0, False, "")):
+        mgr.run_with_streaming(spec, lambda e: None, on_ready=on_ready)
+
+    handle = seen["handle"]
+    assert handle.container_id == "cid-ready"
+    assert handle.base_url == "http://10.0.0.9:8000"
 
 
-def test_runner_has_no_duration_timeout_and_waits_without_deadline():
-    """Agent 不按总运行时长停止；容器自行退出或由取消操作主动拆除。"""
+# ── SSE 帧解析 ──
+
+
+class FakeSSEResponse:
+    def __init__(self, lines):
+        self._lines = lines
+
+    def iter_lines(self):
+        return iter(self._lines)
+
+
+def test_iter_sse_events_parses_frames_and_skips_bad_json():
+    lines = [
+        "event: agent_event",
+        'data: {"event_type": "agent.message", "payload": {"text": "a"}}',
+        "",
+        "data: not-json",
+        "",
+        'data: {"event_type": "runner.exit", "payload": {"exit_code": 1}}',
+    ]
+    events = list(_iter_sse_events(FakeSSEResponse(lines)))
+    assert events[0]["event_type"] == "agent.message"
+    assert len(events) == 2, "非法 JSON 帧跳过"
+
+
+def test_iter_sse_events_handles_trailing_frame_without_blank():
+    lines = ['data: {"event_type": "agent.failed"}']
+    events = list(_iter_sse_events(FakeSSEResponse(lines)))
+    assert events == [{"event_type": "agent.failed"}]
+
+
+# ── stderr 诊断 ──
+
+
+def test_failed_container_stderr_in_summary():
+    """失败时 _stderr_tail 从 container.logs 取（stderr 优先）。"""
     fake_container = MagicMock()
-    fake_container.id = "cid-normal"
-    fake_container.logs.side_effect = [iter([])]
-    fake_container.wait.return_value = {"StatusCode": 0}
-    fake_container.attrs = {"State": {"OOMKilled": False}}
+    fake_container.logs.return_value = b"some error on stderr\nFATAL: bad key\n"
+    fake_container.reload = MagicMock()
 
-    mgr, fake_runner = _make_mgr_with(fake_container, "normal-runner")
-    with patch.object(mgr, "create", return_value=fake_runner):
-        spec = AgentRunnerSpec(host_workdir="/tmp/x")
-        exit_code, summary = mgr.run_with_streaming(spec, lambda e: None)
+    mgr = AgentRunnerManager.__new__(AgentRunnerManager)
+    fake_runner = MagicMock()
+    fake_runner.container = fake_container
+    tail = mgr._stderr_tail(fake_runner)
+    assert "FATAL: bad key" in tail
 
-    assert not hasattr(spec, "timeout_seconds")
-    fake_container.wait.assert_called_once_with(timeout=None)
-    assert exit_code == 0
-    assert summary["timed_out"] is False
+
+def test_failed_container_combined_logs_when_stderr_stream_empty():
+    """stderr-only 可能空，必须回退抓 stdout+stderr。"""
+    fake_container = MagicMock()
+    fake_container.logs.side_effect = [b"", b"/usr/local/bin/python: ModuleNotFoundError: No module named 'runner'\n"]
+    fake_container.reload = MagicMock()
+
+    mgr = AgentRunnerManager.__new__(AgentRunnerManager)
+    fake_runner = MagicMock()
+    fake_runner.container = fake_container
+    tail = mgr._stderr_tail(fake_runner)
+    assert "No module named 'runner'" in tail

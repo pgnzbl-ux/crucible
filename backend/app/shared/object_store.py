@@ -33,6 +33,7 @@ KIND_REGISTRY: dict[str, KindSpec] = {
     "evidence": KindSpec(BUCKET_TASK, presign=True, writable=True),
     "report": KindSpec(BUCKET_TASK, presign=True, writable=True),
     "node_run": KindSpec(BUCKET_TASK, presign=False, writable=True),
+    "transcript": KindSpec(BUCKET_TASK, presign=False, writable=True),
     "avatar": KindSpec(BUCKET_PUBLIC, presign=True, writable=False),
 }
 
@@ -134,6 +135,11 @@ def build_ref(kind: str, owner_id: str, **parts: str) -> ObjectRef:
         run_id = _safe_id(str(parts.get("run_id") or ""), "run_id")
         node_key = _safe_id(str(parts.get("node_key") or ""), "node_key")
         key = f"node_run/{owner}/{task_id}/{run_id}/{node_key}.tar.gz"
+    elif kind == "transcript":
+        task_id = _safe_id(str(parts.get("task_id") or ""), "task_id")
+        run_id = _safe_id(str(parts.get("run_id") or ""), "run_id")
+        node_key = _safe_id(str(parts.get("node_key") or ""), "node_key")
+        key = f"transcript/{owner}/{task_id}/{run_id}/{node_key}.jsonl"
     elif kind == "avatar":
         key = f"avatar/{owner}/profile"
     else:

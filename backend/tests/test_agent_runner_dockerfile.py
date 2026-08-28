@@ -63,3 +63,22 @@ def test_dockerfile_does_not_bake_node_skills():
     assert "COPY plugins/vuln-verify-expert" not in text
     assert "PLUGIN_DIR" not in text
     assert "/node-skill" in text
+
+
+def test_image_default_entrypoint_is_server_and_worker_relies_on_it():
+    """契约锁定：镜像默认入口 = HTTP/SSE 守护，worker 侧不传 command。
+
+    此前 CMD 改成 server 而 worker 仍按 stdout JSONL 消费，现网节点会全部
+    挂起到超时（P0 教训）。两侧契约由本测试钉死。
+    """
+    text = DOCKERFILE.read_text(encoding="utf-8")
+    assert 'ENTRYPOINT ["tini", "--"]' in text
+    assert 'CMD ["python", "-m", "runner.server"]' in text
+
+    from app.core.agent_runner import AgentRunnerManager
+
+    assert "command" not in AgentRunnerManager.create.__code__.co_names or True
+    import inspect
+
+    src = inspect.getsource(AgentRunnerManager.create)
+    assert '"command"' not in src, "worker 不得覆盖镜像默认入口（tini → runner.server）"

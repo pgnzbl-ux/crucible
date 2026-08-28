@@ -1,26 +1,26 @@
 """
-agent-runner 容器冒烟测试 — 替代原 smoke_sandbox.py。
+agent-runner 容器冒烟测试（HTTP/SSE 守护模式）。
 
 覆盖 5 个 case：
-  Case 1: 镜像存在 + 拉起容器 + 收至少 1 条事件 + 自动清理
-  Case 2: 行缓冲解析（半行 chunk 拼接）
-  Case 3: OOM（mem_limit=128m + 触发大内存，断言 OOMKilled）
-  Case 4: 取消（拉起容器 + 5 秒后 docker kill）
-  Case 5: 临时目录清理（agent-runner 跑完后 workdir 已被 rmtree）
+  Case 1: 镜像存在 + 拉起容器 + HTTP 就绪 + /v1/execute 事件流 + runner.exit 终帧 + 自动清理
+  Case 2: SSE 帧解析（data: JSON、坏帧跳过、尾帧无空行）
+  Case 3: OOM（mem_limit=128m，断言容器被强杀或拉起失败）
+  Case 4: 取消（拉起容器 + docker kill，断言 137/143）
+  Case 5: 临时目录清理（workdir rmtree）
 
 运行：
     cd backend
     python tests/smoke_agent_runner.py
 
 注意：
-- 需要本机 docker daemon（与原 sandbox 测试相同）
-- 不需要真实 LLM 凭据（容器内 SDK 调用会因 missing env 失败，但容器本身能跑起来）
-- Case 1 期望收到 agent.failed 事件（凭据缺失），证明事件流通道打通
+- 需要本机 docker daemon；需先构建镜像：
+  docker build -f backend/agent-runner/Dockerfile -t crucible-agent-runner:base .
+- 不需要真实 LLM 凭据：gateway 因缺少 ANTHROPIC_MODEL 走 SPEC_INVALID 失败路径，
+  正好验证「SSE 通道 + 失败事件 + 终帧 + 退出码」全链路。
 """
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import sys
@@ -32,45 +32,38 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.core.agent_runner import (  # noqa: E402
     AgentRunnerError,
     AgentRunnerSpec,
-    LineBufferedJsonParser,
+    _iter_sse_events,
     agent_runner_manager,
 )
 
-
-PROMPT_JSON_TEMPLATE = {
-    "task_id": "smoke-00000000",
-    "run_id": "smoke-run-00000000",
-    "project_address": "https://example.com/test.git",
-    "project_ref": "main",
-    "vulnerability_description": "smoke test - 漏洞验证",
+AGENT_SPEC_BODY = {
+    "node_key": "smoke",
+    "node_payload": {"note": "smoke test"},
+    "submit_schema": None,
+    "skill_path": None,
+    "max_turns": 2,
 }
 
 
+def _make_workdir(prefix: str) -> str:
+    workdir = tempfile.mkdtemp(prefix=prefix)
+    os.makedirs(os.path.join(workdir, "project"), exist_ok=True)
+    return workdir
+
+
 def _case_1_basic_lifecycle() -> None:
-    print("\n=== Case 1: 基础生命周期 ===")
-    # 1. 镜像存在
+    print("\n=== Case 1: 基础生命周期（HTTP/SSE） ===")
     assert agent_runner_manager.image_exists(), (
         f"agent-runner 镜像不存在: {agent_runner_manager._resolve_defaults(AgentRunnerSpec()).image}\n"
         f"先构建：docker build -f backend/agent-runner/Dockerfile -t crucible-agent-runner:base ."
     )
     print("[OK] 镜像存在")
 
-    # 2. 准备 host 临时目录
-    workdir = tempfile.mkdtemp(prefix="crucible-smoke-")
-    prompt_path = os.path.join(workdir, ".prompt.json")
-    with open(prompt_path, "w", encoding="utf-8") as f:
-        json.dump(PROMPT_JSON_TEMPLATE, f, ensure_ascii=False)
-    # 容器内需要 /workspace/project/ 存在（哪怕是空目录）
-    os.makedirs(os.path.join(workdir, "project"), exist_ok=True)
-
-    # 3. 拉起容器（不注入真实凭据，预期收到 agent.failed 事件）
+    workdir = _make_workdir("crucible-smoke-")
     spec = AgentRunnerSpec(
         host_workdir=workdir,
-        env={
-            # 故意不设 ANTHROPIC_API_KEY，让容器内 run_one.py 失败
-            "PYTHONUNBUFFERED": "1",
-            "HOME": "/tmp",
-        },
+        env={"PYTHONUNBUFFERED": "1", "HOME": "/tmp"},
+        agent_spec=dict(AGENT_SPEC_BODY),
         cpu_limit=0.5,
         memory_limit="512m",
     )
@@ -78,111 +71,89 @@ def _case_1_basic_lifecycle() -> None:
     try:
         exit_code, summary = agent_runner_manager.run_with_streaming(
             spec=spec,
-            on_event=lambda e: events.append(e),
+            on_event=events.append,
         )
-        print(f"[OK] 容器跑完: exit_code={exit_code}, container={summary.get('container_name')}")
+        print(f"[OK] 执行完成: exit_code={exit_code}, container={summary.get('container_name')}")
     except AgentRunnerError as e:
         shutil.rmtree(workdir, ignore_errors=True)
-        raise AssertionError(f"拉起失败: {e}")
+        raise AssertionError(f"HTTP/SSE 执行失败: {e}")
 
-    # 4. 断言收到事件（凭据缺失应至少 1 条 agent.failed）
-    assert len(events) >= 1, f"应至少 1 条事件，实际 {len(events)} 条"
-    print(f"[OK] 收到 {len(events)} 条事件")
-    event_types = {e.get("type") for e in events}
-    print(f"[INFO] 事件类型集合: {event_types}")
+    # 无凭据：SPEC_INVALID 失败事件 + runner.exit(2) 终帧（on_event 不含终帧）
+    types_ = [e.get("type") for e in events]
+    assert "agent.failed" in types_, f"应含 agent.failed（缺模型凭据），实际 {types_}"
+    assert "runner.exit" not in types_, "终帧不应进入 on_event 回调"
+    assert exit_code == 2, f"缺凭据应为 exit 2，实际 {exit_code}"
+    assert "runner.exit" in summary["transcript"], "transcript 应含终帧"
+    print(f"[OK] 事件 {len(events)} 条、终帧与退出码契约正确")
 
-    # 5. 清理
     shutil.rmtree(workdir, ignore_errors=True)
     print("[OK] 临时目录已清理")
 
 
-def _case_2_line_buffer_parser() -> None:
-    print("\n=== Case 2: 行缓冲解析（半行 chunk 拼接） ===")
-    parser = LineBufferedJsonParser()
+def _case_2_sse_frame_parser() -> None:
+    print("\n=== Case 2: SSE 帧解析 ===")
 
-    # 半行 chunk1（缺结尾 \n）
-    chunk1 = b'{"type":"phase.updated","phase":"start"'
-    events = list(parser.feed(chunk1))
-    assert len(events) == 0, f"半行不应产生事件，实际 {len(events)} 条"
-    print("[OK] 半行不产生事件")
+    class FakeResp:
+        def __init__(self, lines):
+            self._lines = lines
 
-    # 完成 chunk2
-    chunk2 = b',"sequence":1,"timestamp":1.0}\n'
-    events = list(parser.feed(chunk2))
-    assert len(events) == 1, f"完成行应产生 1 条事件，实际 {len(events)} 条"
-    assert events[0]["type"] == "phase.updated", f"事件 type 错误: {events[0]}"
-    assert events[0]["phase"] == "start"
-    print("[OK] 半行 + 完成行正确拼接")
+        def iter_lines(self):
+            return iter(self._lines)
 
-    # 多行 + 空行
-    chunk3 = b'{"type":"agent.message","text":"hi"}\n\n{"type":"raw","content":"x"}\n'
-    events = list(parser.feed(chunk3))
-    assert len(events) == 2, f"多行应产生 2 条事件，实际 {len(events)} 条"
-    assert events[0]["type"] == "agent.message"
-    assert events[1]["type"] == "raw"
-    print("[OK] 多行 + 空行正确处理")
+    frames = [
+        "event: agent_event",
+        'data: {"event_type": "agent.message", "payload": {"text": "hi"}}',
+        "",
+        "data: broken-json",
+        "",
+        'data: {"event_type": "runner.exit", "payload": {"exit_code": 0}}',
+    ]
+    events = list(_iter_sse_events(FakeResp(frames)))
+    assert len(events) == 2, f"坏帧应跳过，实际 {events}"
+    assert events[0]["payload"]["text"] == "hi"
+    assert events[1]["payload"]["exit_code"] == 0
+    print("[OK] data 帧解析、坏帧跳过")
 
-    # 非法 JSON 容忍
-    chunk4 = b"not-json-line\n"
-    events = list(parser.feed(chunk4))
+    tail = ['data: {"event_type": "agent.failed"}']
+    events = list(_iter_sse_events(FakeResp(tail)))
     assert len(events) == 1
-    assert events[0]["type"] == "raw"
-    print("[OK] 非法 JSON 容忍为 raw 事件")
-
-    # flush
-    chunk5 = b'{"type":"last","no":"newline"'
-    events = list(parser.feed(chunk5))
-    assert len(events) == 0
-    events = list(parser.flush())
-    assert len(events) == 1
-    assert events[0]["type"] == "last"
-    print("[OK] flush 处理残余")
+    print("[OK] 无结尾空行的尾帧处理")
 
 
 def _case_3_oom() -> None:
-    print("\n=== Case 3: OOM 测试（mem=128m + 拉起大容器） ===")
-    workdir = tempfile.mkdtemp(prefix="crucible-smoke-oom-")
-    prompt_path = os.path.join(workdir, ".prompt.json")
-    with open(prompt_path, "w", encoding="utf-8") as f:
-        json.dump(PROMPT_JSON_TEMPLATE, f, ensure_ascii=False)
-    os.makedirs(os.path.join(workdir, "project"), exist_ok=True)
-
+    print("\n=== Case 3: OOM 测试（mem=128m） ===")
+    workdir = _make_workdir("crucible-smoke-oom-")
     spec = AgentRunnerSpec(
         host_workdir=workdir,
         env={"PYTHONUNBUFFERED": "1", "HOME": "/tmp"},
+        agent_spec=dict(AGENT_SPEC_BODY),
         cpu_limit=0.5,
         memory_limit="128m",  # 故意极小
     )
     try:
         exit_code, summary = agent_runner_manager.run_with_streaming(
             spec=spec,
-            on_event=lambda e: None,  # 不收集事件，只关注容器结局
+            on_event=lambda e: None,
         )
         print(f"[INFO] exit_code={exit_code}, oom_killed={summary.get('oom_killed')}")
-        # 128m + python 解释器本身可能刚启动就 OOM；事件流可能根本没机会输出
-        # 这里只断言容器被 docker 强制结束（exit_code != 0 或 OOM killed）
         assert exit_code != 0 or summary.get("oom_killed"), (
             f"128m 内存限制未生效（exit_code={exit_code}, oom_killed={summary.get('oom_killed')}）"
         )
         print("[OK] OOM 限制生效")
     except AgentRunnerError as e:
-        # 拉起本身失败也算通过（极少内存下 docker 拒绝创建也算正常）
-        print(f"[INFO] 拉起失败（符合预期）: {e}")
+        # 就绪等待期间容器被 OOM 杀掉也会走这里（符合预期）
+        print(f"[INFO] 容器提前退出（符合预期）: {str(e)[:200]}")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
 def _case_4_cancel() -> None:
-    print("\n=== Case 4: 取消测试（拉起 + 5 秒后 kill） ===")
-    workdir = tempfile.mkdtemp(prefix="crucible-smoke-cancel-")
-    prompt_path = os.path.join(workdir, ".prompt.json")
-    with open(prompt_path, "w", encoding="utf-8") as f:
-        json.dump(PROMPT_JSON_TEMPLATE, f, ensure_ascii=False)
-    os.makedirs(os.path.join(workdir, "project"), exist_ok=True)
-
+    print("\n=== Case 4: 取消测试（拉起 + docker kill） ===")
+    workdir = _make_workdir("crucible-smoke-cancel-")
     spec = AgentRunnerSpec(
         host_workdir=workdir,
         env={"PYTHONUNBUFFERED": "1", "HOME": "/tmp"},
+        agent_spec=dict(AGENT_SPEC_BODY),
         cpu_limit=0.5,
         memory_limit="512m",
     )
@@ -191,11 +162,10 @@ def _case_4_cancel() -> None:
         runner = agent_runner_manager.create(spec)
         print(f"[OK] 拉起: {runner.name}")
 
-        time.sleep(2)  # 给容器一点启动时间
+        time.sleep(2)
         runner.container.kill()
         print("[OK] docker kill 完成")
 
-        # wait 同步等待（已被 kill，会快速返回）
         wait_result = runner.container.wait()
         exit_code = int(wait_result.get("StatusCode", 1))
         print(f"[INFO] exit_code={exit_code}")
@@ -210,25 +180,20 @@ def _case_4_cancel() -> None:
 
 
 def _case_5_workdir_cleanup() -> None:
-    print("\n=== Case 5: 临时目录清理（tasks.py rmtree 路径模拟） ===")
+    print("\n=== Case 5: 临时目录清理 ===")
     workdir = tempfile.mkdtemp(prefix="crucible-smoke-cleanup-")
     assert os.path.isdir(workdir)
-    print(f"[OK] 创建: {workdir}")
-
-    # 模拟 tasks.py 的 finally 清理
     shutil.rmtree(workdir, ignore_errors=True)
     assert not os.path.isdir(workdir)
     print("[OK] rmtree 后目录消失")
 
-    # 测试不存在的路径不会抛
     shutil.rmtree("/tmp/crucible-nonexistent-12345", ignore_errors=True)
     print("[OK] 不存在路径 rmtree 安全")
 
 
 def main() -> None:
-    print("=== agent-runner 容器冒烟测试 ===")
+    print("=== agent-runner 容器冒烟测试（HTTP/SSE 模式） ===")
 
-    # 镜像检查（先 fail-fast：未构建镜像直接报错）
     if not agent_runner_manager.image_exists():
         print(
             f"[FAIL] agent-runner 镜像不存在\n"
@@ -237,12 +202,11 @@ def main() -> None:
         sys.exit(1)
 
     _case_1_basic_lifecycle()
-    _case_2_line_buffer_parser()
+    _case_2_sse_frame_parser()
     _case_3_oom()
     _case_4_cancel()
     _case_5_workdir_cleanup()
 
-    # 保险 B 巡检
     removed = agent_runner_manager.cleanup_stale(max_age_seconds=0)
     print(f"[OK] 巡检清理 {removed} 个过期容器")
 

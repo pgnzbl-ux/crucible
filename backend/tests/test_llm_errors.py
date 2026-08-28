@@ -111,7 +111,7 @@ async def test_missing_output_prefers_llm_failure_event(tmp_path, monkeypatch):
         },
     ]
 
-    def _fake_run(spec, on_event):
+    def _fake_run(spec, on_event, on_ready=None):
         for ev in events:
             on_event(ev)
         return 1, {"stderr_tail": "", "timed_out": False}

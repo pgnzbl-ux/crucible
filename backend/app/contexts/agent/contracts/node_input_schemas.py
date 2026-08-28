@@ -1,11 +1,12 @@
-"""AI 节点 submit_result 工具的 input schema —— 全平台单一真相。
+"""AI 节点 submit_result 工具的 input schema —— 全平台单一真相（backend 所有）。
 
-同时被两处消费，必须只此一份，禁止再各自维护副本：
-- 容器内 `runner.run_one`：构造 submit_result MCP 工具（AI 实际看到的形状提示）。
-- 后端 `app.contexts.agent.ai_runner`：仅测试 / 契约引用（运行时不构造工具）。
+消费方：
+- 后端 `app.contexts.agent.ai_runner`：构造 AgentSpec.submit_schema，随 HTTP
+  请求下发 runner（纯净网关不内置任何业务契约）。
+- 测试 / 契约引用。
 
-本模块零第三方依赖（纯 dict），后端 import 不会拖入 claude_agent_sdk，
-容器 / 后端 / 单测都能安全导入。真正拒形状仍是后端 `validate_output`。
+本模块零第三方依赖（纯 dict）。真正拒形状仍是后端 `validate_output`，
+schema 只是 AI 看到的形状提示。
 
 MCP 工具 schema 约束（2026-08-19 教训）：Anthropic 工具接口只保证
 `type/properties/required` 子集；顶层 `allOf`/`if`/`then`/`const` 会让

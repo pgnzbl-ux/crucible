@@ -1,15 +1,16 @@
 """
-agent-runner 容器编排 + 流式消费 — Crucible 唯一的容器抽象（替代原 SandboxManager）。
+agent-runner 容器编排 + HTTP/SSE 流消费 — Crucible 唯一的容器抽象（替代原 SandboxManager）。
 
 设计原则：
 - Agent Runner = Claude Agent SDK 的隔离执行环境，与代码层（FastAPI / Celery）物理隔离
-- 凭据仅通过 docker run --env 注入，容器销毁 env 消失（零落盘）
-- 流式 stdout 通过 container.logs(stream=True) + 自建行缓冲解析（跨 chunk 半行处理）
+- 容器默认入口为镜像内 runner.server（FastAPI/SSE 守护）；worker 经 HTTP 驱动执行
+- 凭据仅通过 docker env 注入 + 每容器随机 RUNNER_AUTH_TOKEN（server fail-closed 鉴权）
+- 事件通道：POST /v1/execute 的 SSE AgentEventEnvelope 流，解包为扁平事件回调
 - 同步接口：run_with_streaming() 内部全同步（适配 Celery asyncio.to_thread 包装）
-- 取消双保险：信号钩子 + cleanup_stale 巡检
+- 取消三保险：on_ready 句柄软/硬取消 + cleanup_stale 巡检 + 容器强杀兜底
 
 线程模型：
-- 本模块全同步实现（Docker SDK 同步 API）
+- 本模块全同步实现（Docker SDK + httpx 同步 API）
 - Celery worker 通过 asyncio.to_thread 调用本模块
 - 回调 on_event 在同步线程内执行，落库由 on_event 通过 asyncio.run_coroutine_threadsafe 跨入主 loop
 """
@@ -24,9 +25,10 @@ import subprocess
 import time
 import uuid
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import docker
+import httpx
 from docker.errors import DockerException, ImageNotFound, NotFound
 from docker.types import LogConfig
 
@@ -42,6 +44,16 @@ AGENT_RUNNER_NETWORK = "crucible-sandbox-net"
 AGENT_EXTRA_HOSTS: dict[str, str] = {}
 # 自定义 bridge 在 Docker Desktop 上 127.0.0.11 经常解析不了公网；写死公共 DNS。
 AGENT_RUNNER_DNS = ["223.5.5.5", "8.8.8.8", "1.1.1.1"]
+
+# runner server（镜像内 FastAPI）端口与就绪等待
+_RUNNER_PORT = 8000
+_RUNNER_READY_TIMEOUT_SECONDS = 120.0
+_RUNNER_READY_POLL_INTERVAL = 0.5
+# 终帧缺失（流中断）后容器仍未退出时的宽限
+_RUNNER_STOP_GRACE_SECONDS = 15
+
+# 终帧事件类型（与镜像内 runner.schemas.RUNNER_EXIT_EVENT 对齐；core 不 import runner 包）
+RUNNER_EXIT_EVENT = "runner.exit"
 
 
 class AgentRunnerError(Exception):
@@ -80,48 +92,75 @@ def _runner_labels(name: str, spec: AgentRunnerSpec) -> dict[str, str]:
     return labels
 
 
-# ─ ── 行缓冲 JSONL 解析器（应对 docker logs 按字节 chunk 切分） ──
+# ─ ── SSE 解包与执行句柄 ──
 
 
-class LineBufferedJsonParser:
-    """按 \\n 切分字节 chunk，拼完整行后 json.loads。
-    用于 container.logs(stream=True) 输出（按 docker daemon 缓冲切分，不保证行边界）。
-    """
+def decode_envelope(envelope: dict) -> dict:
+    """AgentEventEnvelope → 扁平事件（backend on_event 消费格式，与旧 stdout JSONL 同构）。"""
+    flat = dict(envelope.get("payload") or {})
+    flat["type"] = str(envelope.get("event_type") or envelope.get("type") or "raw.message")
+    for key in ("sequence", "timestamp", "session_id", "parent_tool_use_id"):
+        if envelope.get(key) is not None:
+            flat[key] = envelope[key]
+    return flat
 
-    def __init__(self) -> None:
-        self._buffer = b""
 
-    def feed(self, chunk: bytes) -> Iterator[dict]:
-        """喂一个 chunk，返回零或多条解析出的事件。"""
-        if not chunk:
-            return
-        self._buffer += chunk
-        while b"\n" in self._buffer:
-            line, self._buffer = self._buffer.split(b"\n", 1)
-            yield from self._emit_line(line)
-
-    def flush(self) -> Iterator[dict]:
-        """EOF 时调用，处理最后一行（无 \\n 结尾）。"""
-        if self._buffer:
-            yield from self._emit_line(self._buffer)
-            self._buffer = b""
-
-    def _emit_line(self, raw: bytes) -> Iterator[dict]:
-        line = raw.strip()
+def _iter_sse_events(response: "httpx.Response") -> Iterator[dict]:
+    """解析 SSE 帧（event: 行忽略，data: JSON 收敛，空行分帧）。"""
+    data_lines: list[str] = []
+    for line in response.iter_lines():
         if not line:
-            return
+            if data_lines:
+                raw = "\n".join(data_lines)
+                data_lines = []
+                try:
+                    yield json.loads(raw)
+                except json.JSONDecodeError:
+                    logger.warning("agent-runner SSE 非法 JSON 帧（跳过）: %s", raw[:200])
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line[len("data:"):].strip())
+    if data_lines:
         try:
-            yield json.loads(line.decode("utf-8", errors="replace"))
-            return
+            yield json.loads("\n".join(data_lines))
         except json.JSONDecodeError:
-            pass
-        # 非法 JSON：兜底为 raw 事件（不阻塞流）
-        logger.warning(f"agent-runner 非 JSONL 行（跳过）: {line[:200]}")
-        yield {
-            "type": "raw",
-            "content": line.decode("utf-8", errors="replace")[:500],
-            "timestamp": time.time(),
-        }
+            logger.warning("agent-runner SSE 尾帧非法 JSON（跳过）")
+
+
+def _runner_base_url(container) -> str:
+    """runner.server 的宿主侧访问地址：环回 + 随机发布端口。
+
+    环境防火墙普遍拦宿主直连 bridge IP（WSL2/加固内核实测超时），且环回绑定
+    保证服务不暴露到局域网——发布端口走 docker DNAT，两者同时满足。
+    """
+    ports = (container.attrs.get("NetworkSettings") or {}).get("Ports") or {}
+    for binding in ports.get(f"{_RUNNER_PORT}/tcp") or []:
+        host_port = binding.get("HostPort")
+        if host_port:
+            return f"http://127.0.0.1:{host_port}"
+    return ""
+
+
+class ActiveRunnerHandle:
+    """运行中 agent-runner 的控制句柄（on_ready 回调交给调度层，用于软/硬取消）。"""
+
+    def __init__(self, container_id: str, container_name: str, base_url: str, token: str) -> None:
+        self.container_id = container_id
+        self.container_name = container_name
+        self.base_url = base_url
+        self._token = token
+
+    def cancel(self, timeout: float = 5.0) -> bool:
+        """请求 runner 收尾当前任务（软+硬取消）；网络失败静默返回 False。"""
+        try:
+            resp = httpx.post(
+                f"{self.base_url}/v1/cancel",
+                headers={"Authorization": f"Bearer {self._token}"},
+                timeout=timeout,
+            )
+            return resp.status_code == 200
+        except Exception:  # noqa: BLE001 — 取消尽力而为
+            return False
 
 
 # ─ ── Spec ─ ──
@@ -140,15 +179,16 @@ class AgentRunnerSpec:
     memory_limit: str | None = None
     network: str | None = None
     env: dict[str, str] = field(default_factory=dict)
+    # AgentSpec body（HTTP /v1/execute 的 JSON）；契约由 backend 下发，core 仅透传
+    agent_spec: dict | None = None
     host_workdir: str = ""                  # bind mount 源（host 路径 → /workspace）
     # 当前节点 skill 目录（host）→ /node-skill:ro；只挂本节点，不进镜像
     skill_host_dir: str | None = None
-    prompt_json_filename: str = ".prompt.json"
     workdir_container: str = "/workspace"
     user: str = "1000:1000"
     extra_labels: dict[str, str] = field(default_factory=dict)
     pids_limit: int = 256
-    network_disabled: bool = False           # True = 完全断网（强隔离）
+    network_disabled: bool = False           # True = 完全断网（强隔离；HTTP 驱动不可用）
     # 用空 tmpfs 遮蔽 /workspace 下的敏感子路径（如 .secrets/），轻工位节点用
     hide_workspace_paths: tuple[str, ...] = ()
 
@@ -242,7 +282,7 @@ class AgentRunnerManager:
         container_config: dict = {
             "image": spec.image,
             "name": name,
-            # 不覆盖镜像 ENTRYPOINT（tini → python -m runner.run_one）
+            # 不覆盖镜像入口（tini → python -m runner.server，HTTP/SSE 守护）
             "environment": {**spec.env, "PYTHONPATH": "/app"},
             "working_dir": spec.workdir_container,
             "user": spec.user,
@@ -270,6 +310,11 @@ class AgentRunnerManager:
                 type="json-file",
                 config={"max-size": "10m", "max-file": "3"},
             ),
+            # runner.server 仅发布到宿主环回随机端口：防火墙拦宿主直连 bridge IP，
+            # 环回绑定又保证服务不暴露到局域网（HTTP 驱动经此端口访问）
+            **({} if spec.network_disabled else {
+                "ports": {f"{_RUNNER_PORT}/tcp": ("127.0.0.1", None)},
+            }),
             "detach": True,
         }
         if AGENT_EXTRA_HOSTS:
@@ -313,86 +358,105 @@ class AgentRunnerManager:
             spec.network = settings.agent_runner_network
         return spec
 
-    # ── 一站式流式拉起 ──
+    # ── 一站式流式拉起（HTTP/SSE 驱动） ──
+
+    def _wait_runner_ready(self, runner: "AgentRunner", token: str) -> str:
+        """等待容器内 runner.server 就绪，返回环回 base_url（随机发布端口）。
+
+        容器退出/未分配端口/超时均视为基础设施失败（收集日志辅助排障）。
+        """
+        deadline = time.monotonic() + _RUNNER_READY_TIMEOUT_SECONDS
+        base_url = ""
+        while time.monotonic() < deadline:
+            try:
+                runner.container.reload()
+                state = (runner.container.attrs.get("State") or {})
+                if state.get("Status") in ("exited", "dead"):
+                    raise AgentRunnerError(
+                        "agent-runner 容器在就绪等待期间退出："
+                        f"{runner.read_logs(tail=40)[-800:] or '（无日志）'}"
+                    )
+                if not base_url:
+                    base_url = _runner_base_url(runner.container)
+            except NotFound:
+                raise AgentRunnerError("agent-runner 容器在就绪等待期间被移除") from None
+            if base_url:
+                try:
+                    resp = httpx.get(f"{base_url}/health", timeout=2.0)
+                    if resp.status_code == 200:
+                        return base_url
+                except Exception:  # noqa: BLE001 — 未就绪，继续轮询
+                    pass
+            time.sleep(_RUNNER_READY_POLL_INTERVAL)
+        raise AgentRunnerError(
+            f"agent-runner 服务未在 {_RUNNER_READY_TIMEOUT_SECONDS:.0f}s 内就绪: "
+            f"{runner.read_logs(tail=40)[-800:] or '（无日志）'}"
+        )
+
+    def _container_exit_code(self, runner: "AgentRunner") -> int:
+        """容器已退出时的退出码；被强删/不可见按 137 处理。"""
+        try:
+            runner.container.reload()
+            state = runner.container.attrs.get("State") or {}
+            if state.get("Running"):
+                return -1
+            return int(state.get("ExitCode", 1) or 1)
+        except NotFound:
+            return 137
+        except DockerException:
+            return 1
 
     def run_with_streaming(
         self,
         spec: AgentRunnerSpec,
         on_event: Callable[[dict], None],
+        *,
+        on_ready: Callable[[ActiveRunnerHandle], None] | None = None,
     ) -> tuple[int, dict]:
-        """拉起 agent-runner 容器 + 流式消费 stdout JSONL + 收尾清理。
+        """拉起容器 + 等就绪 + 消费 /v1/execute SSE + 收尾清理。
 
-        全程同步：
-          - 拉起容器（同步 docker SDK）
-          - container.logs(stream=True, follow=True) 同步迭代
-          - 行缓冲解析 → on_event(event) 同步回调
-          - container.wait() 同步等待结束
-          - 容器清理
-
+        全程同步：Docker SDK 拉起容器，httpx 消费 SSE，事件解包为扁平 dict
+        后逐条回调 on_event（runner.exit 终帧只入 summary，不进回调）。
         返回 (exit_code, summary)。
         """
-        runner: AgentRunner | None = None
-        parser = LineBufferedJsonParser()
+        if not spec.agent_spec:
+            raise AgentRunnerError("AgentRunnerSpec.agent_spec 必填（HTTP/SSE 驱动的执行契约）")
+        if spec.network_disabled:
+            raise AgentRunnerError("network_disabled=True 与 HTTP/SSE 驱动不兼容（无法访问 runner 服务）")
+
+        token = uuid.uuid4().hex
+        spec = replace(spec, env={**spec.env, "RUNNER_AUTH_TOKEN": token})
+        transcript_events: list[dict] = []
         if not hasattr(self, "_active_ids"):
             self._active_ids = set()
+        runner: AgentRunner | None = None
+        exit_code = 2
         try:
             runner = self.create(spec)
             logger.info(f"agent-runner 容器启动: {runner.name} image={spec.image}")
-
-            # 边消费边回调（行缓冲）
-            for chunk in runner.container.logs(
-                stream=True, follow=True, stdout=True, stderr=False
-            ):
-                if isinstance(chunk, bytes):
-                    pass
-                elif isinstance(chunk, str):
-                    chunk = chunk.encode("utf-8")
-                else:
-                    chunk = str(chunk).encode("utf-8")
-                for event in parser.feed(chunk):
-                    on_event(event)
-
-            # EOF：flush 残余
-            for event in parser.flush():
-                on_event(event)
-
-            # logs(follow=True) 结束后容器应已退出；不按运行时长强制 stop/kill。
-            wait_result = runner.container.wait(timeout=None)
-            exit_code = int(wait_result.get("StatusCode", 1))
-
-            # 检查 OOM
-            runner.container.reload()
-            state = runner.container.attrs.get("State", {}) or {}
-            oom_killed = bool(state.get("OOMKilled", False))
-            if oom_killed and exit_code == 137:
-                logger.warning(f"agent-runner 容器 OOM kill: {runner.name}")
-
-            # 失败时(非 0 且非 OOM)在删容器前抓 stderr,供 executor 诊断。
-            # 此前 executor 在 finally 后才取,那时容器已删 → 永远空。
-            stderr_tail = ""
-            if exit_code != 0 and not oom_killed:
+            base_url = self._wait_runner_ready(runner, token)
+            handle = ActiveRunnerHandle(runner.id, runner.name, base_url, token)
+            if on_ready is not None:
                 try:
-                    raw = runner.container.logs(tail=80, stdout=False, stderr=True)
-                    if isinstance(raw, bytes):
-                        stderr_tail = raw.decode("utf-8", errors="replace")
-                    else:
-                        stderr_tail = str(raw)
-                    # stderr-only 常为空；python -m 的 ModuleNotFound 也可能落在未分离的 stdout
-                    if not stderr_tail.strip():
-                        raw = runner.container.logs(tail=80)
-                        if isinstance(raw, bytes):
-                            stderr_tail = raw.decode("utf-8", errors="replace")
-                        else:
-                            stderr_tail = str(raw)
-                except Exception:  # noqa: BLE001 — 抓 stderr 失败不阻断
-                    pass
+                    on_ready(handle)
+                except Exception:  # noqa: BLE001 — 回调异常不阻断执行
+                    logger.warning("on_ready 回调失败", exc_info=True)
 
+            exit_code, oom_killed, stderr_tail = self._consume_sse(
+                runner, handle, spec, token, transcript_events, on_event
+            )
+
+            transcript_text = (
+                "\n".join(json.dumps(e, ensure_ascii=False) for e in transcript_events)
+                + ("\n" if transcript_events else "")
+            )
             summary = {
                 "container_id": runner.id,
                 "container_name": runner.name,
                 "exit_code": exit_code,
                 "oom_killed": oom_killed,
                 "stderr_tail": stderr_tail,
+                "transcript": transcript_text,
                 "timed_out": False,
                 "stop_failed": "",
             }
@@ -401,14 +465,98 @@ class AgentRunnerManager:
         except AgentRunnerError:
             raise
         except DockerException as e:
-            raise AgentRunnerError(f"agent-runner 流式消费失败: {e}") from e
+            raise AgentRunnerError(f"agent-runner 容器编排失败: {e}") from e
         finally:
             if runner is not None:
                 self._active_ids.discard(runner.id)
                 try:
                     runner.stop_and_remove()
-                except Exception:
+                except Exception:  # noqa: BLE001
                     pass
+
+    def _consume_sse(
+        self,
+        runner: "AgentRunner",
+        handle: ActiveRunnerHandle,
+        spec: AgentRunnerSpec,
+        token: str,
+        transcript_events: list[dict],
+        on_event: Callable[[dict], None],
+    ) -> tuple[int, bool, str]:
+        """消费 /v1/execute SSE 流，返回 (exit_code, oom_killed, stderr_tail)。"""
+        exit_code = 2
+        saw_terminal = False
+        try:
+            with httpx.Client(timeout=None) as client:
+                with client.stream(
+                    "POST",
+                    f"{handle.base_url}/v1/execute",
+                    json=spec.agent_spec,
+                    headers={"Authorization": f"Bearer {token}"},
+                ) as resp:
+                    if resp.status_code != 200:
+                        body = resp.read().decode("utf-8", errors="replace")[:400]
+                        raise AgentRunnerError(
+                            f"agent-runner /v1/execute 拒绝执行 "
+                            f"(HTTP {resp.status_code}): {body}"
+                        )
+                    for envelope in _iter_sse_events(resp):
+                        if not isinstance(envelope, dict):
+                            continue
+                        flat = decode_envelope(envelope)
+                        if flat.get("type") == RUNNER_EXIT_EVENT:
+                            exit_code = int(flat.get("exit_code") or 0)
+                            saw_terminal = True
+                            transcript_events.append(flat)
+                            continue
+                        transcript_events.append(flat)
+                        on_event(flat)
+        except httpx.HTTPError as e:
+            logger.warning("agent-runner SSE 连接中断: %s", e)
+
+        oom_killed = False
+        stderr_tail = ""
+        if not saw_terminal:
+            # 流中断：容器若已退出（被强杀/自身崩溃）取其退出码；仍在运行则主动
+            # 请求 runner 收尾并给一个宽限，仍无终帧按基础设施失败处理。
+            code = self._container_exit_code(runner)
+            if code == 137:
+                exit_code = 137
+            elif code == -1:
+                handle.cancel(timeout=3.0)
+                time.sleep(_RUNNER_STOP_GRACE_SECONDS)
+                code = self._container_exit_code(runner)
+                exit_code = code if code not in (0, -1) else 2
+            else:
+                exit_code = code or 2
+        if exit_code == 137:
+            try:
+                runner.container.reload()
+                oom_killed = bool(
+                    (runner.container.attrs.get("State") or {}).get("OOMKilled", False)
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            if oom_killed:
+                logger.warning(f"agent-runner 容器 OOM kill: {runner.name}")
+        if exit_code != 0 and not oom_killed:
+            stderr_tail = self._stderr_tail(runner)
+        return exit_code, oom_killed, stderr_tail
+
+    def _stderr_tail(self, runner: "AgentRunner") -> str:
+        """失败时抓容器日志尾部（stderr 优先，空则混合），供节点诊断。"""
+        try:
+            raw = runner.container.logs(tail=80, stdout=False, stderr=True)
+            if isinstance(raw, bytes):
+                text = raw.decode("utf-8", errors="replace")
+            else:
+                text = str(raw)
+            if not text.strip():
+                raw = runner.container.logs(tail=80)
+                text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+            return text
+        except Exception:  # noqa: BLE001 — 抓日志失败不阻断
+            return ""
 
     def remove_for_workdir(self, host_workdir: str) -> int:
         """删除 bind 了该 host_workdir 的 agent-runner（取消时 worker 可能已被杀掉）。"""
@@ -717,7 +865,12 @@ def _classify_clone_error(stderr: str) -> str:
         return f"源码克隆失败: 网络错误: {snippet}"
     if "couldn't find remote ref" in low or ("remote branch" in low and "not found" in low):
         return f"源码克隆失败: 找不到该远端引用: {snippet}"
-    if "not found" in low or "authentication failed" in low or "permission denied" in low or "could not read username" in low:
+    if (
+        "not found" in low
+        or "authentication failed" in low
+        or "permission denied" in low
+        or "could not read username" in low
+    ):
         return f"源码克隆失败: 仓库不存在或无权访问: {snippet}"
     return f"源码克隆失败: {snippet or '未知 git 错误'}"
 
