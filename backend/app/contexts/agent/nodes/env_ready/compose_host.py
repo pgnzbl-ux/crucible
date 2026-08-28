@@ -262,6 +262,8 @@ async def docker_compose_up(
     lab_id: str | None = None,
     task_id: str | None = None,
     on_progress: Callable[[str], None] | None = None,
+    up_timeout: int = COMPOSE_UP_TIMEOUT,
+    wait_timeout: int = COMPOSE_WAIT_TIMEOUT,
 ) -> tuple[bool, str]:
     """在 host 就地执行 docker compose up -d --build，返回 (ok, error)。
 
@@ -288,7 +290,7 @@ async def docker_compose_up(
         "--progress", "plain",
         *_compose_project_args(_compose_ident(lab_id=lab_id, task_id=task_id)),
         "-f", abs_path, "up", "-d", "--build",
-        "--wait", "--wait-timeout", str(COMPOSE_WAIT_TIMEOUT),
+        "--wait", "--wait-timeout", str(wait_timeout),
     ]
 
     def _run() -> tuple[int, str, bool, str | None]:
@@ -321,7 +323,7 @@ async def docker_compose_up(
             timed_out = True
             proc.kill()
 
-        timer = threading.Timer(COMPOSE_UP_TIMEOUT, _kill)
+        timer = threading.Timer(up_timeout, _kill)
         timer.daemon = True
         timer.start()
         try:
@@ -344,7 +346,7 @@ async def docker_compose_up(
         if stall_err:
             return False, stall_err
         if timed_out:
-            return False, f"docker compose up 超时(>{COMPOSE_UP_TIMEOUT}s)"
+            return False, f"docker compose up 超时(>{up_timeout}s)"
         if rc == 0:
             return True, ""
         return False, summarize_compose_failure(out)

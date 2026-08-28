@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 _NODE_SKILLS_ROOT = (
     Path(__file__).resolve().parents[5]
-    / "infrastructure"
+    / "backend"
     / "agent-runner"
     / "node-skills"
 )

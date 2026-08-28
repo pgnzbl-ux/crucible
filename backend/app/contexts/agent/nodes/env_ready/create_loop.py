@@ -10,10 +10,11 @@ from app.contexts.agent.target_url import publish_target_url
 
 from ..base import NodeContext
 from . import ai_recipe, cache_recipe, compose_host, events, health, ports, reuse
+from .limits import DEFAULT_LIMITS, EnvReadyLimits, probe_attempts, resolve_limits
 
 logger = logging.getLogger(__name__)
 
-MAX_ATTEMPTS = 5
+MAX_ATTEMPTS = DEFAULT_LIMITS.max_attempts
 
 
 def _exclude_compose_project(lab_id: str | None) -> str | None:
@@ -68,9 +69,17 @@ async def _bump_node_attempt(ctx: NodeContext, attempt: int) -> None:
         logger.warning("更新 NodeRun.attempt 失败 attempt=%s", attempt, exc_info=True)
 
 
-async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
+async def _create_lab(
+    ctx: NodeContext,
+    result: Any,
+    limits: EnvReadyLimits | None = None,
+) -> dict[str, Any]:
     from app.contexts.lab.service import LabService
 
+    if limits is None:
+        limits = await resolve_limits(ctx)
+    max_attempts = limits.max_attempts
+    probe_retries = probe_attempts(limits)
     svc = LabService(ctx.db_session)
     last_error: str | None = None
     failed_stage: str | None = None
@@ -97,14 +106,14 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
         if last_error:
             failed_stage = "cached_recipe"
 
-        for attempt in range(1, MAX_ATTEMPTS + 1):
+        for attempt in range(1, max_attempts + 1):
             if not await svc.heartbeat_creation(result.lab_id, ctx.task_id):
                 raise RuntimeError("靶场创建权已转移，当前任务停止建场")
             await events.raise_if_cancelled(ctx)
             if attempt > 1:
                 await _bump_node_attempt(ctx, attempt)
             occupied = ports.list_docker_occupied_host_ports(exclude_project=exclude_project)
-            events._emit(ctx, f"第 {attempt}/{MAX_ATTEMPTS} 轮：AI 分析并写 Dockerfile/compose")
+            events._emit(ctx, f"第 {attempt}/{max_attempts} 轮：AI 分析并写 Dockerfile/compose")
             try:
                 recipe = await ai_recipe.run_ai_turn(
                     ctx,
@@ -123,7 +132,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 _snapshot_failed_attempt(ctx, attempt, last_error, failed_stage)
                 events._emit(
                     ctx,
-                    f"AI 未产出配方，回喂重试（{attempt}/{MAX_ATTEMPTS}）",
+                    f"AI 未产出配方，回喂重试（{attempt}/{max_attempts}）",
                 )
                 continue
             await cache_recipe._require_creation_owner(ctx, svc, result.lab_id)
@@ -137,7 +146,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 _snapshot_failed_attempt(ctx, attempt, last_error, failed_stage, recipe)
                 events._emit(
                     ctx,
-                    f"initial_creds 无效，回喂 AI 补查（{attempt}/{MAX_ATTEMPTS}）",
+                    f"initial_creds 无效，回喂 AI 补查（{attempt}/{max_attempts}）",
                 )
                 continue
 
@@ -154,7 +163,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 )
                 failed_stage = "recipe_validation"
                 _snapshot_failed_attempt(ctx, attempt, last_error, failed_stage, recipe)
-                events._emit(ctx, f"缺少 Web 端口映射，回喂 AI 回溯（{attempt}/{MAX_ATTEMPTS}）")
+                events._emit(ctx, f"缺少 Web 端口映射，回喂 AI 回溯（{attempt}/{max_attempts}）")
                 continue
 
             occupied = ports.list_docker_occupied_host_ports(exclude_project=exclude_project)
@@ -170,13 +179,13 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 _snapshot_failed_attempt(ctx, attempt, last_error, failed_stage, recipe)
                 events._emit(
                     ctx,
-                    f"端口 {conflicts} 已被占用，回喂 AI 改映射（{attempt}/{MAX_ATTEMPTS}）",
+                    f"端口 {conflicts} 已被占用，回喂 AI 改映射（{attempt}/{max_attempts}）",
                 )
                 continue
 
             compose_rel = compose_host.repo_compose_rel(compose_path)
             events._emit(
-                ctx, f"第 {attempt}/{MAX_ATTEMPTS} 轮：平台启动靶场（docker compose up -d --build）"
+                ctx, f"第 {attempt}/{max_attempts} 轮：平台启动靶场（docker compose up -d --build）"
             )
             ok, err = await compose_host.docker_compose_up(
                 compose_rel,
@@ -184,6 +193,8 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 repo,
                 lab_id=result.lab_id,
                 on_progress=lambda line: events._emit(ctx, line),
+                up_timeout=limits.compose_up_timeout,
+                wait_timeout=limits.compose_wait,
             )
             if not ok:
                 stage = compose_host.classify_compose_failure_stage(err)
@@ -215,7 +226,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                     stage,
                     err[:200],
                 )
-                events._emit(ctx, f"启动失败，回喂 AI 回溯（{attempt}/{MAX_ATTEMPTS}）")
+                events._emit(ctx, f"启动失败，回喂 AI 回溯（{attempt}/{max_attempts}）")
                 await cache_recipe._require_creation_owner(ctx, svc, result.lab_id)
                 await compose_host.docker_compose_down(
                     ctx.host_workdir, compose_rel, repo, lab_id=result.lab_id
@@ -249,7 +260,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 )
                 failed_stage = "health_check"
                 _snapshot_failed_attempt(ctx, attempt, last_error, failed_stage, recipe)
-                events._emit(ctx, f"发布端口不可达，回喂 AI 回溯（{attempt}/{MAX_ATTEMPTS}）")
+                events._emit(ctx, f"发布端口不可达，回喂 AI 回溯（{attempt}/{max_attempts}）")
                 await cache_recipe._require_creation_owner(ctx, svc, result.lab_id)
                 await compose_host.docker_compose_down(
                     ctx.host_workdir, compose_rel, repo, lab_id=result.lab_id
@@ -273,7 +284,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 _snapshot_failed_attempt(ctx, attempt, last_error, failed_stage, recipe)
                 events._emit(
                     ctx,
-                    f"配方入口未发布，回喂 AI 回溯（{attempt}/{MAX_ATTEMPTS}）",
+                    f"配方入口未发布，回喂 AI 回溯（{attempt}/{max_attempts}）",
                 )
                 await cache_recipe._require_creation_owner(ctx, svc, result.lab_id)
                 await compose_host.docker_compose_down(
@@ -309,6 +320,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 preferred_scheme=preferred_scheme,
                 probe_path=probe_path,
                 compose_project=result.compose_project,
+                retries=probe_retries,
                 cancel_check=events.cancel_check(ctx),
             )
             # 探活因取消提前返回时不能当健康失败回喂 AI（那会拆场进下一轮）
@@ -325,7 +337,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
                 )
                 failed_stage = "health_check"
                 _snapshot_failed_attempt(ctx, attempt, last_error, failed_stage, recipe)
-                events._emit(ctx, f"探活失败，回喂 AI 回溯（{attempt}/{MAX_ATTEMPTS}）")
+                events._emit(ctx, f"探活失败，回喂 AI 回溯（{attempt}/{max_attempts}）")
                 await cache_recipe._require_creation_owner(ctx, svc, result.lab_id)
                 await compose_host.docker_compose_down(
                     ctx.host_workdir, compose_rel, repo, lab_id=result.lab_id
@@ -375,7 +387,7 @@ async def _create_lab(ctx: NodeContext, result: Any) -> dict[str, Any]:
             return output
 
         raise RuntimeError(
-            f"靶场搭建 {MAX_ATTEMPTS} 轮全失败: "
+            f"靶场搭建 {max_attempts} 轮全失败: "
             f"failed_stage={failed_stage or 'unknown'}\n"
             f"{(last_error or 'unknown')[:500]}"
         )

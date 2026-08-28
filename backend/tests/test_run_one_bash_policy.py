@@ -5,7 +5,7 @@ import sys
 from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "infrastructure", "agent-runner"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "backend", "agent-runner"))
 
 # 容器入口依赖 SDK；单测只验证 Bash 分类，不真调 query()
 sys.modules.setdefault("claude_agent_sdk", MagicMock())
@@ -168,7 +168,7 @@ def test_build_options_registers_hook_matcher_surviving_sdk_convert(monkeypatch)
     root = Path(__file__).resolve().parents[2]
     monkeypatch.setenv(
         "NODE_SKILL_DIR",
-        str(root / "infrastructure" / "agent-runner" / "node-skills"),
+        str(root / "backend" / "agent-runner" / "node-skills"),
     )
     run_one.ClaudeAgentOptions = CaptureOptions
     run_one.HookMatcher = FakeHookMatcher

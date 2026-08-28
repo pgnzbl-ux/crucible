@@ -215,3 +215,74 @@ def test_update_request_rejects_sub_minute_and_overflow():
         RuntimeSettingsUpdateRequest(task_time_budget_seconds=30)
     with pytest.raises(ValidationError):
         RuntimeSettingsUpdateRequest(ai_node_timeout_seconds=7 * 24 * 60 * 60 + 1)
+
+
+@pytest.mark.asyncio
+async def test_env_ready_fields_default_and_persist(session_factory):
+    from app.contexts.settings.repository import SettingsRepository
+    from app.contexts.settings.schemas import RuntimeSettingsUpdateRequest as R
+    from app.contexts.settings.service import SettingsService
+
+    async with session_factory() as session:
+        svc = SettingsService(SettingsRepository(session))
+        got = await svc.get_runtime_settings()
+        assert got.env_ready_max_attempts == 5
+        assert got.env_ready_compose_up_timeout_seconds == 600
+        assert got.env_ready_compose_wait_seconds == 300
+        assert got.env_ready_lab_wait_timeout_seconds == 1860
+        assert got.env_ready_probe_window_seconds == 90
+
+        saved = await svc.update_runtime_settings(R(
+            env_ready_max_attempts=8,
+            env_ready_compose_up_timeout_seconds=900,
+            env_ready_compose_wait_seconds=600,
+            env_ready_lab_wait_timeout_seconds=3600,
+            env_ready_probe_window_seconds=180,
+        ))
+        assert saved.env_ready_max_attempts == 8
+        assert saved.env_ready_compose_wait_seconds == 600
+        again = await svc.get_runtime_settings()
+        assert again.env_ready_max_attempts == 8
+        assert again.env_ready_lab_wait_timeout_seconds == 3600
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("env_ready_max_attempts", 0),
+        ("env_ready_max_attempts", 11),
+        ("env_ready_compose_up_timeout_seconds", 30),
+        ("env_ready_compose_up_timeout_seconds", 7201),
+        ("env_ready_compose_wait_seconds", 20),
+        ("env_ready_lab_wait_timeout_seconds", 30),
+        ("env_ready_probe_window_seconds", 10),
+    ],
+)
+def test_update_request_rejects_env_ready_out_of_range(field, value):
+    from app.contexts.settings.schemas import RuntimeSettingsUpdateRequest
+
+    with pytest.raises(ValidationError):
+        RuntimeSettingsUpdateRequest(**{field: value})
+
+
+def test_update_request_rejects_env_ready_wait_gt_up():
+    from app.contexts.settings.schemas import RuntimeSettingsUpdateRequest
+
+    with pytest.raises(ValidationError, match="compose 等待"):
+        RuntimeSettingsUpdateRequest(
+            env_ready_compose_up_timeout_seconds=600,
+            env_ready_compose_wait_seconds=900,
+        )
+
+
+@pytest.mark.asyncio
+async def test_update_env_ready_wait_gt_existing_up_rejected(session_factory):
+    from app.contexts.settings.repository import SettingsRepository
+    from app.contexts.settings.schemas import RuntimeSettingsUpdateRequest as R
+    from app.contexts.settings.service import SettingsService
+
+    async with session_factory() as session:
+        svc = SettingsService(SettingsRepository(session))
+        # 只改 wait：与库中既有 up=600 合并后超限，保存期校验拒绝
+        with pytest.raises(ValueError, match="compose 等待"):
+            await svc.update_runtime_settings(R(env_ready_compose_wait_seconds=1200))

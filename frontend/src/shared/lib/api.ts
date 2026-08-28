@@ -424,6 +424,12 @@ export interface RuntimeSettings {
   // 时长量纲（秒）；0=不限。生效总预算取本值与 Celery 软限较小者
   task_time_budget_seconds: number
   ai_node_timeout_seconds: number
+  // 靶场搭建(env_ready)时序/重试（秒/次），始终为正
+  env_ready_max_attempts: number
+  env_ready_compose_up_timeout_seconds: number
+  env_ready_compose_wait_seconds: number
+  env_ready_lab_wait_timeout_seconds: number
+  env_ready_probe_window_seconds: number
   max_allowed: number
   agent_runner_max_allowed: number
   lead_verify_max_allowed: number
@@ -439,6 +445,11 @@ export type RuntimeSettingsInput = Pick<
   | 'reproduce_per_lab'
   | 'task_time_budget_seconds'
   | 'ai_node_timeout_seconds'
+  | 'env_ready_max_attempts'
+  | 'env_ready_compose_up_timeout_seconds'
+  | 'env_ready_compose_wait_seconds'
+  | 'env_ready_lab_wait_timeout_seconds'
+  | 'env_ready_probe_window_seconds'
 >
 
 export const api = {

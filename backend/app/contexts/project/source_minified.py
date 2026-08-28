@@ -6,7 +6,7 @@
 
 本模块只做只读判定与统计：source 节点用于可见性输出，
 finding/context_extractor 用于切片保护。容器侧 agent-runner 有一份同阈值的
-拷贝（infrastructure/agent-runner/runner/run_one.py），两边必须保持一致。
+拷贝（backend/agent-runner/runner/run_one.py），两边必须保持一致。
 """
 from __future__ import annotations
 

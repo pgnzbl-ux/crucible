@@ -10,7 +10,7 @@ sys.path.insert(
     0,
     os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "infrastructure",
+        "backend",
         "agent-runner",
     ),
 )
@@ -193,7 +193,7 @@ def test_build_options_registers_read_guard_and_slice(monkeypatch):
     root = Path(__file__).resolve().parents[2]
     monkeypatch.setenv(
         "NODE_SKILL_DIR",
-        str(root / "infrastructure" / "agent-runner" / "node-skills"),
+        str(root / "backend" / "agent-runner" / "node-skills"),
     )
     run_one.ClaudeAgentOptions = CaptureOptions
     run_one.HookMatcher = FakeHookMatcher

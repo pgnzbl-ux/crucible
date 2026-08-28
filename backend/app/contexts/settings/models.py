@@ -153,6 +153,41 @@ class PlatformSetting(BaseModel):
         server_default="3600",
         comment="单 AI 节点最长执行秒数(获槽后起计)；0=不限。超时杀容器，节点按失败收尾",
     )
+    env_ready_max_attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=5,
+        server_default="5",
+        comment="靶场搭建 AI 排障轮数上限",
+    )
+    env_ready_compose_up_timeout_seconds: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=600,
+        server_default="600",
+        comment="单轮 docker compose up 硬超时(秒)",
+    )
+    env_ready_compose_wait_seconds: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=300,
+        server_default="300",
+        comment="compose 等待容器 healthy 上限(秒)；重应用建议调大",
+    )
+    env_ready_lab_wait_timeout_seconds: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1860,
+        server_default="1860",
+        comment="等待共享靶场就绪上限(秒)",
+    )
+    env_ready_probe_window_seconds: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=90,
+        server_default="90",
+        comment="compose up 后应用探活窗口(秒)",
+    )
 
     def __repr__(self) -> str:
         return (

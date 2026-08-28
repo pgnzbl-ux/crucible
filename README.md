@@ -154,7 +154,7 @@ cd infrastructure && cp -n .env.example .env && docker compose up -d && cd ..
 
 # 2. 构建 Agent 镜像（首次，或改了 agent-runner / 节点 skill 之后）
 #    必须在仓库根目录构建，否则镜像里会缺节点 skill
-docker build -f infrastructure/agent-runner/Dockerfile -t crucible-agent-runner:base .
+docker build -f backend/agent-runner/Dockerfile -t crucible-agent-runner:base .
 
 # 3. 后端 API（终端 1）
 cd backend
@@ -200,7 +200,7 @@ cd backend && alembic upgrade head
 <details>
 <summary><b>生产部署</b></summary>
 
-生产用同形态部署：基础设施容器 + 宿主机 systemd 托管后端 + Nginx，模板见 [infrastructure/deploy/](infrastructure/deploy/)。
+生产用同形态部署：基础设施容器 + 宿主机 systemd 托管后端 + Nginx，模板见 [backend/deploy/](backend/deploy/)。
 
 > **后端必须留在宿主机** —— 它要直连 Docker daemon 调度沙箱与靶场，不能装进容器（包括挂 `docker.sock` 的 sidecar）。
 
@@ -256,7 +256,7 @@ CLAUDE_AGENT_SDK_ENABLED=true
 
 - 需要本机 Docker，且已构建 `crucible-agent-runner:base`
 - 构建必须在**仓库根目录**执行，否则镜像里会缺节点 skill
-- 改过 `infrastructure/agent-runner/` 下的 skill 或 Dockerfile 后要重新 build
+- 改过 `backend/agent-runner/` 下的 skill 或 Dockerfile 后要重新 build
 - 任务会访问公网（拉代码、拉镜像、调 LLM）；请在可接受该行为的环境运行
 
 **凭据与安全**
@@ -294,12 +294,12 @@ npm test
 
 ```text
 Crucible/
-├── backend/                 # FastAPI API + Celery Worker
-│   └── app/contexts/        # Bounded Contexts（task/agent/report/identity/settings/lab/project/finding/discovery）
-├── frontend/                # React 19 控制台
-├── infrastructure/          # Docker Compose + Agent 镜像 + 部署模板
+├── backend/                 # FastAPI API + Celery Worker + Agent Runner + 部署模板
+│   ├── app/contexts/        # Bounded Contexts（task/agent/report/identity/settings/lab/project/finding/discovery）
 │   ├── agent-runner/        # Agent 沙箱镜像（node-skills 蒸馏方法论）
 │   └── deploy/              # systemd + Nginx 生产模板
+├── frontend/                # React 19 控制台
+├── infrastructure/          # 第三方中间件 Docker Compose (Postgres/Redis/MinIO)
 ├── plugins/                 # 桌面 Claude Code 方法论母本（不进运行镜像）
 ├── docs/assets/             # 界面截图（其余文档本地维护，不入库）
 └── CLAUDE.md                # 给协作 AI 的项目入口
@@ -318,7 +318,7 @@ Crucible/
 | --- | --- |
 | [backend/README.md](backend/README.md) | 后端启动、配置、测试 |
 | [frontend/README.md](frontend/README.md) | 前端启动、页面、代理 |
-| [infrastructure/deploy/README.md](infrastructure/deploy/README.md) | 生产部署（systemd + Nginx） |
+| [backend/deploy/README.md](backend/deploy/README.md) | 生产部署（systemd + Nginx） |
 | [CLAUDE.md](CLAUDE.md) | 给协作 AI 的项目入口 |
 | [.claude/api-contract.md](.claude/api-contract.md) | HTTP API 契约 |
 

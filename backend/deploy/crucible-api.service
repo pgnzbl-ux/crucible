@@ -1,0 +1,42 @@
+# Crucible API — FastAPI (uvicorn)
+# 安装: cp crucible-api.service /etc/systemd/system/ && systemctl daemon-reload
+# 启用: systemctl enable --now crucible-api
+#
+# 前置:
+#   - 代码部署在 /opt/crucible（WorkingDirectory）
+#   - Python venv 在 /opt/crucible/backend/.venv
+#   - backend/.env 已配置（DATABASE_URL 指向宿主 5433 等）
+#   - 运行用户 crucible 需在 docker 组（worker 调度容器需要；API 侧 preflight 也查镜像）
+
+[Unit]
+Description=Crucible API (FastAPI/uvicorn)
+Documentation=file:///opt/crucible/docs/development-guide.md
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=exec
+User=crucible
+Group=crucible
+SupplementaryGroups=docker
+WorkingDirectory=/opt/crucible/backend
+EnvironmentFile=/opt/crucible/backend/.env
+ExecStart=/opt/crucible/backend/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8010 --workers 2 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=5
+
+# 安全加固（不影响 Docker socket 访问；宿主进程非沙箱，保守收紧）
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=false          # 任务工作区在 /tmp/crucible/*，须与 worker/Docker daemon 共享视图
+ReadWritePaths=/opt/crucible/backend /tmp/crucible
+
+# 日志走 journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=crucible-api
+
+[Install]
+WantedBy=multi-user.target

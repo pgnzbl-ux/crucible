@@ -94,7 +94,10 @@ def test_alembic_chain_from_baseline():
     product_fields = (versions / "w8d4f2a61b73_report_product_fields.py").read_text(encoding="utf-8")
     assert 'revision: str = "w8d4f2a61b73"' in product_fields
     assert 'down_revision: Union[str, None] = "u4b1e7c30a91"' in product_fields
-    assert _alembic_head() == "w8d4f2a61b73"
+    env_tuning = (versions / "k7e3d92f41a05_env_ready_tuning_settings.py").read_text(encoding="utf-8")
+    assert 'revision: str = "k7e3d92f41a05"' in env_tuning
+    assert 'down_revision: Union[str, None] = "w8d4f2a61b73"' in env_tuning
+    assert _alembic_head() == "k7e3d92f41a05"
 
 
 @pytest.mark.asyncio

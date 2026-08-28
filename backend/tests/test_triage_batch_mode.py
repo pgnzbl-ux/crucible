@@ -257,7 +257,7 @@ def test_node_schema_declares_triage_batch():
 
     schema_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "..", "infrastructure", "agent-runner", "runner", "node_schemas.py",
+        "agent-runner", "runner", "node_schemas.py",
     )
     raw = open(schema_path, encoding="utf-8").read()
     namespace = {}

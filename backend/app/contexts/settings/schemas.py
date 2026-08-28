@@ -208,6 +208,12 @@ class RuntimeSettingsUpdateRequest(BaseModel):
     # 时长量纲(秒)：0=不限；上界 7 天防误填毫秒/纳秒
     task_time_budget_seconds: int | None = Field(None, ge=0, le=7 * 24 * 60 * 60)
     ai_node_timeout_seconds: int | None = Field(None, ge=0, le=7 * 24 * 60 * 60)
+    # 靶场搭建(env_ready)时序/重试：无 0=不限语义，始终为正
+    env_ready_max_attempts: int | None = Field(None, ge=1, le=10)
+    env_ready_compose_up_timeout_seconds: int | None = Field(None, ge=60, le=7200)
+    env_ready_compose_wait_seconds: int | None = Field(None, ge=30, le=3600)
+    env_ready_lab_wait_timeout_seconds: int | None = Field(None, ge=60, le=14400)
+    env_ready_probe_window_seconds: int | None = Field(None, ge=30, le=1800)
 
     @model_validator(mode="after")
     def _validate_runtime_budget(self) -> "RuntimeSettingsUpdateRequest":
@@ -249,6 +255,12 @@ class RuntimeSettingsUpdateRequest(BaseModel):
         node_timeout = values.get("ai_node_timeout_seconds", 0) or 0
         if budget > 0 and node_timeout > budget:
             raise ValueError("单节点超时不能大于任务总时长预算")
+        if (
+            self.env_ready_compose_up_timeout_seconds is not None
+            and self.env_ready_compose_wait_seconds is not None
+            and self.env_ready_compose_wait_seconds > self.env_ready_compose_up_timeout_seconds
+        ):
+            raise ValueError("compose 等待 healthy 不能大于单轮 compose up 硬超时")
         return self
 
 
@@ -260,6 +272,11 @@ class RuntimeSettingsResponse(BaseModel):
     task_token_budget: int = 0
     task_time_budget_seconds: int = 10800
     ai_node_timeout_seconds: int = 3600
+    env_ready_max_attempts: int = 5
+    env_ready_compose_up_timeout_seconds: int = 600
+    env_ready_compose_wait_seconds: int = 300
+    env_ready_lab_wait_timeout_seconds: int = 1860
+    env_ready_probe_window_seconds: int = 90
     max_allowed: int
     agent_runner_max_allowed: int
     lead_verify_max_allowed: int

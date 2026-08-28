@@ -34,6 +34,6 @@ total_input ≈ input_tokens + cache_creation_input_tokens + cache_read_input_to
 - 任务合计：`total_tokens = prompt + completion + cache_read + cache_creation`（体积口径；预算软停用此值）。
 - 多轮形状回喂：各轮回传字段相加（含 cache）。
 - 实时：会话完成后 SSE `usage.updated`（不转发 `thinking_tokens`）。
-- **部署注意：** 改台账后须重启 Celery worker；改 `infrastructure/agent-runner/runner/` 后须重建 `crucible-agent-runner:base`。仅升级 API 进程不会让正在跑的 worker / 旧镜像写入正确用量。
+- **部署注意：** 改台账后须重启 Celery worker；改 `backend/agent-runner/runner/` 后须重建 `crucible-agent-runner:base`。仅升级 API 进程不会让正在跑的 worker / 旧镜像写入正确用量。
 
 实现入口：`backend/app/contexts/agent/usage_ledger.py`。

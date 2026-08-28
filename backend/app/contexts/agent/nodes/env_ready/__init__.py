@@ -12,7 +12,7 @@ from typing import Any
 from app.contexts.agent.target_url import host_advertise_ip, publish_target_url
 
 from ..base import NodeContext
-from . import ai_recipe, create_loop, events, reuse
+from . import ai_recipe, create_loop, events, limits, reuse
 from .create_loop import MAX_ATTEMPTS
 from .events import _emit
 
@@ -48,12 +48,13 @@ async def _wait_for_lab(
     owner_id: str,
     project_id: str,
     commit_sha: str,
+    timeout_seconds: int = LAB_WAIT_TIMEOUT_SECONDS,
 ) -> Any:
     from app.contexts.lab.service import LabService
 
     svc = LabService(ctx.db_session)
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + LAB_WAIT_TIMEOUT_SECONDS
+    deadline = loop.time() + timeout_seconds
     waited = 0
     while loop.time() < deadline:
         await events.raise_if_cancelled(ctx)
@@ -70,7 +71,7 @@ async def _wait_for_lab(
         if result.role != "wait":
             return result
     raise RuntimeError(
-        f"等待共享靶场就绪超时（>{LAB_WAIT_TIMEOUT_SECONDS}s），请重试任务"
+        f"等待共享靶场就绪超时（>{timeout_seconds}s），请重试任务"
     )
 
 
@@ -148,6 +149,7 @@ class EnvReadyNode:
         sha = inp.source.commit_sha
         if not sha:
             raise RuntimeError("env_ready 缺少 source.commit_sha，不能 acquire 靶场")
+        env_limits = await limits.resolve_limits(ctx)
         project_id = await _resolve_project_id(ctx)
         ctx.project_id = project_id
         if not ctx.owner_id:
@@ -167,6 +169,7 @@ class EnvReadyNode:
                 owner_id=ctx.owner_id,
                 project_id=project_id,
                 commit_sha=sha,
+                timeout_seconds=env_limits.lab_wait_timeout,
             )
         if result.role == "reuse":
             _emit(ctx, f"复用靶场：{result.target_url}")
@@ -178,7 +181,7 @@ class EnvReadyNode:
             return reuse._reused_output(result, initial_creds=creds)
         if result.role == "start":
             return await reuse._start_lab(ctx, result)
-        return await create_loop._create_lab(ctx, result)
+        return await create_loop._create_lab(ctx, result, env_limits)
 
 
 __all__ = ["EnvReadyNode", "MAX_ATTEMPTS"]

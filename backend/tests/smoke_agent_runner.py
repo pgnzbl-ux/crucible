@@ -51,7 +51,7 @@ def _case_1_basic_lifecycle() -> None:
     # 1. 镜像存在
     assert agent_runner_manager.image_exists(), (
         f"agent-runner 镜像不存在: {agent_runner_manager._resolve_defaults(AgentRunnerSpec()).image}\n"
-        f"先构建：cd infrastructure && docker build -f agent-runner/Dockerfile -t crucible-agent-runner:base ."
+        f"先构建：docker build -f backend/agent-runner/Dockerfile -t crucible-agent-runner:base ."
     )
     print("[OK] 镜像存在")
 
@@ -232,8 +232,7 @@ def main() -> None:
     if not agent_runner_manager.image_exists():
         print(
             f"[FAIL] agent-runner 镜像不存在\n"
-            f"  1. cd infrastructure\n"
-            f"  2.  docker build -f agent-runner/Dockerfile -t crucible-agent-runner:base .\n"
+            f"  docker build -f backend/agent-runner/Dockerfile -t crucible-agent-runner:base .\n"
         )
         sys.exit(1)
 

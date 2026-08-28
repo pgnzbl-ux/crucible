@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 # 仓库根：backend/app/contexts/agent/ai_runner.py → parents[4] = Crucible/
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-_NODE_SKILLS_ROOT = _REPO_ROOT / "infrastructure" / "agent-runner" / "node-skills"
+_NODE_SKILLS_ROOT = _REPO_ROOT / "backend" / "agent-runner" / "node-skills"
 
 
 def resolve_node_skill_dir(node_key: str) -> Path:

@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-DOCKERFILE = ROOT / "infrastructure" / "agent-runner" / "Dockerfile"
+DOCKERFILE = ROOT / "backend" / "agent-runner" / "Dockerfile"
 
 # 钉补丁号，禁止 python:3.11 / node:20-bookworm 浮动标签。
 PINNED_PYTHON_FROM = "FROM python:3.11.15"
@@ -43,7 +43,7 @@ def test_runner_local_bin_path_exists_on_read_only_rootfs():
 def test_runner_uses_linux_bash_env_for_provider_credential_isolation():
     text = DOCKERFILE.read_text(encoding="utf-8")
     scrubber = (
-        ROOT / "infrastructure" / "agent-runner" / "runner" / "bash_env.sh"
+        ROOT / "backend" / "agent-runner" / "runner" / "bash_env.sh"
     ).read_text(encoding="utf-8")
     assert "BASH_ENV=/app/runner/bash_env.sh" in text
     assert "unset ANTHROPIC_API_KEY" in scrubber
@@ -58,6 +58,7 @@ def test_runner_uses_linux_bash_env_for_provider_credential_isolation():
 def test_dockerfile_does_not_bake_node_skills():
     """Skill 由 worker -v 挂载；镜像不得 COPY 全量 node-skills。"""
     text = DOCKERFILE.read_text(encoding="utf-8")
+    assert "COPY backend/agent-runner/node-skills" not in text
     assert "COPY infrastructure/agent-runner/node-skills" not in text
     assert "COPY plugins/vuln-verify-expert" not in text
     assert "PLUGIN_DIR" not in text

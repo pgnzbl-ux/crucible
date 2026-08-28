@@ -55,7 +55,7 @@ if docker image inspect crucible-agent-runner:base >/dev/null 2>&1; then
   log "agent-runner 镜像已存在，跳过构建"
 else
   log "构建 agent-runner 镜像（首次较慢）..."
-  docker build -f infrastructure/agent-runner/Dockerfile -t crucible-agent-runner:base .
+  docker build -f backend/agent-runner/Dockerfile -t crucible-agent-runner:base .
 fi
 
 log "install 阶段完成"

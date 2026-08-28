@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import decode_access_token, decode_sse_ticket
 from app.core.database import get_db_session
+from app.shared.context import CrucibleContext, set_current_context
 
 # auto_error=False：SSE 端点用 query，缺 header 不在此抛错
 _bearer = HTTPBearer(auto_error=False)
@@ -122,6 +123,46 @@ async def get_sse_user_id(
     raise HTTPException(401, "未提供认证凭据")
 
 
+async def get_crucible_context(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> CrucibleContext:
+    """提取全链路请求上下文 (CrucibleContext)。"""
+    from app.contexts.identity.models import User
+    from app.shared.context import CrucibleContext, set_current_context
+
+    ctx = CrucibleContext.from_headers(request.headers)
+
+    if credentials and credentials.credentials:
+        payload = decode_access_token(credentials.credentials)
+        if payload and payload.get("sub"):
+            user_id = str(payload["sub"])
+            user = await session.get(User, user_id)
+            if user is None or not user.is_active:
+                raise HTTPException(401, "用户不存在或已停用")
+            ctx.user_id = user_id
+            ctx.role = user.role or "viewer"
+            ctx.is_admin = bool(user.is_admin or user.role == "admin")
+            ctx.auth_token = credentials.credentials
+            set_current_context(ctx)
+            return ctx
+        raise HTTPException(401, "凭据无效或已过期")
+
+    fallback = _dev_system_fallback(request)
+    if fallback is not None:
+        ctx.user_id = fallback
+        ctx.role = "admin"
+        ctx.is_admin = True
+        set_current_context(ctx)
+        return ctx
+
+    raise HTTPException(401, "未提供认证凭据")
+
+
+CurrentContext = Annotated[CrucibleContext, Depends(get_crucible_context)]
+
+
 # 各 Context 直接 Depends(CurrentUserId) 注入
 CurrentUserId = Annotated[str, Depends(get_current_user_id)]
 
@@ -142,3 +183,4 @@ async def get_current_admin_id(
 
 
 CurrentAdminId = Annotated[str, Depends(get_current_admin_id)]
+

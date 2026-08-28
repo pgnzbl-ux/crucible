@@ -191,6 +191,11 @@ class SettingsService:
             task_token_budget=0,
             task_time_budget_seconds=10800,
             ai_node_timeout_seconds=3600,
+            env_ready_max_attempts=5,
+            env_ready_compose_up_timeout_seconds=600,
+            env_ready_compose_wait_seconds=300,
+            env_ready_lab_wait_timeout_seconds=1860,
+            env_ready_probe_window_seconds=90,
         )
         try:
             async with self.repo.session.begin_nested():
@@ -218,6 +223,15 @@ class SettingsService:
             and row.ai_node_timeout_seconds > row.task_time_budget_seconds
         ):
             row.ai_node_timeout_seconds = row.task_time_budget_seconds
+        # 靶场搭建时序：无 0=不限语义，读取即收敛到正数区间
+        row.env_ready_max_attempts = max(1, row.env_ready_max_attempts)
+        row.env_ready_compose_up_timeout_seconds = max(60, row.env_ready_compose_up_timeout_seconds)
+        row.env_ready_compose_wait_seconds = min(
+            max(30, row.env_ready_compose_wait_seconds),
+            row.env_ready_compose_up_timeout_seconds,
+        )
+        row.env_ready_lab_wait_timeout_seconds = max(60, row.env_ready_lab_wait_timeout_seconds)
+        row.env_ready_probe_window_seconds = max(30, row.env_ready_probe_window_seconds)
         return RuntimeSettingsResponse(
             max_concurrent_tasks=row.max_concurrent_tasks,
             max_concurrent_agent_runners=row.max_concurrent_agent_runners,
@@ -226,6 +240,11 @@ class SettingsService:
             task_token_budget=row.task_token_budget,
             task_time_budget_seconds=row.task_time_budget_seconds,
             ai_node_timeout_seconds=row.ai_node_timeout_seconds,
+            env_ready_max_attempts=row.env_ready_max_attempts,
+            env_ready_compose_up_timeout_seconds=row.env_ready_compose_up_timeout_seconds,
+            env_ready_compose_wait_seconds=row.env_ready_compose_wait_seconds,
+            env_ready_lab_wait_timeout_seconds=row.env_ready_lab_wait_timeout_seconds,
+            env_ready_probe_window_seconds=row.env_ready_probe_window_seconds,
             max_allowed=hard_cap,
             agent_runner_max_allowed=hard_cap,
             lead_verify_max_allowed=hard_cap,
@@ -266,6 +285,11 @@ class SettingsService:
             "task_token_budget": row.task_token_budget,
             "task_time_budget_seconds": row.task_time_budget_seconds,
             "ai_node_timeout_seconds": row.ai_node_timeout_seconds,
+            "env_ready_max_attempts": row.env_ready_max_attempts,
+            "env_ready_compose_up_timeout_seconds": row.env_ready_compose_up_timeout_seconds,
+            "env_ready_compose_wait_seconds": row.env_ready_compose_wait_seconds,
+            "env_ready_lab_wait_timeout_seconds": row.env_ready_lab_wait_timeout_seconds,
+            "env_ready_probe_window_seconds": row.env_ready_probe_window_seconds,
             **updates,
         }
         if merged["lead_verify_per_task"] > merged["max_concurrent_agent_runners"]:
@@ -276,6 +300,8 @@ class SettingsService:
         node_timeout = merged["ai_node_timeout_seconds"]
         if budget > 0 and node_timeout > budget:
             raise ValueError("单节点超时不能大于任务总时长预算")
+        if merged["env_ready_compose_wait_seconds"] > merged["env_ready_compose_up_timeout_seconds"]:
+            raise ValueError("compose 等待 healthy 不能大于单轮 compose up 硬超时")
         for field_name, value in merged.items():
             setattr(row, field_name, value)
         await self.repo.session.flush()

@@ -31,7 +31,7 @@ cd infrastructure && docker compose up -d
 
 # 2. Agent Runner 镜像（首次或改 runner/Dockerfile 时构建；skill 不进镜像）
 #    build context 必须是项目根，Dockerfile 只 COPY runner/
-docker build -f infrastructure/agent-runner/Dockerfile -t crucible-agent-runner:base .
+docker build -f backend/agent-runner/Dockerfile -t crucible-agent-runner:base .
 
 # 3. 后端（端口统一 8010，与前端 Vite 代理对齐；`main.py` 直接运行入口默认 8000，请用 uvicorn 显式指定 8010）
 #    数据库：Docker PostgreSQL 5433（.env 里 DATABASE_URL）
@@ -49,46 +49,23 @@ cd frontend && npm install && npm run dev
 ```
 Crucible/
 ├── backend/
-│   ├── app/
-│   │   ├── main.py              # FastAPI 入口 (<100行)
-│   │   ├── core/                # 配置、数据库、安全、Celery、agent-runner 编排
-│   │   ├── contexts/            # Bounded Contexts
-│   │   │   ├── task/            # 任务管理 (models/schemas/service/repo/api) + NodeRun/重试/删除
-│   │   │   ├── agent/           # Agent 执行平台（模式化子图 + SDK 适配 + 容器编排）
-│   │   │   │   ├── orchestrator.py     # ★ 编排器（就绪波次 + 分支出口 + 断点续跑；finalize 封口）
-│   │   │   │   ├── contracts/          # 公开 Input/Handoff/ControlSignals + DEFAULT/VERIFY_PIPELINE
-│   │   │   │   ├── nodes/              # ★ 节点实现（含 api_*/scan_*/lead_verify/finalize/report；verify 另有 audit/reproduce）
-│   │   │   │   ├── api_inventory/      # 确定性 API 清单 parsers
-│   │   │   │   ├── stacks/             # 语言/框架单一注册表
-│   │   │   │   ├── ai_runner.py        # AI 节点容器编排 + submit_result 工具 + schema 校验
-│   │   │   │   ├── profile_detector.py # profile 规则引擎 hints / SDK 关闭回退
-│   │   │   │   ├── sdk_adapter.py      # Claude Agent SDK 适配器（env + prompt 构造）
-│   │   │   │   └── tasks.py            # Celery 工作流（host clone + 调 orchestrator + 实时落库）
-│   │   │   ├── identity/        # 认证与用户管理
-│   │   │   ├── lab/             # Lab 靶场生命周期（复用、TTL、容器管理）
-│   │   │   ├── finding/         # 告警复核台（RawFinding/AlertGroup/Adjudication + 判决回流）
-│   │   │   ├── discovery/       # 扫描运行（ScanRun）登记
-│   │   │   ├── project/         # ★ 项目源码管理（projects 表 CRUD + 画像缓存）
-│   │   │   └── report/          # 报告与证据（结构化 report_data + md 渲染导出）
-│   │   └── shared/              # 共享基类、事件总线、SSE、鉴权依赖
+│   ├── app/                      # FastAPI 入口 (<100行) + Bounded Contexts + Core
+│   │   ├── main.py
+│   │   ├── core/                # 配置、数据库、安全、Celery、agent-runner 编排、Catalog
+│   │   ├── contexts/            # Bounded Contexts (task/agent/identity/lab/finding/discovery/project/report/settings)
+│   │   └── shared/              # 共享基类、事件总线、SSE、Context、Policy 权限
+│   ├── agent-runner/            # Agent Runner 专用镜像
+│   │   ├── Dockerfile           # build context=项目根；skill 不 COPY，起容器 -v 挂当前节点
+│   │   ├── requirements.txt
+│   │   ├── node-skills/         # 每 AI 节点 SKILL.md 母本（host；-v → /node-skill）
+│   │   └── runner/run_one.py    # 容器内 entrypoint（/node-skill/SKILL.md → system_prompt + JSONL）
+│   ├── deploy/                  # 生产部署模板（systemd + Nginx）
+│   └── semgrep_rules/           # 静态扫描规则
 ├── frontend/
-│   └── src/
-│       ├── app/                 # providers、layout、路由守卫
-│       ├── pages/               # 页面组件
-│       ├── features/            # 领域功能模块（task/components 等）
-│       └── shared/              # api / hooks（useTaskEvents）/ lib / components（NodeSteps/ReportContent）
+│   └── src/                     # React 19 / Vite 6 / Ant Design 6
 ├── plugins/                     # 桌面 Claude Code 插件（母本，不进 runner）
-│   └── vuln-verify-expert/
-│       ├── agents/vuln-verify-expert.md
-│       ├── skills/run-project-env/
-│       └── skills/vuln-verify/
-└── infrastructure/              # Docker Compose
-    ├── docker-compose.yml
-    └── agent-runner/            # Agent Runner 专用镜像
-        ├── Dockerfile           # build context=项目根；skill 不 COPY，起容器 -v 挂当前节点
-        ├── requirements.txt
-        ├── node-skills/         # 每 AI 节点 SKILL.md 母本（host；-v → /node-skill）
-        └── runner/run_one.py    # 容器内 entrypoint（/node-skill/SKILL.md → system_prompt + JSONL）
+└── infrastructure/              # 第三方中间件 Docker Compose (Postgres/Redis/MinIO)
+    └── docker-compose.yml
 ```
 
 ## 开发规范

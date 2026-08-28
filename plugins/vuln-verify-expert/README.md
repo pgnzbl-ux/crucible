@@ -2,7 +2,7 @@
 
 桌面端 Claude Code 插件：白盒优先的漏洞验证方法论。在本机用 `claude --plugin-dir` 加载即可独立跑。
 
-Crucible 平台 **不** 把本目录打进 agent-runner。平台运行时用的是 `infrastructure/agent-runner/node-skills/` 里按节点蒸馏的 skill。本插件是母本 / 指导材料。
+Crucible 平台 **不** 把本目录打进 agent-runner。平台运行时用的是 `backend/agent-runner/node-skills/` 里按节点蒸馏的 skill。本插件是母本 / 指导材料。
 
 ## 组件
 

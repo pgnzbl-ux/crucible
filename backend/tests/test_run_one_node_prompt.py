@@ -11,7 +11,7 @@ sys.path.insert(
     0,
     os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "infrastructure",
+        "backend",
         "agent-runner",
     ),
 )
@@ -28,7 +28,7 @@ from runner.run_one import (  # noqa: E402
 )
 
 ROOT = Path(__file__).resolve().parents[2]
-NODE_SKILLS = ROOT / "infrastructure" / "agent-runner" / "node-skills"
+NODE_SKILLS = ROOT / "backend" / "agent-runner" / "node-skills"
 os.environ["NODE_SKILL_DIR"] = str(NODE_SKILLS)
 
 _ROLE_LEAKS = (

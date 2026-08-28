@@ -56,14 +56,20 @@ async def _redis() -> AsyncIterator[Any]:
 
 
 ORCH_LOCK_PREFIX = "crucible:orch_lock:"
-ORCH_LOCK_TTL_SECONDS = 4 * 60 * 60 + 5 * 60  # 对齐 Celery hard limit + 余量
+
+
+def _orch_lock_ttl_seconds() -> int:
+    """对齐 Celery hard limit + 余量；env 调大硬限后锁不再提前过期。"""
+    from app.core.config import get_settings
+
+    return int(get_settings().celery_task_time_limit_seconds) + 300
 
 
 async def try_acquire_orch_lock(run_id: str) -> bool:
     """acks_late 双 worker：同一 run 只允许一个编排器执行。"""
     async with _redis() as r:
         ok = await r.set(
-            f"{ORCH_LOCK_PREFIX}{run_id}", "1", nx=True, ex=ORCH_LOCK_TTL_SECONDS,
+            f"{ORCH_LOCK_PREFIX}{run_id}", "1", nx=True, ex=_orch_lock_ttl_seconds(),
         )
         return bool(ok)
 
